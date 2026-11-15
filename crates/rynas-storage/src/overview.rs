@@ -204,7 +204,11 @@ fn overview_state(a: &StatArray, array_state: Option<&str>) -> String {
 
 /// The overview arrays from the text of `/proc/mdstat` and sysfs `array_state`.
 pub fn arrays_from(mdstat: &str, array_state: &dyn Fn(&str) -> Option<String>) -> Vec<RaidArray> {
-    parse_mdstat(mdstat)
+    arrays_of(&parse_mdstat(mdstat), array_state)
+}
+
+fn arrays_of(stats: &[StatArray], array_state: &dyn Fn(&str) -> Option<String>) -> Vec<RaidArray> {
+    stats
         .iter()
         .map(|a| {
             let st = if a.active && a.sync.is_none() {
@@ -225,13 +229,175 @@ pub fn arrays_from(mdstat: &str, array_state: &dyn Fn(&str) -> Option<String>) -
         .collect()
 }
 
-/// md arrays, then the btrfs filesystems with a RAID profile of their own.
+/// md arrays (the tiers of a flexible RAID as one entry), then the btrfs filesystems with a
+/// RAID profile of their own.
 pub fn arrays(host: &dyn Host) -> Vec<RaidArray> {
-    let mut v = arrays_from(&host.read("/proc/mdstat").unwrap_or_default(), &|md| {
-        read_sysfs(host, md).array_state
+    let stats = parse_mdstat(&host.read("/proc/mdstat").unwrap_or_default());
+    let v = arrays_of(&stats, &|md| read_sysfs(host, md).array_state);
+    let links = md_links(host);
+    let mut v = group_flexible(&stats, v, &|md| lvm_holder(host, md), &|md| {
+        links.get(md).cloned()
     });
     v.extend(btrfs_arrays(host));
     v
+}
+
+// ---------------------------------------------------------------- flexible RAID
+
+/// The LVM logical volume holding an md array: (its dm kernel name, its device-mapper
+/// name), from `/sys/block/<md>/holders` and the dm `uuid`/`name` files (world-readable).
+fn lvm_holder(host: &dyn Host, md: &str) -> Option<(String, String)> {
+    host.list(&format!("/sys/block/{md}/holders"))
+        .into_iter()
+        .filter(|h| h.starts_with("dm-"))
+        .find_map(|h| {
+            let uuid = host.read(&format!("/sys/block/{h}/dm/uuid"))?;
+            if !uuid.trim().starts_with("LVM-") {
+                return None;
+            }
+            let name = host.read(&format!("/sys/block/{h}/dm/name"))?;
+            Some((h, name.trim().to_string()))
+        })
+}
+
+/// Kernel name → md name of the `/dev/md/<name>` links ("md126" → "vol2_t1").
+fn md_links(host: &dyn Host) -> std::collections::HashMap<String, String> {
+    host.list("/dev/md")
+        .into_iter()
+        .filter_map(|n| {
+            let target = host.canonical(&format!("/dev/md/{n}"))?;
+            Some((target.trim_start_matches("/dev/").to_string(), n))
+        })
+        .collect()
+}
+
+/// The disk of a partition name: "sdb2" → "sdb", "nvme0n1p2" → "nvme0n1".
+fn part_disk(name: &str) -> String {
+    let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    match base.strip_suffix('p') {
+        Some(d) if d.ends_with(|c: char| c.is_ascii_digit()) => d.to_string(),
+        _ if base.is_empty() => name.to_string(),
+        _ => base.to_string(),
+    }
+}
+
+/// The tier number of an md name `<label>_t<N>`.
+fn tier_number(name: &str) -> Option<(&str, u32)> {
+    let (label, n) = name.rsplit_once("_t")?;
+    Some((label, n.parse().ok()?))
+}
+
+/// How bad an overview state is, to pick the worst tier.
+fn state_rank(s: &str) -> u8 {
+    match s {
+        "inactive" => 5,
+        s if s.contains("degraded") => 4,
+        "resyncing" | "recovering" | "reshaping" | "repairing" | "checking" => 2,
+        s if s.ends_with("-delayed") || s.ends_with("-pending") => 1,
+        _ => 0,
+    }
+}
+
+/// The tier arrays of a flexible RAID as one entry: md arrays (RAID1/5/6) held by one LVM
+/// logical volume, when there are several or they carry tier names (`<label>_tN`). The entry
+/// is named after the volume (`rynas_<label>` → `<label>`), its level is `flex1`/`flex2`,
+/// its members are the disks, its state the worst tier's, its progress the running tier's,
+/// and `tiers` keeps the arrays. Any other array stays as it is.
+pub fn group_flexible(
+    stats: &[StatArray],
+    arrays: Vec<RaidArray>,
+    holder_of: &dyn Fn(&str) -> Option<(String, String)>,
+    link_of: &dyn Fn(&str) -> Option<String>,
+) -> Vec<RaidArray> {
+    let stat = |name: &str| stats.iter().find(|s| s.name == name);
+    // holder → (dm name, indices of its arrays)
+    let mut groups: Vec<(String, String, Vec<usize>)> = Vec::new();
+    for (i, a) in arrays.iter().enumerate() {
+        if !matches!(a.level.as_str(), "raid1" | "raid5" | "raid6") {
+            continue;
+        }
+        let Some((holder, dm)) = holder_of(&a.name) else {
+            continue;
+        };
+        match groups.iter_mut().find(|g| g.0 == holder) {
+            Some(g) => g.2.push(i),
+            None => groups.push((holder, dm, vec![i])),
+        }
+    }
+    let mut grouped: Vec<(usize, RaidArray, Vec<usize>)> = Vec::new();
+    for (_, dm, mut idx) in groups {
+        let named = idx
+            .iter()
+            .any(|&i| link_of(&arrays[i].name).is_some_and(|n| tier_number(&n).is_some()));
+        if idx.len() < 2 && !named {
+            continue;
+        }
+        let tolerance = idx
+            .iter()
+            .map(|&i| {
+                let a = &arrays[i];
+                let raid_disks = stat(&a.name)
+                    .and_then(|s| s.raid_disks)
+                    .unwrap_or(a.members.len() as u32);
+                crate::md::tolerance(&a.level, raid_disks)
+            })
+            .min()
+            .unwrap_or(0);
+        if tolerance == 0 {
+            continue;
+        }
+        idx.sort_by_key(|&i| {
+            let n = link_of(&arrays[i].name).and_then(|n| tier_number(&n).map(|(_, t)| t));
+            (n.unwrap_or(u32::MAX), arrays[i].name.clone())
+        });
+        let label = crate::lvm::split_dm_name(&dm)
+            .map(|(vg, _)| vg.strip_prefix("rynas_").map(str::to_string).unwrap_or(vg))
+            .or_else(|| {
+                idx.iter().find_map(|&i| {
+                    link_of(&arrays[i].name)
+                        .and_then(|n| tier_number(&n).map(|(l, _)| l.to_string()))
+                })
+            })
+            .unwrap_or(dm);
+        let mut members: Vec<String> = Vec::new();
+        for &i in &idx {
+            for m in &arrays[i].members {
+                let d = part_disk(m);
+                if !members.contains(&d) {
+                    members.push(d);
+                }
+            }
+        }
+        members.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+        let tiers: Vec<RaidArray> = idx.iter().map(|&i| arrays[i].clone()).collect();
+        let worst = tiers
+            .iter()
+            .max_by_key(|t| state_rank(&t.state))
+            .map(|t| t.state.clone())
+            .unwrap_or_default();
+        let entry = RaidArray {
+            name: label,
+            level: if tolerance >= 2 { "flex2" } else { "flex1" }.into(),
+            size: tiers.iter().map(|t| t.size).sum(),
+            members,
+            state: worst,
+            sync_pct: tiers.iter().find_map(|t| t.sync_pct),
+            tiers,
+        };
+        grouped.push((*idx.iter().min().unwrap_or(&0), entry, idx));
+    }
+    let taken: std::collections::HashSet<usize> =
+        grouped.iter().flat_map(|(_, _, idx)| idx.iter().copied()).collect();
+    let mut out = Vec::new();
+    for (i, a) in arrays.into_iter().enumerate() {
+        if let Some((_, entry, _)) = grouped.iter().find(|(first, _, _)| *first == i) {
+            out.push(entry.clone());
+        }
+        if !taken.contains(&i) {
+            out.push(a);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------- btrfs RAID
@@ -555,6 +721,69 @@ mod tests {
     fn mdstat_delayed() {
         let s = "md5 : active raid1 sdb2[1] sda2[0]\n      1048512 blocks [2/2] [UU]\n        resync=DELAYED\n";
         assert_eq!(arrays_from(s, &|_| None)[0].state, "resync-delayed");
+    }
+
+    /// The 4+8+8 flexible RAID fixture as the unprivileged overview sees it.
+    fn flex_host(mdstat: &str) -> FakeHost {
+        let mut h = FakeHost::default();
+        h.file("/proc/mdstat", mdstat);
+        for md in ["md126", "md127"] {
+            h.file(&format!("/sys/block/{md}/holders/dm-0"), "");
+        }
+        h.file("/sys/block/dm-0/dm/uuid", "LVM-vG2aAabB2bcC3cdD4deE5efF6fgG7g00lV2aAabB2bcC3cdD4deE5efF6fgG7g00\n");
+        h.file("/sys/block/dm-0/dm/name", "rynas_vol2-data\n");
+        h.links.insert("/dev/md/vol2_t1".into(), "/dev/md126".into());
+        h.links.insert("/dev/md/vol2_t2".into(), "/dev/md127".into());
+        h
+    }
+
+    #[test]
+    fn flexible_raid_is_one_entry() {
+        let v = arrays(&flex_host(include_str!("../tests/fixtures/proc-mdstat-flex.txt")));
+        assert_eq!(v.len(), 1, "{v:?}");
+        let a = &v[0];
+        assert_eq!((a.name.as_str(), a.level.as_str()), ("vol2", "flex1"));
+        assert!(a.is_flexible() && !a.is_btrfs());
+        assert_eq!(a.members, ["sda", "sdb", "sdc"]);
+        assert_eq!(a.state, "active");
+        assert_eq!(a.size, (7_813_509_120 + 3_906_877_440) * 1024);
+        assert_eq!(a.tiers.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["md126", "md127"]);
+        assert_eq!(a.tiers[1].members, ["sdb2", "sdc2"]);
+
+        // a lost disk: one entry, degraded (one alert in the interface, not one per tier)
+        let v = arrays(&flex_host(include_str!("../tests/fixtures/proc-mdstat-flex-degraded.txt")));
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].state, "degraded");
+        assert_eq!(v[0].members, ["sda", "sdc"]);
+
+        // a tier rebuilding while another waits: the worst state, the running progress
+        let stats = parse_mdstat(include_str!("../tests/fixtures/proc-mdstat-flex.txt"));
+        let mut tiers = arrays_of(&stats, &|_| None);
+        tiers[0].state = "recovering".into();
+        tiers[0].sync_pct = Some(12.5);
+        tiers[1].state = "recovery-delayed".into();
+        let holder = |_: &str| Some(("dm-0".to_string(), "rynas_vol2-data".to_string()));
+        let v = group_flexible(&stats, tiers, &holder, &|_| None);
+        assert_eq!((v[0].state.as_str(), v[0].sync_pct), ("recovering", Some(12.5)));
+        // ordered by offset is not known here: without tier names, by kernel name
+        assert_eq!(v[0].tiers[0].name, "md126");
+    }
+
+    #[test]
+    fn other_arrays_are_not_grouped() {
+        let s = include_str!("../tests/fixtures/overview-mdstat.txt");
+        let stats = parse_mdstat(s);
+        let plain = arrays_of(&stats, &|_| None);
+        // no holder at all
+        assert_eq!(group_flexible(&stats, plain.clone(), &|_| None, &|_| None), plain);
+        // one array under a classic LVM volume, without tier names: unchanged
+        let holder = |md: &str| (md == "md0").then(|| ("dm-3".to_string(), "vg0-root".to_string()));
+        assert_eq!(group_flexible(&stats, plain.clone(), &holder, &|_| None), plain);
+        assert_eq!(part_disk("nvme0n1p2"), "nvme0n1");
+        assert_eq!(part_disk("sdab12"), "sdab");
+        assert_eq!(part_disk("mmcblk0p1"), "mmcblk0");
+        assert_eq!(tier_number("vol2_t3"), Some(("vol2", 3)));
+        assert_eq!(tier_number("vol2"), None);
     }
 
     #[test]

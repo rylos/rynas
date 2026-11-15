@@ -88,6 +88,10 @@ nev.storage.raid_failed.body_2	{array} ({level}) è guasto: mancano {degraded} m
 nev.storage.raid_inactive.title	RAID {array} inattivo
 nev.storage.raid_inactive.body	{array} ({level}) non è in funzione, stato «{state}».
 nev.storage.raid_ok.title	RAID {array} di nuovo integro
+nev.storage.flex_degraded.title	RAID flessibile {array} degradato
+nev.storage.flex_failed.title	RAID flessibile {array} guasto
+nev.storage.flex_inactive.title	RAID flessibile {array} inattivo
+nev.storage.flex_ok.title	RAID flessibile {array} di nuovo integro
 nev.storage.btrfs_errors.title	Volume {volume}: errori sul dispositivo {device}
 nev.storage.btrfs_errors.body	Dispositivo {device} del volume {volume}: errori di scrittura {write_io}, lettura {read_io}, flush {flush_io}, corruzione {corruption}, generazione {generation}.
 nev.storage.btrfs_errors_cleared.title	Volume {volume}: contatori di errore del dispositivo azzerati

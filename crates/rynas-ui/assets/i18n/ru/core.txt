@@ -88,6 +88,10 @@ nev.storage.raid_failed.body_2	{array} ({level}) отказал: отсутст�
 nev.storage.raid_inactive.title	RAID {array} неактивен
 nev.storage.raid_inactive.body	{array} ({level}) не работает, состояние «{state}».
 nev.storage.raid_ok.title	RAID {array} снова исправен
+nev.storage.flex_degraded.title	Гибкий RAID {array} деградирован
+nev.storage.flex_failed.title	Отказ гибкого RAID {array}
+nev.storage.flex_inactive.title	Гибкий RAID {array} неактивен
+nev.storage.flex_ok.title	Гибкий RAID {array} снова исправен
 nev.storage.btrfs_errors.title	Том {volume}: ошибки устройства {device}
 nev.storage.btrfs_errors.body	Устройство {device} тома {volume}: ошибки записи — {write_io}, чтения — {read_io}, сброса (flush) — {flush_io}, повреждения — {corruption}, поколения — {generation}.
 nev.storage.btrfs_errors_cleared.title	Том {volume}: счётчики ошибок устройства сброшены

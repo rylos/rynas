@@ -10,7 +10,9 @@
 
 use std::collections::HashMap;
 
-use rynas_api_types::storage::{ArrayHealth, BtrfsFilesystem, DiskSummary, HealthVerdict, MdArray};
+use rynas_api_types::storage::{
+    ArrayHealth, BtrfsFilesystem, DiskSummary, FlexLayout, HealthVerdict, MdArray,
+};
 use rynas_api_types::{HardwareStatus, TaskInfo, TaskStatus, Temperature};
 
 use crate::event::{code, field, firing, oneshot, resolved};
@@ -358,8 +360,13 @@ impl StorageWatch {
         disks: &[DiskSummary],
         arrays: &[MdArray],
         filesystems: &[BtrfsFilesystem],
+        flex: &[FlexLayout],
     ) -> Vec<NewEvent> {
         let mut out = Vec::new();
+        let tier_arrays: Vec<&str> = flex
+            .iter()
+            .flat_map(|l| l.tiers.iter().filter_map(|t| t.array.as_deref()))
+            .collect();
         for d in disks {
             let level = match d.health {
                 HealthVerdict::Unknown => continue,
@@ -409,7 +416,8 @@ impl StorageWatch {
                 },
             );
         }
-        for a in arrays {
+        // a flexible RAID reports once for all its tiers (below)
+        for a in arrays.iter().filter(|a| !tier_arrays.contains(&a.name.as_str())) {
             let level = match a.health {
                 ArrayHealth::Unknown => continue,
                 ArrayHealth::Healthy => None,
@@ -467,6 +475,9 @@ impl StorageWatch {
                     field(code(e, "storage.raid_ok"), "array", &a.name)
                 },
             );
+        }
+        for l in flex {
+            self.check_flex(&mut out, l);
         }
         for fs in filesystems {
             let name = fs
@@ -604,6 +615,98 @@ impl StorageWatch {
             );
         }
         out
+    }
+
+    /// One event per flexible RAID, however many tiers a lost disk degrades: its body names
+    /// each missing disk once with the tiers it is missing from ("sdb missing from tiers
+    /// 1–2"). A disk that vanished has no name left: it is counted from the tiers' missing
+    /// members.
+    fn check_flex(&mut self, out: &mut Vec<NewEvent>, l: &FlexLayout) {
+        let health = l.health();
+        let level = match health {
+            ArrayHealth::Unknown => return,
+            ArrayHealth::Healthy => None,
+            ArrayHealth::Degraded | ArrayHealth::Failed => Some(Sev::Critical),
+            ArrayHealth::Inactive => Some(Sev::Error),
+        };
+        let name = l.vg.strip_prefix("rynas_").unwrap_or(&l.vg).to_string();
+        let flex_level = l
+            .level()
+            .map(|lv| if lv == rynas_api_types::storage::RaidLevel::Flex2 { "flex2" } else { "flex1" })
+            .unwrap_or("flex");
+        let key = format!("storage:flex:{}:health", l.vg);
+        let (word, c) = match health {
+            ArrayHealth::Degraded => ("degraded", "storage.flex_degraded"),
+            ArrayHealth::Failed => ("failed", "storage.flex_failed"),
+            _ => ("inactive", "storage.flex_inactive"),
+        };
+        // disk → tiers it is missing from; the unnamed rest per tier
+        let mut by_disk: Vec<(String, Vec<u32>)> = Vec::new();
+        let mut unnamed: Vec<u32> = Vec::new();
+        for t in &l.tiers {
+            for d in &t.missing {
+                match by_disk.iter_mut().find(|(x, _)| x == d) {
+                    Some((_, v)) => v.push(t.index),
+                    None => by_disk.push((d.clone(), vec![t.index])),
+                }
+            }
+            if t.degraded as usize > t.missing.len() {
+                unnamed.push(t.index);
+            }
+        }
+        let tiers_text = |v: &[u32]| -> String {
+            let contiguous = v.windows(2).all(|w| w[1] == w[0] + 1);
+            match v {
+                [one] => format!("tier {one}"),
+                [first, .., last] if contiguous => format!("tiers {first}–{last}"),
+                _ => format!(
+                    "tiers {}",
+                    v.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                ),
+            }
+        };
+        let mut lines: Vec<String> = by_disk
+            .iter()
+            .map(|(d, v)| format!("{d} missing from {}", tiers_text(v)))
+            .collect();
+        if !unnamed.is_empty() {
+            lines.push(format!("a disk missing from {}", tiers_text(&unnamed)));
+        }
+        let members = lines.join(", ");
+        self.t.emit(
+            out,
+            &key,
+            level,
+            |s| {
+                let mut e = firing(
+                    Cat::Storage,
+                    s,
+                    ST,
+                    &key,
+                    format!("Flexible RAID {name} {word}"),
+                );
+                e.body = if lines.is_empty() {
+                    format!("{name} ({flex_level}): {word}.")
+                } else {
+                    format!("{name} ({flex_level}): {}.", lines.join("; "))
+                };
+                let mut e = field(field(code(e, c), "array", &name), "level", flex_level);
+                e = field(e, "state", word);
+                if !members.is_empty() {
+                    e = field(e, "members", &members);
+                }
+                e
+            },
+            || {
+                let e = resolved(
+                    Cat::Storage,
+                    ST,
+                    &key,
+                    format!("Flexible RAID {name} healthy again"),
+                );
+                field(code(e, "storage.flex_ok"), "array", &name)
+            },
+        );
     }
 }
 
@@ -885,6 +988,7 @@ mod tests {
             &[disk(HealthVerdict::Unknown)],
             &[md(ArrayHealth::Healthy)],
             &[fs(50, 0)],
+            &[],
         );
         // md resolved, btrfs errors + missing resolved, usage resolved; unknown disk skipped
         assert_eq!(ev.len(), 4);
@@ -892,6 +996,7 @@ mod tests {
             &[disk(HealthVerdict::Failing)],
             &[md(ArrayHealth::Degraded)],
             &[fs(91, 2)],
+            &[],
         );
         let sev = |k: &str| {
             ev.iter()
@@ -908,9 +1013,67 @@ mod tests {
             &[disk(HealthVerdict::Failing)],
             &[md(ArrayHealth::Degraded)],
             &[fs(91, 3)],
+            &[],
         );
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].key.as_deref(), Some("storage:btrfs:u1:1:errors"));
+    }
+
+    /// A disk lost from a flexible RAID degrades every tier it was in: one event for the
+    /// volume, naming the disk once, and none for the tier arrays.
+    #[test]
+    fn one_event_per_lost_disk_not_per_tier() {
+        use rynas_api_types::storage::{FlexTier, RaidLevel};
+        let mut w = StorageWatch::default();
+        let md = |name: &str, h| MdArray {
+            name: name.into(),
+            level: "raid5".into(),
+            health: h,
+            raid_disks: 3,
+            degraded: u32::from(h == ArrayHealth::Degraded),
+            ..Default::default()
+        };
+        let tier = |i: u32, md: &str, h, missing: &[&str]| FlexTier {
+            index: i,
+            level: Some(RaidLevel::Raid5),
+            array: Some(md.into()),
+            health: h,
+            degraded: u32::from(h == ArrayHealth::Degraded),
+            missing: missing.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let layout = |h, missing: &[&str]| FlexLayout {
+            tolerance: 1,
+            vg: "rynas_vol2".into(),
+            lv: "data".into(),
+            tiers: vec![tier(1, "md126", h, missing), tier(2, "md127", h, missing)],
+            ..Default::default()
+        };
+        let arrays = |h| [md("md126", h), md("md127", h)];
+        let ev = w.check(&[], &arrays(ArrayHealth::Healthy), &[], &[layout(ArrayHealth::Healthy, &[])]);
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].key.as_deref(), Some("storage:flex:rynas_vol2:health"));
+        let ev = w.check(
+            &[],
+            &arrays(ArrayHealth::Degraded),
+            &[],
+            &[layout(ArrayHealth::Degraded, &["sdb"])],
+        );
+        assert_eq!(ev.len(), 1, "{ev:?}");
+        assert_eq!(ev[0].severity, Sev::Critical);
+        assert_eq!(ev[0].title, "Flexible RAID vol2 degraded");
+        assert_eq!(ev[0].body, "vol2 (flex1): sdb missing from tiers 1–2.");
+        assert_eq!(ev[0].fields.get("members").map(String::as_str), Some("sdb missing from tiers 1–2"));
+        assert_eq!(ev[0].code, "storage.flex_degraded");
+        // a vanished disk has no name
+        let mut w = StorageWatch::default();
+        let ev = w.check(&[], &arrays(ArrayHealth::Degraded), &[], &[layout(ArrayHealth::Degraded, &[])]);
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].body, "vol2 (flex1): a disk missing from tiers 1–2.");
+        // back to healthy: resolved once
+        let ev = w.check(&[], &arrays(ArrayHealth::Healthy), &[], &[layout(ArrayHealth::Healthy, &[])]);
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].code, "storage.flex_ok");
     }
 
     #[test]

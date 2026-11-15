@@ -382,7 +382,7 @@ pub fn spawn_storage_watch(
                 Ok(inv) => {
                     let health: Vec<_> = inv.disks.iter().map(|d| (d.name.clone(), d.health)).collect();
                     modules.storage_update(&health);
-                    for ev in watch.check(&inv.disks, &inv.arrays, &inv.filesystems) {
+                    for ev in watch.check(&inv.disks, &inv.arrays, &inv.filesystems, &inv.flex) {
                         notifier.emit(ev);
                     }
                 }
