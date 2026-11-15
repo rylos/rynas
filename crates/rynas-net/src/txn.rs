@@ -2898,13 +2898,26 @@ impl Engine {
 
     /// The post-boot watchdog (`rynas-net-watchdog.timer`, 5 minutes after boot).
     pub fn watchdog(&self, log: &dyn Fn(&str)) -> Result<String> {
-        if let Some(m) = self.store.marker()? {
-            let timer = format!("{ROLLBACK_UNIT}.timer");
-            let service = format!("{ROLLBACK_UNIT}.service");
-            let running = self
-                .os
-                .run(&["systemctl", "is-active", &timer, &service], QUICK)
-                .is_ok_and(|o| o.stdout.lines().any(|l| l.trim() == "active"));
+        // marker and timer read under the lock: `begin` writes the trial and arms its timer
+        // while holding it, so a trial being started is never taken for one with no timer.
+        // The lock is a flock of its own descriptor (not reentrant): released before
+        // `rollback_trial` takes it again, which then acts only on this same trial.
+        let found = {
+            let _lock = self.store.lock()?;
+            match self.store.marker()? {
+                Some(m) => {
+                    let timer = format!("{ROLLBACK_UNIT}.timer");
+                    let service = format!("{ROLLBACK_UNIT}.service");
+                    let running = self
+                        .os
+                        .run(&["systemctl", "is-active", &timer, &service], QUICK)
+                        .is_ok_and(|o| o.stdout.lines().any(|l| l.trim() == "active"));
+                    Some((m, running))
+                }
+                None => None,
+            }
+        };
+        if let Some((m, running)) = found {
             if running {
                 return Ok("a change is being tested: its rollback timer is in charge".into());
             }
