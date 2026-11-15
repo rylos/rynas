@@ -47,11 +47,9 @@ pub fn snapshot(vg: &str, lv: &str) -> Result<Snap, String> {
         lvm(&["lvcreate", "-s", "-n", &name, &format!("{vg}/{lv}")])?;
         lvm(&["lvchange", "-ay", "-K", &format!("{vg}/{name}")])?;
     } else {
-        // copy-on-write room: a tenth of the volume, at least 256 MiB, at most what is free
-        let want = (size / 10).max(256 << 20).min(free);
-        if want < (256 << 20) {
-            return Err(format!("volume group {vg} has no free space for a snapshot"));
-        }
+        let Some(want) = cow_room(size, free) else {
+            return Err(format!("volume group {vg} has too little free space for a snapshot of {lv}"));
+        };
         lvm(&["lvcreate", "-s", "-n", &name, "-L", &format!("{want}b"), &format!("{vg}/{lv}")])?;
     }
     Ok(Snap {
@@ -60,6 +58,18 @@ pub fn snapshot(vg: &str, lv: &str) -> Result<Snap, String> {
         name,
     })
 }
+
+/// Copy-on-write room for a classic snapshot of a volume of `size` bytes with `free` bytes
+/// free in its group: a tenth of the volume, at least 256 MiB, at most what is free. `None`
+/// when less than a quarter of that is free: a snapshot that small fills up (a package update
+/// in `/var` is enough) and is invalidated mid-run, while reading the live volume works.
+pub fn cow_room(size: u64, free: u64) -> Option<u64> {
+    const MIN: u64 = 256 << 20;
+    let want = (size / 10).max(MIN);
+    let got = want.min(free);
+    (got >= MIN && got >= want / 4).then_some(got)
+}
+
 
 /// Removes snapshots an interrupted run left.
 pub fn cleanup_leftovers() {
@@ -75,5 +85,27 @@ pub fn cleanup_leftovers() {
             eprintln!("{}/{}: removed (left by an interrupted backup)", s.vg, s.name);
             s.remove();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cow_room;
+    const MIB: u64 = 1 << 20;
+    const GB: u64 = 1_000_000_000;
+
+    #[test]
+    fn room_for_a_snapshot() {
+        // plenty of room: a tenth of the volume
+        assert_eq!(cow_room(46 * GB, 100 * GB), Some(46 * GB / 10));
+        // small volume: the 256 MiB floor
+        assert_eq!(cow_room(GB, 10 * GB), Some(256 * MIB));
+        // a quarter of what it wants is enough
+        assert_eq!(cow_room(40 * GB, GB + GB / 2), Some(GB + GB / 2));
+        // a 46 GB volume with exactly 256 MiB free: too small, read live instead
+        assert_eq!(cow_room(46 * GB, 256 * MIB), None);
+        // nothing free
+        assert_eq!(cow_room(GB, 0), None);
+        assert_eq!(cow_room(GB, 255 * MIB), None);
     }
 }
