@@ -2,7 +2,8 @@
 
 <h3 align="center">
 A fast, modern NAS manager for plain Debian.<br>
-Storage, shares, snapshots, Docker apps and HTTPS from one web interface, written in Rust.
+Storage with flexible RAID, shares, snapshots, backups, Docker apps and HTTPS<br>
+from one web interface, written in Rust.
 </h3>
 
 <p align="center">
@@ -31,40 +32,57 @@ yours, with or without rynas.
 rynas is a professional tool for people who run their own servers: administrators, homelab
 operators and small businesses who know what an md array, a LUKS header, a btrfs subvolume or a
 systemd unit is, and want them driven well, not hidden. It is deliberately technical and
-powerful, and it is not made for beginners.
+powerful. It is not made for beginners.
 
-- **It shows its work.** Every storage change is planned before it runs. You see each step with
-  its real command (mdadm, sgdisk, LVM, cryptsetup, btrfs), the disks it will erase, by model and
-  serial, and how it resumes if power fails halfway.
+- **It shows its work.** Every storage change is planned before it runs: each step with its real
+  command (mdadm, sgdisk, LVM, cryptsetup, btrfs), the disks it will erase by model and serial,
+  and how it resumes if power fails halfway.
 - **It exposes the real system**, not a simplified copy: arrays and their members, LVM volumes,
   subvolumes, mount options, systemd units, cgroups and logs, as they are on disk.
-- **You stay in charge.** Guided flows exist, but none of them acts behind your back. There is
-  no cloud account, no telemetry and no "easy mode" that trades control for convenience.
-- **It does not replace knowledge.** rynas makes replacing a disk, growing an array or restoring
-  a backup faster and safer. It does not make understanding them optional.
+- **You stay in charge.** Guided flows never act behind your back. No cloud account, no
+  telemetry, no "easy mode" that trades control for convenience.
+- **It does not replace knowledge.** It makes replacing a disk, growing an array or restoring a
+  backup faster and safer, not something you can do without understanding it.
 
 ## Why rynas
 
 - **Fast on modest hardware.** A small privileged daemon, a Rust HTTP server and a WebAssembly
-  interface. At rest the daemons use a few MB of RAM, and pages update live without reloading.
-- **Plain Debian underneath.** No custom distribution, no lock-in: standard tools and config
-  files, standard `apt` updates. Remove rynas and the server keeps working.
+  interface: a few MB of RAM at rest, pages that update live.
+- **Plain Debian underneath.** No custom distribution, no lock-in: standard tools, standard
+  config files, standard `apt` updates. Remove rynas and the server keeps working.
 - **Safe changes.** Changes are staged and applied together. Network changes roll back by
-  themselves if you lose the connection. Snapshots and system restore points come before
-  risky operations.
-- **Apps that stay up to date.** The app catalogue is signed and updated on its own, apart from
-  rynas releases; image updates are checked every day and can be applied automatically, stack
-  by stack.
-- **Made for the keyboard.** <kbd>Ctrl</kbd> <kbd>K</kbd> finds any page, setting or action. Light and dark
-  themes, English, Italian and Russian.
+  themselves if you lose the connection; snapshots and restore points come before risky
+  operations.
+- **Apps that stay current.** A signed app catalogue, updated apart from rynas releases; image
+  updates checked daily and applied automatically if you want, stack by stack.
+- **Made for the keyboard.** <kbd>Ctrl</kbd> <kbd>K</kbd> finds any page, setting or action.
+  Light and dark themes; English, Italian and Russian.
 - **Free software, every feature included.** AGPL-3.0, free for everyone, companies included.
+
+## Flexible RAID
+
+Classic RAID cuts every drive to the size of the smallest: 4 + 8 + 8 TB in RAID 5 gives 8 TB
+and leaves 8 TB unused. **Flexible RAID** uses all of it. The drives are split into tiers: each tier
+takes the same slice of every drive large enough for it and is an md array (RAID 1 or 5, or a
+three-way mirror and RAID 6 for two-drive tolerance); LVM joins the tiers into one btrfs volume,
+optionally LUKS-encrypted. The same
+three drives give **12 TB**, and any one of them can fail.
+
+- **Grows one drive at a time.** Add a drive, or replace a drive with a larger one, and the new
+  space becomes usable: no need to buy a whole set of matching drives.
+- **Plain tools, resumable.** Every step is an ordinary mdadm, LVM or btrfs command, shown before
+  it runs; a growth or a replace stopped by a power cut continues where it was.
+- **Pick with numbers.** The capacity calculator in the volume wizard shows what any set of
+  drives, even ones you don't have yet, gives at every level.
+
+The classic levels (single, RAID 0, 1, 5, 6 and 10) stay available next to it.
 
 ## Features
 
 | | |
 |---|---|
 | **Dashboard** | live CPU, memory, network, disk I/O and temperatures; customizable widgets |
-| **Storage** | RAID arrays and volumes (mdadm, btrfs, ext4, LUKS2 encryption), flexible RAID that uses the full space of drives of different sizes and grows one drive at a time, a capacity calculator, a drive view of the chassis, SMART, spin-down, zram |
+| **Storage** | RAID arrays and volumes (mdadm, btrfs, ext4, LUKS2 encryption), [flexible RAID](#flexible-raid) for drives of different sizes, a capacity calculator, a drive view of the chassis, SMART, spin-down, zram |
 | **Files** | a full web file manager: upload, preview, text editor, space analysis |
 | **Shared folders and services** | SMB (with Time Machine), NFS, per-user and per-group permissions, quotas, recycle bin |
 | **Snapshots** | scheduled btrfs snapshots with retention, file restore, rollback, system restore points, replication to another volume or NAS |
@@ -127,15 +145,6 @@ built in a trixie container.
 The PC backup agent is in the same release: static binaries `rynas-agent-x86_64` and
 `rynas-agent-aarch64`, plus `.deb` and `.rpm` packages.
 
-### Releases
-
-A `vX.Y.Z` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml). It
-checks that the tag, the workspace version and `rynas-agent`'s version are the same, then
-builds the NAS package and the agent and publishes them as the latest release. Fixed-tag
-releases such as the NUT backport (`nut-2.8.5-0rynas1`) never become "latest". Run by hand
-(`gh workflow run release.yml -f ref=main`), the workflow only builds: the packages stay as
-artifacts of the run, for a test install with `dpkg -i`, and no release is made.
-
 Then open `https://<your-server>.local/` (or `http://<your-server>:8080/` before HTTPS is set
 up) and log in with an administrator account of the server. Installed layout and first login:
 [`packaging/deb/README.Debian`](packaging/deb/README.Debian).
@@ -164,12 +173,13 @@ browser ── HTTPS ──> rynas-caddy ──> rynas-web ── Unix socket �
 - **rynasd**: the only privileged process. It does the system work through standard tools and
   keeps every change in a staged, auditable list.
 - **rynas-web**: the HTTP API (`/api/v1`), login and sessions; it never runs as root.
-- **rynas-ui**: a Leptos (Rust → WebAssembly) single-page interface, under 1.5 MB compressed.
+- **rynas-ui**: a Leptos (Rust → WebAssembly) single-page interface, under 2 MB compressed.
 - **Plugins** add features, interface included: hardware support (such as Synology through
   synodeb) lives in its own module, so the core works with standard tools only.
 
 Design documents are in [`docs/`](docs/): architecture, UI, decisions and the research behind
-each feature.
+each feature. Releases are built by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) from a `vX.Y.Z` tag.
 
 ## License
 
@@ -188,5 +198,5 @@ App icons come from [Dashboard Icons](https://github.com/homarr-labs/dashboard-i
 ## Disclaimer
 
 rynas is an independent project. It is **not affiliated with, endorsed by or supported by
-Synology Inc.** Synology, DSM and related names are trademarks of Synology Inc., used here only
-to describe compatibility.
+Synology Inc. or QNAP Systems, Inc.** Synology, DSM, QNAP and related names are trademarks of
+their owners, used here only to describe hardware compatibility.
