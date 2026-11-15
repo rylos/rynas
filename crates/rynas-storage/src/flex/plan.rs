@@ -40,10 +40,10 @@ use crate::plan::{
     volume_top, wait, warn, warn_on,
 };
 
-/// Extent size of a new volume group (the LVM default).
-pub const EXTENT: u64 = 4 * MIB;
-/// LVM metadata at the start of each physical volume (the default area).
-const PV_META: u64 = MIB;
+/// Extent size of a new volume group (the LVM default); LVM arithmetic shared with the web
+/// interface's capacity calculator.
+pub use rynas_api_types::capacity::EXTENT;
+use rynas_api_types::capacity::{lvm_usable, pv_bytes};
 /// A LUKS mapping smaller than its logical volume by more than this was not resized.
 const LUKS_SLACK: u64 = 32 * MIB;
 /// Reshape speed the time estimate assumes, per tier (bytes/s).
@@ -83,12 +83,6 @@ fn md_level_arg(l: RaidLevel) -> &'static str {
         RaidLevel::Raid6 => "6",
         _ => "1",
     }
-}
-
-/// Bytes a physical volume on `size` bytes offers (metadata off, whole extents).
-fn pv_bytes(size: u64, extent: u64) -> u64 {
-    let e = extent.max(MIB);
-    size.saturating_sub(PV_META) / e * e
 }
 
 fn natural(v: &mut [String]) {
@@ -1631,11 +1625,6 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
 
 // ------------------------------------------------------------------------------- create
 
-/// Usable bytes of tiers once joined by LVM (whole extents of each physical volume).
-fn lvm_usable(tiers: &[Tier]) -> u64 {
-    tiers.iter().map(|t| pv_bytes(t.usable(), EXTENT)).sum()
-}
-
 /// The plan of a new flexible volume (`p` holds what the classic planner checked: label,
 /// disks, count).
 pub fn plan_create(
@@ -1659,10 +1648,9 @@ pub fn plan_create(
         }
     };
     let created: Vec<Tier> = layout.created().cloned().collect();
-    let used: u64 = created.iter().map(|t| t.height() * t.members.len() as u64).sum();
-    let reachable: u64 = sizes.iter().map(|(_, s)| tiers::reach(*s) - PART_START).sum();
-    p.wasted_bytes = reachable.saturating_sub(used);
-    p.usable_bytes = lvm_usable(&created).saturating_sub(if req.encrypt { LUKS_HEADER } else { 0 });
+    let cap = rynas_api_types::capacity::flexible(&layout, &sizes, req.encrypt);
+    p.wasted_bytes = cap.wasted;
+    p.usable_bytes = cap.usable;
     p.tiers_after = layout.tiers.iter().map(Tier::to_api).collect();
     mix_warnings(&mut p, chosen, true);
     unused_warning(&mut p, &layout.unused);

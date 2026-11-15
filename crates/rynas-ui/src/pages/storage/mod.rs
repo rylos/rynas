@@ -8,6 +8,7 @@
 //! are read on demand only, and never automatically for a disk in standby (S6).
 //! Every change is planned first (`POST /storage/plan/*`), shown, confirmed, then run as a task.
 
+mod calc;
 pub mod dedup;
 pub mod disks;
 pub mod plan;

@@ -11,7 +11,10 @@ use rynas_api_types::storage::{RaidLevel, StoragePlan};
 use serde_json::json;
 
 use crate::tasks::TaskRun;
-use super::plan::{MIN_TIER, cap_bar, plan_errors, plan_view, plan_warnings, tier_preview, tolerance_text};
+use rynas_api_types::capacity::MIN_TIER;
+
+use super::calc::CapacityCalculator;
+use super::plan::{cap_bar, plan_errors, plan_view, plan_warnings, tier_preview, tolerance_text};
 use super::volume::{RevealDialog, Stage, disk_checklist, level_json, start_task};
 use super::{free_disks, level_key, loading, serial_of, use_refresh, valid_label, volumes};
 use crate::api;
@@ -20,7 +23,7 @@ use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::ui::{self, PageHeader, Skeleton, Tone, typed_confirm};
 
-const LEVELS: [RaidLevel; 8] = [
+pub(super) const LEVELS: [RaidLevel; 8] = [
     RaidLevel::Single,
     RaidLevel::Raid1,
     RaidLevel::Raid5,
@@ -31,14 +34,9 @@ const LEVELS: [RaidLevel; 8] = [
     RaidLevel::Flex2,
 ];
 
+/// The level takes `n` drives (the planner's own rule).
 fn allowed(l: RaidLevel, n: usize) -> bool {
-    match l {
-        RaidLevel::Single => n == 1,
-        RaidLevel::Raid0 | RaidLevel::Raid1 | RaidLevel::Flex1 => n >= 2,
-        RaidLevel::Raid5 => n >= 3,
-        RaidLevel::Raid6 | RaidLevel::Flex2 => n >= 4,
-        RaidLevel::Raid10 => n >= 4 && n.is_multiple_of(2),
-    }
+    rynas_api_types::capacity::disk_count_ok(l, n)
 }
 
 fn min_key(l: RaidLevel) -> &'static str {
@@ -67,7 +65,7 @@ fn desc_key(l: RaidLevel) -> &'static str {
 /// What most NAS vendors suggest for n drives: a mirror for two, single parity up to four,
 /// double parity beyond (rebuilds of large drives take long). Drives of different sizes get
 /// the flexible RAID with the same tolerance, so their extra space is used too.
-fn recommended(n: usize, mixed: bool) -> RaidLevel {
+pub(super) fn recommended(n: usize, mixed: bool) -> RaidLevel {
     match (n, mixed) {
         (0 | 1, _) => RaidLevel::Single,
         (2..=4, true) => RaidLevel::Flex1,
@@ -82,6 +80,11 @@ fn recommended(n: usize, mixed: bool) -> RaidLevel {
 fn mixed_sizes(chosen: &[String]) -> bool {
     let s = super::sto();
     let sizes: Vec<u64> = chosen.iter().filter_map(|n| untrack(|| s.disk(n)).map(|d| d.size)).collect();
+    sizes_mixed(&sizes)
+}
+
+/// Drive sizes that differ by more than one tier step.
+pub(super) fn sizes_mixed(sizes: &[u64]) -> bool {
     match (sizes.iter().min(), sizes.iter().max()) {
         (Some(lo), Some(hi)) => hi - lo > MIN_TIER,
         _ => false,
@@ -109,9 +112,10 @@ pub fn CreateVolume() -> impl IntoView {
     let error = RwSignal::new(None::<String>);
     let reveal = RwSignal::new(false);
     let hdr_msg = RwSignal::new(None::<String>);
+    let calc = RwSignal::new(false);
 
     let taken = Memo::new(move |_| volumes(s).into_iter().map(|v| v.id).collect::<Vec<_>>());
-    // first free "volumeN", like DSM's "Volume 1"
+    // the first free "volumeN"
     Effect::new(move || {
         if label.with_untracked(String::is_empty) && s.tree.with(Option::is_some) {
             let t = taken.get();
@@ -230,6 +234,7 @@ pub fn CreateVolume() -> impl IntoView {
     view! {
         <div class="page">
             <PageHeader icon=icons::PLUS title="sto.create" subtitle="wiz.subtitle">
+                {ui::icon_btn(icons::CALCULATOR, t("wiz.calc").to_string(), false, Signal::stored(false), Callback::new(move |_| calc.set(true)))}
                 <a class="btn ghost" href="/storage">{tr("cancel")}</a>
             </PageHeader>
             <Show when=move || s.disks.with(Option::is_some) && s.tree.with(Option::is_some) fallback=move || loading(s, 6)>
@@ -329,6 +334,11 @@ pub fn CreateVolume() -> impl IntoView {
                 </section>
             </Show>
             {move || reveal.get().then(|| view! { <RevealDialog id=label.get_untracked() on_close=Callback::new(move |_| reveal.set(false)) /> })}
+            {move || calc.get().then(|| {
+                // opens with the drives chosen so far
+                let start: Vec<u64> = chosen.get_untracked().iter().filter_map(|n| untrack(|| s.disk(n)).map(|d| d.size)).collect();
+                view! { <CapacityCalculator start=start on_close=Callback::new(move |_| calc.set(false)) /> }
+            })}
         </div>
     }
 }

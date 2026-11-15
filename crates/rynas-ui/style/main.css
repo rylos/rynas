@@ -1790,6 +1790,32 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .ups-cand-head strong { min-width: 0; overflow-wrap: anywhere; }
 .log-text.ups-cand-log { max-height: 240px; overflow-y: auto; overflow-x: hidden; }
 .level-detail { display: flex; flex-direction: column; gap: var(--s-2); }
+/* capacity calculator: drive sizes typed by hand, then one row per RAID level (a grid on wide
+   dialogs, a card of two columns on narrow ones) with a bar per drive: in the volume / unused */
+.calc-input, .calc-out { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; }
+.calc-drives { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); gap: var(--s-2) var(--s-4); }
+.calc-drive { display: grid; grid-template-columns: minmax(0, 4.5rem) minmax(0, 1fr) 5.5rem auto; align-items: center; gap: var(--s-2); min-width: 0; }
+.calc-drive-n { overflow-wrap: anywhere; }
+.calc-presets { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
+.calc-list { display: flex; flex-direction: column; gap: var(--s-2); container-type: inline-size; }
+.calc-row {
+  display: grid; grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr)) minmax(0, 1.4fr); align-items: center; gap: var(--s-2) var(--s-3);
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-md); border: 1px solid var(--border); background: var(--surface-2); min-width: 0;
+}
+.calc-row.rec { border-color: var(--accent); background: color-mix(in oklch, var(--accent) 7%, var(--surface)); }
+.calc-name { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--s-2); min-width: 0; font-size: var(--fs-13); }
+.calc-name strong, .calc-name .small { overflow-wrap: anywhere; }
+.calc-val { display: flex; flex-direction: column; min-width: 0; font-size: var(--fs-13); overflow-wrap: anywhere; }
+.calc-k { font-size: var(--fs-12); color: var(--text-muted); }
+.calc-disks { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
+.calc-bar { display: flex; height: 6px; min-width: 4px; border-radius: var(--r-pill); overflow: hidden; background: var(--bg); }
+.calc-seg { height: 100%; }
+.calc-seg.used, .dot.calc-used { background: var(--accent); }
+.calc-seg.waste { background: var(--warning-fill); }
+@container (max-width: 600px) {
+  .calc-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .calc-name, .calc-disks { grid-column: 1 / -1; }
+}
 .erase-box { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3) var(--s-4); border-radius: var(--r-md); border: 1px solid color-mix(in oklch, var(--danger) 35%, var(--border)); background: color-mix(in oklch, var(--danger) 7%, var(--surface)); }
 .erase-box strong { display: flex; align-items: center; gap: var(--s-2); color: var(--danger); }
 .erase-box ul { display: flex; flex-direction: column; gap: var(--s-1); font-size: var(--fs-13); }

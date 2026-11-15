@@ -1,4 +1,6 @@
 //! The tier calculator of flexible RAID: pure arithmetic on disk sizes, no system access.
+//! The layout of a new volume lives in [`rynas_api_types::capacity`] (the web interface's
+//! capacity calculator runs the same code); growths and replacements are here.
 //!
 //! Each disk is cut into slices at the sizes of the disks (the "boundaries"); slice j of
 //! every disk that reaches it forms tier j, one md array. Tier levels follow the tolerance:
@@ -16,197 +18,15 @@
 //! counts as equal. Once created, tiers are fixed: a new disk joins every tier it covers, and
 //! a new top tier is made only when enough disks reach past the top one.
 
-use rynas_api_types::storage::{FlexTier, RaidLevel};
+use rynas_api_types::storage::RaidLevel;
 
-use crate::plan::{MD_OVERHEAD, MIB, PART_START, usable_partition};
-
-/// Thinnest tier: closer boundaries merge into the lower one (and smaller rests are not
-/// reported as unused). Tests on loop files pass a smaller value.
-pub const MIN_TIER: u64 = 16 << 30;
-
-/// A disk by kernel name and size in bytes.
-pub type DiskSize = (String, u64);
-
-/// One tier: the slice `[start, end)` (absolute byte offsets, identical on every member).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Tier {
-    /// 1-based, lowest first: also the partition number on each member.
-    pub index: u32,
-    pub start: u64,
-    pub end: u64,
-    pub members: Vec<String>,
-    /// `None`: too few members for the tolerance, the slice stays unused.
-    pub level: Option<RaidLevel>,
-}
-
-impl Tier {
-    pub fn height(&self) -> u64 {
-        self.end - self.start
-    }
-
-    /// Usable bytes the tier adds (0 when it is not created).
-    pub fn usable(&self) -> u64 {
-        self.level.map_or(0, |l| {
-            data_members(l, self.members.len()) * self.height().saturating_sub(MD_OVERHEAD)
-        })
-    }
-
-    pub fn created(&self) -> bool {
-        self.level.is_some()
-    }
-
-    /// The API shape of a planned tier (no array, health or progress yet).
-    pub fn to_api(&self) -> FlexTier {
-        FlexTier {
-            index: self.index,
-            start: self.start,
-            end: self.end,
-            level: self.level,
-            members: self.members.clone(),
-            usable: self.usable(),
-            ..Default::default()
-        }
-    }
-}
-
-/// Why no layout can be computed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TierError {
-    /// The tolerance is not 1 or 2.
-    BadTolerance(u32),
-    /// Fewer disks than the tolerance needs (2 for 1-disk, 4 for 2-disk tolerance).
-    TooFewDisks { need: usize },
-    /// The disk cannot hold the slices it has to (`need` bytes from the start of the disk).
-    TooSmall { disk: String, need: u64 },
-    /// The disk to replace is not in any tier.
-    NotAMember(String),
-}
-
-/// md level of a tier with `members` disks, `None` when it is not created.
-pub fn tier_level(tolerance: u32, members: usize) -> Option<RaidLevel> {
-    match (tolerance, members) {
-        (1, 2) | (2, 3) => Some(RaidLevel::Raid1),
-        (1, n) if n >= 3 => Some(RaidLevel::Raid5),
-        (2, n) if n >= 4 => Some(RaidLevel::Raid6),
-        _ => None,
-    }
-}
-
-/// Fewest members a tier needs at a tolerance.
-pub fn min_members(tolerance: u32) -> usize {
-    if tolerance >= 2 { 3 } else { 2 }
-}
-
-/// Fewest disks a layout needs at a tolerance.
-pub fn min_disks(tolerance: u32) -> usize {
-    if tolerance >= 2 { 4 } else { 2 }
-}
-
-/// Members that carry data in a tier: the rest is redundancy.
-pub fn data_members(level: RaidLevel, n: usize) -> u64 {
-    let n = n as u64;
-    match level {
-        RaidLevel::Raid5 => n.saturating_sub(1),
-        RaidLevel::Raid6 => n.saturating_sub(2),
-        _ => 1,
-    }
-}
-
-/// Where the last slice a disk of `size` bytes can hold ends (absolute byte offset).
-pub fn reach(size: u64) -> u64 {
-    PART_START + usable_partition(size)
-}
-
-/// The tier boundaries (absolute ends) of disks reaching `reaches`: sorted, in whole MiB,
-/// and a boundary closer than `min_tier` to the one below merges into it.
-pub fn boundaries(reaches: &[u64], min_tier: u64) -> Vec<u64> {
-    let mut v: Vec<u64> = reaches.iter().map(|r| r / MIB * MIB).collect();
-    v.sort_unstable();
-    v.dedup();
-    let mut out: Vec<u64> = Vec::new();
-    for r in v {
-        let low = out.last().copied().unwrap_or(PART_START);
-        if r > low && r - low >= min_tier.max(MIB) {
-            out.push(r);
-        }
-    }
-    out
-}
-
-/// A computed layout: tiers (created ones first; uncreated ones show the space they would
-/// have taken) and the space left on each disk.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Layout {
-    pub tolerance: u32,
-    pub tiers: Vec<Tier>,
-    /// (disk, bytes) no created tier uses, at least `min_tier`.
-    pub unused: Vec<(String, u64)>,
-}
-
-impl Layout {
-    pub fn usable(&self) -> u64 {
-        self.tiers.iter().map(Tier::usable).sum()
-    }
-
-    /// The tiers to create (always the lowest ones: members only shrink going up).
-    pub fn created(&self) -> impl Iterator<Item = &Tier> {
-        self.tiers.iter().filter(|t| t.created())
-    }
-}
-
-/// Space on each disk past the highest created tier it is in, when at least `min_tier`.
-fn unused(tiers: &[Tier], disks: &[DiskSize], min_tier: u64) -> Vec<(String, u64)> {
-    disks
-        .iter()
-        .filter_map(|(name, size)| {
-            let top = tiers
-                .iter()
-                .filter(|t| t.created() && t.members.contains(name))
-                .map(|t| t.end)
-                .max()
-                .unwrap_or(PART_START);
-            let rest = reach(*size).saturating_sub(top);
-            (rest >= min_tier.max(MIB)).then(|| (name.clone(), rest))
-        })
-        .collect()
-}
-
-/// The layout of a new flexible RAID over `disks` at `tolerance` (1 or 2).
-pub fn plan(disks: &[DiskSize], tolerance: u32, min_tier: u64) -> Result<Layout, TierError> {
-    if !(1..=2).contains(&tolerance) {
-        return Err(TierError::BadTolerance(tolerance));
-    }
-    if disks.len() < min_disks(tolerance) {
-        return Err(TierError::TooFewDisks {
-            need: min_disks(tolerance),
-        });
-    }
-    let reaches: Vec<u64> = disks.iter().map(|(_, s)| reach(*s)).collect();
-    let bounds = boundaries(&reaches, min_tier);
-    let mut tiers = Vec::new();
-    let mut start = PART_START;
-    for (i, &end) in bounds.iter().enumerate() {
-        let members: Vec<String> = disks
-            .iter()
-            .filter(|(_, s)| reach(*s) >= end)
-            .map(|(n, _)| n.clone())
-            .collect();
-        tiers.push(Tier {
-            index: i as u32 + 1,
-            start,
-            end,
-            level: tier_level(tolerance, members.len()),
-            members,
-        });
-        start = end;
-    }
-    let unused = unused(&tiers, disks, min_tier);
-    Ok(Layout {
-        tolerance,
-        tiers,
-        unused,
-    })
-}
+use crate::plan::{MIB, PART_START};
+// the arithmetic of a new layout is shared with the web interface's capacity calculator
+pub use rynas_api_types::capacity::{
+    DiskSize, Layout, MIN_TIER, Tier, TierError, boundaries, data_members, min_disks, min_members, plan, reach,
+    tier_level,
+};
+use rynas_api_types::capacity::unused_space as unused;
 
 /// A tier whose level changes in a growth.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,6 +213,7 @@ pub fn needed_reach(tiers: &[Tier], disk: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::MD_OVERHEAD;
     use RaidLevel::{Raid1, Raid5, Raid6};
 
     const TB: u64 = 1_000_000_000_000;

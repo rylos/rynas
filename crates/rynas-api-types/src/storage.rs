@@ -986,7 +986,7 @@ impl VolumePlace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RaidLevel {
-    /// One disk (md RAID1 with one member, so a mirror can be added later, like DSM "Basic").
+    /// One disk (md RAID1 with one member, so a mirror can be added later).
     #[default]
     Single,
     Raid0,

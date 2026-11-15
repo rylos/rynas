@@ -5379,6 +5379,20 @@ sto.replace_missing	Disco mancante (non più collegato)
 sto.grow_text_flex	I nuovi dischi entrano in ogni fascia per cui sono abbastanza grandi, e i dischi più grandi degli altri possono creare una nuova fascia. Le fasce vengono rimodellate una alla volta e può richiedere molte ore; il volume resta disponibile.
 sto.replace_text_flex	Il nuovo disco prende il posto del vecchio in ogni fascia; un disco più grande entra anche nelle fasce che ora raggiunge.
 wiz.flex_help	Il RAID flessibile usa tutto lo spazio di dischi di dimensioni diverse: ogni gradino di dimensione diventa una fascia protetta e le fasce formano un unico volume. In seguito cresce un disco alla volta, aggiungendo un disco o sostituendone uno con uno più grande.
+wiz.calc	Calcolatore di capacità
+wiz.calc.text	Inserisci le dimensioni dei dischi, anche di dischi che non hai ancora: ogni livello RAID che accetta quel numero di dischi mostra cosa offre. I numeri vengono dal calcolo con cui rynas crea il volume (partizioni, metadati RAID, LVM), senza crittografia; il file system mostra un po' meno.
+wiz.calc.drive	Disco {n}
+wiz.calc.size	Dimensione del disco {n}
+wiz.calc.unit	Unità del disco {n}
+wiz.calc.remove	Rimuovi il disco {n}
+wiz.calc.add	Aggiungi un disco da
+wiz.calc.bad	Le dimensioni che non sono un numero di almeno 1 GB sono escluse.
+wiz.calc.empty	Aggiungi almeno un disco per vedere i livelli RAID.
+wiz.calc.total.one	{n} disco · {size} grezzi
+wiz.calc.total.other	{n} dischi · {size} grezzi
+wiz.calc.levels	Livelli RAID per questi dischi
+wiz.calc.used	Nel volume
+wiz.calc.disk_use	Disco {n}: {used} nel volume, {unused} non utilizzati
 plan.s.create_pv	Rendi {subject} un volume fisico LVM
 plan.s.create_vg	Crea il gruppo di volumi {subject} dagli array delle fasce
 plan.s.create_lv	Crea il volume logico {subject} su tutto lo spazio libero

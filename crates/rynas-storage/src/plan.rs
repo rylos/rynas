@@ -17,16 +17,9 @@ use rynas_api_types::storage::{
 
 use crate::Inventory;
 
-pub(crate) const MIB: u64 = 1 << 20;
-/// Partition starts at 1 MiB (sgdisk default alignment).
-pub(crate) const PART_START: u64 = MIB;
-/// Left free at the end of each disk so that a replacement "of the same size" from another
-/// vendor (a few MB smaller) still fits.
-pub const END_RESERVE: u64 = 128 * MIB;
-/// md 1.2 superblock, bitmap and data offset (mdadm reserves room for reshapes). Estimate.
-pub(crate) const MD_OVERHEAD: u64 = 128 * MIB;
-/// LUKS2 header with the default 16 MiB metadata area.
-pub(crate) const LUKS_HEADER: u64 = 16 * MIB;
+// disk layout constants and capacity arithmetic, shared with the web interface's calculator
+pub use rynas_api_types::capacity::{END_RESERVE, capacity_factor};
+pub(crate) use rynas_api_types::capacity::{LUKS_HEADER, MD_OVERHEAD, MIB, PART_START, usable_partition};
 /// Argon2id memory cap (KiB) so a 4 GB NAS does not run out of memory while unlocking.
 pub const PBKDF_MEMORY_KIB: &str = "262144";
 pub const COMPRESSION: &str = "zstd:1";
@@ -378,40 +371,20 @@ fn md_level(l: RaidLevel) -> &'static str {
 
 /// (minimum disks, accepted count) for a level.
 fn count_ok(l: RaidLevel, n: usize) -> Result<(), String> {
-    let (min, extra) = match l {
-        RaidLevel::Single => (1, n == 1),
-        RaidLevel::Raid0 | RaidLevel::Raid1 | RaidLevel::Flex1 => (2, true),
-        RaidLevel::Raid5 => (3, true),
-        RaidLevel::Raid6 | RaidLevel::Flex2 => (4, true),
-        RaidLevel::Raid10 => (4, n.is_multiple_of(2)),
-    };
+    if rynas_api_types::capacity::disk_count_ok(l, n) {
+        return Ok(());
+    }
+    let min = rynas_api_types::capacity::level_min_disks(l);
     if n < min {
         return Err(format!(
             "{} needs at least {min} disks, {n} selected",
             level_name(l)
         ));
     }
-    if !extra {
-        return Err(match l {
-            RaidLevel::Single => "single takes exactly one disk".to_string(),
-            _ => format!("{} needs an even number of disks", level_name(l)),
-        });
-    }
-    Ok(())
-}
-
-/// Data-bearing members out of `n` and guaranteed fault tolerance. For a flexible RAID this
-/// is the case of disks of one size (one tier); mixed sizes are counted by
-/// [`crate::flex::tiers`].
-pub fn capacity_factor(l: RaidLevel, n: u64) -> (u64, u32) {
-    match l {
-        RaidLevel::Single => (1, 0),
-        RaidLevel::Raid0 => (n, 0),
-        RaidLevel::Raid1 => (1, (n - 1) as u32),
-        RaidLevel::Raid5 | RaidLevel::Flex1 => (n - 1, 1),
-        RaidLevel::Raid6 | RaidLevel::Flex2 => (n - 2, 2),
-        RaidLevel::Raid10 => (n / 2, 1),
-    }
+    Err(match l {
+        RaidLevel::Single => "single takes exactly one disk".to_string(),
+        _ => format!("{} needs an even number of disks", level_name(l)),
+    })
 }
 
 fn level_from_md(level: &str, raid_disks: u32) -> Option<RaidLevel> {
@@ -424,12 +397,6 @@ fn level_from_md(level: &str, raid_disks: u32) -> Option<RaidLevel> {
         "raid10" => RaidLevel::Raid10,
         _ => return None,
     })
-}
-
-/// Bytes of a disk a partition can use: from [`PART_START`] to [`END_RESERVE`] before the
-/// end, in whole MiB.
-pub(crate) fn usable_partition(disk_size: u64) -> u64 {
-    disk_size.saturating_sub(PART_START + END_RESERVE) / MIB * MIB
 }
 
 /// Records an error of the plan: its English text and its issue (code, request field and
@@ -648,17 +615,13 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
 
     // capacity
     let n = chosen.len() as u64;
-    let min = chosen.iter().map(|d| d.size).min().unwrap_or(0);
-    p.raw_bytes = chosen.iter().map(|d| d.size).sum();
-    p.wasted_bytes = chosen.iter().map(|d| d.size - min).sum();
-    let member = usable_partition(min).saturating_sub(MD_OVERHEAD);
-    let (factor, tolerance) = if count_ok(req.level, chosen.len()).is_ok() {
-        capacity_factor(req.level, n)
-    } else {
-        (0, 0)
-    };
-    p.usable_bytes = (factor * member).saturating_sub(if req.encrypt { LUKS_HEADER } else { 0 });
-    p.fault_tolerance = tolerance;
+    let sizes: Vec<u64> = chosen.iter().map(|d| d.size).collect();
+    let min = sizes.iter().copied().min().unwrap_or(0);
+    let cap = rynas_api_types::capacity::classic(req.level, &sizes, req.encrypt);
+    p.raw_bytes = cap.raw;
+    p.wasted_bytes = cap.wasted;
+    p.usable_bytes = cap.usable;
+    p.fault_tolerance = cap.tolerance;
 
     // warnings about the mix
     if p.wasted_bytes > 0 && n > 1 {

@@ -244,7 +244,7 @@ pub fn tolerance_text(n: u32) -> String {
 
 /// A size difference smaller than this is rounding, not a tier of its own (the planner's
 /// smallest tier): disks that close count as the same size.
-pub const MIN_TIER: u64 = 16 << 30;
+use rynas_api_types::capacity::MIN_TIER;
 
 /// The colour class of a tier (`c1`…`c5`, repeating), shared by the drive map and the lists.
 fn tier_class(index: u32) -> String {

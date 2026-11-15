@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod apps;
 pub mod backup;
+pub mod capacity;
 pub mod clock;
 pub mod dedup;
 pub mod docker;

@@ -306,6 +306,35 @@ fn create_cases_of_the_design_table() {
     assert!(p.issues.iter().any(|i| i.code == PlanIssueCode::DiskCount));
 }
 
+/// The capacity calculator of the web interface ([`rynas_api_types::capacity::volume`]) gives
+/// the numbers of the plan of every level.
+#[test]
+fn the_calculator_matches_the_plans() {
+    use rynas_api_types::capacity;
+    for sizes in [&[4, 8, 8][..], &[4, 4, 12, 16, 20], &[8, 8, 8, 8], &[2, 3]] {
+        let disks: Vec<(String, u64)> = sizes.iter().enumerate().map(|(i, s)| (format!("sd{}", (b'a' + i as u8) as char), s * TB)).collect();
+        let named: Vec<(&str, u64)> = disks.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+        let inv = blank_inventory(&named);
+        let names: Vec<&str> = named.iter().map(|(n, _)| *n).collect();
+        let bytes: Vec<u64> = disks.iter().map(|(_, s)| *s).collect();
+        for level in [
+            RaidLevel::Single, RaidLevel::Raid0, RaidLevel::Raid1, RaidLevel::Raid5, RaidLevel::Raid6,
+            RaidLevel::Raid10, RaidLevel::Flex1, RaidLevel::Flex2,
+        ] {
+            let p = crate::plan::plan_volume(&inv, &create_req(&names, level, false));
+            let c = capacity::volume(level, &bytes, false, MIN_TIER);
+            assert_eq!(p.valid, c.is_some(), "{level:?} {sizes:?}: {:?}", p.errors);
+            if let Some(c) = c {
+                assert_eq!(
+                    (p.usable_bytes, p.raw_bytes, p.wasted_bytes, p.fault_tolerance),
+                    (c.usable, c.raw, c.wasted, c.tolerance),
+                    "{level:?} {sizes:?}"
+                );
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------- growth
 
 #[test]
