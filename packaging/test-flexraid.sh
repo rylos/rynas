@@ -17,9 +17,14 @@
 #   3. replace the smallest disk with a 3 GiB one (hot replace, joins, a new top tier);
 #   4. fail every partition of one disk, replace it;
 #   5. remove a disk (partitions failed and removed, loop device detached), replace "missing";
+#   5b. a disk failed and removed but still attached comes back: replace "missing" with it
+#       (its leftover partitions cleared, then rebuilt on);
 #   6. kill -9 rynasd during a reshape, restart it, complete what is left;
 #   7. a "reboot": arrays stopped, assembled again from mdadm.conf, volume group activated;
 #   8. a 2-disk tolerance volume with a three-way RAID1 tier, grown to RAID6;
+#   8b. two of its disks failed and removed (still attached): a new disk rebuilds one slot
+#       (the tiers stay one disk short), then one of the two comes back and the other,
+#       left over, is cleared (by name, checked to be that disk);
 #   9. an encrypted volume: create, add a disk (LUKS resized), lock, unlock.
 # After every step: the data checksums, no growth left to complete, every tier healthy.
 # At the end the host must have no md array, device-mapper mapping or loop device left.
@@ -385,6 +390,19 @@ create() { # LABEL LEVEL DISK...
     run POST /storage/volumes "{\"label\":\"$l\",\"level\":\"$lvl\",\"disks\":$(disks_json "$@"),\"confirm\":\"$l\",\"serials\":$(serials "$@")${ENCJ:-}${PASSJ:-}}" ok
     speed_up
 }
+fail_remove() { # VOLUME DISK...: every partition of the disks failed and removed
+    local l=$1 md p d; shift
+    for md in $(tiers_of "$l"); do
+        for d in "$@"; do
+            for p in /dev/"$d"p*; do
+                if mdadm --detail "/dev/$md" | grep -q "$p\$"; then
+                    mdadm "/dev/$md" --fail "$p"
+                    mdadm "/dev/$md" --remove "$p"
+                fi
+            done
+        done
+    done
+}
 # FROM=8 or FROM=9 starts at that scenario (debugging)
 FROM=${FROM:-1}
 
@@ -451,6 +469,17 @@ new_loop 2G; H=$DEV
 echo "new disk: $H(2G)"
 replace "$F1" missing "$H"
 after "$F1" "raid5x4 raid5x4 raid1x2"
+
+step "5b. fail and remove every partition of $G (still attached), replace \"missing\" with $G"
+fail_remove "$F1" "$G"
+blkid -s TYPE /dev/"$G"p* || true
+replace "$F1" missing "$G"
+echo "$PLAN" | jq -e --arg p "/dev/${G}p1" '.steps | any(.argv == ["wipefs","--all",$p])' >/dev/null \
+    || fail "the leftover partitions of $G are not cleared"
+after "$F1" "raid5x4 raid5x4 raid1x2"
+for md in $(tiers_of "$F1" | head -2); do
+    mdadm --detail "/dev/$md" | grep -q "/dev/${G}p" || fail "$G not back in $md"
+done
 
 step "6. kill -9 rynasd during a reshape, then complete"
 new_loop 3G; I=$DEV
@@ -525,6 +554,26 @@ echo "$PLAN" | jq -e '.warning_items | any(.code == "flex_reduced_tolerance_wind
 after "$F2" "raid6x5 raid6x4"
 T2=$(fs_size "$F2"); echo "  filesystem: $T1 -> $T2 B"
 [ "$T2" -gt "$T1" ] || fail "filesystem did not grow"
+
+step "8b. $F2 loses $K4 and $K5 (failed, removed, still attached): a new disk, then $K4 again"
+fail_remove "$F2" "$K4" "$K5"
+new_loop 2G; K6=$DEV
+echo "new disk: $K6(2G)"
+replace "$F2" missing "$K6"
+echo "$PLAN" | grep -q 'degraded <= 1' || fail "the rebuild does not wait for a tier one disk short"
+flexwait "$F2"
+show "$F2"
+api GET /storage/tree
+jq_tiers='.volumes[] | select(.label == $l) | .flexible.tiers'
+echo "$BODY" | jq -r --arg l "$F2" "$jq_tiers"'[] | "    t\(.index) \(.health) degraded=\(.degraded)"'
+echo "$BODY" | jq -e --arg l "$F2" "$jq_tiers"' | all(.degraded == 1)' >/dev/null || fail "$F2: every tier should miss one disk"
+verify_data "$F2"
+replace "$F2" missing "$K4"
+echo "$PLAN" | jq -e --arg d "$K5" '[.steps[] | select(.destroys == [$d])] | length > 0 and all(.best_effort)' >/dev/null \
+    || fail "the leftover disk $K5 is not cleared best effort"
+after "$F2" "raid6x5 raid6x4"
+[ "$(lsblk -nro NAME "/dev/$K5" | wc -l)" = 1 ] || fail "$K5 still has partitions: $(lsblk -nro NAME "/dev/$K5")"
+blkid -p "/dev/$K5" && fail "$K5 still has a signature" || echo "  $K5 cleared"
 
 fi
 
