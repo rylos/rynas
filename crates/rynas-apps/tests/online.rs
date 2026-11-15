@@ -25,12 +25,14 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-/// A catalogue folder with `ids` copied from `apps/` and `catalog.toml` at `serial`.
+/// A catalogue folder with `ids` copied from `apps/` and `catalog.toml` at `serial`. Each
+/// package is set to version 1.0.0: the tests name versions, Renovate bumps the real ones.
 fn catalogue(root: &Path, serial: u64, ids: &[&str]) -> PathBuf {
     fs::create_dir_all(root).unwrap();
     fs::write(root.join("catalog.toml"), format!("serial = {serial}\n")).unwrap();
     for id in ids {
         copy_dir(&apps_dir().join(id), &root.join(id));
+        set_field(root, id, "version", "1.0.0");
     }
     root.to_owned()
 }

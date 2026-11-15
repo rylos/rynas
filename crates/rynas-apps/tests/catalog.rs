@@ -265,18 +265,21 @@ fn update_plan_lists_image_changes_and_migrations() {
     let src = apps_dir().join("uptime-kuma");
     let dst = tmp.path().join("uptime-kuma");
     copy_dir(&src, &dst);
-    // the catalogue moves to 1.1.0 with a renamed value
-    let toml_text = fs::read_to_string(dst.join("app.toml")).unwrap().replace("version = \"1.0.0\"", "version = \"1.1.0\"");
+    // the catalogue moves to a later version (99.0.0, whatever the package's version is now:
+    // Renovate bumps it) with a renamed value
+    let toml_text = fs::read_to_string(dst.join("app.toml")).unwrap();
+    let current = toml_text.lines().find_map(|l| l.strip_prefix("version = \"")).and_then(|v| v.strip_suffix('"')).expect("version line").to_string();
+    let toml_text = toml_text.replace(&format!("version = \"{current}\""), "version = \"99.0.0\"");
     fs::write(dst.join("app.toml"), toml_text).unwrap();
     fs::create_dir_all(dst.join("migrations")).unwrap();
     fs::write(
-        dst.join("migrations/1.1.0.toml"),
-        "to = \"1.1.0\"\ndescription = \"test\"\n[[ops]]\nop = \"set_default\"\nkey = \"EXTRA\"\nvalue = \"x\"\n",
+        dst.join("migrations/99.0.0.toml"),
+        "to = \"99.0.0\"\ndescription = \"test\"\n[[ops]]\nop = \"set_default\"\nkey = \"EXTRA\"\nvalue = \"x\"\n",
     )
     .unwrap();
     let new = CatalogApp::load(&dst).unwrap_or_else(|e| panic!("{e}"));
 
-    // installed: version 1.0.0 with an older digest
+    // installed: the current version with an older digest
     let old = catalog();
     let old_app = old.get("uptime-kuma").unwrap();
     let mut req = old_app.test_request();
@@ -289,8 +292,8 @@ fn update_plan_lists_image_changes_and_migrations() {
     let env_text = String::from_utf8(installed.file(".env").unwrap().contents.clone()).unwrap();
 
     let plan = plan::update_plan(&new, &compose_text, &env_text).unwrap();
-    assert_eq!(plan.from_version.to_string(), "1.0.0");
-    assert_eq!(plan.to_version.to_string(), "1.1.0");
+    assert_eq!(plan.from_version.to_string(), current);
+    assert_eq!(plan.to_version.to_string(), "99.0.0");
     assert!(!plan.up_to_date && !plan.downgrade);
     assert_eq!(plan.migrations.len(), 1);
     assert_eq!(plan.image_changes.len(), 1);
@@ -300,7 +303,7 @@ fn update_plan_lists_image_changes_and_migrations() {
     // stays out of the request
     let updated = plan::prepare_update(&new, "rynas", &Provided::example("uptime-kuma"), "uptime-kuma", &compose_text, &env_text, &BTreeMap::new()).unwrap();
     assert_eq!(updated.env["WEB_PORT"], "3002");
-    assert_eq!(updated.meta.version.to_string(), "1.1.0");
+    assert_eq!(updated.meta.version.to_string(), "99.0.0");
 
     // the same stack against the same catalogue is up to date
     let same = plan::update_plan(old_app, &String::from_utf8(installed.file("compose.yaml").unwrap().contents.clone()).unwrap(), &env_text).unwrap();
