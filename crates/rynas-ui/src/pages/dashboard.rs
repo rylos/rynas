@@ -831,6 +831,20 @@ pub fn temp_label(id: &str, label: &str) -> String {
     }
 }
 
+/// The mount point of the volume on an array: the file system on the md device, or the
+/// multi-device btrfs whose source is one of its members (the shortest mount point when a
+/// btrfs is mounted more than once).
+fn array_volume(a: &rynas_api_types::RaidArray, fs: &[rynas_api_types::Filesystem]) -> Option<String> {
+    let dev = |f: &rynas_api_types::Filesystem| f.source.strip_prefix("/dev/").unwrap_or(&f.source).to_string();
+    fs.iter()
+        .filter(|f| {
+            let d = dev(f);
+            d == a.name || (f.fstype == "btrfs" && a.members.contains(&d))
+        })
+        .map(|f| f.mountpoint.clone())
+        .min_by_key(String::len)
+}
+
 /// Volumes (file systems with usage bars) and RAID arrays with state and resync progress.
 #[component]
 fn VolumesWidget() -> impl IntoView {
@@ -889,10 +903,14 @@ fn VolumesWidget() -> impl IntoView {
                             <ul class="raid-list">
                                 {arrays.iter().map(|a| {
                                     let (tone, key) = array_status(a);
+                                    // named by the volume on it, like the bars above; the
+                                    // array's own name stays beside it
+                                    let vol = array_volume(a, &s.filesystems);
                                     view! {
                                         <li class=format!("raid {}", tone.class())>
                                             <div class="raid-top">
-                                                <span class="mono strong">{a.name.clone()}</span>
+                                                <span class="mono strong">{vol.clone().unwrap_or_else(|| a.name.clone())}</span>
+                                                {vol.is_some().then(|| view! { <span class="small muted mono">{a.name.clone()}</span> })}
                                                 <span class="chip accent">{a.level.to_uppercase()}</span>
                                                 <span class="small muted tnum">{format!("{} · {}", i18n::bytes_si(a.size), i18n::tn("sto.members", a.members.len() as u64, &[]))}</span>
                                                 <span class="row-end"><Status tone=tone text=t(key).to_string() /></span>
