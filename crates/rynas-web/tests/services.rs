@@ -63,7 +63,7 @@ async fn rig() -> Rig {
     let config = Config::open(
         ConfigOptions::new(&state_dir, &root),
         sys.clone(),
-        vec![Arc::new(HostnameDomain), users.clone(), shares.clone()],
+        vec![Arc::new(HostnameDomain::new()), users.clone(), shares.clone()],
     )
     .unwrap();
     let tasks =

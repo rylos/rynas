@@ -434,7 +434,7 @@ fn pair_btrfs(svc: &Arc<PcAgent>, p: &Pairing, target: &str, req: &PairRequest) 
         group: String::new(),
         token,
         repo_password: String::new(),
-        nas_name: svc.hostname.clone(),
+        nas_name: svc.hostname(),
         plan,
     })
 }
@@ -559,7 +559,7 @@ pub async fn pair(svc: &Arc<PcAgent>, p: &Pairing, settings: &PcAgentSettings, r
         group,
         token,
         repo_password: pc_password,
-        nas_name: svc.hostname.clone(),
+        nas_name: svc.hostname(),
         plan,
     })
 }

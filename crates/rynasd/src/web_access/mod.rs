@@ -2814,8 +2814,9 @@ impl Applier for WebAccessDomain {
 // periodic check
 // ---------------------------------------------------------------------------------------------
 
-/// At start (after a few seconds) and every [`WATCH_INTERVAL`]: [`WebAccessSvc::sync`].
-pub fn spawn_watch(svc: Arc<WebAccessSvc>) {
+/// At start (after a few seconds), every [`WATCH_INTERVAL`] and at once when an apply renames
+/// the host (`hostname`): [`WebAccessSvc::sync`].
+pub fn spawn_watch(svc: Arc<WebAccessSvc>, mut hostname: tokio::sync::watch::Receiver<String>) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(3)).await;
         loop {
@@ -2825,7 +2826,16 @@ pub fn spawn_watch(svc: Arc<WebAccessSvc>) {
                 Ok(Err(e)) => tracing::warn!("web access: {e}"),
                 Err(e) => tracing::error!("web access: {e}"),
             }
-            tokio::time::sleep(WATCH_INTERVAL).await;
+            // a renamed host: the proxy's names and certificate follow at once (the sync
+            // waits for the apply that renamed it to end)
+            tokio::select! {
+                _ = tokio::time::sleep(WATCH_INTERVAL) => {}
+                r = hostname.changed() => {
+                    if r.is_err() {
+                        tokio::time::sleep(WATCH_INTERVAL).await;
+                    }
+                }
+            }
         }
     });
 }

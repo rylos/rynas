@@ -1980,7 +1980,8 @@ pub struct PcBackup {
     pub notifier: Arc<dyn Notifier>,
     pub state_dir: PathBuf,
     pub admins: AdminPolicy,
-    pub hostname: String,
+    /// This NAS' host name, followed when it changes ([`PcBackup::set_hostname`]).
+    hostname: Mutex<String>,
     reg: Mutex<Registry>,
     /// One change at a time (create, update, remove rewrite the keys file; retention passes
     /// and snapshot deletes).
@@ -2029,7 +2030,7 @@ impl PcBackup {
             notifier,
             state_dir,
             admins,
-            hostname,
+            hostname: Mutex::new(hostname),
             reg: Mutex::new(reg),
             change: tokio::sync::Mutex::new(()),
             manifests: Mutex::new(BTreeMap::new()),
@@ -2041,6 +2042,16 @@ impl PcBackup {
 
     fn reg_path(state_dir: &Path) -> PathBuf {
         state_dir.join("pcbackup/targets.json")
+    }
+
+    /// This NAS' host name (the default host of the setup snippets).
+    pub fn hostname(&self) -> String {
+        self.hostname.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The host name changed (an apply of `system.hostname`).
+    pub fn set_hostname(&self, name: &str) {
+        *self.hostname.lock().unwrap_or_else(|e| e.into_inner()) = name.to_string();
     }
 
     /// Changes the records and saves them; undone when saving fails.
@@ -2270,7 +2281,7 @@ impl PcBackup {
         ReceiveSetup {
             account: ACCOUNT.into(),
             filter: FILTER.into(),
-            host: self.hostname.clone(),
+            host: self.hostname(),
             ssh_port: receive::sshd_port(&f.sshd_config),
             volumes: f.volumes,
             problems,
@@ -3496,7 +3507,7 @@ async fn detail_get(
     Ok(Json(
         blocking(move || {
             let v = s.view(&device, &t, rynas_tasks::now_ms());
-            let host = snippet_host(&q.host, &s.hostname);
+            let host = snippet_host(&q.host, &s.hostname());
             let port = receive::sshd_port(&s.host.facts().sshd_config);
             let key_line = receive::parse_public_key(&t.public_key)
                 .ok()

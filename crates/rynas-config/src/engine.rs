@@ -147,6 +147,19 @@ struct Step {
     applier: Arc<dyn Applier>,
     old: Option<Value>,
     new: Option<Value>,
+    /// Not changed by this apply: written again with its applied value because it follows a
+    /// key that changes ([`Applier::follows`]). Its value and the owner's staged change of it
+    /// stay as they are.
+    follow: bool,
+}
+
+/// The host name an apply of `steps` puts in force, when it changes it.
+fn hostname_change(steps: &[Step]) -> Option<String> {
+    let s = steps
+        .iter()
+        .find(|s| !s.follow && s.key == crate::domain::HOSTNAME_KEY && s.old != s.new)?;
+    let h = s.new.as_ref()?.get("hostname")?.as_str()?;
+    (!h.is_empty()).then(|| h.to_string())
 }
 
 /// A file written (or found already identical) by an apply.
@@ -287,6 +300,7 @@ impl Config {
             replaced: Mutex::new(Vec::new()),
             restarted: Mutex::new(Vec::new()),
             rolling_back: false,
+            new_hostname: None,
         }
     }
 
@@ -672,6 +686,7 @@ impl Config {
                 applier,
                 old: c.base,
                 new: c.value,
+                follow: false,
             });
         }
         self.apply_steps(steps, owner, author, comment, restored_from, log, cancelled)
@@ -742,6 +757,7 @@ impl Config {
             applier,
             old,
             new,
+            follow: false,
         }];
         // the owner of no changeset: `@` is not allowed in user names
         self.apply_steps(steps, "@rynas", author, comment, None, log, &|| false)
@@ -758,6 +774,30 @@ impl Config {
         log: &dyn Fn(&str),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<u64> {
+        // domains whose files carry a value that changes are written again with their own
+        // applied value (the NetBIOS name follows the host name)
+        let changed: Vec<String> = steps
+            .iter()
+            .filter(|s| s.old != s.new)
+            .map(|s| s.key.clone())
+            .collect();
+        let mut followers = Vec::new();
+        for (key, applier) in &self.appliers {
+            if steps.iter().any(|s| &s.key == key) || !changed.iter().any(|k| applier.follows(k)) {
+                continue;
+            }
+            // a key rynas never applied has no files of its own to correct
+            let Some(v) = self.applied(key)? else { continue };
+            log(&format!("{key}: written again, it follows {}", changed.join(", ")));
+            followers.push(Step {
+                key: key.clone(),
+                applier: applier.clone(),
+                old: Some(v.clone()),
+                new: Some(v),
+                follow: true,
+            });
+        }
+        steps.extend(followers);
         // domains run in their declared order (users before the shares that name them)
         steps.sort_by(|a, b| (a.applier.order(), &a.key).cmp(&(b.applier.order(), &b.key)));
         let rev = self.next_rev()?;
@@ -805,7 +845,8 @@ impl Config {
         log: &dyn Fn(&str),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(Vec<Written>, Vec<Restore>)> {
-        let ctx = self.ctx_logging(log);
+        let mut ctx = self.ctx_logging(log);
+        ctx.new_hostname = hostname_change(steps);
         let fail = |key: &str, what: &str, e: String| {
             let m = format!("{key}: {what}: {e}");
             log(&m);
@@ -1049,6 +1090,11 @@ impl Config {
         let mut db = self.db();
         let tx = db.transaction()?;
         for s in steps {
+            if s.follow {
+                // only its files changed: they are recorded below
+                tx.execute("DELETE FROM managed_files WHERE key = ?1", [&s.key])?;
+                continue;
+            }
             match &s.new {
                 Some(v) => tx.execute(
                     "INSERT INTO config (key, value, rev) VALUES (?1, ?2, ?3)
@@ -1091,6 +1137,7 @@ impl Config {
         };
         let changes: Vec<StoredChange> = steps
             .iter()
+            .filter(|s| !s.follow)
             .map(|s| StoredChange {
                 key: s.key.clone(),
                 old: s.old.clone(),
@@ -1339,6 +1386,7 @@ impl Config {
             applier,
             old: Some(value.clone()),
             new: Some(value),
+            follow: false,
         }];
         let backup_dir = self
             .opts

@@ -21,7 +21,7 @@ struct Env {
 
 fn appliers() -> Vec<Arc<dyn Applier>> {
     vec![
-        Arc::new(HostnameDomain),
+        Arc::new(HostnameDomain::new()),
         Arc::new(
             FileDomain::new(
                 "test.app",
@@ -229,7 +229,11 @@ fn apply_writes_files_reloads_and_records_a_revision() {
     assert!(hosts.contains("127.0.1.1\tnas\n"));
     assert!(!hosts.contains("debian"));
     assert_eq!(e.sys.state().hostname, "nas");
-    assert_eq!(e.sys.state().calls, ["set-hostname nas"]);
+    // a new name: Avahi starts again to publish `nas.local`
+    assert_eq!(
+        e.sys.state().calls,
+        ["set-hostname nas", "run systemctl restart avahi-daemon.service"]
+    );
     assert!(!e.root.join("etc/hostname.rynas-new").exists());
     // the previous files are kept with the revision
     assert_eq!(
@@ -730,7 +734,7 @@ fn an_update_rewrites_what_it_renders_differently_but_never_hand_edits() {
     let root = e.root.clone();
     drop(e.cfg);
     let v2: Vec<Arc<dyn Applier>> = vec![
-        Arc::new(HostnameDomain),
+        Arc::new(HostnameDomain::new()),
         Arc::new(
             FileDomain::new(
                 "test.app",
@@ -1085,4 +1089,91 @@ fn a_domain_knows_when_it_is_rolled_back() {
     assert!(cfg.apply("alice", "alice", "", &|_| {}, &|| false).is_err());
     assert_eq!(*seen.lock().unwrap(), [false, false, true]);
     assert!(read(&e.root, "/etc/rollback.conf").ends_with("\n\"good\"\n"));
+}
+
+/// A domain whose file names the host (like the NetBIOS name of `smb.conf`).
+struct NamesHost {
+    reloads: Arc<Mutex<Vec<(String, bool)>>>,
+}
+
+impl Applier for NamesHost {
+    fn key(&self) -> &str {
+        "test.names"
+    }
+
+    fn order(&self) -> i32 {
+        20
+    }
+
+    fn validate(&self, value: serde_json::Value) -> std::result::Result<serde_json::Value, Invalid> {
+        Ok(value)
+    }
+
+    fn render(&self, value: &serde_json::Value, ctx: &ApplyCtx) -> std::result::Result<Vec<ManagedFile>, String> {
+        let text = format!("name = {}\nsize = {}\n", ctx.hostname()?, value["size"]);
+        Ok(vec![ManagedFile::whole("/etc/names.conf", text, true)])
+    }
+
+    fn reload(&self, _value: Option<&serde_json::Value>, ctx: &ApplyCtx) -> std::result::Result<(), String> {
+        self.reloads.lock().unwrap().push((ctx.hostname()?, ctx.hostname_changes()));
+        Ok(())
+    }
+
+    fn follows(&self, key: &str) -> bool {
+        key == HOSTNAME_KEY
+    }
+}
+
+#[test]
+fn a_new_host_name_writes_the_domains_that_follow_it() {
+    let e = env();
+    let reloads = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen2 = seen.clone();
+    let hook: HostnameHook = Box::new(move |h| seen2.lock().unwrap().push(h.to_string()));
+    let state = e.state.clone();
+    let root = e.root.clone();
+    drop(e.cfg);
+    let cfg = Config::open(
+        ConfigOptions::new(&state, &root),
+        e.sys.clone(),
+        vec![
+            Arc::new(HostnameDomain::new().on_change(hook)),
+            Arc::new(NamesHost { reloads: reloads.clone() }),
+        ],
+    )
+    .unwrap();
+    // a follower rynas never applied is left alone
+    cfg.apply_value("rynas", HOSTNAME_KEY, Some(hostname("first")), "", &|_| {}).unwrap();
+    assert!(!root.join("etc/names.conf").exists());
+    assert!(reloads.lock().unwrap().is_empty());
+    assert_eq!(*seen.lock().unwrap(), ["first"]);
+
+    cfg.apply_value("rynas", "test.names", Some(json!({"size": 1})), "", &|_| {}).unwrap();
+    assert!(read(&root, "/etc/names.conf").ends_with("name = first\nsize = 1\n"));
+    // bob's staged change of the follower stays his, pending and without conflict
+    cfg.stage("bob", "test.names", Some(json!({"size": 2}))).unwrap();
+    cfg.stage("alice", HOSTNAME_KEY, Some(hostname("nas"))).unwrap();
+    let rev = cfg.apply("alice", "alice", "rename", &|_| {}, &|| false).unwrap();
+    // the file was rendered with the new name before the name was set, then reloaded
+    assert!(read(&root, "/etc/names.conf").ends_with("name = nas\nsize = 1\n"));
+    assert_eq!(reloads.lock().unwrap().last().unwrap(), &("nas".to_string(), true));
+    assert_eq!(*seen.lock().unwrap(), ["first", "nas"]);
+    assert_eq!(cfg.applied("test.names").unwrap(), Some(json!({"size": 1})));
+    let bob = cfg.pending("bob").unwrap();
+    assert_eq!(bob.changes.len(), 1);
+    assert!(!bob.changes[0].conflict);
+    // the revision changes the host name only, and records the follower's file
+    let d = cfg.revision(rev).unwrap();
+    assert_eq!(d.revision.keys, [HOSTNAME_KEY]);
+    assert!(d.files.contains(&"/etc/names.conf".to_string()));
+    assert!(cfg.drift().unwrap().entries.is_empty());
+    // the same name again: nothing follows, the hook stays quiet
+    let n = reloads.lock().unwrap().len();
+    cfg.apply_value("rynas", HOSTNAME_KEY, Some(hostname("nas")), "", &|_| {}).unwrap();
+    assert_eq!(reloads.lock().unwrap().len(), n);
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    // bob's own change still applies on top
+    cfg.apply("bob", "bob", "", &|_| {}, &|| false).unwrap();
+    assert!(read(&root, "/etc/names.conf").ends_with("name = nas\nsize = 2\n"));
 }

@@ -178,7 +178,8 @@ pub struct Message {
 
 pub struct Templates {
     env: Environment<'static>,
-    hostname: String,
+    /// This NAS' name in subjects and footers; follows a renamed host ([`Templates::set_hostname`]).
+    hostname: std::sync::RwLock<String>,
 }
 
 pub fn fmt_time(t: LocalTime) -> String {
@@ -198,12 +199,17 @@ impl Templates {
             .expect("built-in body template");
         Self {
             env,
-            hostname: hostname.to_string(),
+            hostname: std::sync::RwLock::new(hostname.to_string()),
         }
     }
 
-    pub fn hostname(&self) -> &str {
-        &self.hostname
+    pub fn hostname(&self) -> String {
+        self.hostname.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The host was renamed: later messages carry the new name.
+    pub fn set_hostname(&self, name: &str) {
+        *self.hostname.write().unwrap_or_else(|e| e.into_inner()) = name.to_string();
     }
 
     /// The context of one event.
@@ -250,7 +256,7 @@ impl Templates {
     fn base_ctx(&self, events: &[EventCtx], lang: NotifyLanguage, sev: NotifySeverity) -> Value {
         let d = dict(lang);
         context! {
-            hostname => &self.hostname,
+            hostname => self.hostname(),
             events => Value::from(minijinja::value::Serde(events)),
             severity => sev.as_str(),
             severity_label => d.severity[sev as usize],

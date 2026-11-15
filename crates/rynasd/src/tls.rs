@@ -410,8 +410,9 @@ pub fn parse_ip_addrs(json: &str) -> Vec<IpAddr> {
     out
 }
 
-/// Ensures the certificate at start, then re-checks the names every [`CHECK_INTERVAL`].
-pub fn spawn_watch(svc: Arc<TlsSvc>) {
+/// Ensures the certificate at start, then re-checks the names every [`CHECK_INTERVAL`] and
+/// at once when an apply renames the host (`hostname`).
+pub fn spawn_watch(svc: Arc<TlsSvc>, mut hostname: tokio::sync::watch::Receiver<String>) {
     tokio::spawn(async move {
         loop {
             let s = svc.clone();
@@ -421,7 +422,16 @@ pub fn spawn_watch(svc: Arc<TlsSvc>) {
                 Ok(Err(e)) => tracing::error!("tls: {e}"),
                 Err(e) => tracing::error!("tls: {e}"),
             }
-            tokio::time::sleep(CHECK_INTERVAL).await;
+            // a renamed host gets its certificate at once: the browser is sent to the new name
+            tokio::select! {
+                _ = tokio::time::sleep(CHECK_INTERVAL) => {}
+                r = hostname.changed() => {
+                    if r.is_err() {
+                        // no more renames can come: back to the plain interval
+                        tokio::time::sleep(CHECK_INTERVAL).await;
+                    }
+                }
+            }
         }
     });
 }

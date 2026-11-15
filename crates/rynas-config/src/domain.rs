@@ -29,9 +29,28 @@ pub struct ApplyCtx<'a> {
     pub(crate) restarted: Mutex<Vec<String>>,
     /// The reconcile puts a failed apply's previous values back ([`ApplyCtx::rolling_back`]).
     pub(crate) rolling_back: bool,
+    /// The host name this apply puts in force, when it changes `system.hostname`
+    /// ([`ApplyCtx::hostname`]).
+    pub(crate) new_hostname: Option<String>,
 }
 
 impl ApplyCtx<'_> {
+    /// The host name the rendered files must name: the one this apply puts in force when it
+    /// changes `system.hostname` (files are rendered before the new name is set), else the
+    /// running one.
+    pub fn hostname(&self) -> Result<String, String> {
+        match &self.new_hostname {
+            Some(h) => Ok(h.clone()),
+            None => self.system.hostname(),
+        }
+    }
+
+    /// Whether this apply changes the host name: services that announce it (NetBIOS, WS
+    /// discovery) restart to take the new one.
+    pub fn hostname_changes(&self) -> bool {
+        self.new_hostname.is_some()
+    }
+
     /// Whether this reconcile is the rollback of a failed apply: a domain does only what
     /// puts the previous configuration in force again and skips slow side work (it ran, or
     /// was skipped, when that configuration was applied).
@@ -197,6 +216,15 @@ pub trait Applier: Send + Sync {
         Ok(())
     }
 
+    /// Whether this domain's files depend on the value of `key` (e.g. the Samba NetBIOS name
+    /// on `system.hostname`, read through [`ApplyCtx::hostname`]): an apply that changes
+    /// `key` without this domain renders, writes and reconciles it again with its applied
+    /// value, so its files never keep the old one. Such a pass stores no new value and leaves
+    /// the owner's staged change of this domain pending. Default: none.
+    fn follows(&self, _key: &str) -> bool {
+        false
+    }
+
     /// The current state of the system as a value of this domain, used when rynas has never
     /// applied the key and to import drifted files.
     fn import(&self, _ctx: &ApplyCtx) -> Result<Option<Value>, String> {
@@ -215,8 +243,34 @@ pub trait Applier: Send + Sync {
 }
 
 /// `system.hostname`: `/etc/hostname`, the `127.0.1.1` entry of `/etc/hosts` (Debian
-/// convention), and the running hostname through [`System::set_hostname`].
-pub struct HostnameDomain;
+/// convention), and the running hostname through [`System::set_hostname`]. When the running
+/// name changes, Avahi restarts (it does not follow the kernel's name: `<host>.local` would
+/// keep answering with the old one) and the hook runs with the new name, so the services of
+/// the daemon that hold the name (certificates, web access, notification texts) follow at
+/// once. Domains whose files carry the name re-render through [`Applier::follows`].
+#[derive(Default)]
+pub struct HostnameDomain {
+    on_change: Option<HostnameHook>,
+}
+
+/// Called with the new running host name after an apply (or its rollback) changed it. Runs
+/// inside the apply: it must not apply configuration itself (wake a task that does).
+pub type HostnameHook = Box<dyn Fn(&str) + Send + Sync>;
+
+/// The mDNS responder that publishes `<host>.local`.
+pub const AVAHI_UNIT: &str = "avahi-daemon.service";
+
+impl HostnameDomain {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Runs `f` with the new name whenever an apply changes the running host name.
+    pub fn on_change(mut self, f: HostnameHook) -> Self {
+        self.on_change = Some(f);
+        self
+    }
+}
 
 pub const HOSTNAME_KEY: &str = "system.hostname";
 
@@ -277,10 +331,25 @@ impl Applier for HostnameDomain {
     }
 
     fn reload(&self, value: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {
-        match value {
-            Some(v) => ctx.system.set_hostname(&hostname_of(v)?),
-            None => Ok(()),
+        let Some(v) = value else { return Ok(()) };
+        let want = hostname_of(v)?;
+        let before = ctx.system.hostname().unwrap_or_default();
+        ctx.system.set_hostname(&want)?;
+        if before == want {
+            return Ok(());
         }
+        (ctx.log)(&format!("host name changed from {before:?} to {want:?}"));
+        // best effort: a NAS without Avahi has no `.local` name to move
+        if ctx.system.unit_active(AVAHI_UNIT).unwrap_or(false) {
+            (ctx.log)("restarting Avahi for the new .local name");
+            if let Err(e) = ctx.restart_unit(AVAHI_UNIT) {
+                (ctx.log)(&format!("Avahi: {e}"));
+            }
+        }
+        if let Some(f) = &self.on_change {
+            f(&want);
+        }
+        Ok(())
     }
 
     fn health(&self, value: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {

@@ -201,6 +201,16 @@ fn running_hostname() -> String {
         .unwrap_or_else(|_| "localhost".into())
 }
 
+/// Runs `f` with each new host name an apply puts in force.
+fn follow_hostname(mut rx: tokio::sync::watch::Receiver<String>, f: impl Fn(&str) + Send + 'static) {
+    tokio::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let h = rx.borrow_and_update().clone();
+            f(&h);
+        }
+    });
+}
+
 /// A dry root starts as a copy of the real files it manages.
 fn seed_dry_root(root: &Path) -> std::io::Result<()> {
     for f in ["etc/hostname", "etc/hosts"] {
@@ -233,6 +243,8 @@ struct Opened {
     tls: Arc<rynasd::tls::TlsSvc>,
     /// Web access (W1): the `web_access` key's service.
     web_access: Arc<rynasd::web_access::WebAccessSvc>,
+    /// The running host name, sent again by every apply that changes it.
+    hostname: tokio::sync::watch::Receiver<String>,
 }
 
 fn open_config(
@@ -311,8 +323,14 @@ fn open_config(
     for m in modules.iter() {
         tracing::info!("module {}", m.summary());
     }
+    // a renamed host: the services that hold the name (certificate, web access, notification
+    // texts, PC backup names) follow at once instead of at their next check
+    let (hostname_tx, hostname_rx) = tokio::sync::watch::channel(running_hostname());
+    let hostname_domain = HostnameDomain::new().on_change(Box::new(move |h: &str| {
+        hostname_tx.send_replace(h.to_string());
+    }));
     let mut domains: Vec<Arc<dyn rynas_config::Applier>> = vec![
-        Arc::new(HostnameDomain),
+        Arc::new(hostname_domain),
         homes.clone(),
         users.clone(),
         shares.clone(),
@@ -412,6 +430,7 @@ fn open_config(
         root,
         tls,
         web_access,
+        hostname: hostname_rx,
     })
 }
 
@@ -865,6 +884,10 @@ fn main() -> std::io::Result<()> {
         let mut nopts = EngineOptions::new(args.state_dir.join("notify"), &running_hostname());
         nopts.imports = opened.modules.notify_imports();
         let engine = Engine::open(nopts)?;
+        {
+            let e = engine.clone();
+            follow_hostname(opened.hostname.clone(), move |h| e.set_hostname(h));
+        }
         tokio::spawn(engine.clone().run());
         let notifier: Arc<dyn Notifier> = Arc::new(engine.clone());
         rynasd::notifications::spawn_task_watch(&ops.tasks, notifier.clone());
@@ -1143,6 +1166,10 @@ fn main() -> std::io::Result<()> {
             running_hostname(),
         );
         rynasd::pc_backup::spawn_watch(pc_backup.clone());
+        {
+            let p = pc_backup.clone();
+            follow_hostname(opened.hostname.clone(), move |h| p.set_hostname(h));
+        }
         let _ = ops.pc_backup.set(pc_backup.clone());
         state.pc_backup = Some(pc_backup);
         // PC backup, file method (agent, restic repositories per backup group): the same
@@ -1163,6 +1190,10 @@ fn main() -> std::io::Result<()> {
                 agent.bind_btrfs(pb);
             }
             rynasd::pc_agent::maint::spawn_watch(agent.clone());
+            {
+                let a = agent.clone();
+                follow_hostname(opened.hostname.clone(), move |h| a.set_hostname(h));
+            }
             let _ = ops.pc_agent.set(Arc::downgrade(&agent));
             state.pc_agent = Some(agent);
         }
@@ -1324,7 +1355,7 @@ fn main() -> std::io::Result<()> {
         // host name or an address changes, published for rynas-web (wave W0)
         {
             let tls = opened.tls.clone();
-            rynasd::tls::spawn_watch(tls.clone());
+            rynasd::tls::spawn_watch(tls.clone(), opened.hostname.clone());
             state.tls = Some(tls);
         }
         // web access (W1): the proxy's configuration from the `web_access` key, anti-drift,
@@ -1336,7 +1367,7 @@ fn main() -> std::io::Result<()> {
             if !args.dry_system {
                 web.names.spawn();
             }
-            rynasd::web_access::spawn_watch(web.clone());
+            rynasd::web_access::spawn_watch(web.clone(), opened.hostname.clone());
             // watched folders of imported certificates (§5.5)
             rynasd::web_access::imported::spawn_watch(web.clone());
             state.web_access = Some(web);

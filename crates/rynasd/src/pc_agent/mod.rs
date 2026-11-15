@@ -424,7 +424,8 @@ pub struct PcAgent {
     pub workers: Arc<tokio::sync::Semaphore>,
     pub streams: Arc<tokio::sync::Semaphore>,
     pub tls: Option<Arc<crate::tls::TlsSvc>>,
-    pub hostname: String,
+    /// This NAS' host name, followed when it changes ([`PcAgent::set_hostname`]).
+    hostname: Mutex<String>,
     reg: Mutex<Registry>,
     /// Per group.
     pub live: Mutex<HashMap<String, Live>>,
@@ -473,7 +474,7 @@ impl PcAgent {
             workers,
             streams: Arc::new(tokio::sync::Semaphore::new(MAX_STREAMS)),
             tls,
-            hostname,
+            hostname: Mutex::new(hostname),
             reg: Mutex::new(reg),
             live: Mutex::new(HashMap::new()),
             progress: Mutex::new(HashMap::new()),
@@ -568,6 +569,16 @@ impl PcAgent {
         {
             tracing::warn!("pc backup: writing the registry: {}", e.2);
         }
+    }
+
+    /// This NAS' host name (the name agents are told at pairing).
+    pub fn hostname(&self) -> String {
+        self.hostname.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The host name changed (an apply of `system.hostname`).
+    pub fn set_hostname(&self, name: &str) {
+        *self.hostname.lock().unwrap_or_else(|e| e.into_inner()) = name.to_string();
     }
 
     pub fn fingerprint(&self) -> Option<String> {

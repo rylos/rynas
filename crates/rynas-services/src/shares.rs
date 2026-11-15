@@ -866,6 +866,11 @@ impl Applier for SharesDomain {
         20
     }
 
+    /// `smb.conf` names the host (`netbios name`): a new host name writes it again.
+    fn follows(&self, key: &str) -> bool {
+        key == rynas_config::HOSTNAME_KEY
+    }
+
     fn templates(&self) -> Vec<(String, String)> {
         vec![
             (smb::TEMPLATE_SMB.into(), smb::SMB_CONF_TEMPLATE.into()),
@@ -882,7 +887,8 @@ impl Applier for SharesDomain {
 
     fn render(&self, value: &Value, ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
         let c = parse(Some(value))?;
-        let hostname = ctx.system.hostname().unwrap_or_default();
+        // the name of this apply when it changes the host name (the NetBIOS name follows it)
+        let hostname = ctx.hostname().unwrap_or_default();
         let smb_shares: Vec<&Share> = c.shares.iter().filter(|s| s.smb.enabled).collect();
         let conf = smb::SmbConfCtx {
             global: smb::global_lines(&c.smb, &hostname),
@@ -1080,6 +1086,16 @@ impl Applier for SharesDomain {
                 self.manage_unit(ctx, NMBD, to.smb.netbios)?;
             }
             self.manage_unit(ctx, WSDD2, to.smb.wsdd)?;
+            // nmbd registers the NetBIOS name and wsdd2 announces the host name when they
+            // start: a new host name needs both started again
+            if ctx.hostname_changes() && !ctx.rolling_back() {
+                for (unit, on) in [(NMBD, to.smb.netbios), (WSDD2, to.smb.wsdd)] {
+                    if on && ctx.system.unit_active(unit).unwrap_or(false) {
+                        (ctx.log)(&format!("restarting {unit} for the new host name"));
+                        ctx.system.restart_unit(unit)?;
+                    }
+                }
+            }
         } else if smb_running(&from) || ctx.system.unit_active(SMBD)? {
             // the Debian package starts smbd at install: "off" stops it even then
             self.manage_unit(ctx, SMBD, false)?;

@@ -359,6 +359,11 @@ impl Engine {
         (self.0.o.clock)()
     }
 
+    /// The host was renamed: later messages name it with `name`.
+    pub fn set_hostname(&self, name: &str) {
+        self.0.tpl.set_hostname(name);
+    }
+
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.0.db.lock().unwrap_or_else(|p| p.into_inner())
     }

@@ -51,7 +51,7 @@ async fn rig() -> Rig {
         ConfigOptions::new(&state_dir, &root),
         sys.clone(),
         vec![
-            Arc::new(HostnameDomain),
+            Arc::new(HostnameDomain::new()),
             Arc::new(FileDomain::new(
                 "test.app",
                 "/etc/app.conf",

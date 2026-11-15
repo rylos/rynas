@@ -1176,12 +1176,41 @@ async fn op_in(
     r
 }
 
-/// The job's snapshots as this NAS sees them: its tag and host (review M5, M8).
 fn scope_of(job: &str) -> SnapshotScope {
     SnapshotScope {
         tag: job_tag(job),
-        host: hostname(),
+        host: backup_host(),
     }
+}
+
+/// The host the NAS backups record in their snapshots and look for in lists, `latest` and
+/// retention: the host name of this NAS when it first needed one, kept in
+/// `<state>/backup/snapshot-host`, so a renamed NAS still finds its snapshots (a new host
+/// would hide them, start every source without a parent and never prune them).
+fn backup_host() -> String {
+    match SVC.get() {
+        Some(s) => backup_host_in(&s.prot.state_dir, &hostname()),
+        None => hostname(),
+    }
+}
+
+fn backup_host_in(state_dir: &FsPath, current: &str) -> String {
+    let p = status::dir(state_dir).join("snapshot-host");
+    if let Ok(t) = std::fs::read_to_string(&p) {
+        let t = t.trim();
+        if !t.is_empty() && t.len() <= 255 && !t.chars().any(char::is_control) {
+            return t.to_string();
+        }
+    }
+    let saved = std::fs::create_dir_all(status::dir(state_dir)).and_then(|_| {
+        let tmp = p.with_extension("tmp");
+        std::fs::write(&tmp, format!("{current}\n"))?;
+        std::fs::rename(&tmp, &p)
+    });
+    if let Err(e) = saved {
+        tracing::warn!("backup: {}: {e}", p.display());
+    }
+    current.to_string()
 }
 
 pub fn spawn_run(who: &str, job: &str) -> Res<String> {
@@ -1529,7 +1558,7 @@ async fn run_job(
         let backup = WorkerOp::Backup {
             sources: sources.clone(),
             tags: vec!["rynas".into(), job_tag(&job.name)],
-            host: hostname(),
+            host: backup_host(),
             excludes: vec![],
         };
         let unit = matches!(s.launch, Launch::Unit { .. }).then(|| rynas_backup::runner::unit_name(&job.name));
@@ -2496,6 +2525,19 @@ mod tests {
             repository_password: String::new(),
         };
         assert_eq!(req_public_key(&r), Some("ssh-ed25519 AAAA x"));
+    }
+
+    #[test]
+    fn the_snapshot_host_survives_a_rename() {
+        let d = tempfile::tempdir().unwrap();
+        // the first name is kept and reused after the NAS was renamed
+        assert_eq!(backup_host_in(d.path(), "nas"), "nas");
+        assert_eq!(backup_host_in(d.path(), "store"), "nas");
+        assert_eq!(std::fs::read_to_string(d.path().join("backup/snapshot-host")).unwrap(), "nas\n");
+        // an unreadable record is replaced by the running name
+        std::fs::write(d.path().join("backup/snapshot-host"), "\n").unwrap();
+        assert_eq!(backup_host_in(d.path(), "store"), "store");
+        assert_eq!(backup_host_in(d.path(), "other"), "store");
     }
 
     #[test]

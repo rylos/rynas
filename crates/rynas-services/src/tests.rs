@@ -99,6 +99,7 @@ fn env() -> Env {
         ConfigOptions::new(dir.path().join("state"), &root),
         sys.clone(),
         vec![
+            Arc::new(rynas_config::HostnameDomain::new()),
             Arc::new(UsersDomain::new(acc.clone())),
             Arc::new(
                 SharesDomain::new(host.clone(), acc.clone())
@@ -996,6 +997,38 @@ fn turning_services_off_removes_the_avahi_file() {
     stage(&e, SHARES_KEY, &shares_doc()).unwrap();
     apply(&e).unwrap();
     assert!(e.root.join("etc/avahi/services/rynas-smb.service").exists());
+}
+
+#[test]
+fn a_new_host_name_renames_the_netbios_name() {
+    let e = env();
+    let mut d = shares_doc();
+    d.smb.netbios = true;
+    d.smb.wsdd = true;
+    stage(&e, SHARES_KEY, &d).unwrap();
+    apply(&e).unwrap();
+    assert!(read(&e.root, "/etc/samba/smb.conf").contains("netbios name = NAS\n"));
+    // the host name alone: smb.conf follows with the new name, NetBIOS and WS-Discovery
+    // announce it again, the shares document stays as it was
+    e.sys.state().calls.clear();
+    let before = e.cfg.applied(SHARES_KEY).unwrap();
+    e.cfg
+        .stage("admin", rynas_config::HOSTNAME_KEY, Some(serde_json::json!({ "hostname": "store" })))
+        .unwrap();
+    apply(&e).unwrap();
+    let conf = read(&e.root, "/etc/samba/smb.conf");
+    assert!(conf.contains("netbios name = STORE\n"), "{conf}");
+    let calls = e.sys.state().calls.clone();
+    for c in [
+        "set-hostname store",
+        "reload smbd.service",
+        "run systemctl restart nmbd.service",
+        "run systemctl restart wsdd2.service",
+    ] {
+        assert!(calls.iter().any(|x| x == c), "{c} missing from {calls:?}");
+    }
+    assert_eq!(e.cfg.applied(SHARES_KEY).unwrap(), before);
+    assert!(e.cfg.drift().unwrap().entries.is_empty());
 }
 
 
