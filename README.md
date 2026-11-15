@@ -117,8 +117,8 @@ The classic levels (single, RAID 0, 1, 5, 6 and 10) stay available next to it.
 
 ## Got a Synology? Use it with synodeb
 
-[**synodeb**](https://github.com/rylos/synodeb) installs **Debian 13 on Synology DS920+ and
-DS923+** with all the NAS hardware working: fans, LEDs, buttons, beeper, power schedule, UPS,
+[**synodeb**](https://github.com/rylos/synodeb) installs **Debian 13 on Synology DS920+, DS923+ and
+DS423+** with all the NAS hardware working: fans, LEDs, buttons, beeper, power schedule, UPS,
 watchdog, every bay and both M.2 slots. DSM can stay on its own disks.
 
 Put rynas on top and you get a modern NAS interface on Synology hardware. rynas detects synodeb
