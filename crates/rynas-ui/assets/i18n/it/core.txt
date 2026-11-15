@@ -5410,6 +5410,7 @@ plan.s.add_partition_live	Fai vedere al kernel la nuova partizione {subject}
 plan.w.flex_unused_space	{items}: {size} inutilizzati finché un altro disco non raggiunge la stessa dimensione
 plan.w.flex_long_reshape	Le fasce vengono rimodellate una alla volta: {size} da spostare, circa {n} h in tutto; il volume resta disponibile
 plan.w.flex_reduced_tolerance_window	{subject}: mentre viene rimodellata in RAID 6, questa fascia sopravvive a un solo disco guasto
+plan.w.disk_short_of_tier	{subject}: mancano {size} per la fascia {n}, quindi entra solo nelle fasce sotto
 plan.e.flex_layout_unsupported	rynas non può modificare questo RAID flessibile: la sua disposizione non rispetta la regola delle fasce, oppure questa modifica non è ancora supportata
 plan.e.flex_growth_pending	L'ultima espansione di questo volume si è interrotta: completala prima
 plan.e.tolerance_change_unsupported	La tolleranza ai guasti di un RAID flessibile non si può cambiare

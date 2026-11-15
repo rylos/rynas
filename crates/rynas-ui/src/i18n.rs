@@ -1683,6 +1683,7 @@ dict! { BLOB, LENS;
     "plan.w.flex_unused_space" => "{items}: {size} unused until another drive reaches the same size";
     "plan.w.flex_long_reshape" => "The tiers are reshaped one at a time: {size} to move, about {n} h in all; the volume stays online";
     "plan.w.flex_reduced_tolerance_window" => "{subject}: while it is reshaped to RAID 6, this tier survives only one failed drive";
+    "plan.w.disk_short_of_tier" => "{subject}: {size} short of tier {n}, so it joins only the tiers below";
     "plan.e.flex_layout_unsupported" => "rynas cannot change this flexible RAID: its layout breaks the tier rule, or this change is not supported yet";
     "plan.e.flex_growth_pending" => "The last growth of this volume was interrupted: complete it first";
     "plan.e.tolerance_change_unsupported" => "The fault tolerance of a flexible RAID cannot be changed";

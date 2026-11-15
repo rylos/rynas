@@ -33,9 +33,9 @@ use rynas_api_types::storage::{
 
 use crate::Inventory;
 use crate::flex::detect::{mdadm_uuid, resolve_pv, short_name};
-use crate::flex::tiers::{self, DiskSize, Tier, data_members};
+use crate::flex::tiers::{self, DiskSize, Tier};
 use crate::plan::{
-    D, END_RESERVE, LUKS_HEADER, MD_OVERHEAD, MIB, PART_START, check_new_disk, cmd, cmd_secret,
+    D, END_RESERVE, LUKS_HEADER, MIB, PART_START, check_new_disk, cmd, cmd_secret,
     config, d, d_on, destroying, fail, finish, level_name, mix_warnings, part_name, valid_label,
     volume_top, wait, warn, warn_on,
 };
@@ -43,7 +43,7 @@ use crate::plan::{
 /// Extent size of a new volume group (the LVM default); LVM arithmetic shared with the web
 /// interface's capacity calculator.
 pub use rynas_api_types::capacity::EXTENT;
-use rynas_api_types::capacity::{lvm_usable, pv_bytes};
+use rynas_api_types::capacity::{lvm_usable, md_array_size, tier_pv_bytes};
 /// A LUKS mapping smaller than its logical volume by more than this was not resized.
 const LUKS_SLACK: u64 = 32 * MIB;
 /// Reshape speed the time estimate assumes, per tier (bytes/s).
@@ -185,9 +185,8 @@ impl VTier {
 
     /// The array size md gives the level and member count.
     fn formula_size(&self) -> u64 {
-        self.level.map_or(0, |l| {
-            data_members(l, self.raid_disks as usize) * self.height().saturating_sub(MD_OVERHEAD)
-        })
+        self.level
+            .map_or(0, |l| md_array_size(l, self.raid_disks as usize, self.height()))
     }
 
     /// The wait for the md operation running: `sync_action` idle, and no more slots empty
@@ -904,7 +903,7 @@ impl View {
             ["pvcreate", rest @ ..] => {
                 for dev in rest.iter().filter(|x| x.starts_with("/dev/")) {
                     if let Some(t) = self.tier_by_dev(dev) {
-                        t.pv = Some(pv_bytes(t.size, extent));
+                        t.pv = Some(tier_pv_bytes(t.size, extent, t.level, t.raid_disks as usize));
                         t.in_vg = false;
                     }
                 }
@@ -923,7 +922,7 @@ impl View {
             }
             ["pvresize", dev] => {
                 if let Some(t) = self.tier_by_dev(dev) {
-                    let new = pv_bytes(t.size, extent);
+                    let new = tier_pv_bytes(t.size, extent, t.level, t.raid_disks as usize);
                     let old = t.pv.unwrap_or(0);
                     t.pv = Some(new);
                     if t.in_vg {
@@ -1648,6 +1647,24 @@ pub fn plan_create(
         }
     };
     let created: Vec<Tier> = layout.created().cloned().collect();
+    if created.is_empty() {
+        // too few disks reach the thinnest tier together: name the ones under it
+        let min = inv.min_tier();
+        let need = tiers::min_members(tolerance);
+        for (name, size) in sizes.iter().filter(|(_, s)| tiers::reach(*s) - PART_START < min) {
+            let m = format!(
+                "{name}: too small for a flexible RAID tier ({:.1} GB; {need} disks of at least {:.1} GB are needed)",
+                *size as f64 / 1e9,
+                (min + PART_START + END_RESERVE) as f64 / 1e9
+            );
+            fail(&mut p, PlanIssueCode::DiskTooSmall, "disks", Some(name), m);
+        }
+        if p.errors.is_empty() {
+            let m = format!("no tier can be made: {need} disks must reach the same size");
+            fail(&mut p, PlanIssueCode::DiskCount, "disks", None, m);
+        }
+        return finish(p);
+    }
     let cap = rynas_api_types::capacity::flexible(&layout, &sizes, req.encrypt);
     p.wasted_bytes = cap.wasted;
     p.usable_bytes = cap.usable;
@@ -1932,6 +1949,36 @@ fn tiers_ready(p: &mut StoragePlan, v: &View, allow_degraded: bool) {
     }
 }
 
+/// A warning for each new disk that misses a tier (and so joins only the tiers below it):
+/// how much it misses. Disks too small for the lowest tier are errors instead.
+fn short_warnings(p: &mut StoragePlan, g: &tiers::Growth) {
+    for (disk, tier, missing) in g.short.iter().filter(|(d, _, _)| !g.too_small.contains(d)) {
+        let args = PlanArgs {
+            subject: Some(disk.clone()),
+            size_bytes: Some(*missing),
+            count: Some(u64::from(*tier)),
+            ..Default::default()
+        };
+        warn(p, PlanWarningCode::DiskShortOfTier, args);
+    }
+}
+
+/// The error of a new disk too small for the lowest tier: how much it misses.
+fn too_small_text(g: &tiers::Growth, name: &str) -> String {
+    let missing = g.short.iter().find(|(d, _, _)| d == name).map_or(0, |(_, _, b)| *b);
+    format!("{name}: too small for the lowest tier ({:.1} GB missing)", missing as f64 / 1e9)
+}
+
+/// The error of a replacement disk too small for the tiers of the disk it replaces (`need`:
+/// the smallest disk that holds them).
+fn replace_too_small_text(disk: &str, size: u64, need: u64) -> String {
+    format!(
+        "{disk}: too small ({:.1} GB missing), the tiers it replaces need a disk of {:.1} GB",
+        need.saturating_sub(size) as f64 / 1e9,
+        need as f64 / 1e9
+    )
+}
+
 /// Fills the capacity fields and the steps of a growth plan.
 fn finish_growth(
     mut p: StoragePlan,
@@ -1940,7 +1987,9 @@ fn finish_growth(
     g: &tiers::Growth,
     label: &str,
 ) -> StoragePlan {
-    p.usable_bytes = lvm_usable(&g.tiers);
+    // the LUKS header stays at the start of the logical volume, as when it was created
+    p.usable_bytes = lvm_usable(&g.tiers).saturating_sub(if v.luks.is_some() { LUKS_HEADER } else { 0 });
+    short_warnings(&mut p, g);
     p.fault_tolerance = v.tolerance;
     p.tiers_after = g.tiers.iter().map(Tier::to_api).collect();
     for (after, before) in p.tiers_after.iter_mut().zip(&p.tiers_before) {
@@ -2019,7 +2068,7 @@ pub fn plan_grow_at(inv: &Inventory, req: &GrowPlanRequest, now: u64) -> Storage
     p.raw_bytes = new.iter().map(|(_, s)| s).sum();
     let g = tiers::grow(&v.shapes(), &v.layout_disks(), &new, v.tolerance, inv.min_tier());
     for name in &g.too_small {
-        let m = format!("{name}: too small for the lowest tier");
+        let m = too_small_text(&g, name);
         fail(&mut p, C::DiskTooSmall, "disks", Some(name), m);
     }
     if p.errors.is_empty() {
@@ -2113,10 +2162,7 @@ pub fn plan_replace_at(inv: &Inventory, req: &ReplacePlanRequest, now: u64) -> S
     let g = match tiers::replace(&shapes, &disks, &old_name, &(nd.name.clone(), nd.size), v.tolerance, inv.min_tier()) {
         Ok(g) => g,
         Err(tiers::TierError::TooSmall { disk, need }) => {
-            let m = format!(
-                "{disk}: too small, the tiers it replaces need {:.1} GB",
-                (need + END_RESERVE) as f64 / 1e9
-            );
+            let m = replace_too_small_text(&disk, nd.size, need);
             fail(&mut p, C::DiskTooSmall, "new_disk", Some(&disk), m);
             return finish(p);
         }

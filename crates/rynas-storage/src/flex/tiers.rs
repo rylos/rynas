@@ -17,7 +17,12 @@
 //! [`MIN_TIER`] merge into the lower one, so a disk "of the same size" a few MB short still
 //! counts as equal. Once created, tiers are fixed: a new disk joins every tier it covers, and
 //! a new top tier is made only when enough disks reach past the top one.
+//!
+//! A disk joins an existing tier when the tier's slice ends before the disk's backup GPT
+//! ([`fits`]): the end reserve of the disks that made the tier is what lets a disk "of the
+//! same size" a few MB smaller join or replace. New top tiers keep the reserve ([`reach`]).
 
+use rynas_api_types::capacity::{GPT_TAIL, fits, shortfall};
 use rynas_api_types::storage::RaidLevel;
 
 use crate::plan::{MIB, PART_START};
@@ -59,6 +64,9 @@ pub struct Growth {
     pub level_changes: Vec<LevelChange>,
     /// New disks that cannot hold the lowest tier.
     pub too_small: Vec<String>,
+    /// (disk, tier index, bytes missing): for each new disk, the lowest existing tier it
+    /// does not hold, and how much larger it would have to be.
+    pub short: Vec<(String, u32, u64)>,
     pub unused: Vec<(String, u64)>,
 }
 
@@ -76,14 +84,22 @@ fn empty_growth(existing: &[Tier]) -> Growth {
         created: Vec::new(),
         level_changes: Vec::new(),
         too_small: Vec::new(),
+        short: Vec::new(),
         unused: Vec::new(),
     }
 }
 
-/// `disk` joins every existing tier it fully covers.
-fn join_covered(g: &mut Growth, disk: &str, reach: u64) {
+/// `disk` (`size` bytes) joins every existing tier it holds; the lowest tier it does not
+/// hold goes to [`Growth::short`].
+fn join_covered(g: &mut Growth, disk: &str, size: u64) {
     for t in g.tiers.iter_mut() {
-        if reach >= t.end && !t.members.iter().any(|m| m == disk) {
+        if !fits(size, t.end) {
+            if !g.short.iter().any(|(d, _, _)| d == disk) {
+                g.short.push((disk.to_string(), t.index, shortfall(size, t.end)));
+            }
+            continue;
+        }
+        if !t.members.iter().any(|m| m == disk) {
             t.members.push(disk.to_string());
             g.joins.push((disk.to_string(), t.index));
         }
@@ -148,20 +164,20 @@ pub fn grow(
 ) -> Growth {
     let mut g = empty_growth(existing);
     let mut all: Vec<DiskSize> = disks.to_vec();
-    let lowest = existing.first().map_or(PART_START, |t| t.end);
     for (name, size) in new {
-        if reach(*size) < lowest {
+        join_covered(&mut g, name, *size);
+        if existing.first().is_some_and(|t| !fits(*size, t.end)) {
             g.too_small.push(name.clone());
             continue;
         }
-        join_covered(&mut g, name, reach(*size));
         all.push((name.clone(), *size));
     }
     finish_growth(g, existing, &all, tolerance, min_tier)
 }
 
-/// Replacing `old` with `new` (at least as large as the top of the tiers `old` is in): the
-/// new disk takes the old one's place in those tiers, then joins every other tier it covers.
+/// Replacing `old` with `new` (holding the top of the tiers `old` is in before its backup
+/// GPT, [`fits`]): the new disk takes the old one's place in those tiers, then joins every
+/// other tier it covers. [`TierError::TooSmall`] names the smallest disk size that would do.
 pub fn replace(
     existing: &[Tier],
     disks: &[DiskSize],
@@ -176,11 +192,10 @@ pub fn replace(
         .map(|t| t.end)
         .max()
         .ok_or_else(|| TierError::NotAMember(old.to_string()))?;
-    let new_reach = reach(new.1);
-    if new_reach < old_top {
+    if !fits(new.1, old_top) {
         return Err(TierError::TooSmall {
             disk: new.0.clone(),
-            need: old_top,
+            need: old_top + GPT_TAIL,
         });
     }
     let mut g = empty_growth(existing);
@@ -190,7 +205,7 @@ pub fn replace(
             g.replaced.push(t.index);
         }
     }
-    join_covered(&mut g, &new.0, new_reach);
+    join_covered(&mut g, &new.0, new.1);
     let all: Vec<DiskSize> = disks
         .iter()
         .filter(|(n, _)| n != old)
@@ -200,7 +215,8 @@ pub fn replace(
     Ok(finish_growth(g, existing, &all, tolerance, min_tier))
 }
 
-/// The disk sizes the tiers need: for each member, the end of the highest tier it is in.
+/// Where the slices of `disk` end: the end of the highest tier it is in (a disk holding them
+/// needs [`GPT_TAIL`] more, see [`fits`]).
 pub fn needed_reach(tiers: &[Tier], disk: &str) -> u64 {
     tiers
         .iter()
@@ -213,7 +229,7 @@ pub fn needed_reach(tiers: &[Tier], disk: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::MD_OVERHEAD;
+    use rynas_api_types::capacity::md_component;
     use RaidLevel::{Raid1, Raid5, Raid6};
 
     const TB: u64 = 1_000_000_000_000;
@@ -296,7 +312,13 @@ mod tests {
             let biggest: u64 = reaches.iter().rev().take(c.tolerance as usize).sum();
             let unused_by_rule: u64 = l.tiers.iter().filter(|t| !t.created()).map(|t| t.height() * t.members.len() as u64).sum();
             let unused_redundancy: u64 = l.tiers.iter().filter(|t| !t.created()).map(|t| t.height() * c.tolerance.min(t.members.len() as u32) as u64).sum();
-            let overhead: u64 = l.created().map(|t| data_members(t.level.unwrap(), t.members.len()) * MD_OVERHEAD).sum();
+            let overhead: u64 = l
+                .created()
+                .map(|t| {
+                    let level = t.level.unwrap();
+                    data_members(level, t.members.len()) * (t.height() - md_component(level, t.height()))
+                })
+                .sum();
             assert_eq!(
                 l.usable(),
                 reaches.iter().sum::<u64>() - biggest - (unused_by_rule - unused_redundancy) - overhead,
@@ -443,6 +465,38 @@ mod tests {
         let g = grow(&tiers, &d, &disks(&[("sdd", 6)]), 1, MIN_TIER);
         assert_eq!(g.joins, [("sdd".to_string(), 1)]);
         assert_eq!(g.unused.iter().map(|(n, b)| (n.as_str(), tb(*b))).collect::<Vec<_>>(), [("sdd", 2.0)]);
+        // the plan says how much it misses for tier 2
+        assert_eq!(g.short.len(), 1);
+        let (disk, tier, missing) = &g.short[0];
+        assert_eq!((disk.as_str(), *tier, tb(*missing)), ("sdd", 2, 2.0));
+        assert_eq!(*missing, tiers[1].end + GPT_TAIL - 6 * TB);
+    }
+
+    /// "8 TB" disks of another make, a few MB smaller, join and replace like equal ones: the
+    /// slices end before the end reserve of the disks that made them.
+    #[test]
+    fn a_slightly_smaller_disk_still_joins() {
+        let smaller = 8 * TB - 5_000_000;
+        let (tiers, d) = existing(&[("sda", 8), ("sdb", 8), ("sdc", 8)], 1);
+        let g = replace(&tiers, &d, "sdb", &("sdd".into(), smaller), 1, MIN_TIER).unwrap();
+        assert_eq!(g.replaced, [1]);
+        assert!(g.short.is_empty() && g.unused.is_empty());
+        // 4 + 8 + 8 and an 8 a few MB short: both tiers, as a new 4 + 8 + 8 + 8 would be
+        let (tiers, d) = existing(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
+        let g = grow(&tiers, &d, &[("sdd".into(), smaller)], 1, MIN_TIER);
+        assert_eq!(g.joins, [("sdd".to_string(), 1), ("sdd".to_string(), 2)]);
+        assert!(g.short.is_empty() && g.too_small.is_empty() && g.unused.is_empty());
+        let fresh = plan(&[("sda".into(), 4 * TB), ("sdb".into(), 8 * TB), ("sdc".into(), 8 * TB), ("sdd".into(), smaller)], 1, MIN_TIER).unwrap();
+        assert_eq!(tb(g.usable()), tb(fresh.usable()));
+        assert_eq!(tb(g.usable()), 20.0);
+        // a disk the backup GPT does not fit after the slices is short by what it misses
+        let exact = tiers[1].end;
+        let g = grow(&tiers, &d, &[("sdd".into(), exact)], 1, MIN_TIER);
+        assert_eq!(g.short, [("sdd".to_string(), 2, GPT_TAIL)]);
+        assert_eq!(
+            replace(&tiers, &d, "sdb", &("sdd".into(), exact), 1, MIN_TIER),
+            Err(TierError::TooSmall { disk: "sdd".into(), need: exact + GPT_TAIL })
+        );
     }
 
     #[test]
@@ -460,7 +514,7 @@ mod tests {
         assert_eq!(g.unused.iter().map(|(n, b)| (n.as_str(), tb(*b))).collect::<Vec<_>>(), [("sdd", 4.0)]);
         // a failed 8 replaced by a 6 is refused: it must reach the top of t2
         let e = replace(&tiers, &d, "sdb", &("sdd".into(), 6 * TB), 1, MIN_TIER);
-        assert_eq!(e, Err(TierError::TooSmall { disk: "sdd".into(), need: tiers[1].end }));
+        assert_eq!(e, Err(TierError::TooSmall { disk: "sdd".into(), need: tiers[1].end + GPT_TAIL }));
         assert_eq!(needed_reach(&tiers, "sdb"), tiers[1].end);
         // the same size: a plain replacement, nothing else changes
         let g = replace(&tiers, &d, "sdb", &("sdd".into(), 8 * TB), 1, MIN_TIER).unwrap();

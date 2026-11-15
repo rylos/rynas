@@ -412,6 +412,9 @@ pub struct MdMember {
     pub state: String,
     /// Corrected read errors counted by md.
     pub errors: Option<u64>,
+    /// Where md's data starts on the member (sysfs `offset`), bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -455,6 +458,10 @@ pub struct MdArray {
     pub raid_disks: u32,
     pub size: u64,
     pub chunk_bytes: Option<u64>,
+    /// Bytes md uses of each member (sysfs `component_size`): a new member needs its data
+    /// offset plus this much.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_size: Option<u64>,
     /// md's own state, e.g. "clean", "active", "clean, degraded, recovering".
     pub state: String,
     pub health: ArrayHealth,
@@ -1325,6 +1332,9 @@ pub enum PlanWarningCode {
     FlexLongReshape,
     /// Flexible RAID: tier `subject` tolerates only one disk while it is reshaped to RAID6.
     FlexReducedToleranceWindow,
+    /// Flexible RAID: the new disk `subject` misses `size_bytes` to hold tier `count` (and
+    /// the tiers above): it joins only the tiers below.
+    DiskShortOfTier,
     /// Flexible RAID: no scrub of the filesystem on `subject` (mount point) finished without
     /// errors in the last `count` days: a read error during the reshapes is the main risk.
     FlexNoRecentScrub,

@@ -19,7 +19,11 @@ use crate::Inventory;
 
 // disk layout constants and capacity arithmetic, shared with the web interface's calculator
 pub use rynas_api_types::capacity::{END_RESERVE, capacity_factor};
-pub(crate) use rynas_api_types::capacity::{LUKS_HEADER, MD_OVERHEAD, MIB, PART_START, usable_partition};
+pub(crate) use rynas_api_types::capacity::{LUKS_HEADER, MIB, PART_START, usable_partition};
+use rynas_api_types::capacity::{
+    MD_CHUNK, MIN_DISK, fits, md_array_size_of_components, md_component, md_data_offset,
+    negligible_difference, shortfall,
+};
 /// Argon2id memory cap (KiB) so a 4 GB NAS does not run out of memory while unlocking.
 pub const PBKDF_MEMORY_KIB: &str = "262144";
 pub const COMPRESSION: &str = "zstd:1";
@@ -276,6 +280,11 @@ fn warning_english(code: PlanWarningCode, a: &PlanArgs) -> String {
                 "tier {s} tolerates only one failed disk while it is reshaped to RAID6"
             );
         }
+        W::DiskShortOfTier => {
+            let gb = a.size_bytes.unwrap_or(0) as f64 / 1e9;
+            let tier = a.count.unwrap_or(0);
+            return format!("{s}: {gb:.1} GB missing for tier {tier}: it joins only the tiers below");
+        }
         W::FlexNoRecentScrub => {
             let days = a.count.unwrap_or(0);
             return format!(
@@ -383,7 +392,7 @@ fn count_ok(l: RaidLevel, n: usize) -> Result<(), String> {
     }
     Err(match l {
         RaidLevel::Single => "single takes exactly one disk".to_string(),
-        _ => format!("{} needs an even number of disks", level_name(l)),
+        _ => format!("{} with {n} disks is not possible", level_name(l)),
     })
 }
 
@@ -491,7 +500,7 @@ pub(crate) fn check_new_disk(
     if d.removable || d.transport == "usb" {
         warn_on(p, PlanWarningCode::RemovableDisk, name);
     }
-    if d.size < 2 * (PART_START + END_RESERVE + MD_OVERHEAD) {
+    if d.size < MIN_DISK {
         fail(
             p,
             C::DiskTooSmall,
@@ -511,7 +520,10 @@ pub(crate) fn finish(mut p: StoragePlan) -> StoragePlan {
     p
 }
 
-fn partition_steps(steps: &mut Vec<PlanStep>, disk: &str, label: &str) {
+/// Erases `disk` and makes its md partition: up to [`END_RESERVE`] before the end, or up to
+/// the absolute byte offset `end` (a disk joining an array it holds only without the
+/// reserve).
+fn partition_steps(steps: &mut Vec<PlanStep>, disk: &str, label: &str, end: Option<u64>) {
     let dev = format!("/dev/{disk}");
     steps.push(destroying(
         cmd(
@@ -527,11 +539,15 @@ fn partition_steps(steps: &mut Vec<PlanStep>, disk: &str, label: &str) {
         ),
         &[disk],
     ));
+    let new = match end {
+        None => "--new=1:0:-128M".to_string(),
+        Some(e) => format!("--new=1:{}:{}", PART_START / 512, e / 512 - 1),
+    };
     steps.push(cmd(
         d_on(PlanStepKind::CreatePartition, disk),
         &[
             "sgdisk",
-            "--new=1:0:-128M",
+            &new,
             "--typecode=1:FD00",
             &format!("--change-name=1:rynas-{label}"),
             &dev,
@@ -621,7 +637,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
     let n = chosen.len() as u64;
     let sizes: Vec<u64> = chosen.iter().map(|d| d.size).collect();
     let min = sizes.iter().copied().min().unwrap_or(0);
-    let cap = rynas_api_types::capacity::classic(req.level, &sizes, req.encrypt);
+    let cap = rynas_api_types::capacity::classic(req.level, &sizes, req.encrypt, inv.min_tier());
     p.raw_bytes = cap.raw;
     p.wasted_bytes = cap.wasted;
     p.usable_bytes = cap.usable;
@@ -668,7 +684,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
     let md = format!("/dev/md/{label}");
     let mut steps = Vec::new();
     for d in &chosen {
-        partition_steps(&mut steps, &d.name, label);
+        partition_steps(&mut steps, &d.name, label, None);
     }
     steps.push(cmd(d(PlanStepKind::WaitUdev), &["udevadm", "settle"]));
     let parts: Vec<String> = chosen
@@ -939,15 +955,57 @@ fn array_busy(a: &MdArray, p: &mut StoragePlan) {
     }
 }
 
-/// Size of the md component partition of an existing member.
-fn member_part_size(inv: &Inventory, a: &MdArray) -> u64 {
-    a.members
-        .iter()
-        .filter(|m| m.role == MemberRole::Active)
+/// Bytes a new member partition of `a` needs: md's data offset plus the size md uses of each
+/// member (`component_size`), or the smallest active member partition when md does not say
+/// (md uses no more of any member than the smallest one holds).
+fn member_need(inv: &Inventory, a: &MdArray) -> u64 {
+    let active = || a.members.iter().filter(|m| m.role == MemberRole::Active);
+    let smallest = active()
         .filter_map(|m| inv.graph.get(&m.device))
         .map(|d| d.size)
-        .max()
-        .unwrap_or(0)
+        .min()
+        .unwrap_or(0);
+    match a.component_size {
+        Some(c) => {
+            let offset = active()
+                .filter_map(|m| m.data_offset)
+                .max()
+                .unwrap_or_else(|| md_data_offset(smallest.max(c)));
+            c + offset
+        }
+        None => smallest,
+    }
+}
+
+/// The size md uses of each member of `a`: `component_size`, or what md would make of the
+/// smallest member partition.
+fn member_component(inv: &Inventory, a: &MdArray, level: RaidLevel) -> u64 {
+    a.component_size
+        .unwrap_or_else(|| md_component(level, member_need(inv, a)))
+}
+
+/// Where the md partition of a disk of `size` bytes joining an array whose members need
+/// `need` bytes ends: `None` for the usual partition (up to [`END_RESERVE`] before the end),
+/// an absolute end for a disk too small for that (a disk "of the same size" a few MB
+/// smaller: the partition holds exactly `need`), the bytes missing when it is too small.
+fn member_partition_end(size: u64, need: u64) -> Result<Option<u64>, u64> {
+    if usable_partition(size) >= need {
+        return Ok(None);
+    }
+    let end = PART_START + need.div_ceil(MIB) * MIB;
+    if fits(size, end) {
+        Ok(Some(end))
+    } else {
+        Err(shortfall(size, end))
+    }
+}
+
+/// A member size as a striped level keeps it: whole chunks.
+fn striped_component(level: RaidLevel, component: u64) -> u64 {
+    match level {
+        RaidLevel::Single | RaidLevel::Raid1 => component,
+        _ => component / MD_CHUNK * MD_CHUNK,
+    }
 }
 
 /// `POST /api/v1/storage/plan/grow`
@@ -1031,52 +1089,60 @@ pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
         let m = format!("{} with {new_n} disks is not possible", level_name(to));
         fail(&mut p, PlanIssueCode::DiskCount, "disks", None, m);
     }
-    let part_size = member_part_size(inv, a);
+    let need = member_need(inv, a);
     let label = a
         .md_name
         .as_deref()
         .map(|n| n.rsplit(':').next().unwrap_or(n).to_string())
         .unwrap_or_else(|| a.name.clone());
-    let mut new: Vec<DiskSummary> = Vec::new();
+    let mut new: Vec<(DiskSummary, Option<u64>)> = Vec::new();
     for name in &req.disks {
         if let Some(d) = check_new_disk(inv, name, "disks", &mut p) {
-            if usable_partition(d.size) < part_size {
-                let m = format!(
-                    "{name}: too small ({:.1} GB, members use {:.1} GB)",
-                    d.size as f64 / 1e9,
-                    part_size as f64 / 1e9
-                );
-                fail(&mut p, PlanIssueCode::DiskTooSmall, "disks", Some(name), m);
-            } else if usable_partition(d.size) > part_size + 10 * END_RESERVE {
-                warn_on(&mut p, PlanWarningCode::DiskLargerThanMembers, name);
+            match member_partition_end(d.size, need) {
+                Err(missing) => {
+                    let m = format!(
+                        "{name}: too small ({:.1} GB, {:.1} GB missing: members use {:.1} GB)",
+                        d.size as f64 / 1e9,
+                        missing as f64 / 1e9,
+                        need as f64 / 1e9
+                    );
+                    fail(&mut p, PlanIssueCode::DiskTooSmall, "disks", Some(name), m);
+                }
+                Ok(end) => {
+                    if !negligible_difference(usable_partition(d.size), need)
+                        && usable_partition(d.size) > need
+                    {
+                        warn_on(&mut p, PlanWarningCode::DiskLargerThanMembers, name);
+                    }
+                    new.push((d, end));
+                }
             }
-            new.push(d);
         }
     }
-    let member = part_size.saturating_sub(MD_OVERHEAD);
+    let component = member_component(inv, a, to);
     let (_, tol) = capacity_factor(to, new_n.max(1));
-    let (factor, _) = if count_ok(to, new_n as usize).is_ok() {
-        capacity_factor(to, new_n)
+    p.usable_bytes = if count_ok(to, new_n as usize).is_ok() {
+        // a change to a striped level keeps whole chunks of each member
+        md_array_size_of_components(to, new_n as usize, striped_component(to, component))
     } else {
-        (0, 0)
+        0
     };
-    p.usable_bytes = factor * member;
     p.fault_tolerance = tol;
-    p.raw_bytes = new.iter().map(|d| d.size).sum();
+    p.raw_bytes = new.iter().map(|(d, _)| d.size).sum();
     if !p.errors.is_empty() {
         return finish(p);
     }
 
     let md = a.path.clone();
     let mut steps = Vec::new();
-    for d in &new {
-        partition_steps(&mut steps, &d.name, &label);
+    for (d, end) in &new {
+        partition_steps(&mut steps, &d.name, &label, *end);
     }
     steps.push(cmd(d(PlanStepKind::WaitUdev), &["udevadm", "settle"]));
     let mut add: Vec<String> = vec!["mdadm".into(), md.clone(), "--add".into()];
     add.extend(
         new.iter()
-            .map(|d| format!("/dev/{}", part_name(&d.name, 1))),
+            .map(|(d, _)| format!("/dev/{}", part_name(&d.name, 1))),
     );
     let backup = format!("--backup-file=/var/lib/rynas/md-reshape-{}.bak", a.name);
     let raid_devices = format!("--raid-devices={new_n}");
@@ -1204,13 +1270,13 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
     if member.role == MemberRole::Spare {
         warn_on(&mut p, PlanWarningCode::SpareMember, &member.device);
     }
-    // a healthy member to copy the partition table from
-    let source = a
+    // the healthy members left to rebuild from
+    let healthy: Vec<&rynas_api_types::storage::MdMember> = a
         .members
         .iter()
-        .filter(|m| m.role == MemberRole::Active && m.device != member.device)
-        .find_map(|m| m.disk.clone());
-    let Some(source) = source else {
+        .filter(|m| m.role == MemberRole::Active && m.device != member.device && m.disk.is_some())
+        .collect();
+    if healthy.is_empty() {
         let m = format!("{}: no healthy member left to rebuild from", a.name);
         fail(
             &mut p,
@@ -1220,21 +1286,52 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
             m,
         );
         return finish(p);
-    };
-    let src_size = inv
-        .disks
-        .iter()
-        .find(|d| d.name == source)
-        .map(|d| d.size)
-        .unwrap_or(0);
+    }
+    let disk_size = |name: &str| inv.disks.iter().find(|d| d.name == name).map(|d| d.size);
+    // what the new member needs: md's data offset and the size md uses of each member, not
+    // the size of another (maybe larger) member's disk
+    let need = member_need(inv, a);
     let new = check_new_disk(inv, &req.new_disk, "new_disk", &mut p);
+    // the partition table to copy: that of a healthy member's disk no larger than the new
+    // one (the largest such); without one the new disk gets the md partition alone, sized
+    // for the array, where the smallest member's partition starts
+    let source = new.as_ref().and_then(|nd| {
+        // reversed: of equal disks the first member is chosen
+        healthy
+            .iter()
+            .rev()
+            .filter_map(|m| {
+                let disk = m.disk.clone()?;
+                let size = disk_size(&disk)?;
+                (size <= nd.size).then_some((size, disk, m.device.clone()))
+            })
+            .max_by_key(|(size, _, _)| *size)
+            .map(|(_, disk, dev)| (disk, dev))
+    });
+    let smallest = healthy
+        .iter()
+        .min_by_key(|m| inv.graph.get(&m.device).map_or(u64::MAX, |d| d.size))
+        .copied()
+        .unwrap_or(healthy[0]);
+    let reference = match &source {
+        Some((disk, _)) => disk.clone(),
+        None => smallest.disk.clone().unwrap_or_default(),
+    };
+    let start = inv
+        .graph
+        .get(&smallest.device)
+        .and_then(|d| d.start)
+        .unwrap_or(PART_START);
+    let fresh_end = start + need.div_ceil(MIB) * MIB;
     if let Some(d) = &new {
-        if d.size < src_size {
+        if source.is_none() && !fits(d.size, fresh_end) {
             let m = format!(
-                "{}: smaller than the other members ({:.1} GB < {:.1} GB)",
+                "{}: too small ({:.1} GB, {:.1} GB missing: the members use {:.1} GB from {:.1} MB on)",
                 d.name,
                 d.size as f64 / 1e9,
-                src_size as f64 / 1e9
+                shortfall(d.size, fresh_end) as f64 / 1e9,
+                need as f64 / 1e9,
+                start as f64 / 1e6
             );
             fail(
                 &mut p,
@@ -1254,16 +1351,16 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
         let m = format!("{} is busy ({}); wait for it to finish", a.name, s.action);
         fail(&mut p, PlanIssueCode::ArrayBusy, "array", Some(&a.name), m);
     }
-    // other partitions on the source disk (EFI, swap) are not copied by md
-    let src_parts = inv
+    // other partitions on the members' disks (EFI, swap) are not copied by md
+    let ref_parts = inv
         .graph
-        .get(&source)
+        .get(&reference)
         .map(|d| d.children.len())
         .unwrap_or(0);
-    if src_parts > 1 {
+    if ref_parts > 1 {
         let args = PlanArgs {
-            subject: Some(source.clone()),
-            count: Some(src_parts as u64),
+            subject: Some(reference.clone()),
+            count: Some(ref_parts as u64),
             ..Default::default()
         };
         warn(&mut p, PlanWarningCode::OtherPartitions, args);
@@ -1276,48 +1373,85 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
     }
     let new = new.expect("checked above");
     let new_dev = format!("/dev/{}", new.name);
-    // the component index of the member: keep the same partition number
-    let part_no = member
-        .device
-        .strip_prefix(member.disk.as_deref().unwrap_or(""))
-        .map(|s| s.trim_start_matches('p'))
-        .and_then(|n| n.parse::<u32>().ok())
-        .unwrap_or(1);
+    // the partition number: the copied member's, else the replaced member's
+    let part_no_of = |dev: &str, disk: Option<&str>| {
+        inv.graph.get(dev).and_then(|d| d.partn).or_else(|| {
+            dev.strip_prefix(disk.unwrap_or(""))
+                .map(|s| s.trim_start_matches('p'))
+                .and_then(|n| n.parse::<u32>().ok())
+        })
+    };
+    let part_no = match &source {
+        Some((disk, dev)) => part_no_of(dev, Some(disk)),
+        None => part_no_of(&member.device, member.disk.as_deref()),
+    }
+    .unwrap_or(1);
     let new_part = format!("/dev/{}", part_name(&new.name, part_no));
     let old_dev = format!("/dev/{}", member.device);
     let md = a.path.clone();
-    let mut steps = vec![
-        destroying(
-            cmd(
-                d_on(PlanStepKind::WipeSignatures, &new.name),
-                &["wipefs", "--all", &new_dev],
-            ),
-            &[&new.name],
-        ),
-        destroying(
-            cmd(
-                D(
-                    PlanStepKind::CopyPartitionTable,
-                    PlanArgs {
-                        subject: Some(new.name.clone()),
-                        other: Some(source.clone()),
-                        ..Default::default()
-                    },
-                ),
-                &[
-                    "sgdisk",
-                    &format!("--replicate={new_dev}"),
-                    &format!("/dev/{source}"),
-                ],
-            ),
-            &[&new.name],
-        ),
+    let wipe = destroying(
         cmd(
-            d_on(PlanStepKind::RandomizeGuids, &new.name),
-            &["sgdisk", "--randomize-guids", &new_dev],
+            d_on(PlanStepKind::WipeSignatures, &new.name),
+            &["wipefs", "--all", &new_dev],
         ),
-        cmd(d(PlanStepKind::WaitUdev), &["udevadm", "settle"]),
-    ];
+        &[&new.name],
+    );
+    let mut steps = match &source {
+        Some((src, _)) => vec![
+            wipe,
+            destroying(
+                cmd(
+                    D(
+                        PlanStepKind::CopyPartitionTable,
+                        PlanArgs {
+                            subject: Some(new.name.clone()),
+                            other: Some(src.clone()),
+                            ..Default::default()
+                        },
+                    ),
+                    &[
+                        "sgdisk",
+                        &format!("--replicate={new_dev}"),
+                        &format!("/dev/{src}"),
+                    ],
+                ),
+                &[&new.name],
+            ),
+            // a larger disk: the backup GPT goes to its end
+            cmd(
+                d_on(PlanStepKind::RandomizeGuids, &new.name),
+                &["sgdisk", "--randomize-guids", "--move-second-header", &new_dev],
+            ),
+        ],
+        None => {
+            let label = a
+                .md_name
+                .as_deref()
+                .map(|n| n.rsplit(':').next().unwrap_or(n).to_string())
+                .unwrap_or_else(|| a.name.clone());
+            vec![
+                wipe,
+                destroying(
+                    cmd(
+                        d_on(PlanStepKind::ClearPartitionTable, &new.name),
+                        &["sgdisk", "--zap-all", &new_dev],
+                    ),
+                    &[&new.name],
+                ),
+                cmd(
+                    d_on(PlanStepKind::CreatePartition, &new.name),
+                    &[
+                        "sgdisk",
+                        &format!("--new={part_no}:{}:{}", start / 512, fresh_end / 512 - 1),
+                        &format!("--typecode={part_no}:FD00"),
+                        &format!("--change-name={part_no}:rynas-{label}"),
+                        &new_dev,
+                    ],
+                ),
+            ]
+        }
+    };
+    steps.push(cmd(d(PlanStepKind::WaitUdev), &["udevadm", "settle"]));
     let hot = member.role == MemberRole::Active && a.health == ArrayHealth::Healthy;
     if hot {
         // keeps full redundancy during the copy
@@ -1695,7 +1829,8 @@ mod tests {
         );
         assert!(p.valid, "{:?}", p.errors);
         assert_eq!(p.fault_tolerance, 1);
-        assert_eq!(p.wasted_bytes, 4_000_787_030_016 - 2_000_398_934_016);
+        // what the larger disk's partition holds beyond the smaller one's
+        assert_eq!(p.wasted_bytes, usable_partition(4_000_787_030_016) - usable_partition(2_000_398_934_016));
         let w = p.warnings.join("\n");
         assert!(w.contains("different sizes"), "{w}");
         assert!(w.contains("sde: existing data will be erased"), "{w}");
@@ -2010,6 +2145,229 @@ mod tests {
             },
         );
         assert!(p.errors[0].contains("not a member"));
+    }
+
+    const TB: u64 = 1_000_000_000_000;
+
+    /// md2 healthy over 4 + 4 + 8 TB (sda, sdb: 4 TB, sdc: 8 TB, partitions made by rynas)
+    /// and a blank disk sdf of `new` bytes.
+    fn mixed_raid5(new: u64) -> Inventory {
+        let mut inv = nas_inventory();
+        for (name, size) in [("sda", 4 * TB), ("sdb", 4 * TB), ("sdc", 8 * TB)] {
+            if let Some(d) = inv.disks.iter_mut().find(|d| d.name == name) {
+                d.size = size;
+            }
+            if let Some(g) = inv.graph.devs.get_mut(name) {
+                g.size = size;
+            }
+            if let Some(g) = inv.graph.devs.get_mut(&format!("{name}1")) {
+                g.size = usable_partition(size);
+                g.start = Some(PART_START);
+                g.partn = Some(1);
+            }
+        }
+        let a = inv.arrays.iter_mut().find(|a| a.name == "md2").unwrap();
+        a.sync = None;
+        a.health = ArrayHealth::Healthy;
+        a.degraded = 0;
+        for m in &mut a.members {
+            m.role = MemberRole::Active;
+        }
+        let mut d = inv.disks.iter().find(|d| d.name == "sdd").unwrap().clone();
+        d.name = "sdf".into();
+        d.path = "/dev/sdf".into();
+        d.serial = "NEW-SDF".into();
+        d.size = new;
+        inv.disks.push(d);
+        inv
+    }
+
+    fn grow_md2(inv: &Inventory) -> StoragePlan {
+        plan_grow(
+            inv,
+            &GrowPlanRequest {
+                array: "md2".into(),
+                disks: vec!["sdf".into()],
+                level: None,
+                volume: None,
+            },
+        )
+    }
+
+    fn replace_md2(inv: &Inventory, old: &str) -> StoragePlan {
+        plan_replace(
+            inv,
+            &ReplacePlanRequest {
+                array: "md2".into(),
+                old: old.into(),
+                new_disk: "sdf".into(),
+                volume: None,
+            },
+        )
+    }
+
+    /// RAID5 on 4 + 4 + 8: md uses 4 TB of each member, so a fourth 4 TB joins and the
+    /// array grows by 4 TB (not 8).
+    #[test]
+    fn classic_grow_uses_what_md_uses_of_each_member() {
+        let part = usable_partition(4 * TB);
+        let p = grow_md2(&mixed_raid5(4 * TB));
+        assert!(p.valid, "{:?}", p.errors);
+        assert_codes_match(&p);
+        assert_eq!(p.usable_bytes, 3 * md_component(RaidLevel::Raid5, part));
+        assert!(argvs(&p).iter().any(|l| l.starts_with("sgdisk --new=1:0:-128M ")), "{:?}", argvs(&p));
+        assert!(!p.warning_items.iter().any(|w| w.code == PlanWarningCode::DiskLargerThanMembers));
+        // a "4 TB" of another make, 5 MB smaller: its partition holds exactly what md uses
+        let p = grow_md2(&mixed_raid5(4 * TB - 5_000_000));
+        assert!(p.valid, "{:?}", p.errors);
+        let end = PART_START + part.div_ceil(MIB) * MIB;
+        let want = format!("sgdisk --new=1:2048:{} --typecode=1:FD00 --change-name=1:rynas-vol1 /dev/sdf", end / 512 - 1);
+        assert!(argvs(&p).contains(&want), "{:?}", argvs(&p));
+        // md says what it uses: its component size and data offset
+        let mut inv = mixed_raid5(4 * TB - 5_000_000);
+        let c = md_component(RaidLevel::Raid5, part);
+        let a = inv.arrays.iter_mut().find(|a| a.name == "md2").unwrap();
+        a.component_size = Some(c);
+        for m in &mut a.members {
+            m.data_offset = Some(MD_OVERHEAD_TEST);
+        }
+        let p = grow_md2(&inv);
+        assert!(p.valid, "{:?}", p.errors);
+        assert_eq!(p.usable_bytes, 3 * c);
+        let end = PART_START + (c + MD_OVERHEAD_TEST).div_ceil(MIB) * MIB;
+        assert!(argvs(&p).iter().any(|l| l.starts_with(&format!("sgdisk --new=1:2048:{} ", end / 512 - 1))), "{:?}", argvs(&p));
+        // an 8 TB is larger than what the members use
+        let p = grow_md2(&mixed_raid5(8 * TB));
+        assert!(p.warning_items.iter().any(|w| w.code == PlanWarningCode::DiskLargerThanMembers));
+        // too small: the plan says how much is missing
+        let p = grow_md2(&mixed_raid5(3 * TB));
+        assert!(!p.valid);
+        assert!(p.issues.iter().any(|i| i.code == PlanIssueCode::DiskTooSmall), "{:?}", p.issues);
+        assert!(p.errors.iter().any(|e| e.contains("GB missing")), "{:?}", p.errors);
+    }
+
+    const MD_OVERHEAD_TEST: u64 = rynas_api_types::capacity::MD_OVERHEAD;
+
+    /// RAID5 on 4 + 4 + 8: a new member needs what md uses of a member, never the size of the
+    /// largest member's disk; its partition table is copied only from a disk no larger.
+    #[test]
+    fn classic_replace_needs_what_md_uses_not_the_largest_member() {
+        let inv = mixed_raid5(4 * TB);
+        for old in ["sdb", "sdc"] {
+            let p = replace_md2(&inv, old);
+            assert!(p.valid, "{old}: {:?}", p.errors);
+            assert_codes_match(&p);
+            let a = argvs(&p);
+            assert_eq!(a[1], "sgdisk --replicate=/dev/sdf /dev/sda", "{old}");
+            assert_eq!(a[2], "sgdisk --randomize-guids --move-second-header /dev/sdf");
+            assert!(a.contains(&"mdadm /dev/md2 --add-spare /dev/sdf1".to_string()), "{a:?}");
+        }
+        // a "4 TB" 5 MB smaller than the others: a partition of its own, sized for the array
+        let p = replace_md2(&mixed_raid5(4 * TB - 5_000_000), "sdb");
+        assert!(p.valid, "{:?}", p.errors);
+        assert_codes_match(&p);
+        let a = argvs(&p);
+        assert!(!a.iter().any(|l| l.contains("--replicate")), "{a:?}");
+        assert_eq!(a[1], "sgdisk --zap-all /dev/sdf");
+        let end = PART_START + usable_partition(4 * TB).div_ceil(MIB) * MIB;
+        assert_eq!(a[2], format!("sgdisk --new=1:2048:{} --typecode=1:FD00 --change-name=1:rynas-vol1 /dev/sdf", end / 512 - 1));
+        assert_eq!(p.steps[2].kind, Some(PlanStepKind::CreatePartition));
+        // too small
+        let p = replace_md2(&mixed_raid5(3 * TB), "sdb");
+        assert!(!p.valid);
+        assert!(p.issues.iter().any(|i| i.code == PlanIssueCode::DiskTooSmall), "{:?}", p.issues);
+        assert!(p.errors.iter().any(|e| e.contains("GB missing")), "{:?}", p.errors);
+    }
+
+    /// An inventory of blank HDDs of `sizes` (sda, sdb, ...).
+    fn blank(sizes: &[u64]) -> (Inventory, Vec<String>) {
+        let mut inv = Inventory::default();
+        let mut names = Vec::new();
+        for (i, size) in sizes.iter().enumerate() {
+            let name = format!("sd{}", (b'a' + i as u8) as char);
+            let d = crate::lsblk::BlockDev {
+                kname: name.clone(),
+                name: name.clone(),
+                path: format!("/dev/{name}"),
+                kind: "disk".into(),
+                size: *size,
+                rotational: true,
+                serial: Some(format!("SER-{name}")),
+                ..Default::default()
+            };
+            inv.graph.devs.insert(name.clone(), d);
+            let d = inv.graph.get(&name).unwrap();
+            let s = crate::inventory::summary(d, &inv.graph, None, None, rynas_api_types::storage::PowerState::Active, 0, false);
+            inv.disks.push(s);
+            names.push(name);
+        }
+        (inv, names)
+    }
+
+    /// The web interface's calculator and the plans agree at the edges too: disks of the
+    /// same size from different makes, disks too small for a tier, odd RAID10, rests thinner
+    /// than a tier, encryption.
+    #[test]
+    fn the_calculator_matches_the_plans_at_the_edges() {
+        let g = 1u64 << 30;
+        let cases: [&[u64]; 8] = [
+            &[8 * TB, 8 * TB + 5_000_000, 8 * TB - 5_000_000],
+            &[10 * g, 10 * g],
+            &[10 * g, 4 * TB],
+            &[4 * TB; 5],
+            &[4 * TB, 4 * TB, 4 * TB + 15 * g, 4 * TB + 16 * g + 200 * MIB],
+            &[100 * MIB, 4 * TB, 4 * TB, 4 * TB],
+            &[10 * g, 10 * g, 4 * TB, 4 * TB],
+            &[4 * TB, 8 * TB, 8 * TB, 12 * TB, 12 * TB + 3_000_000],
+        ];
+        for sizes in cases {
+            let (inv, names) = blank(sizes);
+            for level in [
+                RaidLevel::Single, RaidLevel::Raid0, RaidLevel::Raid1, RaidLevel::Raid5, RaidLevel::Raid6,
+                RaidLevel::Raid10, RaidLevel::Flex1, RaidLevel::Flex2,
+            ] {
+                for encrypt in [false, true] {
+                    let req = VolumePlanRequest {
+                        disks: names.clone(),
+                        level,
+                        encrypt,
+                        compress: true,
+                        label: "vol9".into(),
+                    };
+                    let p = plan_volume(&inv, &req);
+                    let c = rynas_api_types::capacity::volume(level, sizes, encrypt, inv.min_tier());
+                    assert_eq!(p.valid, c.is_some(), "{level:?} {sizes:?}: {:?}", p.errors);
+                    if let Some(c) = c {
+                        assert_eq!(
+                            (p.usable_bytes, p.raw_bytes, p.wasted_bytes, p.fault_tolerance),
+                            (c.usable, c.raw, c.wasted, c.tolerance),
+                            "{level:?} {sizes:?} {encrypt}"
+                        );
+                        // the warnings name the same unused space as the bar
+                        let warned: u64 = p
+                            .warning_items
+                            .iter()
+                            .filter(|w| matches!(w.code, PlanWarningCode::MixedSizes | PlanWarningCode::FlexUnusedSpace))
+                            .filter_map(|w| w.args.size_bytes)
+                            .sum();
+                        assert_eq!(warned, c.wasted, "{level:?} {sizes:?}");
+                    } else {
+                        assert!(!p.issues.is_empty());
+                    }
+                }
+            }
+        }
+        // near-equal disks: no warning about mixed sizes
+        let (inv, names) = blank(&[8 * TB, 8 * TB + 5_000_000, 8 * TB - 5_000_000]);
+        let req = VolumePlanRequest { disks: names, level: RaidLevel::Raid5, encrypt: false, compress: true, label: "vol9".into() };
+        let p = plan_volume(&inv, &req);
+        assert!(!p.warning_items.iter().any(|w| w.code == PlanWarningCode::MixedSizes), "{:?}", p.warnings);
+        // RAID10 over five disks: md's near=2 layout
+        let (inv, names) = blank(&[4 * TB; 5]);
+        let req = VolumePlanRequest { disks: names, level: RaidLevel::Raid10, encrypt: false, compress: true, label: "vol9".into() };
+        let p = plan_volume(&inv, &req);
+        assert!(p.valid, "{:?}", p.errors);
+        assert!(argvs(&p).iter().any(|l| l.contains("--level=10 --raid-devices=5")), "{:?}", argvs(&p));
     }
 
     #[test]

@@ -314,6 +314,10 @@ pub struct SysMd {
     pub reshape_position: Option<u64>,
     /// member → (state, slot, errors)
     pub members: HashMap<String, (String, Option<u32>, Option<u64>)>,
+    /// `component_size` (KiB in sysfs), bytes.
+    pub component_size: Option<u64>,
+    /// member → data offset (`dev-*/offset`, sectors in sysfs), bytes.
+    pub offsets: HashMap<String, u64>,
 }
 
 pub fn read_sysfs(host: &dyn Host, md: &str) -> SysMd {
@@ -330,6 +334,11 @@ pub fn read_sysfs(host: &dyn Host, md: &str) -> SysMd {
         bitmap_location: r("bitmap/location"),
         reshape_position: r("reshape_position").and_then(|v| v.parse().ok()),
         members: HashMap::new(),
+        component_size: r("component_size")
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|k| *k > 0)
+            .map(|k| k * 1024),
+        offsets: HashMap::new(),
     };
     for e in host.list(&base) {
         let Some(dev) = e.strip_prefix("dev-") else {
@@ -338,6 +347,9 @@ pub fn read_sysfs(host: &dyn Host, md: &str) -> SysMd {
         let state = r(&format!("{e}/state")).unwrap_or_default();
         let slot = r(&format!("{e}/slot")).and_then(|v| v.parse().ok());
         let errors = r(&format!("{e}/errors")).and_then(|v| v.parse().ok());
+        if let Some(o) = r(&format!("{e}/offset")).and_then(|v| v.parse::<u64>().ok()) {
+            s.offsets.insert(dev.to_string(), o * 512);
+        }
         s.members.insert(dev.to_string(), (state, slot, errors));
     }
     s
@@ -429,6 +441,7 @@ pub fn build(
                     sys_state
                 },
                 errors,
+                data_offset: sys.offsets.get(&m.device).copied(),
             }
         })
         .collect::<Vec<_>>();
@@ -472,6 +485,7 @@ pub fn build(
             .or_else(|| export.and_then(|e| e.metadata.clone())),
         raid_disks,
         size: st.blocks * 1024,
+        component_size: sys.component_size,
         chunk_bytes: st.chunk_bytes.or(detail.and_then(|d| d.chunk_bytes)),
         state,
         health,
@@ -615,6 +629,25 @@ mod tests {
         assert!(a.stale);
         assert_eq!(a.members[2].role, MemberRole::Rebuilding);
         assert_eq!(a.uuid, None);
+    }
+
+    /// What md uses of each member: `component_size` (KiB) and each member's data offset
+    /// (sectors), as bytes.
+    #[test]
+    fn component_size_and_offsets() {
+        let mut h = crate::host::FakeHost::default();
+        h.file("/sys/block/md2/md/component_size", "3906886144\n")
+            .file("/sys/block/md2/md/dev-sda1/state", "in_sync\n")
+            .file("/sys/block/md2/md/dev-sda1/offset", "264192\n")
+            .file("/sys/block/md2/md/dev-sdb1/state", "in_sync\n");
+        let s = read_sysfs(&h, "md2");
+        assert_eq!(s.component_size, Some(3_906_886_144 * 1024));
+        assert_eq!(s.offsets.get("sda1"), Some(&(264_192 * 512)));
+        assert!(!s.offsets.contains_key("sdb1"));
+        let st = &parse_mdstat(MDSTAT)[0];
+        let a = build(st, &s, None, None, false, &|_| None);
+        assert_eq!(a.component_size, s.component_size);
+        assert_eq!(a.members.iter().find(|m| m.device == "sda1").and_then(|m| m.data_offset), Some(264_192 * 512));
     }
 
     #[test]

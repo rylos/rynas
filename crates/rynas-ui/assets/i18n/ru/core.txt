@@ -5442,6 +5442,7 @@ plan.s.add_partition_live	Сообщить ядру о новом разделе
 plan.w.flex_unused_space	{items}: {size} не используется, пока другой диск не достигнет того же размера
 plan.w.flex_long_reshape	Ярусы перестраиваются по одному: нужно переместить {size}, всего около {n} ч; том остаётся доступным
 plan.w.flex_reduced_tolerance_window	{subject}: пока ярус перестраивается в RAID 6, он выдерживает отказ только одного диска
+plan.w.disk_short_of_tier	{subject}: до яруса {n} не хватает {size}, поэтому диск входит только в ярусы ниже
 plan.e.flex_layout_unsupported	rynas не может изменить этот гибкий RAID: его разметка нарушает правило ярусов, или такое изменение пока не поддерживается
 plan.e.flex_growth_pending	Последнее расширение этого тома было прервано: сначала завершите его
 plan.e.tolerance_change_unsupported	Отказоустойчивость гибкого RAID изменить нельзя
