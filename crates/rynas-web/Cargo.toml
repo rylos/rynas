@@ -63,7 +63,8 @@ priority = "optional"
 depends = "$auto, adduser, libpam-runtime"
 # What the features run; a missing tool makes only its feature fail, with a clear error:
 # file services (rsync: moving user homes to a volume; samba, nfs-kernel-server, acl for share ACLs, avahi-daemon and wsdd2 for
-# discovery), snapshots (btrbk, btrfs-progs), storage (mdadm, cryptsetup-bin and
+# discovery), snapshots (btrbk, btrfs-progs), storage (mdadm, lvm2 for flexible RAID volumes,
+# cryptsetup-bin and
 # systemd-cryptsetup for encrypted volumes, gdisk, smartmontools, hdparm), network changes
 # (iputils-arping/iputils-ping: duplicate-address checks and gateway tests), file manager
 # (7zip: zip/7z/iso archives; zstd: opening .tar.zst archives, GNU tar runs it; ffmpeg:
@@ -72,7 +73,7 @@ depends = "$auto, adduser, libpam-runtime"
 # the NTFS fallback driver, exfatprogs and dosfstools for checks), backups (restic: the
 # safety net that opens and repairs the same repositories; openssh-client: SFTP destinations
 # and their keys)
-recommends = "rsync, samba, nfs-kernel-server, acl, avahi-daemon, wsdd2, btrbk, btrfs-progs, mdadm, cryptsetup-bin, systemd-cryptsetup, smartmontools, hdparm, gdisk, iputils-arping, iputils-ping, 7zip, zstd, ffmpeg, unattended-upgrades, ntfs-3g, exfatprogs, dosfstools, restic, openssh-client"
+recommends = "rsync, samba, nfs-kernel-server, acl, avahi-daemon, wsdd2, btrbk, btrfs-progs, mdadm, lvm2, cryptsetup-bin, systemd-cryptsetup, smartmontools, hdparm, gdisk, iputils-arping, iputils-ping, 7zip, zstd, ffmpeg, unattended-upgrades, ntfs-3g, exfatprogs, dosfstools, restic, openssh-client"
 # mtr-tiny: traceroute diagnostics as JSON; rclone: backup destinations such as Google Drive
 # or OneDrive; restic-rest-server: receiving backups of another NAS
 suggests = "fail2ban, mtr-tiny, unrar, rclone, restic-rest-server"

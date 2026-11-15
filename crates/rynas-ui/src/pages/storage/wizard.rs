@@ -7,7 +7,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::TaskStatus;
-use rynas_api_types::storage::{RaidLevel, StoragePlan};
+use rynas_api_types::storage::{PlanIssueCode, RaidLevel, StoragePlan};
 use serde_json::json;
 
 use crate::tasks::TaskRun;
@@ -74,6 +74,14 @@ pub(super) fn recommended(n: usize, mixed: bool) -> RaidLevel {
         (3 | 4, false) => RaidLevel::Raid5,
         (_, false) => RaidLevel::Raid6,
     }
+}
+
+/// The plan of level `l` says the server lacks LVM (flexible RAID without lvm2).
+fn lvm_missing(plans: &[(RaidLevel, PlanRes)], l: RaidLevel) -> bool {
+    plans.iter().any(|(x, r)| {
+        *x == l
+            && matches!(r, Some(Ok(p)) if p.issues.iter().any(|i| i.code == PlanIssueCode::LvmMissing))
+    })
 }
 
 /// The chosen drives differ in size by more than one tier step.
@@ -155,6 +163,10 @@ pub fn CreateVolume() -> impl IntoView {
                         e.1 = Some(r);
                     }
                 });
+                // a flexible level the server cannot make is never left selected
+                if plans.try_with_untracked(|p| lvm_missing(p, l)) == Some(true) && level.try_get_untracked() == Some(l) {
+                    let _ = level.try_set(recommended(n, false));
+                }
             });
         }
     };
@@ -368,6 +380,8 @@ fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: 
             {LEVELS.into_iter().map(|l| {
                 let ok = allowed(l, n);
                 let plan = move || plans.with(|p| p.iter().find(|(x, _)| *x == l).and_then(|(_, r)| r.clone()));
+                // the server cannot make it (flexible RAID without lvm2): greyed with the reason
+                let no_lvm = move || plans.with(|p| lvm_missing(p, l));
                 // a flexible RAID: the name, then its tolerance on a line of its own
                 let (name, variant) = match l {
                     RaidLevel::Flex1 => ("sto.flex", Some("sto.flex_tol1")),
@@ -380,16 +394,20 @@ fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: 
                         type="button"
                         role="radio"
                         aria-checked=move || (level.get() == l).to_string()
-                        disabled=!ok
+                        disabled=move || !ok || no_lvm()
                         on:click=move |_| level.set(l)
                     >
                         <span class="level-top">
                             <strong>{tr(name)}</strong>
-                            {(ok && l == rec).then(|| view! { <span class="chip accent">{tr("wiz.recommended")}</span> })}
+                            {move || (ok && l == rec && !no_lvm()).then(|| view! { <span class="chip accent">{tr("wiz.recommended")}</span> })}
                         </span>
                         {variant.map(|k| view! { <span class="small strong">{tr(k)}</span> })}
                         <span class="muted small">{tr(desc_key(l))}</span>
-                        {if ok {
+                        {move || if !ok {
+                            view! { <span class="muted small">{tr(min_key(l))}</span> }.into_any()
+                        } else if no_lvm() {
+                            view! { <span class="muted small">{tr("wiz.lvm_missing")}</span> }.into_any()
+                        } else {
                             view! {
                                 <span class="level-num tnum">
                                     {move || match plan() {
@@ -401,8 +419,6 @@ fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: 
                                 <span class="small">{move || plan().and_then(Result::ok).filter(|p| p.valid).map(|p| tolerance_text(p.fault_tolerance))}</span>
                             }
                             .into_any()
-                        } else {
-                            view! { <span class="muted small">{tr(min_key(l))}</span> }.into_any()
                         }}
                     </button>
                 }

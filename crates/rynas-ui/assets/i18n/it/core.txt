@@ -1345,6 +1345,7 @@ wiz.min_single	Esattamente 1 disco
 wiz.min2	Servono almeno 2 dischi
 wiz.min3	Servono almeno 3 dischi
 wiz.min4	Servono almeno 4 dischi
+wiz.lvm_missing	Serve il pacchetto lvm2
 wiz.min_even4	Serve un numero pari di dischi, almeno 4
 wiz.d_single	Un disco, senza ridondanza; un mirror si può aggiungere in seguito.
 wiz.d_raid0	Striping per velocità: un disco guasto fa perdere tutto.
@@ -5412,3 +5413,4 @@ plan.before	Prima
 plan.after	Dopo
 plan.w.flex_no_recent_scrub	{subject}: nessuna pulizia dati senza errori negli ultimi {n} giorni; un errore di lettura durante i rimodellamenti è il rischio principale, quindi avvia prima una pulizia dati
 plan.e.scrub_errors	L'ultima pulizia dati ha trovato errori che non ha potuto riparare: un rimodellamento li diffonderebbe, ripristina prima i file danneggiati
+plan.e.lvm_missing	Il RAID flessibile richiede LVM: installa il pacchetto lvm2 (apt install lvm2), poi riprova

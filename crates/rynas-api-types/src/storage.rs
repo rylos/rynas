@@ -1228,6 +1228,8 @@ pub enum PlanIssueCode {
     /// The last scrub of the filesystem found errors it could not correct: a reshape would
     /// spread them; restore the damaged files first.
     ScrubErrors,
+    /// A flexible RAID needs LVM, and `lvm` (package lvm2) is not installed.
+    LvmMissing,
 }
 
 /// One error of a [`StoragePlan`].

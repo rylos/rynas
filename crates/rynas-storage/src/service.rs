@@ -792,6 +792,7 @@ impl Storage {
             flex: Vec::new(),
             records: self.records.lock().unwrap().clone(),
             min_tier: self.min_tier,
+            lvm_missing: !self.host.has_lvm(),
         };
         inv.flex = crate::flex::detect::detect(&inv, inv.records.as_deref(), self.min_tier);
         Ok(inv)

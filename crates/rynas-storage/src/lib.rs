@@ -63,6 +63,8 @@ pub struct Inventory {
     /// Thinnest flexible RAID tier; 0 means [`flex::tiers::MIN_TIER`] (see
     /// [`Inventory::min_tier`]).
     pub min_tier: u64,
+    /// `lvm` is not installed: no new flexible RAID volume can be made.
+    pub lvm_missing: bool,
 }
 
 impl Inventory {

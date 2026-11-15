@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::path::Path;
 use std::time::Duration;
 
 use rynas_tasks::cmd::{Cmd, CmdError as RunError};
@@ -56,6 +57,10 @@ pub trait Host: Send + Sync {
     fn ata_power(&self, dev_path: &str) -> Option<PowerState>;
     /// Milliseconds since the Unix epoch.
     fn now_ms(&self) -> u64;
+    /// LVM's `lvm` program is installed (flexible RAID volumes need it). Fakes: yes.
+    fn has_lvm(&self) -> bool {
+        true
+    }
 }
 
 /// The real machine.
@@ -102,6 +107,10 @@ impl Host for SystemHost {
 
     fn ata_power(&self, dev_path: &str) -> Option<PowerState> {
         ata_check_power_mode(dev_path)
+    }
+
+    fn has_lvm(&self) -> bool {
+        ["/usr/sbin/lvm", "/sbin/lvm"].iter().any(|p| Path::new(p).is_file())
     }
 
     fn now_ms(&self) -> u64 {

@@ -610,6 +610,10 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
         return finish(p);
     }
     if req.level.is_flexible() {
+        if inv.lvm_missing {
+            fail(&mut p, PlanIssueCode::LvmMissing, "level", None, "flexible RAID needs LVM: install lvm2".into());
+            return finish(p);
+        }
         return crate::flex::plan::plan_create(inv, req, p, &chosen);
     }
 
@@ -1774,6 +1778,25 @@ mod tests {
         assert!(p.issues.iter().any(|i| i.code == PlanIssueCode::DiskCount), "{:?}", p.issues);
         assert_codes_match(&p);
         assert_eq!(level_name(RaidLevel::Flex2), "flex2");
+    }
+
+    #[test]
+    fn flexible_levels_need_lvm() {
+        let mut inv = nas_inventory();
+        inv.lvm_missing = true;
+        let req = |level| VolumePlanRequest {
+            disks: vec!["sdd".into(), "sde".into()],
+            level,
+            encrypt: false,
+            compress: true,
+            label: "x".into(),
+        };
+        let p = plan_volume(&inv, &req(RaidLevel::Flex1));
+        assert!(!p.valid && p.steps.is_empty());
+        assert_eq!(p.issues.iter().map(|i| i.code).collect::<Vec<_>>(), [PlanIssueCode::LvmMissing]);
+        assert_codes_match(&p);
+        // classic levels do not need it
+        assert!(plan_volume(&inv, &req(RaidLevel::Raid1)).valid);
     }
 
     #[test]
