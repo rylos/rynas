@@ -354,6 +354,8 @@ pub fn level_key(l: RaidLevel) -> &'static str {
         RaidLevel::Raid5 => "sto.lvl.raid5",
         RaidLevel::Raid6 => "sto.lvl.raid6",
         RaidLevel::Raid10 => "sto.lvl.raid10",
+        RaidLevel::Flex1 => "sto.lvl.flex1",
+        RaidLevel::Flex2 => "sto.lvl.flex2",
     }
 }
 

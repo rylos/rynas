@@ -467,6 +467,10 @@ pub struct MdArray {
     pub members: Vec<MdMember>,
     /// Superblock details were not refreshed because a member disk is in standby.
     pub stale: bool,
+    /// Sector md `reshape_position` names while a reshape is under way or was interrupted
+    /// (sysfs `none` otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reshape_position: Option<u64>,
 }
 
 // ------------------------------------------------------------------ btrfs
@@ -700,6 +704,140 @@ mod btrfs_size_tests {
     }
 }
 
+// ------------------------------------------------------------------ flexible RAID
+
+/// One tier of a flexible RAID: the same slice of every member disk (partition number
+/// `index`, identical sectors on each disk), assembled as one md array.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct FlexTier {
+    /// 1-based, lowest slice first.
+    pub index: u32,
+    /// Byte offset of the slice on every member disk (inclusive).
+    pub start: u64,
+    /// Byte offset where the slice ends (exclusive).
+    pub end: u64,
+    /// md level of the tier: [`RaidLevel::Raid1`], [`RaidLevel::Raid5`] or
+    /// [`RaidLevel::Raid6`]. `None` in a plan: the slice is too narrow (too few disks reach
+    /// it) and is left unused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<RaidLevel>,
+    /// Whole disks that hold this slice (kernel names, sorted).
+    pub members: Vec<String>,
+    /// Kernel name of the md array ("md127"); `None` in a plan before it exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub array: Option<String>,
+    /// Usable bytes the tier adds to the volume.
+    pub usable: u64,
+    #[serde(default)]
+    pub health: ArrayHealth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncProgress>,
+    /// Members md misses (the `degraded` count of the array).
+    #[serde(default)]
+    pub degraded: u32,
+    /// Disks of [`FlexTier::members`] that are not an active member of the array now
+    /// (faulty, removed, rebuilding). A disk that vanished has no name left: it only counts
+    /// in [`FlexTier::degraded`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+}
+
+/// Unfinished work on a flexible RAID, found from the system state (an interrupted growth),
+/// so that "complete" can plan only what is left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlexPendingKind {
+    /// A reshape stopped half way (md `reshape_position` set, no reshape running).
+    ReshapeInterrupted,
+    /// The tier array is larger than its LVM physical volume (`pvresize` missing).
+    ResizePv,
+    /// The volume group has free space the logical volume does not use (`lvextend`).
+    ExtendLv,
+    /// The LUKS mapping is smaller than the logical volume (`cryptsetup resize`).
+    ResizeLuks,
+    /// The filesystem is smaller than its device (`btrfs filesystem resize max`).
+    ResizeFilesystem,
+    /// A tier array of the volume is not in the volume group.
+    TierNotInVg,
+    /// A tier array is not in the recorded volume (not assembled by name at boot).
+    TierNotRecorded,
+    /// A disk has the tier's partition, but the partition is not a member of the array.
+    PartitionNotMember,
+    /// A kind this client does not know (newer server).
+    #[serde(other)]
+    Other,
+}
+
+/// One item of [`FlexLayout::pending`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlexPending {
+    pub kind: FlexPendingKind,
+    /// The array, partition or device it is about (`md127`, `sdb2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+}
+
+/// A flexible RAID as found on the system: md tiers → LVM volume group → one logical volume.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct FlexLayout {
+    /// Disks that may fail without data loss: the lowest tolerance of the tiers.
+    pub tolerance: u32,
+    /// Volume group name (`rynas_<label>` when rynas made it).
+    pub vg: String,
+    /// Logical volume name (`data` when rynas made it).
+    pub lv: String,
+    /// Kernel name of the logical volume ("dm-1").
+    #[serde(default)]
+    pub lv_device: String,
+    /// Size of the logical volume.
+    #[serde(default)]
+    pub size: u64,
+    /// Lowest slice first.
+    pub tiers: Vec<FlexTier>,
+    /// Space on each disk no tier uses: (disk, bytes). Only amounts of at least one tier
+    /// step are listed (smaller rests come from rounding near-equal disks together).
+    #[serde(default)]
+    pub unused: Vec<(String, u64)>,
+    /// Names follow the rynas pattern and the filesystem is a btrfs with the volume label:
+    /// rynas may change it. A layout made elsewhere is shown read-only.
+    pub managed: bool,
+    #[serde(default)]
+    pub pending: Vec<FlexPending>,
+    /// Why rynas cannot change this layout (English): a tier rule broken, a partial volume
+    /// group...
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    /// The LVM facts were not refreshed because a disk under them is in standby (or LVM
+    /// could not be read): the checks that need them are skipped.
+    #[serde(default)]
+    pub stale: bool,
+}
+
+impl FlexLayout {
+    /// The flexible level of the layout (`Flex1`/`Flex2`), `None` without tolerance.
+    pub fn level(&self) -> Option<RaidLevel> {
+        RaidLevel::flexible(self.tolerance.min(2))
+    }
+
+    /// Worst health of the tiers.
+    pub fn health(&self) -> ArrayHealth {
+        fn rank(h: ArrayHealth) -> u8 {
+            match h {
+                ArrayHealth::Healthy => 0,
+                ArrayHealth::Unknown => 1,
+                ArrayHealth::Degraded => 2,
+                ArrayHealth::Inactive => 3,
+                ArrayHealth::Failed => 4,
+            }
+        }
+        self.tiers
+            .iter()
+            .map(|t| t.health)
+            .max_by_key(|h| rank(*h))
+            .unwrap_or_default()
+    }
+}
+
 // ------------------------------------------------------------------ tree
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -747,6 +885,10 @@ pub struct VolumeTree {
     /// Top layer = the device the filesystem lives on; children go down to the disks.
     pub layers: Vec<TreeNode>,
     pub subvolumes: Vec<TreeNode>,
+    /// The volume is a flexible RAID: its tiers (the LVM node of `layers` has them as
+    /// children too).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flexible: Option<FlexLayout>,
 }
 
 /// `GET /api/v1/storage/tree`.
@@ -851,6 +993,38 @@ pub enum RaidLevel {
     Raid5,
     Raid6,
     Raid10,
+    /// Flexible RAID, 1-disk tolerance: disks of different sizes, each size step ("tier") its
+    /// own md array (RAID5, or RAID1 with two members), all tiers joined by LVM.
+    Flex1,
+    /// Flexible RAID, 2-disk tolerance: tiers are RAID6, or three-way RAID1 with three
+    /// members. Needs at least 4 disks.
+    Flex2,
+}
+
+impl RaidLevel {
+    /// A flexible RAID (tiers of md arrays joined by LVM), not one md array.
+    pub fn is_flexible(self) -> bool {
+        matches!(self, RaidLevel::Flex1 | RaidLevel::Flex2)
+    }
+
+    /// Disks that may fail without data loss, at the smallest disk count the level allows
+    /// (a RAID1 of more than two disks tolerates more: see the plan's `fault_tolerance`).
+    pub fn tolerance(self) -> u32 {
+        match self {
+            RaidLevel::Single | RaidLevel::Raid0 => 0,
+            RaidLevel::Raid1 | RaidLevel::Raid5 | RaidLevel::Raid10 | RaidLevel::Flex1 => 1,
+            RaidLevel::Raid6 | RaidLevel::Flex2 => 2,
+        }
+    }
+
+    /// The flexible level of a tolerance (1 or 2), `None` for anything else.
+    pub fn flexible(tolerance: u32) -> Option<RaidLevel> {
+        match tolerance {
+            1 => Some(RaidLevel::Flex1),
+            2 => Some(RaidLevel::Flex2),
+            _ => None,
+        }
+    }
 }
 
 /// `POST /api/v1/storage/plan/volume`.
@@ -968,6 +1142,12 @@ pub struct StoragePlan {
     /// Named results, e.g. {"md": "/dev/md/vol1", "mapper": "rynas-vol1", "mountpoint": "/vol1"}.
     pub summary: Vec<(String, String)>,
     pub steps: Vec<PlanStep>,
+    /// Flexible RAID: the tiers before the change (empty for a new volume)...
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers_before: Vec<FlexTier>,
+    /// ...and after it, for the preview.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers_after: Vec<FlexTier>,
 }
 
 /// Why a storage plan cannot run.
@@ -1013,6 +1193,13 @@ pub enum PlanIssueCode {
     NotMounted,
     /// A scrub is already running.
     ScrubRunning,
+    /// The flexible RAID breaks the tier rule (made elsewhere), or flexible RAID cannot be
+    /// planned for this operation yet.
+    FlexLayoutUnsupported,
+    /// A growth of the flexible RAID was interrupted: complete it first.
+    FlexGrowthPending,
+    /// The fault tolerance of a flexible RAID cannot be changed.
+    ToleranceChangeUnsupported,
 }
 
 /// One error of a [`StoragePlan`].
@@ -1100,6 +1287,14 @@ pub enum PlanWarningCode {
     ArrayNotHealthy,
     /// A scrub reads every block, takes hours and wakes sleeping disks.
     ScrubCost,
+    /// Flexible RAID: `items` are disks with space no tier can use yet (`size_bytes` in all),
+    /// until another disk reaches the same size.
+    FlexUnusedSpace,
+    /// Flexible RAID: the reshapes move `size_bytes` and take about `count` hours in all
+    /// (estimated at 50 MB/s per tier, one tier at a time); the volume stays online.
+    FlexLongReshape,
+    /// Flexible RAID: tier `subject` tolerates only one disk while it is reshaped to RAID6.
+    FlexReducedToleranceWindow,
     /// A code this client does not know (newer server): show the English text.
     #[serde(other)]
     Other,
@@ -1159,6 +1354,24 @@ pub enum PlanStepKind {
     Scrub,
     CheckArray,
     WaitCheck,
+    /// Flexible RAID: make tier array `subject` an LVM physical volume.
+    CreatePv,
+    /// Flexible RAID: create the volume group `subject` from the tier arrays.
+    CreateVg,
+    /// Flexible RAID: create the logical volume `subject` over all the free space.
+    CreateLv,
+    /// Flexible RAID: add tier array `other` to the volume group `subject`.
+    ExtendVg,
+    /// Flexible RAID: grow the physical volume on tier array `subject` to the array size.
+    ResizePv,
+    /// Flexible RAID: grow the logical volume `subject` over the free space.
+    ExtendLv,
+    /// Turn off the write-intent bitmap of `subject` (a level change or reshape needs it).
+    BitmapOff,
+    /// Turn the write-intent bitmap of `subject` back on.
+    BitmapOn,
+    /// Flexible RAID: tell the kernel about partition `subject` on a disk in use.
+    AddPartitionLive,
     /// A kind this client does not know (newer server): show the English text.
     #[serde(other)]
     Other,
@@ -1293,9 +1506,16 @@ redacted_debug!(RecoveryKey);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct VolumeRecord {
     pub label: String,
-    /// md array UUID as mdadm prints it (`xxxxxxxx:xxxxxxxx:xxxxxxxx:xxxxxxxx`).
+    /// md array UUID as mdadm prints it (`xxxxxxxx:xxxxxxxx:xxxxxxxx:xxxxxxxx`). Empty for a
+    /// flexible RAID, whose arrays are in `tiers`.
     pub md_uuid: String,
     pub level: RaidLevel,
+    /// Flexible RAID: one md array per tier (`/dev/md/<label>_t<index>`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<TierRecord>,
+    /// Flexible RAID: the LVM volume group (`rynas_<label>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vg: Option<String>,
     /// LUKS2 container UUID when encrypted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub luks_uuid: Option<String>,
@@ -1307,6 +1527,26 @@ pub struct VolumeRecord {
     pub options: String,
     #[serde(default)]
     pub created_ms: u64,
+}
+
+/// One tier array of a flexible RAID [`VolumeRecord`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TierRecord {
+    /// 1-based tier number (`<label>_t<index>`).
+    pub index: u32,
+    /// md array UUID as mdadm prints it.
+    pub md_uuid: String,
+}
+
+impl VolumeRecord {
+    /// Every md array of the volume: the one array of a classic volume, or the tiers.
+    pub fn md_uuids(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self.tiers.iter().map(|t| t.md_uuid.as_str()).collect();
+        if !self.md_uuid.is_empty() {
+            v.insert(0, self.md_uuid.as_str());
+        }
+        v
+    }
 }
 
 /// Configuration key `storage.volumes`.
@@ -1535,5 +1775,77 @@ mod tests {
         assert_eq!(w.code, PlanWarningCode::Other);
         let k: PlanStepKind = serde_json::from_str(r#""teleport""#).unwrap();
         assert_eq!(k, PlanStepKind::Other);
+    }
+
+    #[test]
+    fn flexible_levels() {
+        assert_eq!(serde_json::to_string(&RaidLevel::Flex1).unwrap(), r#""flex1""#);
+        assert_eq!(
+            serde_json::from_str::<RaidLevel>(r#""flex2""#).unwrap(),
+            RaidLevel::Flex2
+        );
+        assert!(RaidLevel::Flex1.is_flexible() && !RaidLevel::Raid5.is_flexible());
+        assert_eq!(RaidLevel::Flex1.tolerance(), 1);
+        assert_eq!(RaidLevel::Flex2.tolerance(), 2);
+        assert_eq!(RaidLevel::Raid6.tolerance(), 2);
+        assert_eq!(RaidLevel::Single.tolerance(), 0);
+        assert_eq!(RaidLevel::flexible(2), Some(RaidLevel::Flex2));
+        assert_eq!(RaidLevel::flexible(0), None);
+    }
+
+    /// Records, trees and plans written before flexible RAID still parse, and a classic
+    /// record is written exactly as before.
+    #[test]
+    fn flexible_fields_are_optional() {
+        let old = r#"{"label":"vol1","md_uuid":"0a1b2c3d:4e5f6071:8293a4b5:c6d7e8f9","level":"raid5",
+            "fs_uuid":"3e6c1f0a-9b2d-4c8e-a7f1-5d0b2c4e6a81","mountpoint":"/vol1","options":"noatime"}"#;
+        let r: VolumeRecord = serde_json::from_str(old).unwrap();
+        assert!(r.tiers.is_empty() && r.vg.is_none());
+        assert_eq!(r.md_uuids(), ["0a1b2c3d:4e5f6071:8293a4b5:c6d7e8f9"]);
+        let j = serde_json::to_string(&r).unwrap();
+        assert!(!j.contains("tiers") && !j.contains("vg"), "{j}");
+
+        let flex = VolumeRecord {
+            label: "vol2".into(),
+            level: RaidLevel::Flex1,
+            tiers: vec![
+                TierRecord { index: 1, md_uuid: "11111111:22222222:33333333:44444444".into() },
+                TierRecord { index: 2, md_uuid: "55555555:66666666:77777777:88888888".into() },
+            ],
+            vg: Some("rynas_vol2".into()),
+            ..Default::default()
+        };
+        assert_eq!(flex.md_uuids().len(), 2);
+        let back: VolumeRecord =
+            serde_json::from_str(&serde_json::to_string(&flex).unwrap()).unwrap();
+        assert_eq!(back, flex);
+
+        let tree: VolumeTree = serde_json::from_str(
+            r#"{"id":"u","label":null,"fstype":"btrfs","mountpoint":null,"size":0,"used":0,
+            "health":"healthy","encrypted":false,"layers":[],"subvolumes":[]}"#,
+        )
+        .unwrap();
+        assert!(tree.flexible.is_none());
+        let p: StoragePlan = serde_json::from_str(
+            r#"{"operation":"scrub","valid":true,"errors":[],"warnings":[],"raw_bytes":0,
+            "usable_bytes":0,"fault_tolerance":0,"wasted_bytes":0,"summary":[],"steps":[]}"#,
+        )
+        .unwrap();
+        assert!(p.tiers_before.is_empty() && p.tiers_after.is_empty());
+        let k: FlexPendingKind = serde_json::from_str(r#""from_the_future""#).unwrap();
+        assert_eq!(k, FlexPendingKind::Other);
+    }
+
+    #[test]
+    fn flex_layout_health_is_the_worst_tier() {
+        let tier = |h| FlexTier { health: h, ..Default::default() };
+        let l = FlexLayout {
+            tolerance: 1,
+            tiers: vec![tier(ArrayHealth::Healthy), tier(ArrayHealth::Degraded)],
+            ..Default::default()
+        };
+        assert_eq!(l.health(), ArrayHealth::Degraded);
+        assert_eq!(l.level(), Some(RaidLevel::Flex1));
+        assert_eq!(FlexLayout::default().health(), ArrayHealth::Unknown);
     }
 }

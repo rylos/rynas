@@ -43,7 +43,13 @@ const UPDATE_INITRAMFS: &str = "/usr/sbin/update-initramfs";
 /// The md arrays of a `storage.volumes` value (empty when absent or invalid).
 fn md_uuids(v: Option<&Value>) -> std::collections::BTreeSet<String> {
     parse_volumes(v)
-        .map(|c| c.volumes.into_iter().map(|r| r.md_uuid).collect())
+        .map(|c| {
+            c.volumes
+                .iter()
+                .flat_map(|r| r.md_uuids())
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -69,6 +75,62 @@ pub fn fstab_line(r: &VolumeRecord) -> String {
         r.options,
         if r.luks_uuid.is_some() { ",noauto" } else { "" }
     )
+}
+
+/// The md arrays of a record come in one of two forms: one array (`md_uuid`), or for a
+/// flexible RAID one array per tier (`tiers`, numbered 1, 2, ... without gaps) and the
+/// volume group that joins them.
+fn check_arrays(r: &VolumeRecord) -> Result<(), rynas_config::Invalid> {
+    if !r.level.is_flexible() {
+        if !r.tiers.is_empty() || r.vg.is_some() {
+            return Err(format!("volume {}: tiers belong to a flexible RAID", r.label).into());
+        }
+        if !is_uuid(&r.md_uuid) {
+            return Err(format!("volume {}: invalid UUID", r.label).into());
+        }
+        return Ok(());
+    }
+    if !r.md_uuid.is_empty() {
+        return Err(format!("volume {}: a flexible RAID lists its arrays in tiers", r.label).into());
+    }
+    if r.tiers.is_empty() {
+        return Err(format!("volume {}: a flexible RAID needs at least one tier", r.label).into());
+    }
+    for (i, t) in r.tiers.iter().enumerate() {
+        if t.index as usize != i + 1 {
+            return Err(format!("volume {}: tiers must be numbered 1, 2, ... in order", r.label).into());
+        }
+        if !is_uuid(&t.md_uuid) {
+            return Err(format!("volume {}: invalid UUID of tier {}", r.label, t.index).into());
+        }
+    }
+    let vg_ok = r.vg.as_deref().is_some_and(|v| {
+        !v.is_empty()
+            && v.len() <= 64
+            && !v.starts_with('-')
+            && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'+' | b'-'))
+    });
+    if !vg_ok {
+        return Err(format!("volume {}: invalid volume group name", r.label).into());
+    }
+    Ok(())
+}
+
+/// The `/etc/mdadm/mdadm.conf` lines of a volume: one array, or one per tier (with
+/// `AUTO -all` only listed arrays are assembled, so every tier must be there).
+fn mdadm_lines(r: &VolumeRecord) -> String {
+    if r.tiers.is_empty() {
+        return format!("ARRAY /dev/md/{} metadata=1.2 UUID={}\n", r.label, r.md_uuid);
+    }
+    r.tiers
+        .iter()
+        .map(|t| {
+            format!(
+                "ARRAY /dev/md/{}_t{} metadata=1.2 UUID={}\n",
+                r.label, t.index, t.md_uuid
+            )
+        })
+        .collect()
 }
 
 pub struct VolumesDomain;
@@ -100,9 +162,10 @@ impl Applier for VolumesDomain {
                     format!("volume {}: the mount point must be /{}", r.label, r.label).into(),
                 );
             }
-            if !is_uuid(&r.md_uuid) || !is_uuid(&r.fs_uuid) {
+            if !is_uuid(&r.fs_uuid) {
                 return Err(format!("volume {}: invalid UUID", r.label).into());
             }
+            check_arrays(r)?;
             if r.luks_uuid.as_deref().is_some_and(|u| !is_uuid(u)) {
                 return Err(format!("volume {}: invalid LUKS UUID", r.label).into());
             }
@@ -132,16 +195,7 @@ impl Applier for VolumesDomain {
                     .map(|u| format!("{} UUID={u} none luks,noauto\n", mapper_name(&r.label)))
             })
             .collect();
-        let mdadm: String = c
-            .volumes
-            .iter()
-            .map(|r| {
-                format!(
-                    "ARRAY /dev/md/{} metadata=1.2 UUID={}\n",
-                    r.label, r.md_uuid
-                )
-            })
-            .collect();
+        let mdadm: String = c.volumes.iter().map(mdadm_lines).collect();
         Ok(vec![
             ManagedFile::block(FSTAB, "storage", fstab),
             ManagedFile::block(CRYPTTAB, "storage", crypttab),
@@ -433,7 +487,7 @@ pub fn propose_stripe_cache(level: &str, members: u32, ram_bytes: u64) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rynas_api_types::storage::{ArrayTuning, DiskOverride, RaidLevel};
+    use rynas_api_types::storage::{ArrayTuning, DiskOverride, RaidLevel, TierRecord};
     use rynas_config::{Config, ConfigOptions, MemorySystem};
     use std::sync::Arc;
 
@@ -447,6 +501,7 @@ mod tests {
             mountpoint: format!("/{label}"),
             options: "noatime,compress=zstd:1".into(),
             created_ms: 1,
+            ..Default::default()
         }
     }
 
@@ -637,6 +692,66 @@ mod tests {
         cfg.stage("alice", VOLUMES_KEY, Some(serde_json::to_value(&c).unwrap())).unwrap();
         cfg.apply("alice", "alice", "", &|_| {}, &|| false).unwrap();
         assert_eq!(count(), 1, "unchanged arrays");
+    }
+
+    fn flex_record(label: &str) -> VolumeRecord {
+        VolumeRecord {
+            md_uuid: String::new(),
+            level: RaidLevel::Flex1,
+            tiers: vec![
+                TierRecord { index: 1, md_uuid: "11111111:22222222:33333333:44444444".into() },
+                TierRecord { index: 2, md_uuid: "55555555:66666666:77777777:88888888".into() },
+            ],
+            vg: Some(format!("rynas_{label}")),
+            ..record(label, false)
+        }
+    }
+
+    #[test]
+    fn flexible_volume_records() {
+        let ok = |r: VolumeRecord| {
+            VolumesDomain
+                .validate(serde_json::to_value(StorageVolumes { volumes: vec![r] }).unwrap())
+                .is_ok()
+        };
+        assert!(ok(flex_record("vol2")));
+        assert!(ok(record("vol2", false)));
+        // one form or the other, never both, never neither
+        let mut r = flex_record("vol2");
+        r.md_uuid = "0a1b2c3d:4e5f6071:8293a4b5:c6d7e8f9".into();
+        assert!(!ok(r));
+        let mut r = flex_record("vol2");
+        r.tiers.clear();
+        assert!(!ok(r));
+        let mut r = record("vol2", false);
+        r.tiers = flex_record("vol2").tiers;
+        assert!(!ok(r));
+        let mut r = flex_record("vol2");
+        r.tiers[1].index = 3;
+        assert!(!ok(r), "tiers numbered without gaps");
+        let mut r = flex_record("vol2");
+        r.vg = Some("bad name".into());
+        assert!(!ok(r));
+        let mut r = flex_record("vol2");
+        r.vg = None;
+        assert!(!ok(r));
+
+        // one ARRAY line per tier, and the tiers count as arrays for the initramfs
+        assert_eq!(
+            mdadm_lines(&flex_record("vol2")),
+            "ARRAY /dev/md/vol2_t1 metadata=1.2 UUID=11111111:22222222:33333333:44444444\n\
+             ARRAY /dev/md/vol2_t2 metadata=1.2 UUID=55555555:66666666:77777777:88888888\n"
+        );
+        let v = serde_json::to_value(StorageVolumes {
+            volumes: vec![flex_record("vol2"), record("photos", false)],
+        })
+        .unwrap();
+        assert_eq!(md_uuids(Some(&v)).len(), 3);
+        let mut grown = flex_record("vol2");
+        grown.tiers.push(TierRecord { index: 3, md_uuid: "99999999:aaaaaaaa:bbbbbbbb:cccccccc".into() });
+        let w = serde_json::to_value(StorageVolumes { volumes: vec![grown, record("photos", false)] })
+            .unwrap();
+        assert_ne!(md_uuids(Some(&v)), md_uuids(Some(&w)), "a new tier refreshes the initramfs");
     }
 
     #[test]

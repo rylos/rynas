@@ -1151,6 +1151,8 @@ sto.lvl.raid1	RAID 1
 sto.lvl.raid5	RAID 5
 sto.lvl.raid6	RAID 6
 sto.lvl.raid10	RAID 10
+sto.lvl.flex1	RAID flessibile, tolleranza 1 disco
+sto.lvl.flex2	RAID flessibile, tolleranza 2 dischi
 sto.sync.resync	Sincronizzazione
 sto.sync.recovery	Ricostruzione
 sto.sync.check	Controllo parità
@@ -1346,6 +1348,8 @@ wiz.d_raid1	Mirror: ogni disco contiene una copia completa.
 wiz.d_raid5	Parità singola: sopravvive a un disco guasto.
 wiz.d_raid6	Doppia parità: sopravvive a due dischi guasti.
 wiz.d_raid10	Mirror in striping: veloce, sopravvive a un guasto per mirror.
+wiz.d_flex1	Dischi di dimensioni diverse, tutto il loro spazio usato: sopravvive a un disco guasto.
+wiz.d_flex2	Dischi di dimensioni diverse, tutto il loro spazio usato: sopravvive a due dischi guasti.
 wiz.label	Nome del volume
 wiz.label_hint	Montato in {path}.
 wiz.label_invalid	Usa da 1 a 16 lettere minuscole, cifre o trattini, iniziando con una lettera.

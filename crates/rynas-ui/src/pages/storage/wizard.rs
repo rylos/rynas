@@ -25,9 +25,9 @@ const LEVELS: [RaidLevel; 6] = [RaidLevel::Single, RaidLevel::Raid1, RaidLevel::
 fn allowed(l: RaidLevel, n: usize) -> bool {
     match l {
         RaidLevel::Single => n == 1,
-        RaidLevel::Raid0 | RaidLevel::Raid1 => n >= 2,
+        RaidLevel::Raid0 | RaidLevel::Raid1 | RaidLevel::Flex1 => n >= 2,
         RaidLevel::Raid5 => n >= 3,
-        RaidLevel::Raid6 => n >= 4,
+        RaidLevel::Raid6 | RaidLevel::Flex2 => n >= 4,
         RaidLevel::Raid10 => n >= 4 && n.is_multiple_of(2),
     }
 }
@@ -35,9 +35,9 @@ fn allowed(l: RaidLevel, n: usize) -> bool {
 fn min_key(l: RaidLevel) -> &'static str {
     match l {
         RaidLevel::Single => "wiz.min_single",
-        RaidLevel::Raid0 | RaidLevel::Raid1 => "wiz.min2",
+        RaidLevel::Raid0 | RaidLevel::Raid1 | RaidLevel::Flex1 => "wiz.min2",
         RaidLevel::Raid5 => "wiz.min3",
-        RaidLevel::Raid6 => "wiz.min4",
+        RaidLevel::Raid6 | RaidLevel::Flex2 => "wiz.min4",
         RaidLevel::Raid10 => "wiz.min_even4",
     }
 }
@@ -50,6 +50,8 @@ fn desc_key(l: RaidLevel) -> &'static str {
         RaidLevel::Raid5 => "wiz.d_raid5",
         RaidLevel::Raid6 => "wiz.d_raid6",
         RaidLevel::Raid10 => "wiz.d_raid10",
+        RaidLevel::Flex1 => "wiz.d_flex1",
+        RaidLevel::Flex2 => "wiz.d_flex2",
     }
 }
 

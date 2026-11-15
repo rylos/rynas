@@ -219,6 +219,7 @@ pub fn arrays_from(mdstat: &str, array_state: &dyn Fn(&str) -> Option<String>) -
                 members: a.members.iter().map(|m| m.device.clone()).collect(),
                 state: overview_state(a, st.as_deref()),
                 sync_pct: a.sync.as_ref().and_then(|s| s.pct),
+                tiers: Vec::new(),
             }
         })
         .collect()
@@ -316,6 +317,7 @@ pub fn btrfs_arrays(host: &dyn Host) -> Vec<RaidArray> {
                 members,
                 state: if degraded { "degraded" } else { "clean" }.into(),
                 sync_pct: None,
+                tiers: Vec::new(),
             })
         })
         .collect()

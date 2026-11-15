@@ -172,6 +172,10 @@ pub struct RaidArray {
     pub state: String,
     /// Progress of a resync/recovery/check, 0..=100.
     pub sync_pct: Option<f32>,
+    /// A flexible RAID ("flex1"/"flex2": `name` is the volume label, `members` the disks):
+    /// its tier arrays, lowest first. Empty for an md array or a btrfs filesystem.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<RaidArray>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -194,6 +198,11 @@ impl RaidArray {
     /// A btrfs filesystem with its own RAID profile, not an md array (no md page for it).
     pub fn is_btrfs(&self) -> bool {
         self.level.starts_with("btrfs")
+    }
+
+    /// A flexible RAID: several md arrays (`tiers`) shown as one volume (no md page for it).
+    pub fn is_flexible(&self) -> bool {
+        self.level.starts_with("flex")
     }
 }
 

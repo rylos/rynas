@@ -130,6 +130,7 @@ fn storage() -> StorageOverview {
                 members: vec!["sda3".into(), "sdb3".into(), "sdc3".into()],
                 state: "resyncing".into(),
                 sync_pct: Some(42.6),
+                tiers: Vec::new(),
             },
             RaidArray {
                 name: "md0".into(),
@@ -138,6 +139,7 @@ fn storage() -> StorageOverview {
                 members: vec!["sda1".into(), "sdb1".into(), "sdc1".into(), "sdd1".into()],
                 state: "clean".into(),
                 sync_pct: None,
+                tiers: Vec::new(),
             },
         ],
         filesystems: vec![

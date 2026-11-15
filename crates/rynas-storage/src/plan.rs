@@ -17,14 +17,14 @@ use rynas_api_types::storage::{
 
 use crate::Inventory;
 
-const MIB: u64 = 1 << 20;
+pub(crate) const MIB: u64 = 1 << 20;
 /// Partition starts at 1 MiB (sgdisk default alignment).
-const PART_START: u64 = MIB;
+pub(crate) const PART_START: u64 = MIB;
 /// Left free at the end of each disk so that a replacement "of the same size" from another
 /// vendor (a few MB smaller) still fits.
 pub const END_RESERVE: u64 = 128 * MIB;
 /// md 1.2 superblock, bitmap and data offset (mdadm reserves room for reshapes). Estimate.
-const MD_OVERHEAD: u64 = 128 * MIB;
+pub(crate) const MD_OVERHEAD: u64 = 128 * MIB;
 /// LUKS2 header with the default 16 MiB metadata area.
 const LUKS_HEADER: u64 = 16 * MIB;
 /// Argon2id memory cap (KiB) so a 4 GB NAS does not run out of memory while unlocking.
@@ -150,6 +150,22 @@ fn step_english(kind: PlanStepKind, a: &PlanArgs) -> String {
             return format!("Check the parity/mirrors of {s} (read-only, counts mismatches)");
         }
         K::WaitCheck => return format!("Wait for the {s} check, then read mismatch_cnt"),
+        K::CreatePv => return format!("Make {s} an LVM physical volume"),
+        K::CreateVg => return format!("Create the volume group {s} from the tier arrays"),
+        K::CreateLv => return format!("Create the logical volume {s} over all the free space"),
+        K::ExtendVg => {
+            let o = a.other.as_deref().unwrap_or("");
+            return format!("Add {o} to the volume group {s}");
+        }
+        K::ResizePv => return format!("Grow the physical volume on {s} to the array size"),
+        K::ExtendLv => return format!("Grow the logical volume {s} over the free space"),
+        K::BitmapOff => {
+            return format!("Turn off the write-intent bitmap of {s} for the level change");
+        }
+        K::BitmapOn => return format!("Turn the write-intent bitmap of {s} back on"),
+        K::AddPartitionLive => {
+            return format!("Tell the kernel about the new partition {s} (the disk is in use)");
+        }
         K::WaitUdev => "Wait for udev to create the partition nodes",
         K::RecordArray => "Record the array so it is assembled at boot",
         K::LuksFormat => "Format the array as LUKS2 (Argon2id, 256 MiB memory, 4 KiB sectors)",
@@ -241,6 +257,24 @@ fn warning_english(code: PlanWarningCode, a: &PlanArgs) -> String {
                 "{s} is not healthy: a scrub can find but not repair errors without redundancy"
             );
         }
+        W::FlexUnusedSpace => {
+            let gb = a.size_bytes.unwrap_or(0) as f64 / 1e9;
+            return format!(
+                "{gb:.1} GB on {items} stay unused until another disk reaches the same size"
+            );
+        }
+        W::FlexLongReshape => {
+            let gb = a.size_bytes.unwrap_or(0) as f64 / 1e9;
+            let h = a.count.unwrap_or(0);
+            return format!(
+                "the tiers are reshaped one after the other ({gb:.0} GB, about {h} h); the volume stays online"
+            );
+        }
+        W::FlexReducedToleranceWindow => {
+            return format!(
+                "tier {s} tolerates only one failed disk while it is reshaped to RAID6"
+            );
+        }
         W::MixedKinds => {
             "mixed disk types (HDD/SSD/NVMe): the array runs at the speed of the slowest"
         }
@@ -311,16 +345,19 @@ pub fn level_name(l: RaidLevel) -> &'static str {
         RaidLevel::Raid5 => "raid5",
         RaidLevel::Raid6 => "raid6",
         RaidLevel::Raid10 => "raid10",
+        RaidLevel::Flex1 => "flex1",
+        RaidLevel::Flex2 => "flex2",
     }
 }
 
-/// md level number for `mdadm --level`.
+/// md level number for `mdadm --level`. A flexible RAID has one array per tier: its full
+/// width tiers get the level named here, narrower ones are chosen by [`crate::flex::tiers`].
 fn md_level(l: RaidLevel) -> &'static str {
     match l {
         RaidLevel::Single | RaidLevel::Raid1 => "1",
         RaidLevel::Raid0 => "0",
-        RaidLevel::Raid5 => "5",
-        RaidLevel::Raid6 => "6",
+        RaidLevel::Raid5 | RaidLevel::Flex1 => "5",
+        RaidLevel::Raid6 | RaidLevel::Flex2 => "6",
         RaidLevel::Raid10 => "10",
     }
 }
@@ -329,9 +366,9 @@ fn md_level(l: RaidLevel) -> &'static str {
 fn count_ok(l: RaidLevel, n: usize) -> Result<(), String> {
     let (min, extra) = match l {
         RaidLevel::Single => (1, n == 1),
-        RaidLevel::Raid0 | RaidLevel::Raid1 => (2, true),
+        RaidLevel::Raid0 | RaidLevel::Raid1 | RaidLevel::Flex1 => (2, true),
         RaidLevel::Raid5 => (3, true),
-        RaidLevel::Raid6 => (4, true),
+        RaidLevel::Raid6 | RaidLevel::Flex2 => (4, true),
         RaidLevel::Raid10 => (4, n.is_multiple_of(2)),
     };
     if n < min {
@@ -349,14 +386,16 @@ fn count_ok(l: RaidLevel, n: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Data-bearing members out of `n` and guaranteed fault tolerance.
+/// Data-bearing members out of `n` and guaranteed fault tolerance. For a flexible RAID this
+/// is the case of disks of one size (one tier); mixed sizes are counted by
+/// [`crate::flex::tiers`].
 pub fn capacity_factor(l: RaidLevel, n: u64) -> (u64, u32) {
     match l {
         RaidLevel::Single => (1, 0),
         RaidLevel::Raid0 => (n, 0),
         RaidLevel::Raid1 => (1, (n - 1) as u32),
-        RaidLevel::Raid5 => (n - 1, 1),
-        RaidLevel::Raid6 => (n - 2, 2),
+        RaidLevel::Raid5 | RaidLevel::Flex1 => (n - 1, 1),
+        RaidLevel::Raid6 | RaidLevel::Flex2 => (n - 2, 2),
         RaidLevel::Raid10 => (n / 2, 1),
     }
 }
@@ -373,7 +412,9 @@ fn level_from_md(level: &str, raid_disks: u32) -> Option<RaidLevel> {
     })
 }
 
-fn usable_partition(disk_size: u64) -> u64 {
+/// Bytes of a disk a partition can use: from [`PART_START`] to [`END_RESERVE`] before the
+/// end, in whole MiB.
+pub(crate) fn usable_partition(disk_size: u64) -> u64 {
     disk_size.saturating_sub(PART_START + END_RESERVE) / MIB * MIB
 }
 
@@ -577,6 +618,16 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
             PlanIssueCode::DiskCount
         };
         fail(&mut p, code, "disks", None, e);
+    }
+    if req.level.is_flexible() {
+        // the tier planner comes with the write side of flexible RAID
+        fail(
+            &mut p,
+            PlanIssueCode::FlexLayoutUnsupported,
+            "level",
+            None,
+            "flexible RAID volumes cannot be created yet".into(),
+        );
     }
     let mut chosen: Vec<DiskSummary> = Vec::new();
     for name in &req.disks {
@@ -1681,6 +1732,41 @@ mod tests {
             );
             assert!(p.errors.iter().any(|e| e.contains(msg)), "{:?}", p.errors);
         }
+    }
+
+    /// Until the tier planner exists, a flexible level is refused with its own issue (and
+    /// the disk count rules of the tolerance still apply).
+    #[test]
+    fn flexible_levels_are_refused_for_now() {
+        let inv = nas_inventory();
+        for (level, disks) in [
+            (RaidLevel::Flex1, vec!["sdd", "sde"]),
+            (RaidLevel::Flex2, vec!["sdd", "sde"]),
+        ] {
+            let p = plan_volume(
+                &inv,
+                &VolumePlanRequest {
+                    disks: disks.into_iter().map(String::from).collect(),
+                    level,
+                    encrypt: false,
+                    compress: true,
+                    label: "x".into(),
+                },
+            );
+            assert!(!p.valid && p.steps.is_empty());
+            assert!(
+                p.issues
+                    .iter()
+                    .any(|i| i.code == PlanIssueCode::FlexLayoutUnsupported
+                        && i.field.as_deref() == Some("level")),
+                "{:?}",
+                p.issues
+            );
+            assert_codes_match(&p);
+            let count = p.issues.iter().any(|i| i.code == PlanIssueCode::DiskCount);
+            assert_eq!(count, level == RaidLevel::Flex2, "{level:?}");
+        }
+        assert_eq!(level_name(RaidLevel::Flex2), "flex2");
     }
 
     #[test]

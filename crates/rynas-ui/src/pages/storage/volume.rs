@@ -792,6 +792,8 @@ fn level_str(l: RaidLevel) -> &'static str {
         RaidLevel::Raid5 => "raid5",
         RaidLevel::Raid6 => "raid6",
         RaidLevel::Raid10 => "raid10",
+        RaidLevel::Flex1 => "flex1",
+        RaidLevel::Flex2 => "flex2",
     }
 }
 

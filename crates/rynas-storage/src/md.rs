@@ -310,6 +310,8 @@ pub struct SysMd {
     pub mismatch_cnt: Option<u64>,
     pub sync_action: Option<String>,
     pub bitmap_location: Option<String>,
+    /// `reshape_position`: a sector while a reshape runs or stopped half way.
+    pub reshape_position: Option<u64>,
     /// member → (state, slot, errors)
     pub members: HashMap<String, (String, Option<u32>, Option<u64>)>,
 }
@@ -326,6 +328,7 @@ pub fn read_sysfs(host: &dyn Host, md: &str) -> SysMd {
         mismatch_cnt: r("mismatch_cnt").and_then(|v| v.parse().ok()),
         sync_action: r("sync_action"),
         bitmap_location: r("bitmap/location"),
+        reshape_position: r("reshape_position").and_then(|v| v.parse().ok()),
         members: HashMap::new(),
     };
     for e in host.list(&base) {
@@ -479,6 +482,7 @@ pub fn build(
         mismatch_cnt: sys.mismatch_cnt,
         members,
         stale,
+        reshape_position: sys.reshape_position,
     }
 }
 
