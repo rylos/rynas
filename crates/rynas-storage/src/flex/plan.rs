@@ -573,16 +573,29 @@ impl View {
             .find(|p| p.tier == t.index && p.start == t.start && p.end == t.end)
     }
 
-    /// Fresh slice partitions of tier `t` that are not in its array, except on the disk
-    /// being replaced (`old`: once cleared, its partitions are fresh too).
-    fn candidates(&self, t: &VTier, old: Option<&str>) -> Vec<&VPart> {
+    /// Fresh slice partitions of tier `t` that are not in its array, on the disks of the
+    /// volume (a member of a tier, or planned in one) and on the goal's new disks. Never on
+    /// the disk being replaced (once cleared, its partitions are fresh too), nor on a disk
+    /// in no tier that the goal does not name: slices left there (a replaced disk whose
+    /// partition table could not be cleared after its superblocks were, or a new disk
+    /// partitioned by a growth that stopped before adding it) are never adopted silently;
+    /// adding that disk again clears it ([`partition_steps`]).
+    fn candidates(&self, t: &VTier, g: &Goal) -> Vec<&VPart> {
         self.disks
             .iter()
-            .filter(|d| Some(d.name.as_str()) != old)
+            .filter(|d| g.old.as_deref() != Some(d.name.as_str()))
+            .filter(|d| g.new.contains(&d.name) || self.in_some_tier(&d.name))
             .flat_map(|d| d.parts.iter())
             .filter(|p| p.tier == t.index && p.start == t.start && p.end == t.end)
             .filter(|p| p.fresh && t.member(&p.kname).is_none())
             .collect()
+    }
+
+    /// The disk holds a member of a tier (any role) or is planned in one.
+    fn in_some_tier(&self, disk: &str) -> bool {
+        self.tiers
+            .iter()
+            .any(|t| t.planned.iter().any(|d| d == disk) || t.members.iter().any(|m| m.disk == disk))
     }
 
     fn part_disk(&self, kname: &str) -> String {
@@ -1003,8 +1016,9 @@ fn dev(p: &str) -> String {
 /// missing one alone, announced to the kernel with `partx`.
 ///
 /// A new disk with slices of this volume left over (a member once: replaced, or gone and
-/// back, its partitions in no array) is cleared like a blank one, the md superblocks of its
-/// partitions first (the same partitions made again would carry them). A disk holding a
+/// back, its partitions in no array; or partitioned by a growth that stopped before adding
+/// it) is cleared like a blank one, the md superblocks of its partitions first (the same
+/// partitions made again would carry them). A disk holding a
 /// live member is never cleared.
 fn partition_steps(v: &mut View, target: &[Tier], new: &[String]) -> Result<Vec<PlanStep>, String> {
     let mut steps = Vec::new();
@@ -1018,7 +1032,7 @@ fn partition_steps(v: &mut View, target: &[Tier], new: &[String]) -> Result<Vec<
         };
         let wanted: Vec<&Tier> = target.iter().filter(|t| t.members.contains(&disk)).collect();
         let live = v.tiers.iter().any(|t| t.members.iter().any(|m| m.disk == disk));
-        let leftover = new.contains(&disk) && !live && vd.parts.iter().any(|p| !p.fresh);
+        let leftover = new.contains(&disk) && !live && !vd.parts.is_empty();
         let blank = new.contains(&disk) && (vd.parts.is_empty() || leftover);
         if !leftover {
             for t in &wanted {
@@ -1212,7 +1226,7 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
     };
     let idle = |t: &VTier| t.sync.is_none() && !t.interrupted && t.replacing.is_none();
     let change_pending = |t: &VTier| {
-        !v.candidates(t, g.old.as_deref()).is_empty() || t.count(MemberRole::Spare) > 0 || replace_pending(t)
+        !v.candidates(t, g).is_empty() || t.count(MemberRole::Spare) > 0 || replace_pending(t)
     };
 
     // a write-intent bitmap back on as soon as its tier is done (also on a tier still short
@@ -1361,7 +1375,7 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
             (t.member(&p.kname).is_none() && working && g.old.as_deref() != Some(&dk.name)).then_some(p)
         });
         let Some(out) = out else { continue };
-        let others = v.candidates(t, g.old.as_deref()).iter().filter(|p| p.kname != out.kname).count();
+        let others = v.candidates(t, g).iter().filter(|p| p.kname != out.kname).count();
         if t.active() + 1 + others < 4 {
             continue;
         }
@@ -1419,7 +1433,7 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
         }
         let slots = (t.degraded() as usize).saturating_sub(t.count(MemberRole::Rebuilding));
         let cands: Vec<String> = v
-            .candidates(t, g.old.as_deref())
+            .candidates(t, g)
             .into_iter()
             .take(slots)
             .map(|p| dev(&p.kname))
@@ -1494,7 +1508,7 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
             };
         }
         // joins
-        let cands: Vec<&VPart> = v.candidates(t, g.old.as_deref());
+        let cands: Vec<&VPart> = v.candidates(t, g);
         let spares: Vec<&VMember> = t
             .members
             .iter()
@@ -1567,15 +1581,12 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
     // initramfs does, finds an outdated copy of a tier and gives up on the whole array),
     // then its partition table goes (a slice of the volume that is not a member would be
     // taken for a new disk's partition waiting to join): the disk is free again. For a
-    // "missing" disk: a disk with only leftover slices of the volume, once no tier misses a
-    // disk any more (while one does, that disk may still be the one to put back). The steps
+    // "missing" disk: a disk with only leftover slices of the volume (with or without their
+    // superblocks), once no tier misses a disk any more (while one does, that disk may still
+    // be the one to put back). The steps
     // erase the disk (the plan names it, the executor checks it is still that disk) and are
     // best effort: the volume no longer needs the disk, which may be unreadable.
-    let in_no_tier = |name: &str| {
-        v.tiers
-            .iter()
-            .all(|t| t.members.iter().all(|m| m.disk != name) && !t.planned.iter().any(|d| d == name))
-    };
+    let in_no_tier = |name: &str| !v.in_some_tier(name);
     let clear: Option<&VDisk> = match g.old.as_deref() {
         None => None,
         Some(MISSING) => {
@@ -1584,7 +1595,6 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
                 healthy
                     && !g.new.contains(&dk.name)
                     && !dk.parts.is_empty()
-                    && dk.parts.iter().all(|p| !p.fresh)
                     && in_no_tier(&dk.name)
             })
         }

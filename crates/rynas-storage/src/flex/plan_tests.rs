@@ -169,7 +169,11 @@ fn converges(start: &View, goal: &Goal, target: &[Tier], steps: &[PlanStep], end
         growth_steps(&mut w, goal, Some(target)).unwrap();
         assert_eq!(shape(&w), shape(end), "same goal after step {i}: {}", steps.get(i.saturating_sub(1)).map(line).unwrap_or_default());
         assert_eq!((w.lv_size, w.vg_free, w.fs.clone()), (end.lv_size, end.vg_free, end.fs.clone()), "after step {i}");
-        if complete_too && i >= prelude {
+        // complete takes a new disk's slices only once the disk is in a tier: before, they
+        // are slices on a disk in no tier, never adopted silently (adding the disk again
+        // clears and uses it)
+        let adopted = goal.new.iter().all(|d| v.in_some_tier(d));
+        if complete_too && i >= prelude && adopted {
             let mut w = v.clone();
             growth_steps(&mut w, &Goal::default(), None).unwrap();
             assert_eq!(shape(&w), shape(end), "complete after step {i}: {}", line(&steps[i.saturating_sub(1)]));
@@ -978,4 +982,68 @@ fn complete_the_partitions_of_a_new_tier() {
     let create = g.iter().find(|x| x.starts_with("mdadm --create /dev/md/vol2_t2")).expect("tier 2 created");
     assert!(create.contains("--level=1 --raid-devices=3") && create.contains("/dev/sde2"), "{create}");
     assert_eq!(shape(&w), shape(&end));
+}
+
+/// A replace whose last step (the old disk's partition table) failed leaves that disk with
+/// clean slices of the volume in no array. A later growth by another disk, and complete,
+/// never touch it (they do not add its slices to a tier); a growth naming it clears it
+/// first (the plan says it is erased); a replace of a missing disk clears it at the end.
+#[test]
+fn leftover_slices_without_superblocks_are_never_adopted() {
+    let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
+    let mut v = start.clone();
+    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new() });
+    let g = tiers::replace(&v.shapes(), &v.layout_disks(), "sda", &("sdd".into(), 12 * TB), 1, MIN_TIER).unwrap();
+    let goal = Goal { old: Some("sda".into()), new: vec!["sdd".into()] };
+    let steps = growth_steps(&mut v, &goal, Some(&g.tiers)).unwrap();
+    assert_eq!(line(steps.last().unwrap()), "sgdisk --zap-all /dev/sda");
+    // the superblock went, the partition table stayed: the inventory finds sda by its
+    // partition label again, with a clean slice of tier 1
+    let old_part = start.disks.iter().find(|d| d.name == "sda").unwrap().parts[0].clone();
+    assert_eq!(old_part.tier, 1);
+    v.disks.retain(|d| d.name != "sda");
+    v.disks.push(VDisk { name: "sda".into(), size: 4 * TB, parts: vec![VPart { fresh: true, ..old_part }] });
+    let after_replace = v.clone();
+    let touches_sda = |steps: &[PlanStep]| {
+        steps.iter().any(|s| line(s).contains("/dev/sda") || s.destroys.contains(&"sda".to_string()))
+    };
+
+    // complete: nothing to do, sda is not added
+    let mut w = after_replace.clone();
+    let got = growth_steps(&mut w, &Goal::default(), None).unwrap();
+    assert!(got.is_empty(), "{:?}", lines(&got));
+
+    // growing by another disk: sda stays out of every tier
+    let Grown { steps, end, .. } = grow_view(&after_replace, &[("sde", 8)]);
+    assert!(!touches_sda(&steps), "{:?}", lines(&steps));
+    assert!(lines(&steps).contains(&"mdadm /dev/md/vol2_t1 --add /dev/sde1".to_string()));
+    assert!(!end.in_some_tier("sda"));
+
+    // growing by sda itself: cleared like a blank disk, then used
+    let mut w = after_replace.clone();
+    let ns = vec![("sda".to_string(), 4 * TB)];
+    let growth = tiers::grow(&w.shapes(), &w.layout_disks(), &ns, 1, MIN_TIER);
+    let goal = Goal { old: None, new: vec!["sda".into()] };
+    let begin = w.clone();
+    let steps = growth_steps(&mut w, &goal, Some(&growth.tiers)).unwrap();
+    kinds_ok(&steps);
+    let l = lines(&steps);
+    assert_eq!(l[..2], ["wipefs --all /dev/sda", "sgdisk --zap-all /dev/sda"], "{l:?}");
+    assert!(steps[..2].iter().all(|s| s.destroys == ["sda"]));
+    assert!(l.contains(&"mdadm /dev/md/vol2_t1 --add /dev/sda1".to_string()), "{l:?}");
+    converges(&begin, &goal, &growth.tiers, &steps, &w, true);
+
+    // a replace of a missing disk: sda is cleared at the end, once no tier misses a disk
+    let mut v = after_replace.clone();
+    for t in &mut v.tiers {
+        t.members.retain(|m| m.disk != "sdb");
+    }
+    v.disks.retain(|d| d.name != "sdb");
+    v.disks.push(VDisk { name: "sdf".into(), size: 8 * TB, parts: Vec::new() });
+    let (goal, target) = replace_missing(&v, ("sdf", 8 * TB));
+    let steps = growth_steps(&mut v, &goal, Some(&target)).unwrap();
+    let n = steps.len();
+    assert_eq!(line(&steps[n - 1]), "sgdisk --zap-all /dev/sda", "{:?}", lines(&steps));
+    assert!(steps[n - 1].destroys == ["sda"] && steps[n - 1].best_effort);
+    assert!(!touches_sda(&steps[..n - 1]), "{:?}", lines(&steps));
 }
