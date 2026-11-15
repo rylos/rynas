@@ -14,6 +14,7 @@
 //! | POST | `/api/v1/storage/plan/volume` | [`VolumePlanRequest`] | [`StoragePlan`] |
 //! | POST | `/api/v1/storage/plan/grow` | [`GrowPlanRequest`] | [`StoragePlan`] |
 //! | POST | `/api/v1/storage/plan/replace` | [`ReplacePlanRequest`] | [`StoragePlan`] |
+//! | POST | `/api/v1/storage/plan/complete` | [`CompletePlanRequest`] | [`StoragePlan`] |
 //! | POST | `/api/v1/storage/plan/scrub` | [`ScrubPlanRequest`] | [`StoragePlan`] |
 //!
 //! The write side (volumes, subvolumes, disk settings) is listed above
@@ -1220,6 +1221,9 @@ pub enum PlanIssueCode {
     FlexGrowthPending,
     /// The fault tolerance of a flexible RAID cannot be changed.
     ToleranceChangeUnsupported,
+    /// The last scrub of the filesystem found errors it could not correct: a reshape would
+    /// spread them; restore the damaged files first.
+    ScrubErrors,
 }
 
 /// One error of a [`StoragePlan`].
@@ -1315,6 +1319,9 @@ pub enum PlanWarningCode {
     FlexLongReshape,
     /// Flexible RAID: tier `subject` tolerates only one disk while it is reshaped to RAID6.
     FlexReducedToleranceWindow,
+    /// Flexible RAID: no scrub of the filesystem on `subject` (mount point) finished without
+    /// errors in the last `count` days: a read error during the reshapes is the main risk.
+    FlexNoRecentScrub,
     /// A code this client does not know (newer server): show the English text.
     #[serde(other)]
     Other,
@@ -1404,6 +1411,7 @@ pub enum PlanStepKind {
 // | POST | `/api/v1/storage/volumes` | [`VolumeCreateRequest`] | 202 `TaskStarted`, or 200 [`StoragePlan`] with `dry_run` |
 // | POST | `/api/v1/storage/volumes/{name}/grow` | [`VolumeGrowRequest`] | 202 / 200 (dry run) |
 // | POST | `/api/v1/storage/volumes/{name}/replace` | [`VolumeReplaceRequest`] | 202 / 200 (dry run) |
+// | POST | `/api/v1/storage/volumes/{name}/complete` | [`VolumeCompleteRequest`] | 202 / 200 (dry run) |
 // | POST | `/api/v1/storage/volumes/{name}/scrub` | [`VolumeScrubRequest`] | 202 / 200 (dry run) |
 // | POST | `/api/v1/storage/volumes/{name}/unlock` | [`UnlockRequest`] | 202 |
 // | POST | `/api/v1/storage/volumes/{name}/lock` | — | 202 |
@@ -1457,7 +1465,7 @@ pub struct VolumeGrowRequest {
 }
 
 /// `POST /api/v1/storage/volumes/{name}/replace`: replace a member (failed or not).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct VolumeReplaceRequest {
     /// Member to replace: component ("sdb1") or whole disk ("sdb").
     pub old: String,
@@ -1467,6 +1475,20 @@ pub struct VolumeReplaceRequest {
     /// Serial of the new disk (one entry).
     #[serde(default)]
     pub serials: Vec<String>,
+    /// Flexible RAID, encrypted: needed when a bigger disk grows the LUKS mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `POST /api/v1/storage/volumes/{name}/complete`: finish an interrupted growth of a
+/// flexible volume (the plan of [`CompletePlanRequest`]).
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VolumeCompleteRequest {
+    /// Needed when the volume is encrypted and the LUKS mapping is grown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
     #[serde(default)]
     pub dry_run: bool,
 }
@@ -1518,6 +1540,8 @@ macro_rules! redacted_debug {
 }
 redacted_debug!(VolumeCreateRequest, plan, confirm, serials, dry_run);
 redacted_debug!(VolumeGrowRequest, disks, level, confirm, serials, dry_run);
+redacted_debug!(VolumeReplaceRequest, old, new_disk, confirm, serials, dry_run);
+redacted_debug!(VolumeCompleteRequest, dry_run);
 redacted_debug!(UnlockRequest);
 redacted_debug!(RecoveryKey);
 

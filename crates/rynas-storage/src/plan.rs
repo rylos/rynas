@@ -275,6 +275,12 @@ fn warning_english(code: PlanWarningCode, a: &PlanArgs) -> String {
                 "tier {s} tolerates only one failed disk while it is reshaped to RAID6"
             );
         }
+        W::FlexNoRecentScrub => {
+            let days = a.count.unwrap_or(0);
+            return format!(
+                "{s}: no scrub finished without errors in the last {days} days; a read error during the reshapes is the main risk: scrub first"
+            );
+        }
         W::MixedKinds => {
             "mixed disk types (HDD/SSD/NVMe): the array runs at the speed of the slowest"
         }
