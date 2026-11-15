@@ -118,5 +118,77 @@ pub fn nas_inventory() -> Inventory {
         arrays,
         filesystems,
         mounts,
+        ..Default::default()
     }
+}
+
+/// Which state of the flexible RAID fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexState {
+    /// 4+8+8 TB, 1-disk tolerance: md126 RAID5 (sda1, sdb1, sdc1) and md127 RAID1 (sdb2,
+    /// sdc2) → VG `rynas_vol2` → LV `data` → btrfs "vol2" on /vol2.
+    Healthy,
+    /// sdb vanished: both tiers degraded, nothing names the lost disk.
+    DiskGone,
+    /// sdb's partitions failed in both tiers (still attached, marked faulty).
+    DiskFaulty,
+}
+
+/// The flexible RAID fixture NAS as an [`Inventory`] (no SMART: disks awake, health
+/// unknown), with the LVM report when `lvm` and the layouts detected.
+pub fn flex_inventory(state: FlexState, lvm: bool) -> Inventory {
+    use rynas_api_types::storage::{BtrfsDevice, BtrfsFilesystem};
+    let graph = BlockGraph::parse(match state {
+        FlexState::DiskGone => include_str!("../tests/fixtures/lsblk-flex-degraded.json"),
+        _ => include_str!("../tests/fixtures/lsblk-flex.json"),
+    })
+    .unwrap();
+    let mdstat = match state {
+        FlexState::Healthy => include_str!("../tests/fixtures/proc-mdstat-flex.txt"),
+        FlexState::DiskGone => include_str!("../tests/fixtures/proc-mdstat-flex-degraded.txt"),
+        FlexState::DiskFaulty => include_str!("../tests/fixtures/proc-mdstat-flex-faulty.txt"),
+    };
+    let now = 1_793_836_860_000;
+    let disks = graph
+        .disks()
+        .into_iter()
+        .map(|d| inventory::summary(d, &graph, None, None, PowerState::Active, now, false))
+        .collect();
+    let disk_of = |dev: &str| graph.disks_under(dev).into_iter().next();
+    let arrays = md::parse_mdstat(mdstat)
+        .iter()
+        .map(|s| md::build(s, &md::SysMd::default(), None, None, false, &disk_of))
+        .collect();
+    let lv = graph.get("dm-0").unwrap();
+    let filesystems = vec![BtrfsFilesystem {
+        uuid: lv.uuid.clone().unwrap(),
+        label: Some("vol2".into()),
+        mountpoint: Some("/vol2".into()),
+        mountpoints: vec!["/vol2".into()],
+        devices: vec![BtrfsDevice {
+            devid: 1,
+            path: lv.path.clone(),
+            size: lv.size,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let mut inv = Inventory {
+        graph,
+        disks,
+        arrays,
+        filesystems,
+        ..Default::default()
+    };
+    if lvm {
+        inv.lvm = crate::lvm::parse(
+            Some(include_str!("../tests/fixtures/lvm-pvs-flex.json")),
+            Some(include_str!("../tests/fixtures/lvm-vgs-flex.json")),
+            Some(include_str!("../tests/fixtures/lvm-lvs-flex.json")),
+        );
+    } else {
+        inv.lvm_stale = vec!["md126".into(), "md127".into()];
+    }
+    inv.flex = crate::flex::detect::detect(&inv, None, crate::flex::tiers::MIN_TIER);
+    inv
 }

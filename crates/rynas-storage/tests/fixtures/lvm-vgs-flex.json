@@ -1,0 +1,12 @@
+  {
+      "report": [
+          {
+              "vg": [
+                  {"vg_name":"rynas_vol2", "vg_uuid":"vG2aAa-bB2b-cC3c-dD4d-eE5e-fF6f-gG7g00", "vg_size":"12001669545984", "vg_free":"0", "vg_extent_size":"4194304", "pv_count":"2", "lv_count":"1", "vg_attr":"wz--n-"}
+              ]
+          }
+      ]
+      ,
+      "log": [
+      ]
+  }

@@ -22,6 +22,7 @@ pub mod host;
 pub mod inventory;
 pub mod lsblk;
 pub mod luks;
+pub mod lvm;
 pub mod md;
 pub mod mounts;
 pub mod overview;
@@ -39,7 +40,7 @@ mod exec_tests;
 
 pub use service::Storage;
 
-use rynas_api_types::storage::{BtrfsFilesystem, DiskSummary, MdArray};
+use rynas_api_types::storage::{BtrfsFilesystem, DiskSummary, FlexLayout, MdArray};
 
 /// A consistent snapshot of the storage state, the input of the planner and the tree.
 #[derive(Debug, Clone, Default)]
@@ -49,4 +50,11 @@ pub struct Inventory {
     pub arrays: Vec<MdArray>,
     pub filesystems: Vec<BtrfsFilesystem>,
     pub mounts: Vec<mounts::Mount>,
+    /// LVM facts of the logical volumes built on md arrays (flexible RAID candidates).
+    pub lvm: lvm::LvmReport,
+    /// Physical volumes (kernel names) whose LVM facts are old or missing: a disk under them
+    /// sleeps, or LVM could not be read.
+    pub lvm_stale: Vec<String>,
+    /// The flexible RAID layouts found ([`flex::detect`]).
+    pub flex: Vec<FlexLayout>,
 }

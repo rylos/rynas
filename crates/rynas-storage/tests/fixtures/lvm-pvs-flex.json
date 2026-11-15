@@ -1,0 +1,13 @@
+  {
+      "report": [
+          {
+              "pv": [
+                  {"pv_name":"/dev/md126", "pv_uuid":"pV1aAa-bB2b-cC3c-dD4d-eE5e-fF6f-gG7g01", "vg_name":"rynas_vol2", "pv_size":"8001029144576", "pv_free":"0", "dev_size":"8001033338880", "pv_attr":"a--"},
+                  {"pv_name":"/dev/md127", "pv_uuid":"pV2aAa-bB2b-cC3c-dD4d-eE5e-fF6f-gG7g02", "vg_name":"rynas_vol2", "pv_size":"4000640401408", "pv_free":"0", "dev_size":"4000642498560", "pv_attr":"a--"}
+              ]
+          }
+      ]
+      ,
+      "log": [
+      ]
+  }

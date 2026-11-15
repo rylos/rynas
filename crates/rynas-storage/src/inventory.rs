@@ -369,6 +369,18 @@ fn layer(inv: &Inventory, kname: &str, depth: usize) -> Option<TreeNode> {
                 ));
             }
         }
+        NodeKind::Lvm => {
+            n.state = Some("active".into());
+            n.detail = Some(match inv.flex.iter().find(|l| l.lv_device == d.kname) {
+                Some(l) => format!(
+                    "{}, {} tier{}",
+                    l.level().map(crate::plan::level_name).unwrap_or("lvm"),
+                    l.tiers.len(),
+                    if l.tiers.len() == 1 { "" } else { "s" }
+                ),
+                None => "LVM".into(),
+            });
+        }
         NodeKind::Crypt => {
             n.state = Some("unlocked".into());
             n.detail = Some("LUKS".into());
@@ -391,6 +403,26 @@ fn layer(inv: &Inventory, kname: &str, depth: usize) -> Option<TreeNode> {
     Some(n)
 }
 
+/// The flexible RAID under a filesystem device: its logical volume is the device itself or
+/// lies below it (through LUKS).
+fn flex_under<'a>(
+    inv: &'a Inventory,
+    kname: &str,
+) -> Option<&'a rynas_api_types::storage::FlexLayout> {
+    let mut stack = vec![(kname.to_string(), 0)];
+    while let Some((k, depth)) = stack.pop() {
+        if let Some(l) = inv.flex.iter().find(|l| l.lv_device == k) {
+            return Some(l);
+        }
+        if depth < 3
+            && let Some(d) = inv.graph.get(&k)
+        {
+            stack.extend(d.parents.iter().map(|p| (p.clone(), depth + 1)));
+        }
+    }
+    None
+}
+
 pub fn tree(inv: &Inventory) -> StorageTree {
     let mut t = StorageTree::default();
     let mut covered: HashSet<String> = HashSet::new();
@@ -411,6 +443,9 @@ pub fn tree(inv: &Inventory) -> StorageTree {
             }
             if let Some(b) = inv.graph.find(&dev.path) {
                 covered.insert(b.kname.clone());
+                if v.flexible.is_none() {
+                    v.flexible = flex_under(inv, &b.kname).cloned();
+                }
                 if let Some(n) = layer(inv, &b.kname, 0) {
                     v.health = worst(v.health, n.health);
                     v.layers.push(n);
@@ -454,6 +489,7 @@ pub fn tree(inv: &Inventory) -> StorageTree {
             mountpoint: d.mountpoints.first().cloned(),
             size: d.size,
             health: HealthVerdict::Healthy,
+            flexible: flex_under(inv, &d.kname).cloned(),
             ..Default::default()
         };
         if let Some(n) = layer(inv, &d.kname, 0) {
@@ -627,5 +663,33 @@ mod tests {
         assert_eq!(t.locked.len(), 1);
         assert_eq!(t.locked[0].children[0].name, "sde1");
         assert_eq!(t.unused_disks, ["sdd"]);
+    }
+
+    /// btrfs → LVM node (the flexible RAID) → one md node per tier → partitions → disks;
+    /// the volume's health is the worst tier.
+    #[test]
+    fn flexible_volume_tree() {
+        use crate::tests_support::{FlexState, flex_inventory};
+        let t = tree(&flex_inventory(FlexState::Healthy, true));
+        let v = t.volumes.iter().find(|v| v.label.as_deref() == Some("vol2")).unwrap();
+        let flex = v.flexible.as_ref().expect("flexible layout");
+        assert_eq!(flex.tiers.len(), 2);
+        let lvm = &v.layers[0];
+        assert_eq!(lvm.kind, NodeKind::Lvm);
+        assert_eq!(lvm.name, "rynas_vol2-data");
+        assert_eq!(lvm.detail.as_deref(), Some("flex1, 2 tiers"));
+        let mds: Vec<_> = lvm.children.iter().map(|c| (c.kind, c.name.as_str(), c.children.len())).collect();
+        assert_eq!(mds, [(NodeKind::Md, "md126", 3), (NodeKind::Md, "md127", 2)]);
+        assert_eq!(lvm.children[1].children[0].children[0].kind, NodeKind::Disk);
+        // disks without SMART data read "unknown"; the arrays themselves are healthy
+        assert_eq!(lvm.children[0].detail.as_deref(), Some("raid5, 3 disks"));
+        assert!(t.unused_disks.is_empty());
+
+        let t = tree(&flex_inventory(FlexState::DiskGone, true));
+        let v = t.volumes.iter().find(|v| v.label.as_deref() == Some("vol2")).unwrap();
+        assert_eq!(v.health, HealthVerdict::Warning);
+        assert_eq!(v.flexible.as_ref().unwrap().health(), ArrayHealth::Degraded);
+        // the classic fixture has no flexible volume
+        assert!(tree(&nas_inventory()).volumes.iter().all(|v| v.flexible.is_none()));
     }
 }

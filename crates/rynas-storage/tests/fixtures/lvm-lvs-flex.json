@@ -1,0 +1,13 @@
+  {
+      "report": [
+          {
+              "lv": [
+                  {"lv_name":"data", "vg_name":"rynas_vol2", "lv_uuid":"lV2aAa-bB2b-cC3c-dD4d-eE5e-fF6f-gG7g00", "lv_size":"12001669545984", "lv_attr":"-wi-ao----", "lv_dm_path":"/dev/mapper/rynas_vol2-data", "segtype":"linear", "devices":"/dev/md126(0)"},
+                  {"lv_name":"data", "vg_name":"rynas_vol2", "lv_uuid":"lV2aAa-bB2b-cC3c-dD4d-eE5e-fF6f-gG7g00", "lv_size":"12001669545984", "lv_attr":"-wi-ao----", "lv_dm_path":"/dev/mapper/rynas_vol2-data", "segtype":"linear", "devices":"/dev/md127(0)"}
+              ]
+          }
+      ]
+      ,
+      "log": [
+      ]
+  }

@@ -9,12 +9,14 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-/// Columns asked from lsblk. `MAJ:MIN` comes back as the key "maj:min".
+/// Columns asked from lsblk. `MAJ:MIN` comes back as the key "maj:min". `START` (in 512-byte
+/// sectors, whatever the logical sector size) and `PARTN` place a partition on its disk:
+/// the tiers of a flexible RAID are told apart by them.
 pub const LSBLK_ARGS: &[&str] = &[
     "--json",
     "--bytes",
     "--output",
-    "NAME,KNAME,PATH,TYPE,FSTYPE,FSVER,LABEL,UUID,PARTLABEL,SIZE,ROTA,TRAN,MODEL,SERIAL,WWN,REV,MOUNTPOINTS,RM,HOTPLUG,MAJ:MIN",
+    "NAME,KNAME,PATH,TYPE,FSTYPE,FSVER,LABEL,UUID,PARTLABEL,SIZE,ROTA,TRAN,MODEL,SERIAL,WWN,REV,MOUNTPOINTS,RM,HOTPLUG,MAJ:MIN,START,PARTN",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -42,6 +44,10 @@ pub struct BlockDev {
     pub removable: bool,
     pub hotplug: bool,
     pub majmin: Option<String>,
+    /// Partition start in bytes (lsblk `START` sectors × 512); `None` for whole devices.
+    pub start: Option<u64>,
+    /// Partition number (`PARTN`); `None` for whole devices.
+    pub partn: Option<u32>,
     /// Devices below (e.g. the partitions of an md array).
     pub parents: Vec<String>,
     /// Devices stacked on top.
@@ -141,6 +147,8 @@ impl BlockGraph {
             removable: b(v, "rm"),
             hotplug: b(v, "hotplug"),
             majmin: s(v, "maj:min"),
+            start: s(v, "start").and_then(|x| x.parse::<u64>().ok()).map(|x| x * 512),
+            partn: s(v, "partn").and_then(|x| x.parse().ok()),
             parents: Vec::new(),
             children: Vec::new(),
         });
@@ -313,5 +321,17 @@ mod tests {
         assert_eq!(d.size, 1000);
         assert!(d.rotational);
         assert_eq!(d.path, "/dev/sda");
+    }
+
+    #[test]
+    fn partition_start_and_number() {
+        let j = r#"{"blockdevices":[{"name":"sda","kname":"sda","type":"disk","size":8001563222016,"start":null,"partn":null,
+            "children":[{"name":"sda2","kname":"sda2","type":"part","size":4000000000000,"start":7812659200,"partn":2}]}]}"#;
+        let g = BlockGraph::parse(j).unwrap();
+        let p = g.get("sda2").unwrap();
+        assert_eq!(p.start, Some(7_812_659_200 * 512));
+        assert_eq!(p.partn, Some(2));
+        let d = g.get("sda").unwrap();
+        assert_eq!((d.start, d.partn), (None, None));
     }
 }

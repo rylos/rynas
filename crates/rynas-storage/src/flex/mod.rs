@@ -3,5 +3,7 @@
 //! through LUKS).
 //!
 //! - [`tiers`]: the pure tier calculator (layout of a new volume, growth, replacement);
+//! - [`detect`]: recognizes a tiered layout in the inventory (read side).
 
+pub mod detect;
 pub mod tiers;

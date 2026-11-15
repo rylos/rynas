@@ -1,0 +1,386 @@
+{
+   "blockdevices": [
+      {
+         "name": "sda",
+         "kname": "sda",
+         "path": "/dev/sda",
+         "type": "disk",
+         "fstype": null,
+         "fsver": null,
+         "label": null,
+         "uuid": null,
+         "partlabel": null,
+         "size": 4000787030016,
+         "rota": true,
+         "tran": "sata",
+         "model": "ST4000VN006-3CW104",
+         "serial": "ZZ4AAAA1",
+         "wwn": "0x5000c500aaaa0001",
+         "rev": "0001",
+         "mountpoints": [
+            null
+         ],
+         "rm": false,
+         "hotplug": false,
+         "maj:min": "8:0",
+         "start": null,
+         "partn": null,
+         "children": [
+            {
+               "name": "sda1",
+               "kname": "sda1",
+               "path": "/dev/sda1",
+               "type": "part",
+               "fstype": "linux_raid_member",
+               "fsver": "1.2",
+               "label": "nas:vol2_t1",
+               "uuid": "4f1c2a9e-7b3d-5e60-81a2-c3d4e5f60718",
+               "partlabel": "rynas-vol2-t1",
+               "size": 4000650887168,
+               "rota": true,
+               "tran": null,
+               "model": null,
+               "serial": null,
+               "wwn": "0x5000c500aaaa0001",
+               "rev": null,
+               "mountpoints": [
+                  null
+               ],
+               "rm": false,
+               "hotplug": false,
+               "maj:min": "8:1",
+               "start": 2048,
+               "partn": 1,
+               "children": [
+                  {
+                     "name": "md126",
+                     "kname": "md126",
+                     "path": "/dev/md126",
+                     "type": "raid5",
+                     "fstype": "LVM2_member",
+                     "fsver": "LVM2 001",
+                     "label": null,
+                     "uuid": "pV1aAa-bB2b-cC3c-dD4d-eE5e-fF6f-gG7g01",
+                     "partlabel": null,
+                     "size": 8001033338880,
+                     "rota": true,
+                     "tran": null,
+                     "model": null,
+                     "serial": null,
+                     "wwn": null,
+                     "rev": null,
+                     "mountpoints": [
+                        null
+                     ],
+                     "rm": false,
+                     "hotplug": false,
+                     "maj:min": "9:126",
+                     "start": null,
+                     "partn": null,
+                     "children": [
+                        {
+                           "name": "rynas_vol2-data",
+                           "kname": "dm-0",
+                           "path": "/dev/mapper/rynas_vol2-data",
+                           "type": "lvm",
+                           "fstype": "btrfs",
+                           "fsver": null,
+                           "label": "vol2",
+                           "uuid": "7d2e4c1a-0b9f-4e3d-a6c5-8f1e2d3c4b5a",
+                           "partlabel": null,
+                           "size": 12001669545984,
+                           "rota": true,
+                           "tran": null,
+                           "model": null,
+                           "serial": null,
+                           "wwn": null,
+                           "rev": null,
+                           "mountpoints": [
+                              "/vol2"
+                           ],
+                           "rm": false,
+                           "hotplug": false,
+                           "maj:min": "253:0",
+                           "start": null,
+                           "partn": null
+                        }
+                     ]
+                  }
+               ]
+            }
+         ]
+      },
+      {
+         "name": "sdc",
+         "kname": "sdc",
+         "path": "/dev/sdc",
+         "type": "disk",
+         "fstype": null,
+         "fsver": null,
+         "label": null,
+         "uuid": null,
+         "partlabel": null,
+         "size": 8001563222016,
+         "rota": true,
+         "tran": "sata",
+         "model": "ST8000VN004-3CP101",
+         "serial": "ZZ8CCCC3",
+         "wwn": "0x5000c500cccc0003",
+         "rev": "0001",
+         "mountpoints": [
+            null
+         ],
+         "rm": false,
+         "hotplug": false,
+         "maj:min": "8:32",
+         "start": null,
+         "partn": null,
+         "children": [
+            {
+               "name": "sdc1",
+               "kname": "sdc1",
+               "path": "/dev/sdc1",
+               "type": "part",
+               "fstype": "linux_raid_member",
+               "fsver": "1.2",
+               "label": "nas:vol2_t1",
+               "uuid": "4f1c2a9e-7b3d-5e60-81a2-c3d4e5f60718",
+               "partlabel": "rynas-vol2-t1",
+               "size": 4000650887168,
+               "rota": true,
+               "tran": null,
+               "model": null,
+               "serial": null,
+               "wwn": "0x5000c500cccc0003",
+               "rev": null,
+               "mountpoints": [
+                  null
+               ],
+               "rm": false,
+               "hotplug": false,
+               "maj:min": "8:33",
+               "start": 2048,
+               "partn": 1,
+               "children": [
+                  {
+                     "name": "md126",
+                     "kname": "md126",
+                     "path": "/dev/md126",
+                     "type": "raid5",
+                     "fstype": "LVM2_member",
+                     "fsver": "LVM2 001",
+                     "label": null,
+                     "uuid": "pV1aAa-bB2b-cC3c-dD4d-eE5e-fF6f-gG7g01",
+                     "partlabel": null,
+                     "size": 8001033338880,
+                     "rota": true,
+                     "tran": null,
+                     "model": null,
+                     "serial": null,
+                     "wwn": null,
+                     "rev": null,
+                     "mountpoints": [
+                        null
+                     ],
+                     "rm": false,
+                     "hotplug": false,
+                     "maj:min": "9:126",
+                     "start": null,
+                     "partn": null,
+                     "children": [
+                        {
+                           "name": "rynas_vol2-data",
+                           "kname": "dm-0",
+                           "path": "/dev/mapper/rynas_vol2-data",
+                           "type": "lvm",
+                           "fstype": "btrfs",
+                           "fsver": null,
+                           "label": "vol2",
+                           "uuid": "7d2e4c1a-0b9f-4e3d-a6c5-8f1e2d3c4b5a",
+                           "partlabel": null,
+                           "size": 12001669545984,
+                           "rota": true,
+                           "tran": null,
+                           "model": null,
+                           "serial": null,
+                           "wwn": null,
+                           "rev": null,
+                           "mountpoints": [
+                              "/vol2"
+                           ],
+                           "rm": false,
+                           "hotplug": false,
+                           "maj:min": "253:0",
+                           "start": null,
+                           "partn": null
+                        }
+                     ]
+                  }
+               ]
+            },
+            {
+               "name": "sdc2",
+               "kname": "sdc2",
+               "path": "/dev/sdc2",
+               "type": "part",
+               "fstype": "linux_raid_member",
+               "fsver": "1.2",
+               "label": "nas:vol2_t2",
+               "uuid": "9a8b7c6d-5e4f-3a2b-1c0d-e1f2a3b4c5d6",
+               "partlabel": "rynas-vol2-t2",
+               "size": 4000776716288,
+               "rota": true,
+               "tran": null,
+               "model": null,
+               "serial": null,
+               "wwn": "0x5000c500cccc0003",
+               "rev": null,
+               "mountpoints": [
+                  null
+               ],
+               "rm": false,
+               "hotplug": false,
+               "maj:min": "8:34",
+               "start": 7813773312,
+               "partn": 2,
+               "children": [
+                  {
+                     "name": "md127",
+                     "kname": "md127",
+                     "path": "/dev/md127",
+                     "type": "raid1",
+                     "fstype": "LVM2_member",
+                     "fsver": "LVM2 001",
+                     "label": null,
+                     "uuid": "pV2aAa-bB2b-cC3c-dD4d-eE5e-fF6f-gG7g02",
+                     "partlabel": null,
+                     "size": 4000642498560,
+                     "rota": true,
+                     "tran": null,
+                     "model": null,
+                     "serial": null,
+                     "wwn": null,
+                     "rev": null,
+                     "mountpoints": [
+                        null
+                     ],
+                     "rm": false,
+                     "hotplug": false,
+                     "maj:min": "9:127",
+                     "start": null,
+                     "partn": null,
+                     "children": [
+                        {
+                           "name": "rynas_vol2-data",
+                           "kname": "dm-0",
+                           "path": "/dev/mapper/rynas_vol2-data",
+                           "type": "lvm",
+                           "fstype": "btrfs",
+                           "fsver": null,
+                           "label": "vol2",
+                           "uuid": "7d2e4c1a-0b9f-4e3d-a6c5-8f1e2d3c4b5a",
+                           "partlabel": null,
+                           "size": 12001669545984,
+                           "rota": true,
+                           "tran": null,
+                           "model": null,
+                           "serial": null,
+                           "wwn": null,
+                           "rev": null,
+                           "mountpoints": [
+                              "/vol2"
+                           ],
+                           "rm": false,
+                           "hotplug": false,
+                           "maj:min": "253:0",
+                           "start": null,
+                           "partn": null
+                        }
+                     ]
+                  }
+               ]
+            }
+         ]
+      },
+      {
+         "name": "nvme0n1",
+         "kname": "nvme0n1",
+         "path": "/dev/nvme0n1",
+         "type": "disk",
+         "fstype": null,
+         "fsver": null,
+         "label": null,
+         "uuid": null,
+         "partlabel": null,
+         "size": 256060514304,
+         "rota": false,
+         "tran": "nvme",
+         "model": "Samsung SSD 980 256GB",
+         "serial": "S64BNX0R000001",
+         "wwn": "eui.002538b000000001",
+         "rev": null,
+         "mountpoints": [
+            null
+         ],
+         "rm": false,
+         "hotplug": false,
+         "maj:min": "259:0",
+         "start": null,
+         "partn": null,
+         "children": [
+            {
+               "name": "nvme0n1p1",
+               "kname": "nvme0n1p1",
+               "path": "/dev/nvme0n1p1",
+               "type": "part",
+               "fstype": "vfat",
+               "fsver": "FAT32",
+               "label": "EFI",
+               "uuid": "1A2B-3C4D",
+               "partlabel": "EFI system partition",
+               "size": 536870912,
+               "rota": false,
+               "tran": null,
+               "model": null,
+               "serial": null,
+               "wwn": null,
+               "rev": null,
+               "mountpoints": [
+                  "/boot/efi"
+               ],
+               "rm": false,
+               "hotplug": false,
+               "maj:min": "259:1",
+               "start": 2048,
+               "partn": 1
+            },
+            {
+               "name": "nvme0n1p2",
+               "kname": "nvme0n1p2",
+               "path": "/dev/nvme0n1p2",
+               "type": "part",
+               "fstype": "ext4",
+               "fsver": "1.0",
+               "label": "root",
+               "uuid": "0c9d8e7f-6a5b-4c3d-2e1f-0a9b8c7d6e5f",
+               "partlabel": null,
+               "size": 255521439744,
+               "rota": false,
+               "tran": null,
+               "model": null,
+               "serial": null,
+               "wwn": null,
+               "rev": null,
+               "mountpoints": [
+                  "/"
+               ],
+               "rm": false,
+               "hotplug": false,
+               "maj:min": "259:2",
+               "start": 1050624,
+               "partn": 2
+            }
+         ]
+      }
+   ]
+}

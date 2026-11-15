@@ -30,6 +30,7 @@ const T_SMART: Duration = Duration::from_secs(30);
 const T_MDADM: Duration = Duration::from_secs(15);
 const T_BTRFS: Duration = Duration::from_secs(60);
 const T_CRYPT: Duration = Duration::from_secs(10);
+const T_LVM: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StorageError {
@@ -86,6 +87,8 @@ struct Cache {
     no_smart: HashMap<String, (String, u64)>,
     md: HashMap<String, MdCache>,
     fs: HashMap<String, FsCache>,
+    /// LVM reports by physical volume set (comma-joined device paths): (when, report).
+    lvm: HashMap<String, (u64, crate::lvm::LvmReport)>,
     /// The last full inventory and when it was taken (ms): shared by the list views, the
     /// tree and the planners for [`Storage::inventory_max_age`].
     inventory: Option<(u64, Arc<Inventory>)>,
@@ -101,6 +104,8 @@ pub struct Storage {
     pub inventory_max_age: Duration,
     /// Attached loop devices count as disks: tests of the write side on loop files only.
     pub loop_disks: bool,
+    /// Thinnest flexible RAID tier ([`crate::flex::tiers::MIN_TIER`]; smaller on loop files).
+    pub min_tier: u64,
     cache: Mutex<Cache>,
     /// SMART reasons marked as seen, per drive (memory only until opened on a file).
     acks: AckStore,
@@ -142,6 +147,7 @@ impl Storage {
             detail_max_age: Duration::from_secs(60),
             inventory_max_age: Duration::from_secs(5),
             loop_disks: false,
+            min_tier: crate::flex::tiers::MIN_TIER,
             cache: Mutex::new(Cache::default()),
             acks: AckStore::memory(),
         }
@@ -283,6 +289,7 @@ impl Storage {
         c.inventory = None;
         c.md.clear();
         c.fs.clear();
+        c.lvm.clear();
     }
 
     /// Re-reads APM and write cache of the ATA disks after the disk settings were applied
@@ -762,13 +769,98 @@ impl Storage {
         let disks = self.summaries(&graph).into_iter().map(|(s, _)| s).collect();
         let arrays = self.arrays_with(&graph);
         let filesystems = self.filesystems_with(&graph, &mounts);
-        Ok(Inventory {
+        let (lvm, lvm_stale) = self.lvm_with(&graph);
+        let mut inv = Inventory {
             graph,
             disks,
             arrays,
             filesystems,
             mounts,
-        })
+            lvm,
+            lvm_stale,
+            flex: Vec::new(),
+        };
+        inv.flex = crate::flex::detect::detect(&inv, None, self.min_tier);
+        Ok(inv)
+    }
+
+    /// The LVM reports of the logical volumes built only on md arrays (the flexible RAID
+    /// candidates), one set of physical volumes at a time and restricted to it. Like
+    /// `mdadm --detail`: refreshed at most every [`Storage::detail_max_age`], never while a
+    /// disk under those arrays sleeps (the last report is kept, its devices listed as stale).
+    fn lvm_with(&self, g: &BlockGraph) -> (crate::lvm::LvmReport, Vec<String>) {
+        let mut sets: Vec<Vec<&BlockDev>> = Vec::new();
+        for lv in g.devs.values().filter(|d| d.kind == "lvm") {
+            let mut pvs: Vec<&BlockDev> = lv.parents.iter().filter_map(|p| g.get(p)).collect();
+            if pvs.is_empty() || !pvs.iter().all(|p| p.is_md()) {
+                continue;
+            }
+            // a tier array already in the group but not used by the volume yet (a growth
+            // stopped before `lvextend`) is not under it in lsblk: without it the group would
+            // read as partial
+            let disks: HashSet<String> = pvs.iter().flat_map(|p| g.disks_under(&p.kname)).collect();
+            for d in g.devs.values() {
+                if d.is_md()
+                    && d.fstype.as_deref() == Some("LVM2_member")
+                    && !pvs.iter().any(|p| p.kname == d.kname)
+                    && g.disks_under(&d.kname).iter().any(|x| disks.contains(x))
+                {
+                    pvs.push(d);
+                }
+            }
+            pvs.sort_by(|a, b| a.kname.cmp(&b.kname));
+            if !sets.iter().any(|s| s.iter().map(|d| &d.kname).eq(pvs.iter().map(|d| &d.kname))) {
+                sets.push(pvs);
+            }
+        }
+        let now = self.host.now_ms();
+        let max_age = self.detail_max_age.as_millis() as u64;
+        let mut report = crate::lvm::LvmReport::default();
+        let mut stale: Vec<String> = Vec::new();
+        for pvs in sets {
+            let paths: Vec<String> = pvs.iter().map(|d| d.path.clone()).collect();
+            let key = paths.join(",");
+            let cached = self.cache.lock().unwrap().lvm.get(&key).cloned();
+            let fresh = cached
+                .as_ref()
+                .is_some_and(|(at, _)| now.saturating_sub(*at) < max_age);
+            let sleeping = pvs
+                .iter()
+                .flat_map(|d| g.disks_under(&d.kname))
+                .filter_map(|d| g.get(&d))
+                .any(|d| asleep(self.power_of(d)));
+            let r = if fresh {
+                cached.map(|(_, r)| r)
+            } else if sleeping {
+                stale.extend(pvs.iter().map(|d| d.kname.clone()));
+                cached.map(|(_, r)| r)
+            } else {
+                let run = |prog: &str| {
+                    let args = crate::lvm::args(prog, &paths);
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                    self.run_ok(prog, &args, T_LVM)
+                };
+                let (pv, vg, lv) = (run("pvs"), run("vgs"), run("lvs"));
+                if pv.is_none() || vg.is_none() || lv.is_none() {
+                    stale.extend(pvs.iter().map(|d| d.kname.clone()));
+                }
+                let r = crate::lvm::parse(pv.as_deref(), vg.as_deref(), lv.as_deref());
+                self.cache
+                    .lock()
+                    .unwrap()
+                    .lvm
+                    .insert(key, (now, r.clone()));
+                Some(r)
+            };
+            if let Some(r) = r {
+                report.extend(r);
+            } else {
+                stale.extend(pvs.iter().map(|d| d.kname.clone()));
+            }
+        }
+        stale.sort();
+        stale.dedup();
+        (report, stale)
     }
 
     /// The cached inventory if it is younger than [`Storage::inventory_max_age`].
@@ -1334,6 +1426,66 @@ mod tests {
                 .iter()
                 .any(|c| c == "btrfs filesystem usage -b /vol1")
         );
+    }
+
+    /// The flexible RAID fixture: sda, sdb, sdc awake, LVM answers for md126 + md127.
+    fn flex_host() -> FakeHost {
+        let mut h = FakeHost {
+            now_ms: 1_793_836_800_000,
+            ..Default::default()
+        };
+        h.cmd(&format!("lsblk {}", LSBLK_ARGS.join(" ")), 0, &fx("lsblk-flex.json"));
+        h.file("/proc/mdstat", &fx("proc-mdstat-flex.txt"));
+        for d in ["sda", "sdb", "sdc"] {
+            h.power.insert(format!("/dev/{d}"), PowerState::Active);
+        }
+        let devs = vec!["/dev/md126".to_string(), "/dev/md127".to_string()];
+        for (prog, file) in [
+            ("pvs", "lvm-pvs-flex.json"),
+            ("vgs", "lvm-vgs-flex.json"),
+            ("lvs", "lvm-lvs-flex.json"),
+        ] {
+            h.cmd(
+                &format!("{prog} {}", crate::lvm::args(prog, &devs).join(" ")),
+                0,
+                &fx(file),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn lvm_read_only_while_its_disks_are_awake() {
+        let h = Arc::new(flex_host());
+        let s = Storage::new(h.clone());
+        let inv = s.inventory().unwrap();
+        assert!(inv.lvm_stale.is_empty());
+        assert_eq!(inv.lvm.vgs.len(), 1);
+        assert_eq!(inv.flex.len(), 1);
+        assert!(!inv.flex[0].stale && inv.flex[0].managed);
+        let lvm_runs = |h: &FakeHost| {
+            h.ran()
+                .iter()
+                .filter(|c| c.starts_with("pvs ") || c.starts_with("vgs ") || c.starts_with("lvs "))
+                .count()
+        };
+        assert_eq!(lvm_runs(&h), 3);
+        // cached for detail_max_age
+        s.inventory().unwrap();
+        assert_eq!(lvm_runs(&h), 3);
+
+        // sdb sleeps: LVM is not asked, the layout still shows from lsblk, flagged stale
+        let mut h = flex_host();
+        h.power.insert("/dev/sdb".into(), PowerState::Standby);
+        let h = Arc::new(h);
+        let s = Storage::new(h.clone());
+        let inv = s.inventory().unwrap();
+        assert_eq!(lvm_runs(&h), 0);
+        assert_eq!(inv.lvm_stale, ["md126", "md127"]);
+        assert!(inv.flex[0].stale);
+        assert_eq!(inv.flex[0].tiers.len(), 2);
+        let t = s.tree_of(&inv);
+        assert!(t.volumes.iter().any(|v| v.flexible.is_some()));
     }
 
     #[test]
