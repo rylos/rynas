@@ -261,6 +261,67 @@ pub async fn same_disk<M: Machine>(m: &M, want: &DiskSummary) -> Result<(), Stri
     Ok(())
 }
 
+/// Right before a step erases part of `disk`, a disk outside the plan's new disks (a
+/// replaced disk, cleared hours after the plan by a flexible RAID `label`): what the step
+/// touches is still a slice of the volume (partition label `rynas-<label>-t<N>`), not
+/// mounted and holding nothing (no md array, no mapping), and the kernel lets it be
+/// claimed; `sgdisk --zap-all` needs every partition of the disk to be such a slice.
+async fn still_leftover<M: Machine>(m: &M, argv: &[String], disk: &str, label: &str) -> Result<(), String> {
+    let a: Vec<&str> = argv.iter().map(String::as_str).collect();
+    // the partitions touched (kernel name, or number), `None`: all of them
+    let (names, numbers, all): (Vec<&str>, Vec<u32>, bool) = match a.as_slice() {
+        ["mdadm", "--zero-superblock", p] => (vec![p.trim_start_matches("/dev/")], vec![], false),
+        ["sgdisk", "--zap-all", _] => (vec![], vec![], true),
+        ["sgdisk", rest @ ..] if rest.iter().any(|x| x.starts_with("--delete=")) => (
+            vec![],
+            rest.iter().filter_map(|x| x.strip_prefix("--delete=")?.parse().ok()).collect(),
+            false,
+        ),
+        _ => return Ok(()),
+    };
+    let dev = format!("/dev/{disk}");
+    let o = run_cmd(
+        m,
+        strs(&["lsblk", "--json", "--bytes", "--output", "KNAME,TYPE,PARTN,PARTLABEL,MOUNTPOINT", &dev]),
+        None,
+        true,
+        true,
+    )
+    .await
+    .map_err(|e| format!("{dev}: cannot read its partitions ({e}): not erased"))?;
+    let v: serde_json::Value = serde_json::from_str(&o.stdout)
+        .map_err(|e| format!("{dev}: lsblk printed no disk ({e}): not erased"))?;
+    let d = &v["blockdevices"][0];
+    if d.is_null() {
+        return Err(format!("{dev}: lsblk printed no disk: not erased"));
+    }
+    let prefix = format!("rynas-{label}-t");
+    let empty = Vec::new();
+    for p in d["children"].as_array().unwrap_or(&empty) {
+        let kname = p["kname"].as_str().unwrap_or("");
+        let partn = p["partn"]
+            .as_u64()
+            .or_else(|| p["partn"].as_str().and_then(|s| s.trim().parse().ok()))
+            .unwrap_or(0) as u32;
+        if !(all || names.contains(&kname) || numbers.contains(&partn)) {
+            continue;
+        }
+        let ours = p["partlabel"].as_str().is_some_and(|l| l.starts_with(&prefix));
+        let busy = !p["mountpoint"].is_null() || p["children"].as_array().is_some_and(|c| !c.is_empty());
+        if !ours || busy {
+            return Err(format!(
+                "{kname} is {} now: {dev} not erased",
+                if ours { "in use" } else { "not a slice of this volume" }
+            ));
+        }
+        m.claim_free(&format!("/dev/{kname}"))?;
+    }
+    if all {
+        m.claim_free(&dev)?;
+    }
+    Ok(())
+}
+
 /// `name` is the disk `disk` or one of its partitions (`sdb3`, `nvme0n1p2`).
 fn on_disk(name: &str, disk: &str) -> bool {
     let Some(tail) = name.strip_prefix(disk) else {
@@ -1135,6 +1196,11 @@ pub async fn run_plan_with<M: Machine>(
                     if let Some(want) = inv.disks.iter().find(|x| &x.name == disk) {
                         r = r.and(same_disk(m, want).await);
                         verified.insert(want.name.clone());
+                        if r.is_ok()
+                            && let Some(label) = summary(plan, "volume")
+                        {
+                            r = still_leftover(m, argv, disk, label).await;
+                        }
                     }
                 }
                 // after a wait (hours, maybe a reboot of the enclosure) a kernel name may now

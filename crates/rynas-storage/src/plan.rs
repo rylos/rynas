@@ -171,6 +171,9 @@ pub(crate) fn step_english(kind: PlanStepKind, a: &PlanArgs) -> String {
         K::AddPartitionLive => {
             return format!("Tell the kernel about the new partition {s} (the disk is in use)");
         }
+        K::DeletePartitions => {
+            return format!("Delete the partitions {} of {s} (its other partitions stay)", a.items.join(", "));
+        }
         K::WaitUdev => "Wait for udev to create the partition nodes",
         K::RecordArray => "Record the array so it is assembled at boot",
         K::LuksFormat => "Format the array as LUKS2 (Argon2id, 256 MiB memory, 4 KiB sectors)",
@@ -289,6 +292,11 @@ fn warning_english(code: PlanWarningCode, a: &PlanArgs) -> String {
             let days = a.count.unwrap_or(0);
             return format!(
                 "{s}: no scrub finished without errors in the last {days} days; a read error during the reshapes is the main risk: scrub first"
+            );
+        }
+        W::FlexLeftoverDisk => {
+            return format!(
+                "{s} holds old slices of this volume in no tier and is not erased: add it to a volume or erase it (an old superblock can confuse assembling the tiers at boot)"
             );
         }
         W::MixedKinds => {
@@ -577,10 +585,16 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
             .iter()
             .any(|f| f.label.as_deref() == Some(label))
             || inv.arrays.iter().any(|a| {
-                a.md_name
-                    .as_deref()
-                    .is_some_and(|n| n == label || n.ends_with(&format!(":{label}")))
+                a.md_name.as_deref().is_some_and(|n| {
+                    let n = n.rsplit(':').next().unwrap_or(n);
+                    // a flexible volume's tier arrays are <label>_t<N>
+                    n == label
+                        || n.strip_prefix(label)
+                            .and_then(|r| r.strip_prefix("_t"))
+                            .is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+                })
             })
+            || inv.lvm.vgs.iter().any(|v| v.name == crate::flex::plan::vg_name(label))
             || inv
                 .mounts
                 .iter()

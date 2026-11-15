@@ -14,8 +14,8 @@
 use std::collections::BTreeSet;
 
 use rynas_api_types::storage::{
-    ArrayHealth, FlexLayout, FlexPending, FlexPendingKind, FlexTier, MemberRole, RaidLevel,
-    VolumeRecord,
+    ArrayHealth, DiskRef, FlexLayout, FlexPending, FlexPendingKind, FlexTier, MdArray, MemberRole,
+    RaidLevel, VolumeRecord,
 };
 
 use crate::Inventory;
@@ -108,6 +108,66 @@ fn md_uuid(inv: &Inventory, f: &Found) -> Option<String> {
         .find(|a| a.name == f.md.kname)
         .and_then(|a| a.uuid.clone())
         .or_else(|| f.parts.iter().find_map(|p| p.uuid.as_deref().and_then(mdadm_uuid)))
+}
+
+/// The disk of the inventory a record names: by identity (serial, or kernel name for a disk
+/// without one), or by kernel name when recorded without an identity.
+pub(crate) fn find_disk(inv: &Inventory, r: &DiskRef) -> Option<String> {
+    inv.disks
+        .iter()
+        .find(|d| {
+            if r.id.is_empty() {
+                d.name == r.name
+            } else {
+                crate::exec::identity(d) == r.id
+            }
+        })
+        .map(|d| d.name.clone())
+}
+
+/// The new disks of the change recorded as under way for a volume, under today's names.
+pub(crate) fn change_disks(inv: &Inventory, record: Option<&VolumeRecord>) -> Vec<String> {
+    record
+        .and_then(|r| r.change.as_ref())
+        .map_or_else(Vec::new, |c| c.new.iter().filter_map(|r| find_disk(inv, r)).collect())
+}
+
+/// The tier number of md array `a` when it belongs to flexible volume `label` without being
+/// one of its physical volumes (created by a growth that stopped before `vgextend`): recorded
+/// for the volume (its md UUID in `record`), or named `<label>_t<N>` with every member
+/// partition labeled `rynas-<label>-t<N>` and at least one on a disk of the volume (`disks`:
+/// those of its tiers and the new disks of the change under way). An array of the same names
+/// from another system, or made by hand on other disks, is never taken for one of the
+/// volume's (it would be made a physical volume of its group).
+pub(crate) fn outside_tier(
+    inv: &Inventory,
+    label: &str,
+    a: &MdArray,
+    disks: &[String],
+    record: Option<&VolumeRecord>,
+) -> Option<u32> {
+    if let (Some(r), Some(u)) = (record, a.uuid.as_deref()) {
+        let u = mdadm_uuid(u).unwrap_or_else(|| u.to_string());
+        if let Some(t) = r.tiers.iter().find(|t| t.md_uuid.eq_ignore_ascii_case(&u)) {
+            return Some(t.index);
+        }
+    }
+    let plabel = format!("rynas-{label}-t");
+    let slice = |dev: &str| -> Option<u32> {
+        inv.graph.get(dev)?.partlabel.as_deref()?.strip_prefix(&plabel)?.parse().ok()
+    };
+    let n = match a.md_name.as_deref() {
+        Some(name) => short_name(name).strip_prefix(&format!("{label}_t"))?.parse::<u32>().ok()?,
+        None => slice(&a.members.first()?.device)?,
+    };
+    let labeled = !a.members.is_empty() && a.members.iter().all(|m| slice(&m.device) == Some(n));
+    let ours = a.members.iter().any(|m| {
+        m.disk
+            .clone()
+            .or_else(|| inv.graph.disks_under(&m.device).into_iter().next())
+            .is_some_and(|d| disks.contains(&d))
+    });
+    (labeled && ours).then_some(n)
 }
 
 /// Every flexible RAID of the inventory. `records` are the volumes rynas recorded (`None`
@@ -287,6 +347,15 @@ fn layout(
         {
             pend(&mut pending, FlexPendingKind::ReshapeInterrupted, &a.name);
         }
+        // every tier has its bitmap; a growth turns it off for a level change or a reshape
+        // and back on after (idle without one: it stopped in between)
+        if let Some(a) = arr
+            && a.bitmap.as_deref() == Some("none")
+            && a.sync.is_none()
+            && a.reshape_position.is_none()
+        {
+            pend(&mut pending, FlexPendingKind::BitmapOff, &a.name);
+        }
     }
     if tolerance == 0 {
         blockers.push("a tier has no redundancy".into());
@@ -309,19 +378,25 @@ fn layout(
             })
     });
     if let Some(l) = label {
-        // an array of the volume left out of the group (created, never added)
+        let rec = records.and_then(|r| r.iter().find(|r| r.label == l));
+        // an array of the volume left out of the group (created, never added): recorded, or
+        // named and labeled after the volume on its disks (never another system's)
+        let mut vol_disks = disks.clone();
+        vol_disks.extend(change_disks(inv, rec));
         for a in &inv.arrays {
-            let tier_name = a
-                .md_name
-                .as_deref()
-                .map(short_name)
-                .and_then(|n| n.strip_prefix(&format!("{l}_t")))
-                .is_some_and(|n| n.parse::<u32>().is_ok());
-            if tier_name && !found.iter().any(|f| f.md.kname == a.name) {
+            if !found.iter().any(|f| f.md.kname == a.name) && outside_tier(inv, l, a, &vol_disks, rec).is_some() {
                 pend(&mut pending, FlexPendingKind::TierNotInVg, &a.name);
             }
         }
-        if let Some(rec) = records.and_then(|r| r.iter().find(|r| r.label == l)) {
+        if let Some(rec) = rec {
+            if let Some(c) = &rec.change {
+                let names: Vec<String> = c
+                    .new
+                    .iter()
+                    .map(|r| find_disk(inv, r).unwrap_or_else(|| r.name.clone()))
+                    .collect();
+                pend(&mut pending, FlexPendingKind::ChangeInterrupted, &names.join(", "));
+            }
             for f in &found {
                 let recorded = md_uuid(inv, f)
                     .is_some_and(|u| rec.tiers.iter().any(|t| t.md_uuid.eq_ignore_ascii_case(&u)));
@@ -407,7 +482,7 @@ fn layout(
 mod tests {
     use super::*;
     use crate::tests_support::{FlexState, flex_inventory, nas_inventory};
-    use rynas_api_types::storage::TierRecord;
+    use rynas_api_types::storage::{MdMember, TierRecord};
 
     const MIB: u64 = 1 << 20;
 
@@ -498,11 +573,37 @@ mod tests {
         // sdb2 holds the tier-2 slice but is not in md127
         inv.graph.devs.get_mut("md127").unwrap().parents.retain(|p| p != "sdb2");
         inv.graph.devs.get_mut("sdb2").unwrap().children.clear();
-        // a third tier array exists outside the group
+        // a third tier array exists outside the group, on slices of the volume's disks
         let mut t3 = inv.arrays[0].clone();
         t3.name = "md125".into();
         t3.md_name = Some("nas:vol2_t3".into());
+        t3.uuid = None;
+        t3.members = ["sdb", "sdc"]
+            .iter()
+            .map(|d| {
+                let k = format!("{d}3");
+                add_part(&mut inv, d, &k, "rynas-vol2-t3");
+                MdMember { device: k, disk: Some(d.to_string()), role: MemberRole::Active, ..Default::default() }
+            })
+            .collect();
         inv.arrays.push(t3);
+        // arrays of the same names that are not the volume's: on a disk of another system,
+        // on slices labeled for another tier, unlabeled
+        let mut foreign = inv.arrays[0].clone();
+        foreign.name = "md124".into();
+        foreign.md_name = Some("other:vol2_t4".into());
+        foreign.uuid = None;
+        let mut inv_x = inv.clone();
+        add_disk(&mut inv_x, "sdx");
+        add_part(&mut inv_x, "sdx", "sdx1", "rynas-vol2-t4");
+        foreign.members = vec![MdMember { device: "sdx1".into(), disk: Some("sdx".into()), role: MemberRole::Active, ..Default::default() }];
+        inv_x.arrays.push(foreign.clone());
+        let mut mislabeled = foreign.clone();
+        mislabeled.name = "md123".into();
+        mislabeled.md_name = Some("vol2_t5".into());
+        mislabeled.members = vec![MdMember { device: "sdb3".into(), disk: Some("sdb".into()), role: MemberRole::Active, ..Default::default() }];
+        inv_x.arrays.push(mislabeled);
+        inv = inv_x;
         // the record lists tier 1 only
         let uuid1 = mdadm_uuid("4f1c2a9e-7b3d-5e60-81a2-c3d4e5f60718").unwrap();
         let rec = VolumeRecord {
@@ -533,6 +634,71 @@ mod tests {
         // the slice is still counted as sdb's
         assert_eq!(l.tiers[1].members, ["sdb", "sdc"]);
         assert!(l.blockers.is_empty(), "{:?}", l.blockers);
+        // recorded, an array is the volume's whatever its name
+        let mut inv2 = inv.clone();
+        let a = inv2.arrays.iter_mut().find(|a| a.name == "md124").unwrap();
+        a.uuid = Some("99999999:99999999:99999999:99999999".into());
+        let rec2 = VolumeRecord {
+            label: "vol2".into(),
+            level: RaidLevel::Flex1,
+            tiers: vec![TierRecord { index: 4, md_uuid: "99999999:99999999:99999999:99999999".into() }],
+            vg: Some("rynas_vol2".into()),
+            ..Default::default()
+        };
+        let l = &detect(&inv2, Some(&[rec2]), tiers::MIN_TIER)[0];
+        assert!(l.pending.iter().any(|p| p.kind == FlexPendingKind::TierNotInVg && p.subject.as_deref() == Some("md124")), "{:?}", l.pending);
+    }
+
+    /// A graph node for partition `kname` of `disk`, labeled `partlabel`.
+    fn add_part(inv: &mut Inventory, disk: &str, kname: &str, partlabel: &str) {
+        let mut p = inv.graph.get("sdb2").unwrap().clone();
+        p.kname = kname.into();
+        p.name = kname.into();
+        p.path = format!("/dev/{kname}");
+        p.partlabel = Some(partlabel.into());
+        // past the tiers of the fixture
+        p.start = p.start.map(|s| s + 2 * p.size);
+        p.parents = vec![disk.into()];
+        p.children.clear();
+        inv.graph.devs.insert(kname.into(), p);
+        inv.graph.devs.get_mut(disk).unwrap().children.push(kname.into());
+    }
+
+    /// A graph node for a blank disk.
+    fn add_disk(inv: &mut Inventory, name: &str) {
+        let mut d = inv.graph.get("sdb").unwrap().clone();
+        d.kname = name.into();
+        d.name = name.into();
+        d.path = format!("/dev/{name}");
+        d.children.clear();
+        inv.graph.devs.insert(name.into(), d);
+    }
+
+    /// A change recorded as under way, and a tier left without its bitmap, are pending.
+    #[test]
+    fn a_recorded_change_and_a_tier_without_bitmap_are_pending() {
+        let mut inv = flex_inventory(FlexState::Healthy, true);
+        let rec = VolumeRecord {
+            label: "vol2".into(),
+            level: RaidLevel::Flex1,
+            vg: Some("rynas_vol2".into()),
+            change: Some(rynas_api_types::storage::FlexChange {
+                old: Some(DiskRef { name: "sda".into(), id: String::new() }),
+                new: vec![DiskRef { name: "sdd".into(), id: "SER-SDD".into() }],
+            }),
+            ..Default::default()
+        };
+        inv.arrays.iter_mut().find(|a| a.name == "md127").unwrap().bitmap = Some("none".into());
+        let l = &detect(&inv, Some(std::slice::from_ref(&rec)), tiers::MIN_TIER)[0];
+        let kinds: Vec<(FlexPendingKind, String)> =
+            l.pending.iter().map(|p| (p.kind, p.subject.clone().unwrap_or_default())).collect();
+        assert!(kinds.contains(&(FlexPendingKind::ChangeInterrupted, "sdd".into())), "{kinds:?}");
+        assert!(kinds.contains(&(FlexPendingKind::BitmapOff, "md127".into())), "{kinds:?}");
+        // while md works on the tier, its bitmap is off on purpose
+        inv.arrays.iter_mut().find(|a| a.name == "md127").unwrap().sync =
+            Some(rynas_api_types::storage::SyncProgress { action: "reshape".into(), ..Default::default() });
+        let l = &detect(&inv, None, tiers::MIN_TIER)[0];
+        assert!(!l.pending.iter().any(|p| p.kind == FlexPendingKind::BitmapOff), "{:?}", l.pending);
     }
 
     #[test]

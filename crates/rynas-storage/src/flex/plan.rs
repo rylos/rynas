@@ -23,16 +23,28 @@
 //! A three-way mirror of a 2-disk tolerance volume becomes RAID6 through RAID5 (md has no
 //! direct path): one mirror is taken out, the 2-disk mirror becomes RAID5, grows over the
 //! disks, then takes the Q parity (`--layout=preserve`). The tier tolerates one disk until
-//! then, and the plan says so.
+//! then, and the plan says so. The RAID6 keeps that layout (Q on one disk, not rotated)
+//! until its next reshape: normalising it at once would be a second full reshape of the
+//! tier, while a later growth restripes it anyway and takes the standard layout on the way
+//! (`--raid-devices=N --layout=normalise`; mdadm refuses to grow a RAID6 of that layout
+//! without being told which layout to keep).
+//!
+//! A growth or replace is recorded in the volume's record before its first step
+//! ([`FlexChange`], cleared when it ends): the same request again, or complete, plans from
+//! that record and the state of the moment ([`recorded_change`], [`resume_shapes`]), so a
+//! change that stopped at any step (power loss, rynasd restarted during a long wait, a
+//! failed or cancelled step) goes on to its end, the replaced disk cleared included. Without
+//! that record nothing outside the tiers is taken: a disk in no tier is never adopted, and
+//! a disk is only ever erased when a request named it.
 
 use rynas_api_types::storage::{
-    CompletePlanRequest, DiskSummary, FlexLayout, FlexTier, GrowPlanRequest,
+    CompletePlanRequest, DiskRef, DiskSummary, FlexChange, FlexLayout, FlexTier, GrowPlanRequest,
     MemberRole, PlanAction, PlanArgs, PlanIssueCode, PlanStep, PlanStepKind, PlanWarningCode,
     RaidLevel, ReplacePlanRequest, ScrubState, StoragePlan, VolumePlanRequest,
 };
 
 use crate::Inventory;
-use crate::flex::detect::{mdadm_uuid, resolve_pv, short_name};
+use crate::flex::detect::{change_disks, find_disk, mdadm_uuid, outside_tier, resolve_pv};
 use crate::flex::tiers::{self, DiskSize, Tier};
 use crate::plan::{
     D, END_RESERVE, LUKS_HEADER, MIB, PART_START, check_new_disk, cmd, cmd_secret,
@@ -102,6 +114,8 @@ pub struct VPart {
     /// partitions are added to an array or make a new one; a stale one (a member taken out,
     /// a failed disk, a superblock of an array that is not running) is left alone.
     pub fresh: bool,
+    /// Partition number (the tier's, as the plans make them).
+    pub partn: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -109,6 +123,8 @@ pub struct VDisk {
     pub name: String,
     pub size: u64,
     pub parts: Vec<VPart>,
+    /// Partitions that are not slices of this volume: the disk is never cleared whole.
+    pub others: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,7 +287,7 @@ impl View {
                 .map(|(n, s)| VDisk {
                     name: n.clone(),
                     size: *s,
-                    parts: Vec::new(),
+                    ..Default::default()
                 })
                 .collect(),
             records_known: true,
@@ -287,10 +303,8 @@ impl View {
         let vg_report = inv.lvm.vg(vg);
         let mut v = View {
             label: label.into(),
-            tolerance: record
-                .map(|r| r.level.tolerance())
-                .filter(|t| *t > 0)
-                .unwrap_or(layout.tolerance.min(2)),
+            // the record's; without one, from the tiers below
+            tolerance: record.map_or(0, |r| r.level.tolerance()),
             extent: vg_report.map_or(EXTENT, |x| x.extent_size.max(MIB)),
             vg_exists: true,
             vg_free: vg_report.map_or(0, |x| x.free),
@@ -322,34 +336,21 @@ impl View {
             Some((mnt, used))
         });
 
-        // tier arrays: those of the layout, and arrays named after the volume outside the group
-        let prefix = format!("{label}_t");
+        // tier arrays: those of the layout, and arrays of the volume outside the group (recorded,
+        // or named and labeled after it on its disks: never one of another system)
         let mut arrays: Vec<(u32, &rynas_api_types::storage::MdArray)> = Vec::new();
         for t in &layout.tiers {
             if let Some(a) = t.array.as_deref().and_then(|n| inv.arrays.iter().find(|a| a.name == n)) {
                 arrays.push((t.index, a));
             }
         }
+        let mut vol_disks: Vec<String> = layout.tiers.iter().flat_map(|t| t.members.clone()).collect();
+        vol_disks.extend(change_disks(inv, record));
         for a in &inv.arrays {
-            let named = a
-                .md_name
-                .as_deref()
-                .map(short_name)
-                .and_then(|n| n.strip_prefix(&prefix))
-                .and_then(|n| n.parse::<u32>().ok())
-                .or_else(|| {
-                    a.members.iter().find_map(|m| {
-                        g.get(&m.device)?
-                            .partlabel
-                            .as_deref()?
-                            .strip_prefix(&format!("rynas-{label}-t"))?
-                            .parse::<u32>()
-                            .ok()
-                    })
-                });
-            if let Some(n) = named
-                && !arrays.iter().any(|(_, x)| x.name == a.name)
-            {
+            if arrays.iter().any(|(_, x)| x.name == a.name) {
+                continue;
+            }
+            if let Some(n) = outside_tier(inv, label, a, &vol_disks, record) {
                 arrays.push((n, a));
             }
         }
@@ -405,12 +406,30 @@ impl View {
                 sync: a.sync.as_ref().map(|s| s.action.clone()),
                 interrupted: a.reshape_position.is_some()
                     && a.sync.as_ref().is_none_or(|s| s.action != "reshape"),
-                replacing: None,
+                // a copy under way (`--replace`): md marks the member it copies away
+                replacing: a
+                    .members
+                    .iter()
+                    .find(|m| m.role == MemberRole::Active && m.state.contains("want_replacement"))
+                    .map(|m| m.device.clone()),
                 size: a.size.max(pv.map_or(0, |p| p.dev_size)),
                 pv: pv.map(|p| p.size),
                 in_vg: pv.is_some_and(|p| &p.vg == vg),
                 recorded,
             });
+        }
+
+        if v.tolerance == 0 {
+            // never less than a tier has: a three-way mirror half way to RAID6 (a 2-disk
+            // mirror or RAID5 for a while) does not make a 2-disk tolerance volume a 1-disk
+            // one, its lowest tier (RAID6, every disk) still says 2
+            v.tolerance = v
+                .tiers
+                .iter()
+                .filter_map(|t| t.level.map(|l| level_tolerance(l, t.raid_disks)))
+                .max()
+                .unwrap_or(layout.tolerance)
+                .clamp(1, 2);
         }
 
         // the disks: those of the tiers, and any disk with a slice of this volume
@@ -430,8 +449,6 @@ impl View {
         for n in names {
             v.add_disk(inv, &n);
         }
-
-        v.discover_planned();
         v
     }
 
@@ -441,12 +458,18 @@ impl View {
     /// planned over every disk of the tier below that reaches its end, as the tier
     /// calculator made it, and the missing partitions are made again
     /// ([`growth_steps`] without a target).
-    pub fn discover_planned(&mut self) {
+    ///
+    /// Only slices on disks in a tier, or `named` (the new disks of the change recorded as
+    /// under way), count: a disk in no tier is never adopted silently, its slices may be left
+    /// over from anything (another system's volume of the same name, a growth that never
+    /// added it).
+    pub fn discover_planned(&mut self, named: &[String]) {
         let mut next = self.tiers.iter().map(|t| t.index).max().unwrap_or(0) + 1;
         loop {
             let slices: Vec<(String, VPart)> = self
                 .disks
                 .iter()
+                .filter(|d| named.contains(&d.name) || self.in_some_tier(&d.name))
                 .flat_map(|d| {
                     d.parts
                         .iter()
@@ -470,6 +493,7 @@ impl View {
             let planned: Vec<String> = self
                 .disks
                 .iter()
+                .filter(|d| named.contains(&d.name) || self.in_some_tier(&d.name))
                 .filter(|d| {
                     slices.iter().any(|(n, _)| n == &d.name)
                         || (!d.parts.iter().any(|p| p.tier == next)
@@ -508,34 +532,36 @@ impl View {
             .or_else(|| g.get(name).map(|d| d.size))
             .unwrap_or(0);
         let plabel = format!("rynas-{}-t", self.label);
-        let parts = g
-            .get(name)
-            .map(|d| {
-                d.children
-                    .iter()
-                    .filter_map(|c| g.get(c))
-                    .filter(|p| p.kind == "part")
-                    .filter_map(|p| {
-                        let tier = p.partlabel.as_deref()?.strip_prefix(&plabel)?.parse().ok()?;
-                        let start = p.start?;
-                        // an md superblock: of the tier's array (a member, or one taken out),
-                        // or of an array that is not running; never added or created over
-                        let stale = p.fstype.as_deref() == Some("linux_raid_member");
-                        Some(VPart {
-                            tier,
-                            kname: p.kname.clone(),
-                            start,
-                            end: start + p.size,
-                            fresh: !stale,
-                        })
-                    })
-                    .collect()
+        let slice_tier = |p: &crate::lsblk::BlockDev| -> Option<u32> {
+            p.partlabel.as_deref()?.strip_prefix(&plabel)?.parse().ok()
+        };
+        let all_parts: Vec<&crate::lsblk::BlockDev> = g.get(name).map_or_else(Vec::new, |d| {
+            d.children.iter().filter_map(|c| g.get(c)).filter(|p| p.kind == "part").collect()
+        });
+        let others = all_parts.iter().filter(|p| slice_tier(p).is_none()).count() as u32;
+        let parts = all_parts
+            .iter()
+            .filter_map(|p| {
+                let tier = slice_tier(p)?;
+                let start = p.start?;
+                // an md superblock: of the tier's array (a member, or one taken out), or of
+                // an array that is not running; never added or created over
+                let stale = p.fstype.as_deref() == Some("linux_raid_member");
+                Some(VPart {
+                    tier,
+                    kname: p.kname.clone(),
+                    start,
+                    end: start + p.size,
+                    fresh: !stale,
+                    partn: p.partn.unwrap_or(tier),
+                })
             })
-            .unwrap_or_default();
+            .collect();
         self.disks.push(VDisk {
             name: name.into(),
             size,
             parts,
+            others,
         });
     }
 
@@ -694,6 +720,11 @@ impl View {
             ["sgdisk", rest @ ..] => {
                 let Some(dev) = rest.last() else { return };
                 let disk = part(dev);
+                for n in rest.iter().filter_map(|x| x.strip_prefix("--delete=")) {
+                    if let (Ok(n), Some(d)) = (n.parse::<u32>(), self.disks.iter_mut().find(|d| d.name == disk)) {
+                        d.parts.retain(|p| p.partn != n);
+                    }
+                }
                 for n in rest.iter().filter_map(|x| x.strip_prefix("--new=")) {
                     let f: Vec<u64> = n.split(':').filter_map(|x| x.parse().ok()).collect();
                     if let [num, s, e] = f[..] {
@@ -705,6 +736,7 @@ impl View {
                             start: s * 512,
                             end: (e + 1) * 512,
                             fresh: true,
+                            partn: num as u32,
                         });
                     }
                 }
@@ -826,20 +858,11 @@ impl View {
             }
             ["mdadm", "--zero-superblock", p] => {
                 let p = part(p);
+                // the partition stays (a fresh inventory still finds its disk by its label)
                 for d in self.disks.iter_mut() {
                     for x in d.parts.iter_mut().filter(|x| x.kname == p) {
                         x.fresh = true;
                     }
-                }
-                // a disk in no tier (the replaced one) is not part of the layout: a fresh
-                // inventory does not find it under the volume either
-                let disk = self.part_disk(&p);
-                let in_tier = self
-                    .tiers
-                    .iter()
-                    .any(|t| t.planned.contains(&disk) || t.members.iter().any(|m| m.disk == disk));
-                if !in_tier {
-                    self.disks.retain(|d| d.name != disk);
                 }
             }
             ["mdadm", dev, op, rest @ ..] => {
@@ -1150,7 +1173,9 @@ pub fn growth_steps(v: &mut View, goal: &Goal, target: Option<&[Tier]>) -> Resul
         v.tiers.sort_by_key(|t| t.index);
         steps = partition_steps(v, target, &goal.new)?;
     } else {
-        v.discover_planned();
+        // the planned tiers again, with the disks of the change under way
+        v.tiers.retain(VTier::created);
+        v.discover_planned(&goal.new);
         let planned: Vec<Tier> = v
             .tiers
             .iter()
@@ -1232,8 +1257,92 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
             ));
         }
     }
-    // new tiers
-    for t in v.tiers.iter().filter(|t| !t.created()) {
+
+    // a three-way mirror on its way to RAID6 that lost its third mirror to the plan (a crash
+    // after `--fail` or `--remove`, before `--raid-devices=2`): the conversion goes on
+    // ([`third_mirror_out`]); the joins then take the partition back
+    for t in created() {
+        match third_mirror_out(v, t, g) {
+            Some(MirrorOut::Faulty(m)) => {
+                return one(run(
+                    on(PlanStepKind::RemoveMember, &m.part),
+                    s(&["mdadm", &t.dev, "--remove", &dev(&m.part)]),
+                ));
+            }
+            Some(MirrorOut::Slice(out)) => {
+                let mut steps = Vec::new();
+                if !out.fresh {
+                    steps.push(run(
+                        on(PlanStepKind::WipeSignatures, &out.kname),
+                        s(&["mdadm", "--zero-superblock", &dev(&out.kname)]),
+                    ));
+                }
+                steps.push(run(
+                    on(PlanStepKind::Reshape, &t.kname),
+                    s(&["mdadm", "--grow", &t.dev, "--raid-devices=2"]),
+                ));
+                return Some(steps);
+            }
+            None => {}
+        }
+    }
+    // a mirror taken out on the way to RAID6 and not cleared (a crash in between): its disk
+    // still works in every lower tier, so it is cleared and joins again
+    for t in created().filter(|t| v.tolerance >= 2 && t.level == Some(RaidLevel::Raid1)) {
+        let lower: Vec<&VTier> = created().filter(|x| x.index < t.index).collect();
+        if lower.is_empty() {
+            continue;
+        }
+        let reclaim = v.disks.iter().find_map(|dk| {
+            let p = v.slice_of(&dk.name, t)?;
+            (!p.fresh && t.member(&p.kname).is_none() && works_below(&lower, &dk.name) && g.old.as_deref() != Some(&dk.name))
+                .then(|| p.kname.clone())
+        });
+        if let Some(p) = reclaim {
+            return one(run(
+                on(PlanStepKind::WipeSignatures, &p),
+                s(&["mdadm", "--zero-superblock", &dev(&p)]),
+            ));
+        }
+    }
+    // rebuilds first: every degraded tier gets its new member before any wait (md queues
+    // them), before a new tier is made or a tier grows
+    for t in created().filter(|t| t.degraded() > 0 && t.replacing.is_none()) {
+        if let Some(old) = g.old.as_deref() {
+            let faulty: Vec<&VMember> = t
+                .members
+                .iter()
+                .filter(|m| m.disk == old && m.role == MemberRole::Faulty)
+                .collect();
+            if let Some(m) = faulty.first() {
+                return one(run(
+                    on(PlanStepKind::RemoveMember, &m.part),
+                    s(&["mdadm", &t.dev, "--remove", &dev(&m.part)]),
+                ));
+            }
+        }
+        let slots = (t.degraded() as usize).saturating_sub(t.count(MemberRole::Rebuilding));
+        let cands: Vec<String> = v
+            .candidates(t, g)
+            .into_iter()
+            .take(slots)
+            .map(|p| dev(&p.kname))
+            .collect();
+        if !cands.is_empty() {
+            let mut argv = s(&["mdadm", &t.dev, "--add"]);
+            argv.extend(cands);
+            return one(run(on(PlanStepKind::AddForRebuild, &t.kname), argv));
+        }
+    }
+    // new tiers, once no rebuild runs or waits to start: the copies of the data that lost
+    // its redundancy come before anything else reads and writes the same disks
+    let rebuilding = created().any(|t| {
+        t.degraded() > 0
+            && (t.count(MemberRole::Rebuilding) > 0
+                || t.sync.as_deref() == Some("recovery")
+                || !v.candidates(t, g).is_empty())
+    });
+    for t in v.tiers.iter().filter(|t| !t.created() && !rebuilding) {
         let parts: Option<Vec<String>> = t
             .planned
             .iter()
@@ -1340,102 +1449,6 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
             on(PlanStepKind::GrowFilesystem, mnt),
             s(&["btrfs", "filesystem", "resize", "max", mnt]),
         ));
-    }
-
-    // a three-way mirror on its way to RAID6 that lost its third mirror to the plan (a crash
-    // after `--fail`/`--remove`, before `--raid-devices=2`): with that partition and the
-    // new ones it has the four disks of RAID6, which only the conversion gives it, so the
-    // conversion goes on: the partition is cleared, the mirror becomes a 2-disk one (the
-    // joins then take the partition back). A third mirror lost otherwise (three disks, no
-    // new partition) is left to a replace. Its disk must still work in every lower tier.
-    for t in created().filter(|t| {
-        v.tolerance >= 2
-            && t.level == Some(RaidLevel::Raid1)
-            && t.raid_disks == 3
-            && t.members.len() == 2
-            && t.active() == 2
-            && t.sync.is_none()
-            && !t.interrupted
-    }) {
-        let lower: Vec<&VTier> = created().filter(|x| x.index < t.index).collect();
-        let out = v.disks.iter().find_map(|dk| {
-            let p = v.slice_of(&dk.name, t)?;
-            let working = lower.iter().all(|x| {
-                x.members
-                    .iter()
-                    .any(|m| m.disk == dk.name && m.role == MemberRole::Active)
-            });
-            (t.member(&p.kname).is_none() && working && g.old.as_deref() != Some(&dk.name)).then_some(p)
-        });
-        let Some(out) = out else { continue };
-        let others = v.candidates(t, g).iter().filter(|p| p.kname != out.kname).count();
-        if t.active() + 1 + others < 4 {
-            continue;
-        }
-        let mut steps = Vec::new();
-        if !out.fresh {
-            steps.push(run(
-                on(PlanStepKind::WipeSignatures, &out.kname),
-                s(&["mdadm", "--zero-superblock", &dev(&out.kname)]),
-            ));
-        }
-        steps.push(run(
-            on(PlanStepKind::Reshape, &t.kname),
-            s(&["mdadm", "--grow", &t.dev, "--raid-devices=2"]),
-        ));
-        return Some(steps);
-    }
-    // a mirror taken out on the way to RAID6 and not cleared (a crash in between): its disk
-    // still works in every lower tier, so it is cleared and joins again
-    for t in created().filter(|t| v.tolerance >= 2 && t.level == Some(RaidLevel::Raid1)) {
-        let lower: Vec<&VTier> = created().filter(|x| x.index < t.index).collect();
-        if lower.is_empty() {
-            continue;
-        }
-        let reclaim = v.disks.iter().find_map(|dk| {
-            let p = v.slice_of(&dk.name, t)?;
-            let working = lower.iter().all(|x| {
-                x.members
-                    .iter()
-                    .any(|m| m.disk == dk.name && m.role == MemberRole::Active)
-            });
-            (!p.fresh && t.member(&p.kname).is_none() && working && g.old.as_deref() != Some(&dk.name))
-                .then(|| p.kname.clone())
-        });
-        if let Some(p) = reclaim {
-            return one(run(
-                on(PlanStepKind::WipeSignatures, &p),
-                s(&["mdadm", "--zero-superblock", &dev(&p)]),
-            ));
-        }
-    }
-    // rebuilds: every degraded tier gets its new member before any wait (md queues them)
-    for t in created().filter(|t| t.degraded() > 0 && t.replacing.is_none()) {
-        if let Some(old) = g.old.as_deref() {
-            let faulty: Vec<&VMember> = t
-                .members
-                .iter()
-                .filter(|m| m.disk == old && m.role == MemberRole::Faulty)
-                .collect();
-            if let Some(m) = faulty.first() {
-                return one(run(
-                    on(PlanStepKind::RemoveMember, &m.part),
-                    s(&["mdadm", &t.dev, "--remove", &dev(&m.part)]),
-                ));
-            }
-        }
-        let slots = (t.degraded() as usize).saturating_sub(t.count(MemberRole::Rebuilding));
-        let cands: Vec<String> = v
-            .candidates(t, g)
-            .into_iter()
-            .take(slots)
-            .map(|p| dev(&p.kname))
-            .collect();
-        if !cands.is_empty() {
-            let mut argv = s(&["mdadm", &t.dev, "--add"]);
-            argv.extend(cands);
-            return one(run(on(PlanStepKind::AddForRebuild, &t.kname), argv));
-        }
     }
 
     // per tier, lowest first
@@ -1550,6 +1563,9 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
                 on(PlanStepKind::Reshape, &t.kname),
                 s(&["mdadm", "--grow", &t.dev, &format!("--raid-devices={}", total - 1)]),
             ),
+            // the layout is kept (Q on the new disk, not rotated): the conversion is a
+            // recovery onto that disk; normalising it now would be a second full reshape of
+            // the tier, so it waits for the next reshape of the tier (below)
             RaidLevel::Raid5 if v.tolerance >= 2 && total >= 4 => run(
                 on(PlanStepKind::Reshape, &t.kname),
                 s(&[
@@ -1561,9 +1577,16 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
                     "--layout=preserve",
                 ]),
             ),
-            RaidLevel::Raid5 | RaidLevel::Raid6 => run(
+            RaidLevel::Raid5 => run(
                 on(PlanStepKind::Reshape, &t.kname),
                 s(&["mdadm", "--grow", &t.dev, &format!("--raid-devices={total}")]),
+            ),
+            // a RAID6 made from RAID5 keeps the layout of the conversion, which mdadm does
+            // not reshape without being told: this reshape restripes the tier anyway, so it
+            // takes the standard layout on the way (nothing changes for one that has it)
+            RaidLevel::Raid6 => run(
+                on(PlanStepKind::Reshape, &t.kname),
+                s(&["mdadm", "--grow", &t.dev, &format!("--raid-devices={total}"), "--layout=normalise"]),
             ),
             _ => continue,
         };
@@ -1573,28 +1596,19 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
     // partitions lose their superblocks (otherwise assembling from mdadm.conf, as the
     // initramfs does, finds an outdated copy of a tier and gives up on the whole array),
     // then its partition table goes (a slice of the volume that is not a member would be
-    // taken for a new disk's partition waiting to join): the disk is free again. For a
-    // "missing" disk: a disk with only leftover slices of the volume (with or without their
-    // superblocks), once no tier misses a disk any more (while one does, that disk may still
-    // be the one to put back). The steps
-    // erase the disk (the plan names it, the executor checks it is still that disk) and are
-    // best effort: the volume no longer needs the disk, which may be unreadable.
-    let in_no_tier = |name: &str| !v.in_some_tier(name);
+    // taken for a new disk's partition waiting to join): the disk is free again. A disk
+    // with other partitions keeps them: only the volume's are deleted. The steps erase the
+    // disk the request named (the executor checks it is still that disk and that what it
+    // erases is still the volume's and unused) and are best effort: the volume no longer
+    // needs the disk, which may be unreadable. Nothing else is ever erased here: for a
+    // "missing" disk, a disk with slices of the volume left over is not one the request
+    // named (the plan says so, [`PlanWarningCode::FlexLeftoverDisk`]).
     let clear: Option<&VDisk> = match g.old.as_deref() {
-        None => None,
-        Some(MISSING) => {
-            let healthy = created().all(|t| t.degraded() == 0);
-            v.disks.iter().find(|dk| {
-                healthy
-                    && !g.new.contains(&dk.name)
-                    && !dk.parts.is_empty()
-                    && in_no_tier(&dk.name)
-            })
-        }
+        None | Some(MISSING) => None,
         Some(old) => v
             .disks
             .iter()
-            .find(|d| d.name == old && !d.parts.is_empty() && in_no_tier(old)),
+            .find(|d| d.name == old && !d.parts.is_empty() && !v.in_some_tier(old)),
     };
     if let Some(dk) = clear {
         let name = dk.name.as_str();
@@ -1609,10 +1623,29 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
                 )
             })
             .collect();
-        steps.push(run(
-            on(PlanStepKind::ClearPartitionTable, name),
-            s(&["sgdisk", "--zap-all", &dev(name)]),
-        ));
+        if dk.others == 0 {
+            steps.push(run(
+                on(PlanStepKind::ClearPartitionTable, name),
+                s(&["sgdisk", "--zap-all", &dev(name)]),
+            ));
+        } else {
+            let mut parts: Vec<&VPart> = dk.parts.iter().collect();
+            parts.sort_by_key(|p| p.partn);
+            let mut argv = vec!["sgdisk".to_string()];
+            argv.extend(parts.iter().map(|p| format!("--delete={}", p.partn)));
+            argv.push(dev(name));
+            steps.push(run(
+                D(
+                    PlanStepKind::DeletePartitions,
+                    PlanArgs {
+                        subject: Some(name.to_string()),
+                        items: parts.iter().map(|p| p.kname.clone()).collect(),
+                        ..Default::default()
+                    },
+                ),
+                argv,
+            ));
+        }
         for st in &mut steps {
             st.destroys = vec![name.to_string()];
             st.best_effort = true;
@@ -1620,6 +1653,63 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
         return Some(steps);
     }
     None
+}
+
+/// The disk is an in-sync member of every tier in `lower`.
+fn works_below(lower: &[&VTier], disk: &str) -> bool {
+    lower.iter().all(|x| {
+        x.members
+            .iter()
+            .any(|m| m.disk == disk && m.role == MemberRole::Active)
+    })
+}
+
+/// The third mirror a three-way mirror lost on its way to RAID6 ([`third_mirror_out`]).
+#[derive(Debug, Clone, Copy)]
+enum MirrorOut<'a> {
+    /// Marked faulty, still in the array (a crash between `--fail` and `--remove`).
+    Faulty(&'a VMember),
+    /// Out of the array (a crash after `--remove`, before `--raid-devices=2`).
+    Slice(&'a VPart),
+}
+
+/// A three-way mirror of a 2-disk tolerance volume on its way to RAID6 (one mirror taken out,
+/// back to two disks, RAID5, then RAID6 over the new disks: md has no direct path) stopped
+/// after its third mirror went out: the mirror's partition, on a disk that still works in
+/// every lower tier, is faulty in the array or out of it. With it and the new partitions
+/// the tier has the four disks of RAID6, which only the conversion gives it, so the
+/// conversion goes on instead of rebuilding the mirror; a third mirror lost otherwise (no
+/// four disks: no new partition around) is left to a replace. The same holds when a
+/// "missing" disk is replaced: its slot is taken by the conversion (the replace plan shows
+/// the tier as RAID6 and warns about the window).
+fn third_mirror_out<'a>(v: &'a View, t: &'a VTier, g: &Goal) -> Option<MirrorOut<'a>> {
+    if v.tolerance < 2
+        || t.level != Some(RaidLevel::Raid1)
+        || t.raid_disks != 3
+        || t.active() != 2
+        || t.sync.is_some()
+        || t.interrupted
+        || t.replacing.is_some()
+    {
+        return None;
+    }
+    let lower: Vec<&VTier> = v.tiers.iter().filter(|x| x.created() && x.index < t.index).collect();
+    let usable = |disk: &str| works_below(&lower, disk) && g.old.as_deref() != Some(disk);
+    let enough = |out: &str| {
+        let others = v.candidates(t, g).iter().filter(|p| p.kname != out).count();
+        t.active() + 1 + others >= 4
+    };
+    let faulty: Vec<&VMember> = t.members.iter().filter(|m| m.role == MemberRole::Faulty).collect();
+    match (t.members.len(), faulty.as_slice()) {
+        (3, [m]) if usable(&m.disk) && v.slice_of(&m.disk, t).is_some() && enough(&m.part) => {
+            Some(MirrorOut::Faulty(m))
+        }
+        (2, []) => v.disks.iter().find_map(|dk| {
+            let p = v.slice_of(&dk.name, t)?;
+            (t.member(&p.kname).is_none() && usable(&dk.name) && enough(&p.kname)).then_some(MirrorOut::Slice(p))
+        }),
+        _ => None,
+    }
 }
 
 // ------------------------------------------------------------------------------- create
@@ -1814,13 +1904,21 @@ fn load(inv: &Inventory, label: &str, p: &mut StoragePlan) -> Option<View> {
     Some(View::from_inventory(inv, layout, label))
 }
 
-/// The pending items of the volume's layout.
-fn pending_of<'a>(inv: &'a Inventory, label: &str) -> &'a [rynas_api_types::storage::FlexPending] {
+/// The pending items of the volume's layout that hold a growth or replace back. A change
+/// recorded as under way is not one of them: going on with it is the request's business
+/// ([`recorded_change`]), and one that never started is ignored.
+fn pending_of(inv: &Inventory, label: &str) -> Vec<rynas_api_types::storage::FlexPending> {
     let vg = vg_name(label);
     inv.flex
         .iter()
         .find(|l| l.vg == vg)
-        .map_or(&[][..], |l| l.pending.as_slice())
+        .map_or_else(Vec::new, |l| {
+            l.pending
+                .iter()
+                .filter(|p| p.kind != rynas_api_types::storage::FlexPendingKind::ChangeInterrupted)
+                .cloned()
+                .collect()
+        })
 }
 
 /// Days since the epoch of a civil date (proleptic Gregorian).
@@ -1987,31 +2085,74 @@ fn finish_growth(
     g: &tiers::Growth,
     label: &str,
 ) -> StoragePlan {
-    // the LUKS header stays at the start of the logical volume, as when it was created
-    p.usable_bytes = lvm_usable(&g.tiers).saturating_sub(if v.luks.is_some() { LUKS_HEADER } else { 0 });
-    short_warnings(&mut p, g);
     p.fault_tolerance = v.tolerance;
-    p.tiers_after = g.tiers.iter().map(Tier::to_api).collect();
-    for (after, before) in p.tiers_after.iter_mut().zip(&p.tiers_before) {
-        if after.index == before.index {
-            after.array = before.array.clone();
-        }
-    }
     unused_warning(&mut p, &g.unused);
     reshape_warnings(&mut p, g);
     if v.fs.is_none() {
         warn(&mut p, PlanWarningCode::GrowFilesystemByHand, PlanArgs::default());
     }
+    let mut after = g.tiers.clone();
+    if p.errors.is_empty() {
+        match growth_steps(&mut v, goal, Some(&g.tiers)) {
+            Ok(steps) => {
+                p.steps = steps;
+                as_planned(&mut p, &v, &mut after);
+            }
+            Err(e) => fail(&mut p, PlanIssueCode::FlexLayoutUnsupported, "volume", Some(label), e),
+        }
+    }
+    // the LUKS header stays at the start of the logical volume, as when it was created
+    p.usable_bytes = lvm_usable(&after).saturating_sub(if v.luks.is_some() { LUKS_HEADER } else { 0 });
+    short_warnings(&mut p, g);
+    p.tiers_after = after.iter().map(Tier::to_api).collect();
+    for (after, before) in p.tiers_after.iter_mut().zip(&p.tiers_before) {
+        if after.index == before.index {
+            after.array = before.array.clone();
+        }
+    }
     if !p.errors.is_empty() {
         return finish(p);
-    }
-    match growth_steps(&mut v, goal, Some(&g.tiers)) {
-        Ok(steps) => p.steps = steps,
-        Err(e) => fail(&mut p, PlanIssueCode::FlexLayoutUnsupported, "volume", Some(label), e),
     }
     p.summary = summary(&v, label);
     finish(p)
 }
+
+/// The tiers after the plan as its steps leave them (`v`, the end state of the model), where
+/// that differs from the calculator's target: a three-way mirror that lost its third mirror
+/// becomes RAID6 when the disks are there ([`third_mirror_out`]), with the warning about the
+/// window it tolerates one disk.
+fn as_planned(p: &mut StoragePlan, v: &View, after: &mut [Tier]) {
+    for a in after.iter_mut() {
+        let Some(t) = v.tiers.iter().find(|t| t.index == a.index && t.created()) else {
+            continue;
+        };
+        let mut members: Vec<String> = t
+            .members
+            .iter()
+            .filter(|m| m.role != MemberRole::Faulty)
+            .map(|m| m.disk.clone())
+            .collect();
+        members.sort();
+        members.dedup();
+        natural(&mut members);
+        let mut want = a.members.clone();
+        natural(&mut want);
+        if (&members, t.level) == (&want, a.level) || t.level.is_none() {
+            continue;
+        }
+        let reduces = a.level == Some(RaidLevel::Raid1) && t.level == Some(RaidLevel::Raid6);
+        a.members = members;
+        a.level = t.level;
+        let warned = p.warning_items.iter().any(|w| {
+            w.code == PlanWarningCode::FlexReducedToleranceWindow
+                && w.args.subject.as_deref() == Some(a.index.to_string().as_str())
+        });
+        if reduces && !warned {
+            warn_on(p, PlanWarningCode::FlexReducedToleranceWindow, &a.index.to_string());
+        }
+    }
+}
+
 
 fn summary(v: &View, label: &str) -> Vec<(String, String)> {
     let mut s = vec![
@@ -2045,11 +2186,21 @@ pub fn plan_grow_at(inv: &Inventory, req: &GrowPlanRequest, now: u64) -> Storage
         let m = format!("the fault tolerance of a flexible RAID cannot be changed ({} stays)", v.tolerance);
         fail(&mut p, C::ToleranceChangeUnsupported, "level", None, m);
     }
-    if !pending_of(inv, &label).is_empty() {
+    // the same growth requested again goes on from where it stopped
+    let change = recorded_change(inv, &label);
+    let resume = change
+        .as_ref()
+        .is_some_and(|c| c.old.is_none() && same_names(&c.new, &req.disks));
+    if let Some(c) = change.as_ref().filter(|_| !resume) {
+        let m = format!("{label}: {} stopped half way: request it again or complete it", c.describe());
+        fail(&mut p, C::FlexGrowthPending, "volume", Some(&label), m);
+    } else if !resume && !pending_of(inv, &label).is_empty() {
         let m = format!("{label}: a growth was interrupted; complete it first");
         fail(&mut p, C::FlexGrowthPending, "volume", Some(&label), m);
     }
-    tiers_ready(&mut p, &v, false);
+    if !resume {
+        tiers_ready(&mut p, &v, false);
+    }
     if req.disks.is_empty() {
         fail(&mut p, C::NoDisks, "disks", None, "select at least one disk to add".into());
     }
@@ -2060,24 +2211,36 @@ pub fn plan_grow_at(inv: &Inventory, req: &GrowPlanRequest, now: u64) -> Storage
             fail(&mut p, C::DiskSelectedTwice, "disks", Some(name), format!("{name}: selected twice"));
             continue;
         }
-        if let Some(d) = check_new_disk(inv, name, "disks", &mut p) {
+        // a disk the growth already put in a tier is the volume's, not a free disk
+        let d = if resume && v.in_some_tier(name) {
+            inv.disks.iter().find(|d| &d.name == name).cloned()
+        } else {
+            check_new_disk(inv, name, "disks", &mut p)
+        };
+        if let Some(d) = d {
             new.push((d.name.clone(), d.size));
             v.add_disk(inv, name);
         }
     }
     p.raw_bytes = new.iter().map(|(_, s)| s).sum();
-    let g = tiers::grow(&v.shapes(), &v.layout_disks(), &new, v.tolerance, inv.min_tier());
+    let goal = Goal {
+        old: None,
+        new: new.iter().map(|(n, _)| n.clone()).collect(),
+    };
+    let g = if resume {
+        let mut disks = v.layout_disks();
+        disks.retain(|(n, _)| !goal.new.contains(n));
+        tiers::grow(&resume_shapes(&v, &goal), &disks, &new, v.tolerance, inv.min_tier())
+    } else {
+        tiers::grow(&v.shapes(), &v.layout_disks(), &new, v.tolerance, inv.min_tier())
+    };
     for name in &g.too_small {
         let m = too_small_text(&g, name);
         fail(&mut p, C::DiskTooSmall, "disks", Some(name), m);
     }
     if p.errors.is_empty() {
-        scrub_check(&mut p, inv, &v, now, true);
+        scrub_check(&mut p, inv, &v, now, !resume);
     }
-    let goal = Goal {
-        old: None,
-        new: new.iter().map(|(n, _)| n.clone()).collect(),
-    };
     finish_growth(p, v, &goal, &g, &label)
 }
 
@@ -2099,10 +2262,31 @@ pub fn plan_replace_at(inv: &Inventory, req: &ReplacePlanRequest, now: u64) -> S
         return finish(p);
     };
     let old = req.old.trim_start_matches("/dev/").to_string();
-    let mut shapes = v.shapes();
+    let new_name = req.new_disk.clone();
+    // the same replace requested again goes on from where it stopped: the new disk may hold
+    // members already, the old one may be out of some tiers (or all: what is left is the new
+    // disk's joins and clearing the old one)
+    let change = recorded_change(inv, &label);
+    let resume = change.as_ref().is_some_and(|c| {
+        c.old.as_deref() == Some(old.as_str()) && c.new.len() == 1 && c.new[0] == new_name
+    });
+    if let Some(c) = change.as_ref().filter(|_| !resume) {
+        let m = format!("{label}: {} stopped half way: request it again or complete it", c.describe());
+        fail(&mut p, C::FlexGrowthPending, "volume", Some(&label), m);
+        return finish(p);
+    }
+    let goal = Goal {
+        old: Some(old.clone()),
+        new: vec![new_name.clone()],
+    };
+    let mut shapes = if resume { resume_shapes(&v, &goal) } else { v.shapes() };
     let mut disks = v.layout_disks();
+    if resume {
+        disks.retain(|(n, _)| n != &new_name);
+    }
     // the disk to replace, by name; "missing" stands for the disk gone from degraded tiers
-    let old_name = if old == MISSING {
+    let in_tiers = v.tiers.iter().any(|t| t.members.iter().any(|m| m.disk == old));
+    let old_name: Option<String> = if old == MISSING {
         let degraded: Vec<u32> = v
             .tiers
             .iter()
@@ -2110,48 +2294,73 @@ pub fn plan_replace_at(inv: &Inventory, req: &ReplacePlanRequest, now: u64) -> S
             .map(|t| t.index)
             .collect();
         if degraded.is_empty() {
-            fail(&mut p, C::NotAMember, "old", Some(&old), format!("{label}: no tier misses a disk"));
-            return finish(p);
+            if !resume {
+                fail(&mut p, C::NotAMember, "old", Some(&old), format!("{label}: no tier misses a disk"));
+                return finish(p);
+            }
+            None
+        } else {
+            let ghost = "<missing>".to_string();
+            let mut top = PART_START;
+            for t in shapes.iter_mut().filter(|t| degraded.contains(&t.index)) {
+                // a new disk rebuilding there takes the ghost's place, not one of its own
+                t.members.retain(|m| m != &new_name);
+                t.members.push(ghost.clone());
+                top = top.max(t.end);
+            }
+            disks.push((ghost.clone(), top + END_RESERVE));
+            Some(ghost)
         }
-        let ghost = "<missing>".to_string();
-        let mut top = PART_START;
-        for t in shapes.iter_mut().filter(|t| degraded.contains(&t.index)) {
-            t.members.push(ghost.clone());
-            top = top.max(t.end);
-        }
-        disks.push((ghost.clone(), top + END_RESERVE));
-        ghost
+    } else if in_tiers {
+        Some(old.clone())
+    } else if resume {
+        None
     } else {
-        if !v.tiers.iter().any(|t| t.members.iter().any(|m| m.disk == old)) {
-            let m = format!("{old} is not a disk of {label}");
-            fail(&mut p, C::NotAMember, "old", Some(&old), m);
-            return finish(p);
-        }
-        old.clone()
+        let m = format!("{old} is not a disk of {label}");
+        fail(&mut p, C::NotAMember, "old", Some(&old), m);
+        return finish(p);
     };
-    // a working member while another disk is missing: no healthy copy to keep
+    // a working member while another disk is missing: no healthy copy to keep (a copy done,
+    // the old member faulty and the new one in sync, is still a hot replace)
+    let new_in_sync = |t: &VTier| {
+        t.members
+            .iter()
+            .any(|m| m.disk == new_name && m.role == MemberRole::Active)
+    };
     let rebuild = old == MISSING
         || v.tiers.iter().any(|t| {
-            t.members
-                .iter()
-                .any(|m| m.disk == old && m.role != MemberRole::Active)
+            !new_in_sync(t)
+                && t.members
+                    .iter()
+                    .any(|m| m.disk == old && m.role != MemberRole::Active)
         });
     for t in v.tiers.iter().filter(|t| t.created()) {
         let old_active = t.members.iter().any(|m| m.disk == old && m.role == MemberRole::Active);
         if old_active && t.degraded() > 0 {
+            // md fills an empty slot before it replaces a member: the new disk would take
+            // the missing disk's place, the old one would stay (and failing it first would
+            // leave the tier without redundancy while it rebuilds)
             let m = format!(
-                "{} (tier {}) misses another disk: replace that one first",
+                "{} (tier {}) misses another disk: the new disk would take that disk's place, not {old}'s; replace the missing disk first",
                 t.kname, t.index
             );
             fail(&mut p, C::ArrayNotHealthy, "old", Some(&t.kname), m);
         }
     }
-    tiers_ready(&mut p, &v, rebuild);
-    if !rebuild && !pending_of(inv, &label).is_empty() {
-        let m = format!("{label}: a growth was interrupted; complete it first");
-        fail(&mut p, C::FlexGrowthPending, "volume", Some(&label), m);
+    if !resume {
+        tiers_ready(&mut p, &v, rebuild);
+        if !rebuild && !pending_of(inv, &label).is_empty() {
+            let m = format!("{label}: a growth was interrupted; complete it first");
+            fail(&mut p, C::FlexGrowthPending, "volume", Some(&label), m);
+        }
     }
-    let Some(nd) = check_new_disk(inv, &req.new_disk, "new_disk", &mut p) else {
+    // a new disk the replace already put in a tier is the volume's, not a free disk
+    let nd = if resume && v.in_some_tier(&new_name) {
+        inv.disks.iter().find(|d| d.name == new_name).cloned()
+    } else {
+        check_new_disk(inv, &new_name, "new_disk", &mut p)
+    };
+    let Some(nd) = nd else {
         return finish(p);
     };
     if nd.smr {
@@ -2159,35 +2368,75 @@ pub fn plan_replace_at(inv: &Inventory, req: &ReplacePlanRequest, now: u64) -> S
     }
     v.add_disk(inv, &nd.name);
     p.raw_bytes = nd.size;
-    let g = match tiers::replace(&shapes, &disks, &old_name, &(nd.name.clone(), nd.size), v.tolerance, inv.min_tier()) {
-        Ok(g) => g,
-        Err(tiers::TierError::TooSmall { disk, need }) => {
-            let m = replace_too_small_text(&disk, nd.size, need);
-            fail(&mut p, C::DiskTooSmall, "new_disk", Some(&disk), m);
-            return finish(p);
-        }
-        Err(e) => {
-            fail(&mut p, C::NotAMember, "old", Some(&old), format!("{e:?}"));
-            return finish(p);
-        }
+    let new_disk = (nd.name.clone(), nd.size);
+    let g = match &old_name {
+        Some(o) => match tiers::replace(&shapes, &disks, o, &new_disk, v.tolerance, inv.min_tier()) {
+            Ok(g) => g,
+            Err(tiers::TierError::TooSmall { disk, need }) => {
+                let m = replace_too_small_text(&disk, nd.size, need);
+                fail(&mut p, C::DiskTooSmall, "new_disk", Some(&disk), m);
+                return finish(p);
+            }
+            Err(e) => {
+                fail(&mut p, C::NotAMember, "old", Some(&old), format!("{e:?}"));
+                return finish(p);
+            }
+        },
+        None => tiers::grow(&shapes, &disks, std::slice::from_ref(&new_disk), v.tolerance, inv.min_tier()),
     };
     if p.errors.is_empty() && !g.joins.is_empty() {
-        scrub_check(&mut p, inv, &v, now, !rebuild);
+        scrub_check(&mut p, inv, &v, now, !rebuild && !resume);
     }
-    let goal = Goal {
-        old: Some(if old == MISSING { MISSING.into() } else { old }),
-        new: vec![nd.name.clone()],
-    };
+    if old == MISSING {
+        // slices left on a disk in no tier are never erased by a replace of "missing": the
+        // request names no such disk
+        for dk in v.disks.iter().filter(|d| !d.parts.is_empty() && d.name != nd.name && !v.in_some_tier(&d.name)) {
+            warn_on(&mut p, PlanWarningCode::FlexLeftoverDisk, &dk.name);
+        }
+    }
     finish_growth(p, v, &goal, &g, &label)
 }
 
 /// `POST /api/v1/storage/plan/complete`: what is left of an interrupted growth.
 pub fn plan_complete(inv: &Inventory, req: &CompletePlanRequest) -> StoragePlan {
+    plan_complete_at(inv, req, now_s())
+}
+
+/// [`plan_complete`]: a growth or replace recorded as under way ([`recorded_change`]) goes on
+/// as if requested again, whatever step it stopped at; otherwise only what the state shows
+/// unfinished is done (and no disk outside the tiers is taken).
+pub fn plan_complete_at(inv: &Inventory, req: &CompletePlanRequest, now: u64) -> StoragePlan {
+    let label = req.volume.as_str();
+    if let Some(c) = recorded_change(inv, label) {
+        let mut p = match &c.old {
+            Some(old) => plan_replace_at(
+                inv,
+                &ReplacePlanRequest {
+                    array: String::new(),
+                    old: old.clone(),
+                    new_disk: c.new.first().cloned().unwrap_or_default(),
+                    volume: Some(label.to_string()),
+                },
+                now,
+            ),
+            None => plan_grow_at(
+                inv,
+                &GrowPlanRequest {
+                    array: String::new(),
+                    disks: c.new.clone(),
+                    level: None,
+                    volume: Some(label.to_string()),
+                },
+                now,
+            ),
+        };
+        p.operation = "complete_growth".into();
+        return p;
+    }
     let mut p = StoragePlan {
         operation: "complete_growth".into(),
         ..Default::default()
     };
-    let label = req.volume.as_str();
     let Some(mut v) = load(inv, label, &mut p) else {
         return finish(p);
     };
@@ -2203,6 +2452,137 @@ pub fn plan_complete(inv: &Inventory, req: &CompletePlanRequest) -> StoragePlan 
         warn(&mut p, PlanWarningCode::GrowFilesystemByHand, PlanArgs::default());
     }
     finish(p)
+}
+
+/// md tolerance of a tier array.
+fn level_tolerance(l: RaidLevel, raid_disks: u32) -> u32 {
+    match l {
+        RaidLevel::Raid1 => raid_disks.saturating_sub(1),
+        RaidLevel::Raid5 => 1,
+        RaidLevel::Raid6 => 2,
+        _ => 0,
+    }
+}
+
+/// The same disks, in any order.
+fn same_names(a: &[String], b: &[String]) -> bool {
+    let (mut a, mut b) = (a.to_vec(), b.to_vec());
+    a.sort();
+    b.sort();
+    a == b
+}
+
+/// A growth or replace recorded as under way ([`FlexChange`]), its disks under today's
+/// kernel names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    /// The disk a replace takes out: today's name, or [`MISSING`] (recorded so, or gone
+    /// since); `None` for a growth.
+    pub old: Option<String>,
+    pub new: Vec<String>,
+}
+
+impl Change {
+    fn describe(&self) -> String {
+        match &self.old {
+            Some(o) => format!("the replace of {o} by {}", self.new.join(", ")),
+            None => format!("the growth by {}", self.new.join(", ")),
+        }
+    }
+}
+
+/// A partition of `disk` is a slice of volume `label` (labeled `rynas-<label>-t<N>`); with
+/// `member`, one with an md array on it.
+pub fn holds_slice(inv: &Inventory, label: &str, disk: &str, member: bool) -> bool {
+    let g = &inv.graph;
+    let plabel = format!("rynas-{label}-t");
+    g.get(disk).is_some_and(|d| {
+        d.children.iter().filter_map(|c| g.get(c)).any(|p| {
+            p.kind == "part"
+                && p.partlabel.as_deref().is_some_and(|l| l.starts_with(&plabel))
+                && (!member || p.children.iter().filter_map(|c| g.get(c)).any(|x| x.is_md()))
+        })
+    })
+}
+
+/// The change recorded for volume `label` that is going on: its new disks found again by
+/// identity, one of them at least holding a slice of the volume. A change that stopped
+/// before its first step, or was rolled back (its new disks erased again), is not one to go
+/// on with: planning ignores it, and the next change or complete clears it.
+pub fn recorded_change(inv: &Inventory, label: &str) -> Option<Change> {
+    let c = inv.record(label)?.change.as_ref()?;
+    let new: Vec<String> = c.new.iter().map(|r| find_disk(inv, r)).collect::<Option<_>>()?;
+    if new.is_empty() || !new.iter().any(|d| holds_slice(inv, label, d, false)) {
+        return None;
+    }
+    let old = c.old.as_ref().map(|o| {
+        if o.name == MISSING {
+            MISSING.to_string()
+        } else {
+            find_disk(inv, o).unwrap_or_else(|| MISSING.to_string())
+        }
+    });
+    Some(Change { old, new })
+}
+
+/// The record of a change before its first step ([`VolumeRecord::change`]): the disks with
+/// their names and identities in `inv`.
+///
+/// [`VolumeRecord::change`]: rynas_api_types::storage::VolumeRecord::change
+pub fn change_record(inv: &Inventory, old: Option<&str>, new: &[String]) -> FlexChange {
+    let r = |name: &str| DiskRef {
+        name: name.to_string(),
+        id: inv
+            .disks
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| crate::exec::identity(d).to_string())
+            .unwrap_or_default(),
+    };
+    FlexChange {
+        old: old.map(|o| {
+            if o == MISSING {
+                DiskRef {
+                    name: MISSING.into(),
+                    id: String::new(),
+                }
+            } else {
+                r(o)
+            }
+        }),
+        new: new.iter().map(|n| r(n)).collect(),
+    }
+}
+
+/// The created tiers as the tier calculator sees them while a change goes on (`g`): fresh
+/// slices of a tier not in its array yet count as members (the new disks partitioned, or
+/// half way through the joins), and so does a third mirror out on its way to RAID6
+/// ([`third_mirror_out`]); where the disk a replace takes out is still a member, the new
+/// disk does not count (a spare, or a copy under way). The calculator then plans the target
+/// of the change, less what is done.
+fn resume_shapes(v: &View, g: &Goal) -> Vec<Tier> {
+    let mut shapes = v.shapes();
+    for s in shapes.iter_mut() {
+        let Some(t) = v.tiers.iter().find(|t| t.index == s.index) else {
+            continue;
+        };
+        let mut extra: Vec<String> = v.candidates(t, g).iter().map(|p| v.part_disk(&p.kname)).collect();
+        if let Some(MirrorOut::Slice(p)) = third_mirror_out(v, t, g) {
+            extra.push(v.part_disk(&p.kname));
+        }
+        for d in extra {
+            if !s.members.contains(&d) {
+                s.members.push(d);
+            }
+        }
+        if let Some(old) = g.old.as_deref()
+            && s.members.iter().any(|m| m == old)
+        {
+            s.members.retain(|m| !g.new.contains(m));
+        }
+        natural(&mut s.members);
+    }
+    shapes
 }
 
 #[cfg(test)]

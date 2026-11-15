@@ -22,7 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use rynas_api_types::storage::{
-    ArrayTuning, BtrfsFilesystem, CompletePlanRequest, DiskOverride, DiskSettings, DiskSettingsState, DiskSummary,
+    ArrayTuning, BtrfsFilesystem, CompletePlanRequest, DiskOverride, DiskSettings, DiskSettingsState, DiskSummary, FlexChange,
     GrowPlanRequest, HealthAckRequest, HealthAckResult, MdArray, RecoveryKey, ReplacePlanRequest, ScrubAction, ScrubPlanRequest,
     StoragePlan, StorageTuning, StorageVolumes, SubvolumeCreateRequest, SubvolumeInfo,
     SubvolumeSettings, UnlockRequest, VolumeCompleteRequest, VolumeCreateRequest, VolumeGrowRequest, VolumeRecord,
@@ -760,6 +760,7 @@ async fn volume_create(
     }
     let plan_req = req.plan.clone();
     let ops = s.clone();
+    let checked = inv.clone();
     let id = spawn(
         &s,
         "storage.volume-create",
@@ -775,6 +776,7 @@ async fn volume_create(
                     fresh.errors.join("; ")
                 ));
             }
+            same_disks(&checked, &inv, &plan_req.disks)?;
             let out = exec::create_volume(
                 &m,
                 &inv,
@@ -837,8 +839,14 @@ async fn volume_grow(
         &req.serials,
     )?;
     let secrets = secrets_for(&p, req.passphrase.take())?;
-    check_free_now(&s, &inv, &req.disks)?;
+    let flex = v.flex;
+    // a growth going on again: its disks already holding members are the volume's
+    let free = if flex { free_new_disks(&inv, &name, &req.disks) } else { req.disks.clone() };
+    check_free_now(&s, &inv, &free)?;
     let mut keys: Vec<String> = req.disks.iter().map(|d| format!("disk:{d}")).collect();
+    keys.extend(erased_disks(&inv, &p).iter().map(|d| format!("disk:{d}")));
+    keys.sort();
+    keys.dedup();
     keys.push(format!("volume:{name}"));
     let held = s.reserve(keys)?;
     if req.dry_run {
@@ -847,7 +855,7 @@ async fn volume_grow(
     let ops = s.clone();
     let disks = req.disks.clone();
     let mnt = v.mounted().and_then(|f| f.mountpoint.clone());
-    let flex = v.flex;
+    let checked = inv.clone();
     let id = spawn(
         &s,
         "storage.volume-grow",
@@ -864,8 +872,17 @@ async fn volume_grow(
                     fresh.errors.join("; ")
                 ));
             }
-            let record = if flex { record_of(&ops, &name)? } else { None };
-            exec::run_plan_with(&m, &inv, &fresh, &disks, &secrets, record).await
+            let mut names = disks.clone();
+            names.extend(erased_disks(&inv, &fresh));
+            same_disks(&checked, &inv, &names)?;
+            if !flex {
+                return exec::run_plan_with(&m, &inv, &fresh, &disks, &secrets, None).await;
+            }
+            let change = rynas_storage::flex::plan::change_record(&inv, None, &disks);
+            let record = record_change(&m, &ops, &name, change).await?;
+            let free = free_new_disks(&inv, &name, &disks);
+            let r = exec::run_plan_with(&m, &inv, &fresh, &free, &secrets, record).await;
+            end_change(&m, &ops, &name, r).await
         },
     )?;
     Ok(started(id))
@@ -897,6 +914,104 @@ fn record_of(ops: &StorageOps, label: &str) -> Result<Option<VolumeRecord>, Stri
         return Err(format!("volume {label} is not recorded: its new tiers could not be recorded"));
     }
     Ok(r)
+}
+
+/// The growth or replace of a flexible volume recorded as under way before its first step
+/// ([`VolumeRecord::change`]): after a stop at any step, the same request again or complete
+/// goes on with it. Returns the record the plan then updates.
+async fn record_change<M: Machine>(
+    m: &M,
+    ops: &StorageOps,
+    label: &str,
+    change: FlexChange,
+) -> Result<Option<VolumeRecord>, String> {
+    let Some(mut r) = record_of(ops, label)? else {
+        return Ok(None);
+    };
+    if r.change.as_ref() != Some(&change) {
+        r.change = Some(change);
+        m.commit(VolumeChange::Update(r.clone())).await?;
+    }
+    Ok(Some(r))
+}
+
+/// The change recorded on volume `label` ended, or never started: its record goes.
+async fn clear_change<M: Machine>(m: &M, ops: &StorageOps, label: &str) -> Result<(), String> {
+    let Some(mut r) = record_of(ops, label)? else {
+        return Ok(());
+    };
+    if let Some(c) = r.change.take() {
+        m.commit(VolumeChange::Update(r)).await?;
+        let names: Vec<&str> = c.new.iter().map(|d| d.name.as_str()).collect();
+        m.log(&format!("the change by {} is recorded as ended", names.join(", ")));
+    }
+    Ok(())
+}
+
+/// The end of a growth or replace task of a flexible volume: done, its record of the change
+/// goes; failed, it stays unless nothing was done (no new disk holds a slice of the volume:
+/// stopped before the first step, or rolled back), so that the same request or complete goes
+/// on with it.
+async fn end_change<M: Machine>(m: &M, ops: &StorageOps, label: &str, r: Result<(), String>) -> Result<(), String> {
+    let started = match &r {
+        Ok(()) => false,
+        Err(_) => match ops.inventory(true).await {
+            Ok(inv) => rynas_storage::flex::plan::recorded_change(&inv, label).is_some(),
+            Err(_) => true,
+        },
+    };
+    if !started && let Err(e) = clear_change(m, ops, label).await {
+        m.log(&format!("WARNING: the record of the change could not be cleared: {e}"));
+    }
+    r
+}
+
+/// Whole disks a plan erases (in the inventory it was made from).
+fn erased_disks(inv: &Inventory, p: &StoragePlan) -> Vec<String> {
+    let mut v: Vec<String> = p
+        .steps
+        .iter()
+        .flat_map(|s| s.destroys.iter())
+        .filter(|d| inv.disks.iter().any(|x| &x.name == *d))
+        .cloned()
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The disks a task works on are still the ones its request was checked against (serial or
+/// name, WWN, size): a disk swapped under the same kernel name while the task waited in the
+/// queue gets the same steps, so comparing the plans cannot tell.
+fn same_disks(before: &Inventory, now: &Inventory, names: &[String]) -> Result<(), String> {
+    for n in names {
+        let a = before.disks.iter().find(|d| &d.name == n);
+        let b = now.disks.iter().find(|d| &d.name == n);
+        let same = match (a, b) {
+            (Some(a), Some(b)) => {
+                exec::identity(a) == exec::identity(b) && a.wwn == b.wwn && a.size == b.size
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            return Err(format!(
+                "{n} is not the disk the request was checked against any more: plan again"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The new disks of a flexible growth or replace that the executor checks as free disks:
+/// not those already holding members of the volume (the same change requested again, or
+/// completed, after a stop).
+fn free_new_disks(inv: &Inventory, label: &str, disks: &[String]) -> Vec<String> {
+    disks
+        .iter()
+        .filter(|d| !rynas_storage::flex::plan::holds_slice(inv, label, d, true))
+        .cloned()
+        .collect()
 }
 
 async fn volume_replace(
@@ -934,17 +1049,28 @@ async fn volume_replace(
     let disks = vec![req.new_disk.clone()];
     confirm(&name, &req.confirm, &disks_of(&inv, &disks)?, &req.serials)?;
     let secrets = secrets_for(&p, req.passphrase.take())?;
-    check_free_now(&s, &inv, &disks)?;
-    let held = s.reserve(vec![
-        format!("disk:{}", req.new_disk),
-        format!("volume:{name}"),
-    ])?;
+    let flex = v.flex;
+    // a replace going on again: a new disk already holding members is the volume's
+    let free = if flex { free_new_disks(&inv, &name, &disks) } else { disks.clone() };
+    check_free_now(&s, &inv, &free)?;
+    // the disks it works on: the new one, the old one (cleared at the end) and whatever the
+    // plan erases
+    let old = req.old.trim_start_matches("/dev/").to_string();
+    let mut keys = vec![format!("disk:{}", req.new_disk)];
+    if inv.disks.iter().any(|d| d.name == old) {
+        keys.push(format!("disk:{old}"));
+    }
+    keys.extend(erased_disks(&inv, &p).iter().map(|d| format!("disk:{d}")));
+    keys.sort();
+    keys.dedup();
+    keys.push(format!("volume:{name}"));
+    let held = s.reserve(keys)?;
     if req.dry_run {
         return Ok(Json(p).into_response());
     }
     let ops = s.clone();
     let mnt = v.mounted().and_then(|f| f.mountpoint.clone());
-    let flex = v.flex;
+    let checked = inv.clone();
     let id = spawn(
         &s,
         "storage.volume-replace",
@@ -961,16 +1087,23 @@ async fn volume_replace(
                     fresh.errors.join("; ")
                 ));
             }
-            let record = if flex { record_of(&ops, &name)? } else { None };
-            exec::run_plan_with(&m, &inv, &fresh, &disks, &secrets, record).await
+            let mut names = disks.clone();
+            names.push(old.clone());
+            names.extend(erased_disks(&inv, &fresh));
+            same_disks(&checked, &inv, &names)?;
+            if !flex {
+                return exec::run_plan_with(&m, &inv, &fresh, &disks, &secrets, None).await;
+            }
+            let change = rynas_storage::flex::plan::change_record(&inv, Some(&old), &disks);
+            let record = record_change(&m, &ops, &name, change).await?;
+            let free = free_new_disks(&inv, &name, &disks);
+            let r = exec::run_plan_with(&m, &inv, &fresh, &free, &secrets, record).await;
+            end_change(&m, &ops, &name, r).await
         },
     )?;
     Ok(started(id))
 }
 
-/// `POST /storage/volumes/{name}/complete`: what is left of an interrupted growth of a
-/// flexible volume. Nothing is erased (the partitions it uses are the volume's own), so no
-/// typed confirmation.
 async fn volume_complete(
     State(st): State<StoState>,
     h: HeaderMap,
@@ -990,16 +1123,32 @@ async fn volume_complete(
     if !p.valid {
         return Err(invalid_plan(&p));
     }
-    if p.steps.is_empty() {
+    // a change recorded as under way: complete goes on with it (its disks were confirmed when
+    // it was requested), or, with nothing left, only its record goes
+    let recorded = inv.record(&name).and_then(|r| r.change.clone());
+    let change = rynas_storage::flex::plan::recorded_change(&inv, &name);
+    if p.steps.is_empty() && recorded.is_none() {
         return Err(conflict(format!("volume {name} has nothing left to complete")));
     }
     let secrets = secrets_for(&p, req.passphrase.take())?;
-    let held = s.reserve(vec![format!("volume:{name}")])?;
+    let new: Vec<String> = change.as_ref().map(|c| c.new.clone()).unwrap_or_default();
+    let mut keys: Vec<String> = new.iter().map(|d| format!("disk:{d}")).collect();
+    if let Some(old) = change.as_ref().and_then(|c| c.old.clone())
+        && inv.disks.iter().any(|d| d.name == old)
+    {
+        keys.push(format!("disk:{old}"));
+    }
+    keys.extend(erased_disks(&inv, &p).iter().map(|d| format!("disk:{d}")));
+    keys.sort();
+    keys.dedup();
+    keys.push(format!("volume:{name}"));
+    let held = s.reserve(keys)?;
     if req.dry_run {
         return Ok(Json(p).into_response());
     }
     let ops = s.clone();
     let mnt = v.mounted().and_then(|f| f.mountpoint.clone());
+    let checked = inv.clone();
     let id = spawn(
         &s,
         "storage.volume-complete",
@@ -1015,8 +1164,17 @@ async fn volume_complete(
                     fresh.errors.join("; ")
                 ));
             }
+            let mut names = new.clone();
+            names.extend(erased_disks(&inv, &fresh));
+            same_disks(&checked, &inv, &names)?;
             let record = record_of(&ops, &name)?;
-            exec::run_plan_with(&m, &inv, &fresh, &[], &secrets, record).await
+            if fresh.steps.is_empty() {
+                // nothing was left: the change ended, or never started
+                return clear_change(&m, &ops, &name).await;
+            }
+            let free = free_new_disks(&inv, &name, &new);
+            let r = exec::run_plan_with(&m, &inv, &fresh, &free, &secrets, record).await;
+            end_change(&m, &ops, &name, r).await
         },
     )?;
     Ok(started(id))
@@ -1750,5 +1908,64 @@ impl rynas_services::SubvolumeCreator for HostSubvolumes {
                 .map_err(|e| format!("{}: {e}", argv[0]))?;
         }
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rynas_api_types::storage::{PlanAction, PlanStep};
+
+    fn inv(disks: &[(&str, &str, u64)]) -> Inventory {
+        let mut i = Inventory::default();
+        for (name, serial, size) in disks {
+            i.disks.push(DiskSummary {
+                name: name.to_string(),
+                serial: serial.to_string(),
+                size: *size,
+                ..Default::default()
+            });
+        }
+        i
+    }
+
+    /// A disk swapped under the same kernel name while a task waited is refused, whatever the
+    /// plans say; "missing" names no disk.
+    #[test]
+    fn a_disk_swapped_under_its_name_is_refused() {
+        let before = inv(&[("sdb", "AAA", 8), ("sdd", "DDD", 12)]);
+        let names = vec!["sdb".to_string(), "sdd".into(), "missing".into()];
+        assert!(same_disks(&before, &before, &names).is_ok());
+        for now in [
+            inv(&[("sdb", "AAA", 8), ("sdd", "EEE", 12)]),
+            inv(&[("sdb", "AAA", 8), ("sdd", "DDD", 10)]),
+            inv(&[("sdb", "AAA", 8)]),
+        ] {
+            let e = same_disks(&before, &now, &names).unwrap_err();
+            assert!(e.contains("sdd is not the disk the request was checked against"), "{e}");
+        }
+        let mut now = before.clone();
+        now.disks[1].wwn = Some("0x5000".into());
+        assert!(same_disks(&before, &now, &names).is_err());
+    }
+
+    /// The whole disks a plan erases, for their reservation and the identity check.
+    #[test]
+    fn the_disks_a_plan_erases() {
+        let i = inv(&[("sda", "A", 4), ("sdd", "D", 12)]);
+        let step = |destroys: &[&str]| PlanStep {
+            description: String::new(),
+            kind: None,
+            args: Default::default(),
+            action: PlanAction::Command { argv: vec!["true".into()], stdin: None },
+            destroys: destroys.iter().map(|s| s.to_string()).collect(),
+            best_effort: false,
+        };
+        let p = StoragePlan {
+            steps: vec![step(&["sdd"]), step(&["sdd1", "sdc2"]), step(&["sda"]), step(&["sdd"])],
+            ..Default::default()
+        };
+        assert_eq!(erased_disks(&i, &p), ["sda", "sdd"]);
     }
 }

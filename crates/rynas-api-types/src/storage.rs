@@ -771,6 +771,11 @@ pub enum FlexPendingKind {
     TierNotRecorded,
     /// A disk has the tier's partition, but the partition is not a member of the array.
     PartitionNotMember,
+    /// A growth or replace recorded as under way did not end (`subject`: its new disks):
+    /// completing it, or requesting it again, goes on with it.
+    ChangeInterrupted,
+    /// The tier array has no write-intent bitmap (a growth stopped after turning it off).
+    BitmapOff,
     /// A kind this client does not know (newer server).
     #[serde(other)]
     Other,
@@ -1338,6 +1343,10 @@ pub enum PlanWarningCode {
     /// Flexible RAID: no scrub of the filesystem on `subject` (mount point) finished without
     /// errors in the last `count` days: a read error during the reshapes is the main risk.
     FlexNoRecentScrub,
+    /// Flexible RAID: `subject` holds old slices of the volume in no tier and is not erased
+    /// by this plan (an old superblock on it can confuse assembling the tiers at boot):
+    /// add it to a volume or erase it.
+    FlexLeftoverDisk,
     /// A code this client does not know (newer server): show the English text.
     #[serde(other)]
     Other,
@@ -1415,6 +1424,9 @@ pub enum PlanStepKind {
     BitmapOn,
     /// Flexible RAID: tell the kernel about partition `subject` on a disk in use.
     AddPartitionLive,
+    /// Flexible RAID: delete the volume's own partitions `items` of disk `subject` (the disk
+    /// has other partitions, which stay).
+    DeletePartitions,
     /// A kind this client does not know (newer server): show the English text.
     #[serde(other)]
     Other,
@@ -1587,6 +1599,32 @@ pub struct VolumeRecord {
     pub options: String,
     #[serde(default)]
     pub created_ms: u64,
+    /// Flexible RAID: the growth or replace under way (recorded before its first step,
+    /// cleared when it ends).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<FlexChange>,
+}
+
+/// A growth or replace of a flexible RAID under way ([`VolumeRecord::change`]): planning
+/// again, with the same request or with complete, goes on with it, whatever step it stopped
+/// at (power loss, rynasd restarted during a long wait, a failed or cancelled step).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FlexChange {
+    /// The disk a replace takes out (`name` is `missing` for a disk gone); `None` for a
+    /// growth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old: Option<DiskRef>,
+    /// The disks joining (the one new disk of a replace).
+    pub new: Vec<DiskRef>,
+}
+
+/// A disk as a record names it: its kernel name then, and its identity (serial, or the
+/// kernel name for a disk without one), which finds it again under another name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DiskRef {
+    pub name: String,
+    #[serde(default)]
+    pub id: String,
 }
 
 /// One tier array of a flexible RAID [`VolumeRecord`].

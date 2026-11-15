@@ -797,6 +797,95 @@ fn lsblk_identity(inv: &Inventory, disk: &str, serial: Option<&str>) -> (String,
     )
 }
 
+/// lsblk's answer for the partitions of `disk` before a replaced disk is cleared: (kernel
+/// name, number, partition label, holds an md array).
+fn lsblk_parts(disk: &str, parts: &[(&str, u32, &str, bool)]) -> (String, String) {
+    let children: Vec<serde_json::Value> = parts
+        .iter()
+        .map(|(k, n, l, md)| {
+            let held: Vec<serde_json::Value> = if *md {
+                vec![serde_json::json!({"kname": "md125", "type": "raid1", "mountpoint": null})]
+            } else {
+                Vec::new()
+            };
+            serde_json::json!({"kname": k, "type": "part", "partn": n, "partlabel": l, "mountpoint": null, "children": held})
+        })
+        .collect();
+    let j = serde_json::json!({"blockdevices": [{"kname": disk, "type": "disk", "partn": null, "partlabel": null, "mountpoint": null, "children": children}]});
+    (
+        format!("lsblk --json --bytes --output KNAME,TYPE,PARTN,PARTLABEL,MOUNTPOINT /dev/{disk}"),
+        j.to_string(),
+    )
+}
+
+/// Right before the replaced disk is cleared, what each step erases is still a slice of the
+/// volume and unused: a partition of another volume, one holding an array, or one the
+/// kernel will not let go is left alone (best effort: the plan goes on).
+#[tokio::test]
+async fn the_replaced_disk_is_checked_again_right_before_it_is_cleared() {
+    use crate::tests_support::{FlexState, flex_inventory};
+    let mut inv = flex_inventory(FlexState::DiskFaulty, true);
+    let mut d = inv.disks[0].clone();
+    d.name = "sdd".into();
+    d.path = "/dev/sdd".into();
+    d.serial = "NEW-DISK".into();
+    d.size = 8_001_563_222_016;
+    d.used_by.clear();
+    inv.disks.push(d);
+    let req = ReplacePlanRequest {
+        array: String::new(),
+        old: "sdb".into(),
+        new_disk: "sdd".into(),
+        volume: Some("vol2".into()),
+    };
+    let p = plan::plan_replace(&inv, &req);
+    assert!(p.valid, "{:?}", p.errors);
+    let disks = vec!["sdd".to_string()];
+    let run = |parts: &[(&str, u32, &str, bool)], busy: &[&str]| {
+        let mut m = FakeMachine::default();
+        let (line, out) = lsblk_identity(&inv, "sdb", None);
+        m.output(&line, &out);
+        let (line, out) = lsblk_identity(&inv, "sdd", None);
+        m.output(&line, &out);
+        let (line, out) = lsblk_parts("sdb", parts);
+        m.output(&line, &out);
+        m.busy = busy.iter().map(|s| s.to_string()).collect();
+        {
+            let mut f = m.files.lock().unwrap();
+            for a in ["md126", "md127"] {
+                f.insert(format!("/sys/block/{a}/md/sync_action"), "idle\n".into());
+                f.insert(format!("/sys/block/{a}/md/degraded"), "0\n".into());
+            }
+        }
+        m
+    };
+    let erased = |m: &FakeMachine| {
+        m.ran()
+            .into_iter()
+            .filter(|l| l.starts_with("mdadm --zero-superblock /dev/sdb") || l.starts_with("sgdisk --zap-all /dev/sdb"))
+            .collect::<Vec<_>>()
+    };
+    let ours = [("sdb1", 1, "rynas-vol2-t1", false), ("sdb2", 2, "rynas-vol2-t2", false)];
+    // still the volume's slices, unused: cleared
+    let m = run(&ours, &[]);
+    run_plan_with(&m, &inv, &p, &disks, &Secrets::default(), None).await.unwrap();
+    assert_eq!(erased(&m).len(), 3, "{:?}", m.ran());
+    // a partition of something else by now: the table stays (the slices lose their superblocks)
+    let m = run(&[ours[0], ours[1], ("sdb3", 3, "data", false)], &[]);
+    run_plan_with(&m, &inv, &p, &disks, &Secrets::default(), None).await.unwrap();
+    assert!(!m.ran().iter().any(|l| l.starts_with("sgdisk --zap-all /dev/sdb")), "{:?}", m.ran());
+    assert!(m.logged().contains("sdb3 is not a slice of this volume now"), "{}", m.logged());
+    // an array assembled on a slice again: that slice and the table stay
+    let m = run(&[("sdb1", 1, "rynas-vol2-t1", true), ours[1]], &[]);
+    run_plan_with(&m, &inv, &p, &disks, &Secrets::default(), None).await.unwrap();
+    assert_eq!(erased(&m), ["mdadm --zero-superblock /dev/sdb2"], "{:?}", m.ran());
+    assert!(m.logged().contains("sdb1 is in use now"), "{}", m.logged());
+    // the kernel holds the disk: nothing erased
+    let m = run(&ours, &["/dev/sdb1", "/dev/sdb2", "/dev/sdb"]);
+    run_plan_with(&m, &inv, &p, &disks, &Secrets::default(), None).await.unwrap();
+    assert!(erased(&m).is_empty(), "{:?}", m.ran());
+}
+
 /// The replaced disk is cleared last, best effort, and only while it is still the disk the
 /// plan was made for.
 #[tokio::test]
@@ -825,6 +914,8 @@ async fn flexible_replace_clears_the_old_disk_only_if_it_is_still_that_disk() {
         let mut m = FakeMachine::default();
         let (line, out) = lsblk_identity(&inv, "sdb", serial);
         m.output(&line, &out);
+        let (line, out) = lsblk_parts("sdb", &[("sdb1", 1, "rynas-vol2-t1", false), ("sdb2", 2, "rynas-vol2-t2", false)]);
+        m.output(&line, &out);
         // the new disk is checked again after each wait
         let (line, out) = lsblk_identity(&inv, "sdd", None);
         m.output(&line, &out);
@@ -843,7 +934,9 @@ async fn flexible_replace_clears_the_old_disk_only_if_it_is_still_that_disk() {
     run_plan_with(&m, &inv, &p, &disks, &Secrets::default(), None).await.unwrap();
     let ran = m.ran();
     let zero = ran.iter().position(|l| l == "mdadm --zero-superblock /dev/sdb1").unwrap();
-    assert!(ran[zero - 1].starts_with("lsblk --json --nodeps"), "{ran:?}");
+    // which disk it is, then what is on it now
+    assert!(ran[zero - 2].starts_with("lsblk --json --nodeps"), "{ran:?}");
+    assert!(ran[zero - 1].starts_with("lsblk --json --bytes --output KNAME"), "{ran:?}");
     assert_eq!(ran.last().unwrap(), "sgdisk --zap-all /dev/sdb");
     // another disk under the name by now: left alone, the plan still succeeds
     let m = machine(Some("SOMEONE-ELSE"));

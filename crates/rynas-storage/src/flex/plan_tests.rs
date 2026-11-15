@@ -6,7 +6,7 @@ use crate::flex::tiers::{MIN_TIER, reach};
 use crate::lsblk::BlockDev;
 use crate::tests_support::{FlexState, flex_inventory};
 use rynas_api_types::storage::{
-    BtrfsFilesystem, PowerState, ScrubStatus, TierRecord, VolumeRecord,
+    BtrfsFilesystem, FlexPendingKind, PowerState, ScrubStatus, TierRecord, VolumeRecord,
 };
 
 const TB: u64 = 1_000_000_000_000;
@@ -122,7 +122,7 @@ fn grow_view(v: &View, new: &[(&str, u64)]) -> Grown {
     let mut v = v.clone();
     let ns = sizes(new);
     for (n, s) in &ns {
-        v.disks.push(VDisk { name: n.clone(), size: *s, parts: Vec::new() });
+        v.disks.push(VDisk { name: n.clone(), size: *s, parts: Vec::new(), others: 0 });
     }
     let growth = tiers::grow(&v.shapes(), &v.layout_disks(), &ns, v.tolerance, MIN_TIER);
     let goal = Goal { old: None, new: ns.iter().map(|(n, _)| n.clone()).collect() };
@@ -380,7 +380,7 @@ fn add_a_12_to_4_8_8() {
 fn replace_the_4_with_a_12_in_4_8_8() {
     let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
     let mut v = start.clone();
-    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new() });
+    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new(), others: 0 });
     let g = tiers::replace(&v.shapes(), &v.layout_disks(), "sda", &("sdd".into(), 12 * TB), 1, MIN_TIER).unwrap();
     let goal = Goal { old: Some("sda".into()), new: vec!["sdd".into()] };
     let begin = v.clone();
@@ -454,7 +454,7 @@ fn a_new_top_tier_on_disks_in_use() {
     assert_eq!(entry, "ARRAY /dev/md/vol2_t2 metadata=1.2 UUID=<from mdadm --detail --export /dev/md/vol2_t2>");
     // then tier 1 takes the new disk: RAID6 4 → 5
     assert!(l.contains(&"mdadm /dev/md/vol2_t1 --add /dev/sde1".to_string()));
-    assert!(l.contains(&"mdadm --grow /dev/md/vol2_t1 --raid-devices=5".to_string()));
+    assert!(l.contains(&"mdadm --grow /dev/md/vol2_t1 --raid-devices=5 --layout=normalise".to_string()), "{l:?}");
     assert_eq!((end.lv_size as f64 / 1e12).round(), 16.0);
     converges(&begin, &goal, &target, &steps, &end, true);
 }
@@ -506,7 +506,7 @@ fn replace_a_failed_disk_in_the_model() {
             m.role = MemberRole::Faulty;
         }
     }
-    start.disks.push(VDisk { name: "sdd".into(), size: 8 * TB, parts: Vec::new() });
+    start.disks.push(VDisk { name: "sdd".into(), size: 8 * TB, parts: Vec::new(), others: 0 });
     let g = tiers::replace(&start.shapes(), &start.layout_disks(), "sdb", &("sdd".into(), 8 * TB), 1, MIN_TIER).unwrap();
     let goal = Goal { old: Some("sdb".into()), new: vec!["sdd".into()] };
     let mut end = start.clone();
@@ -769,7 +769,7 @@ fn scrub_dates() {
 fn the_replaced_disk_is_erased_best_effort() {
     let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
     let mut v = start.clone();
-    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new() });
+    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new(), others: 0 });
     let g = tiers::replace(&v.shapes(), &v.layout_disks(), "sda", &("sdd".into(), 12 * TB), 1, MIN_TIER).unwrap();
     let goal = Goal { old: Some("sda".into()), new: vec!["sdd".into()] };
     let steps = growth_steps(&mut v, &goal, Some(&g.tiers)).unwrap();
@@ -806,7 +806,7 @@ fn a_rebuild_that_leaves_the_tier_degraded_waits_for_that() {
         t.members.retain(|m| m.disk != "sdc" && m.disk != "sdd");
     }
     start.disks.retain(|d| d.name != "sdc" && d.name != "sdd");
-    start.disks.push(VDisk { name: "sde".into(), size: 8 * TB, parts: Vec::new() });
+    start.disks.push(VDisk { name: "sde".into(), size: 8 * TB, parts: Vec::new(), others: 0 });
     let (goal, target) = replace_missing(&start, ("sde", 8 * TB));
     let mut end = start.clone();
     let steps = growth_steps(&mut end, &goal, Some(&target)).unwrap();
@@ -847,9 +847,10 @@ fn a_disk_with_leftover_slices_is_cleared_and_used() {
         name: "sdd".into(),
         size: 8 * TB,
         parts: vec![
-            VPart { tier: 1, kname: "sdd1".into(), start: MIB, end: b1 - 64 * MIB, fresh: false },
-            VPart { tier: 2, kname: "sdd2".into(), start: b1 - 64 * MIB, end: b2, fresh: false },
+            VPart { tier: 1, kname: "sdd1".into(), start: MIB, end: b1 - 64 * MIB, fresh: false, partn: 1 },
+            VPart { tier: 2, kname: "sdd2".into(), start: b1 - 64 * MIB, end: b2, fresh: false, partn: 2 },
         ],
+        others: 0,
     });
     let ns = vec![("sdd".to_string(), 8 * TB)];
     let growth = tiers::grow(&v.shapes(), &v.layout_disks(), &ns, 1, MIN_TIER);
@@ -880,8 +881,8 @@ fn a_disk_with_leftover_slices_is_cleared_and_used() {
 }
 
 /// "missing": the disk gone and back (its slices in no array) is the new disk: cleared and
-/// rebuilt on; another disk takes its place: it is cleared at the end, once no tier misses
-/// a disk.
+/// rebuilt on; another disk takes its place: the old one is never erased (the request does
+/// not name it; the plan warns about it, see `replace_missing_warns_about_a_leftover_disk`).
 #[test]
 fn replace_missing_with_the_old_disk_still_attached() {
     let mut start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
@@ -901,16 +902,16 @@ fn replace_missing_with_the_old_disk_still_attached() {
     assert!(end.tiers.iter().all(|t| t.degraded() == 0));
     // another disk
     let mut v = start.clone();
-    v.disks.push(VDisk { name: "sdd".into(), size: 8 * TB, parts: Vec::new() });
+    v.disks.push(VDisk { name: "sdd".into(), size: 8 * TB, parts: Vec::new(), others: 0 });
     let (goal, target) = replace_missing(&v, ("sdd", 8 * TB));
     let begin = v.clone();
     let steps = growth_steps(&mut v, &goal, Some(&target)).unwrap();
-    let n = steps.len();
-    assert_eq!(
-        lines(&steps[n - 3..]),
-        ["mdadm --zero-superblock /dev/sdb1", "mdadm --zero-superblock /dev/sdb2", "sgdisk --zap-all /dev/sdb"]
+    assert!(
+        !steps.iter().any(|s| line(s).contains("/dev/sdb") || s.destroys.contains(&"sdb".to_string())),
+        "{:?}",
+        lines(&steps)
     );
-    assert!(steps[n - 3..].iter().all(|s| s.destroys == ["sdb"] && s.best_effort));
+    assert!(v.tiers.iter().all(|t| t.degraded() == 0));
     converges(&begin, &goal, &target, &steps, &v, false);
 }
 
@@ -975,8 +976,9 @@ fn a_new_tier_refuses_a_partition_with_a_superblock() {
         start: b1,
         end: b2,
         fresh: false,
+        partn: 2,
     });
-    v.disks.push(VDisk { name: "sde".into(), size: 12 * TB, parts: Vec::new() });
+    v.disks.push(VDisk { name: "sde".into(), size: 12 * TB, parts: Vec::new(), others: 0 });
     let ns = vec![("sde".to_string(), 12 * TB)];
     let growth = tiers::grow(&v.shapes(), &v.layout_disks(), &ns, 2, MIN_TIER);
     let goal = Goal { old: None, new: vec!["sde".into()] };
@@ -984,8 +986,10 @@ fn a_new_tier_refuses_a_partition_with_a_superblock() {
     assert!(e.contains("sdc2: carries an md superblock"), "{e}");
 }
 
-/// A crash while the disks in use got their partitions for a new top tier: completing makes
-/// the missing ones before the array, over every disk the tier was planned on.
+/// A crash while the disks in use got their partitions for a new top tier: completing with
+/// the growth recorded (its new disk named) makes the missing ones before the array, over
+/// every disk the tier was planned on. Without that record the new disk, in no tier yet, is
+/// never adopted: no tier is made over its slices.
 #[test]
 fn complete_the_partitions_of_a_new_tier() {
     let start = created_view(&[("sda", 4), ("sdc", 4), ("sdd", 8), ("sde", 8)], 2);
@@ -998,7 +1002,11 @@ fn complete_the_partitions_of_a_new_tier() {
     for s in &steps[..cut] {
         w.apply(s);
     }
-    let got = growth_steps(&mut w, &Goal::default(), None).unwrap();
+    let mut silent = w.clone();
+    let got = growth_steps(&mut silent, &Goal::default(), None).unwrap();
+    assert!(!lines(&got).iter().any(|l| l.contains("--create") || l.contains("/dev/sdb")), "{:?}", lines(&got));
+    let named = Goal { old: None, new: vec!["sdb".into()] };
+    let got = growth_steps(&mut w, &named, None).unwrap();
     let g = lines(&got);
     assert_eq!(
         g[..3],
@@ -1016,12 +1024,12 @@ fn complete_the_partitions_of_a_new_tier() {
 /// A replace whose last step (the old disk's partition table) failed leaves that disk with
 /// clean slices of the volume in no array. A later growth by another disk, and complete,
 /// never touch it (they do not add its slices to a tier); a growth naming it clears it
-/// first (the plan says it is erased); a replace of a missing disk clears it at the end.
+/// first (the plan says it is erased); a replace of a missing disk leaves it alone.
 #[test]
 fn leftover_slices_without_superblocks_are_never_adopted() {
     let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
     let mut v = start.clone();
-    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new() });
+    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new(), others: 0 });
     let g = tiers::replace(&v.shapes(), &v.layout_disks(), "sda", &("sdd".into(), 12 * TB), 1, MIN_TIER).unwrap();
     let goal = Goal { old: Some("sda".into()), new: vec!["sdd".into()] };
     let steps = growth_steps(&mut v, &goal, Some(&g.tiers)).unwrap();
@@ -1031,7 +1039,7 @@ fn leftover_slices_without_superblocks_are_never_adopted() {
     let old_part = start.disks.iter().find(|d| d.name == "sda").unwrap().parts[0].clone();
     assert_eq!(old_part.tier, 1);
     v.disks.retain(|d| d.name != "sda");
-    v.disks.push(VDisk { name: "sda".into(), size: 4 * TB, parts: vec![VPart { fresh: true, ..old_part }] });
+    v.disks.push(VDisk { name: "sda".into(), size: 4 * TB, parts: vec![VPart { fresh: true, ..old_part }], others: 0 });
     let after_replace = v.clone();
     let touches_sda = |steps: &[PlanStep]| {
         steps.iter().any(|s| line(s).contains("/dev/sda") || s.destroys.contains(&"sda".to_string()))
@@ -1062,17 +1070,598 @@ fn leftover_slices_without_superblocks_are_never_adopted() {
     assert!(l.contains(&"mdadm /dev/md/vol2_t1 --add /dev/sda1".to_string()), "{l:?}");
     converges(&begin, &goal, &growth.tiers, &steps, &w, true);
 
-    // a replace of a missing disk: sda is cleared at the end, once no tier misses a disk
+    // a replace of a missing disk: sda is not named by the request, never erased
     let mut v = after_replace.clone();
     for t in &mut v.tiers {
         t.members.retain(|m| m.disk != "sdb");
     }
     v.disks.retain(|d| d.name != "sdb");
-    v.disks.push(VDisk { name: "sdf".into(), size: 8 * TB, parts: Vec::new() });
+    v.disks.push(VDisk { name: "sdf".into(), size: 8 * TB, parts: Vec::new(), others: 0 });
     let (goal, target) = replace_missing(&v, ("sdf", 8 * TB));
     let steps = growth_steps(&mut v, &goal, Some(&target)).unwrap();
-    let n = steps.len();
-    assert_eq!(line(&steps[n - 1]), "sgdisk --zap-all /dev/sda", "{:?}", lines(&steps));
-    assert!(steps[n - 1].destroys == ["sda"] && steps[n - 1].best_effort);
-    assert!(!touches_sda(&steps[..n - 1]), "{:?}", lines(&steps));
+    assert!(!touches_sda(&steps), "{:?}", lines(&steps));
+    assert!(v.tiers.iter().all(|t| t.degraded() == 0));
+}
+
+// ------------------------------------------------------------------------------- through the request checks
+
+/// The inventory of the volume in model state `v`, as lsblk, mdadm, LVM and btrfs show it,
+/// with the volume's record (and `change` recorded as under way): the planners' input, so a
+/// state of the model goes through the request checks (plan_replace, plan_grow, complete).
+fn inventory_of(v: &View, change: Option<FlexChange>) -> Inventory {
+    use crate::lvm::{Lv, Pv, Vg};
+    use rynas_api_types::storage::{BtrfsDevice, MdArray, MdMember, SyncProgress};
+    let label = v.label.clone();
+    let vg = vg_name(&label);
+    let dm_path = format!("/dev/mapper/{vg}-{LV_NAME}");
+    let fs_uuid = "11111111-2222-3333-4444-555555555555".to_string();
+    let mut inv = Inventory::default();
+    let member_of = |part: &str| {
+        v.tiers
+            .iter()
+            .find(|t| t.created() && t.members.iter().any(|m| m.part == part))
+    };
+    for d in &v.disks {
+        let mut disk = BlockDev {
+            kname: d.name.clone(),
+            name: d.name.clone(),
+            path: dev(&d.name),
+            kind: "disk".into(),
+            size: d.size,
+            rotational: true,
+            serial: Some(format!("SER-{}", d.name)),
+            model: Some("TEST HDD".into()),
+            ..Default::default()
+        };
+        for p in &d.parts {
+            let t = member_of(&p.kname);
+            inv.graph.devs.insert(
+                p.kname.clone(),
+                BlockDev {
+                    kname: p.kname.clone(),
+                    name: p.kname.clone(),
+                    path: dev(&p.kname),
+                    kind: "part".into(),
+                    size: p.end - p.start,
+                    start: Some(p.start),
+                    partn: Some(if p.partn == 0 { p.tier } else { p.partn }),
+                    partlabel: Some(tier_partlabel(&label, p.tier)),
+                    fstype: (!p.fresh || t.is_some()).then(|| "linux_raid_member".to_string()),
+                    parents: vec![d.name.clone()],
+                    children: t.map(|t| vec![t.kname.clone()]).unwrap_or_default(),
+                    ..Default::default()
+                },
+            );
+            disk.children.push(p.kname.clone());
+        }
+        for n in 0..d.others {
+            let k = format!("{}{}", d.name, 9 + n);
+            inv.graph.devs.insert(
+                k.clone(),
+                BlockDev {
+                    kname: k.clone(),
+                    name: k.clone(),
+                    path: dev(&k),
+                    kind: "part".into(),
+                    size: MIB,
+                    start: Some(d.size - (n as u64 + 2) * MIB),
+                    partn: Some(9 + n),
+                    partlabel: Some("other".into()),
+                    parents: vec![d.name.clone()],
+                    ..Default::default()
+                },
+            );
+            disk.children.push(k);
+        }
+        inv.graph.devs.insert(d.name.clone(), disk);
+    }
+    let mut in_vg: Vec<String> = Vec::new();
+    for t in v.tiers.iter().filter(|t| t.created()) {
+        let kind = match t.level {
+            Some(RaidLevel::Raid5) => "raid5",
+            Some(RaidLevel::Raid6) => "raid6",
+            _ => "raid1",
+        };
+        if t.in_vg {
+            in_vg.push(t.kname.clone());
+        }
+        inv.graph.devs.insert(
+            t.kname.clone(),
+            BlockDev {
+                kname: t.kname.clone(),
+                name: t.kname.clone(),
+                path: format!("/dev/{}", t.kname),
+                kind: kind.into(),
+                size: t.size,
+                parents: t.members.iter().map(|m| m.part.clone()).collect(),
+                children: if t.in_vg { vec!["dm-0".into()] } else { Vec::new() },
+                ..Default::default()
+            },
+        );
+        inv.arrays.push(MdArray {
+            name: t.kname.clone(),
+            path: t.dev.clone(),
+            md_name: Some(format!("nas:{label}_t{}", t.index)),
+            uuid: Some(format!("{:08x}:00000000:00000000:00000000", t.index)),
+            level: kind.into(),
+            raid_disks: t.raid_disks,
+            size: t.size,
+            degraded: t.degraded(),
+            sync: t.sync.as_ref().map(|a| SyncProgress { action: a.clone(), ..Default::default() }),
+            bitmap: Some(if t.bitmap { "internal" } else { "none" }.into()),
+            reshape_position: t.interrupted.then_some(1),
+            members: t
+                .members
+                .iter()
+                .map(|m| MdMember {
+                    device: m.part.clone(),
+                    disk: Some(m.disk.clone()),
+                    role: m.role,
+                    // sysfs state of a copy under way
+                    state: if t.replacing.as_deref() == Some(m.part.as_str()) {
+                        "in_sync,want_replacement".into()
+                    } else if t.replacing.is_some() && m.role == MemberRole::Rebuilding {
+                        "spare,replacement".into()
+                    } else {
+                        String::new()
+                    },
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        });
+        if let Some(pv) = t.pv {
+            inv.lvm.pvs.push(Pv {
+                name: t.dev.clone(),
+                vg: if t.in_vg { vg.clone() } else { String::new() },
+                size: pv,
+                dev_size: t.size,
+                ..Default::default()
+            });
+        }
+    }
+    if v.vg_exists {
+        inv.lvm.vgs.push(Vg {
+            name: vg.clone(),
+            size: inv.lvm.pvs.iter().filter(|p| p.vg == vg).map(|p| p.size).sum(),
+            free: v.vg_free,
+            extent_size: v.extent,
+            pv_count: in_vg.len() as u32,
+            lv_count: 1,
+            ..Default::default()
+        });
+    }
+    if v.lv_exists {
+        inv.lvm.lvs.push(Lv {
+            name: LV_NAME.into(),
+            vg: vg.clone(),
+            size: v.lv_size,
+            dm_path: dm_path.clone(),
+            ..Default::default()
+        });
+        inv.graph.devs.insert(
+            "dm-0".into(),
+            BlockDev {
+                kname: "dm-0".into(),
+                name: format!("{vg}-{LV_NAME}"),
+                path: dm_path.clone(),
+                kind: "lvm".into(),
+                size: v.lv_size,
+                fstype: Some("btrfs".into()),
+                label: Some(label.clone()),
+                uuid: Some(fs_uuid.clone()),
+                parents: in_vg,
+                ..Default::default()
+            },
+        );
+        if let Some((mnt, used)) = &v.fs {
+            inv.filesystems.push(BtrfsFilesystem {
+                uuid: fs_uuid.clone(),
+                label: Some(label.clone()),
+                mountpoint: Some(mnt.clone()),
+                mountpoints: vec![mnt.clone()],
+                devices: vec![BtrfsDevice { devid: 1, path: dm_path.clone(), size: *used, ..Default::default() }],
+                ..Default::default()
+            });
+        }
+    }
+    let names: Vec<String> = inv.graph.disks().iter().map(|d| d.kname.clone()).collect();
+    for n in names {
+        let d = inv.graph.get(&n).unwrap();
+        let s = crate::inventory::summary(d, &inv.graph, None, None, PowerState::Active, NOW * 1000, false);
+        inv.disks.push(s);
+    }
+    inv.records = Some(vec![VolumeRecord {
+        label: label.clone(),
+        level: RaidLevel::flexible(v.tolerance).unwrap(),
+        tiers: v
+            .tiers
+            .iter()
+            .filter(|t| t.created() && t.recorded)
+            .map(|t| TierRecord { index: t.index, md_uuid: format!("{:08x}:00000000:00000000:00000000", t.index) })
+            .collect(),
+        vg: Some(vg),
+        fs_uuid,
+        mountpoint: format!("/{label}"),
+        options: "noatime".into(),
+        change,
+        ..Default::default()
+    }]);
+    inv.flex = crate::flex::detect::detect(&inv, inv.records.as_deref(), MIN_TIER);
+    inv
+}
+
+/// The view of a created volume over `disks` (TB) plus blank disks `extra`, and the change
+/// record of a request on it.
+fn with_blank(v: &View, extra: &[(&str, u64)]) -> View {
+    let mut v = v.clone();
+    for (n, s) in extra {
+        v.disks.push(VDisk { name: n.to_string(), size: s * TB, ..Default::default() });
+    }
+    v
+}
+
+fn prev(steps: &[PlanStep], i: usize) -> String {
+    i.checked_sub(1).and_then(|j| steps.get(j)).map(line).unwrap_or_default()
+}
+
+/// The steps of `plan` (valid) run from `v` reach the end state `end`.
+fn reaches(v: &View, plan: &StoragePlan, end: &View, what: &str) {
+    assert!(plan.valid, "{what}: {:?}", plan.errors);
+    let mut w = v.clone();
+    for s in &plan.steps {
+        w.apply(s);
+    }
+    assert_eq!(shape(&w), shape(end), "{what}: {:?}", lines(&plan.steps));
+    assert_eq!(w.lv_size, end.lv_size, "{what}");
+}
+
+/// A change interrupted after any of its steps, the volume read again: the same request and
+/// complete both pass the request checks and end where the uninterrupted plan ends (the
+/// change recorded before its first step). Returns the end state.
+fn resumes(start: &View, change: FlexChange, request: &dyn Fn(&Inventory) -> StoragePlan) -> View {
+    let first = request(&inventory_of(start, None));
+    assert!(first.valid, "{:?}", first.errors);
+    kinds_ok(&first.steps);
+    let steps = first.steps.clone();
+    let mut end = start.clone();
+    for s in &steps {
+        end.apply(s);
+    }
+    assert!(growth_steps(&mut end.clone(), &Goal::default(), None).unwrap().is_empty(), "left after the plan");
+    for i in 0..=steps.len() {
+        let mut v = start.clone();
+        for s in &steps[..i] {
+            v.apply(s);
+        }
+        let inv = inventory_of(&v, Some(change.clone()));
+        let what = format!("after step {i} ({})", prev(&steps, i));
+        if i < steps.len() {
+            reaches(&v, &request(&inv), &end, &format!("requested again {what}"));
+        }
+        let c = plan_complete_at(&inv, &CompletePlanRequest { volume: "vol2".into() }, NOW);
+        if recorded_change(&inv, "vol2").is_some() {
+            reaches(&v, &c, &end, &format!("complete {what}"));
+            assert!(c.steps.iter().all(|s| s.kind != Some(PlanStepKind::Other)));
+        } else {
+            assert!(c.valid, "complete {what}: {:?}", c.errors);
+        }
+    }
+    end
+}
+
+fn grow_req(disks: &[&str]) -> GrowPlanRequest {
+    GrowPlanRequest {
+        array: String::new(),
+        disks: disks.iter().map(|s| s.to_string()).collect(),
+        level: None,
+        volume: Some("vol2".into()),
+    }
+}
+
+/// A hot replace (the old disk works) stopped at any step, e.g. after the old disk's first
+/// partition left tier 1 (the reported case: re-requesting was refused, complete grew the
+/// volume instead and the old disk never left): requested again or completed, it goes on to
+/// its end, the old disk cleared included.
+#[test]
+fn a_hot_replace_resumes_from_any_step() {
+    let start = with_blank(&created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1), &[("sdd", 12)]);
+    for old in ["sdb", "sda"] {
+        let inv = inventory_of(&start, None);
+        let change = change_record(&inv, Some(old), &["sdd".into()]);
+        let end = resumes(&start, change, &|inv| plan_replace_at(inv, &replace_req(old, "sdd"), NOW));
+        assert!(end.tiers.iter().all(|t| t.members.iter().all(|m| m.disk != old)), "{old}: {:?}", shape(&end));
+        assert!(end.disks.iter().find(|d| d.name == old).is_none_or(|d| d.parts.is_empty()), "{old} not cleared");
+    }
+    // 2-disk tolerance: a member of the three-way mirror
+    let start = with_blank(&created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8), ("sdd", 8)], 2), &[("sde", 8)]);
+    let change = change_record(&inventory_of(&start, None), Some("sdc"), &["sde".into()]);
+    resumes(&start, change, &|inv| plan_replace_at(inv, &replace_req("sdc", "sde"), NOW));
+}
+
+/// A replace of a failed disk, and of a missing one, stopped at any step: the same.
+#[test]
+fn a_rebuild_resumes_from_any_step() {
+    let mut start = with_blank(&created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1), &[("sdd", 8)]);
+    for t in &mut start.tiers {
+        for m in t.members.iter_mut().filter(|m| m.disk == "sdb") {
+            m.role = MemberRole::Faulty;
+        }
+    }
+    let change = change_record(&inventory_of(&start, None), Some("sdb"), &["sdd".into()]);
+    resumes(&start, change, &|inv| plan_replace_at(inv, &replace_req("sdb", "sdd"), NOW));
+    // gone: its members out of the arrays, the disk detached
+    let mut start = start.clone();
+    for t in &mut start.tiers {
+        t.members.retain(|m| m.disk != "sdb");
+    }
+    start.disks.retain(|d| d.name != "sdb");
+    let change = change_record(&inventory_of(&start, None), Some(MISSING), &["sdd".into()]);
+    resumes(&start, change, &|inv| plan_replace_at(inv, &replace_req(MISSING, "sdd"), NOW));
+}
+
+/// A growth stopped at any step (a new top tier on disks in use, a three-way mirror on its
+/// way to RAID6 stopped between `--fail` and `--remove` included): the same request again, or
+/// complete, goes on to the end.
+#[test]
+fn a_growth_resumes_from_any_step() {
+    for (disks, tolerance, new) in [
+        (&[("sda", 4), ("sdb", 8), ("sdc", 8)][..], 1, ("sdd", 12)),
+        (&[("sda", 4), ("sdb", 8), ("sdc", 8), ("sdd", 8)][..], 2, ("sde", 8)),
+        (&[("sda", 4), ("sdb", 4), ("sdc", 8), ("sdd", 8)][..], 2, ("sde", 12)),
+    ] {
+        let start = with_blank(&created_view(disks, tolerance), &[new]);
+        let change = change_record(&inventory_of(&start, None), None, &[new.0.into()]);
+        resumes(&start, change, &|inv| plan_grow_at(inv, &grow_req(&[new.0]), NOW));
+    }
+}
+
+/// A change recorded as under way blocks other changes (the same request or complete goes
+/// on with it); one that never started (no new disk holds a slice) is ignored.
+#[test]
+fn a_recorded_change_blocks_other_changes() {
+    let start = with_blank(&created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1), &[("sdd", 12), ("sde", 12)]);
+    let inv0 = inventory_of(&start, None);
+    let change = change_record(&inv0, Some("sdb"), &["sdd".into()]);
+    let p = plan_replace_at(&inv0, &replace_req("sdb", "sdd"), NOW);
+    let mut v = start.clone();
+    for s in &p.steps[..6] {
+        v.apply(s);
+    }
+    let inv = inventory_of(&v, Some(change.clone()));
+    assert!(inv.flex[0].pending.iter().any(|p| p.kind == FlexPendingKind::ChangeInterrupted));
+    for p in [
+        plan_replace_at(&inv, &replace_req("sdb", "sde"), NOW),
+        plan_replace_at(&inv, &replace_req("sdc", "sdd"), NOW),
+        plan_grow_at(&inv, &grow_req(&["sde"]), NOW),
+    ] {
+        assert!(p.issues.iter().any(|i| i.code == PlanIssueCode::FlexGrowthPending), "{:?}", p.issues);
+        assert!(p.errors.iter().any(|e| e.contains("the replace of sdb by sdd stopped half way")), "{:?}", p.errors);
+    }
+    // never started: ignored by the plans (complete then clears the record)
+    let inv = inventory_of(&start, Some(change));
+    assert!(recorded_change(&inv, "vol2").is_none());
+    let p = plan_complete_at(&inv, &CompletePlanRequest { volume: "vol2".into() }, NOW);
+    assert!(p.valid && p.steps.is_empty(), "{:?}", lines(&p.steps));
+}
+
+/// "missing" never erases a disk the request does not name: a disk with slices of the volume
+/// in no tier is left alone, and the plan says so.
+#[test]
+fn replace_missing_warns_about_a_leftover_disk() {
+    let mut v = with_blank(&created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1), &[("sdd", 8)]);
+    for t in &mut v.tiers {
+        t.members.retain(|m| m.disk != "sdb");
+    }
+    for p in &mut v.disks.iter_mut().find(|d| d.name == "sdb").unwrap().parts {
+        p.fresh = false;
+    }
+    let inv = inventory_of(&v, None);
+    let p = plan_replace_at(&inv, &replace_req(MISSING, "sdd"), NOW);
+    assert!(p.valid, "{:?}", p.errors);
+    assert!(
+        p.warning_items.iter().any(|w| w.code == PlanWarningCode::FlexLeftoverDisk && w.args.subject.as_deref() == Some("sdb")),
+        "{:?}",
+        p.warnings
+    );
+    assert!(!p.steps.iter().any(|s| line(s).contains("/dev/sdb") || !s.destroys.iter().all(|d| d == "sdd" || d.starts_with("sdd"))), "{:?}", lines(&p.steps));
+}
+
+/// A replaced disk with partitions of something else keeps them: only the volume's are
+/// deleted, the partition table stays.
+#[test]
+fn a_replaced_disk_with_other_partitions_keeps_them() {
+    let mut start = with_blank(&created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1), &[("sdd", 12)]);
+    start.disks.iter_mut().find(|d| d.name == "sda").unwrap().others = 1;
+    let inv = inventory_of(&start, None);
+    let p = plan_replace_at(&inv, &replace_req("sda", "sdd"), NOW);
+    assert!(p.valid, "{:?}", p.errors);
+    kinds_ok(&p.steps);
+    let last = p.steps.last().unwrap();
+    assert_eq!(line(last), "sgdisk --delete=1 /dev/sda");
+    assert_eq!(last.kind, Some(PlanStepKind::DeletePartitions));
+    assert_eq!(last.args.items, ["sda1"]);
+    assert!(last.best_effort && last.destroys == ["sda"]);
+    assert!(!lines(&p.steps).iter().any(|l| l.contains("--zap-all /dev/sda")));
+    // the model: the slices go, the disk stays
+    let mut w = start.clone();
+    for s in &p.steps {
+        w.apply(s);
+    }
+    assert!(w.disks.iter().find(|d| d.name == "sda").unwrap().parts.is_empty());
+}
+
+/// An array of the volume's names that is not the volume's (another system's disk, the same
+/// label) is never taken for a tier, nor are slices on a disk in no tier; a new label may not
+/// take the names of a flexible volume's arrays or volume group.
+#[test]
+fn foreign_arrays_and_slices_are_not_the_volumes() {
+    let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
+    let mut inv = inventory_of(&start, None);
+    // another system's disk with a "vol2_t3" array on slices labeled for tier 3
+    let (b1, b2) = (reach(4 * TB), reach(8 * TB));
+    let mut x = with_blank(&View::blank("vol2", 1, &[]), &[("sdx", 12), ("sdy", 12)]);
+    for d in x.disks.iter_mut() {
+        d.parts.push(VPart { tier: 3, kname: format!("{}3", d.name), start: b2, end: b2 + (b2 - b1), fresh: false, partn: 3 });
+    }
+    let xi = inventory_of(&x, None);
+    for n in ["sdx", "sdy", "sdx3", "sdy3"] {
+        inv.graph.devs.insert(n.into(), xi.graph.get(n).unwrap().clone());
+    }
+    inv.disks.extend(xi.disks.iter().cloned());
+    inv.arrays.push(rynas_api_types::storage::MdArray {
+        name: "md90".into(),
+        path: "/dev/md90".into(),
+        md_name: Some("othernas:vol2_t3".into()),
+        level: "raid1".into(),
+        raid_disks: 2,
+        members: ["sdx", "sdy"]
+            .iter()
+            .map(|d| rynas_api_types::storage::MdMember { device: format!("{d}3"), disk: Some(d.to_string()), role: MemberRole::Active, ..Default::default() })
+            .collect(),
+        ..Default::default()
+    });
+    for d in ["sdx3", "sdy3"] {
+        inv.graph.devs.get_mut(d).unwrap().children = vec!["md90".into()];
+    }
+    inv.graph.devs.insert("md90".into(), BlockDev { kname: "md90".into(), name: "md90".into(), path: "/dev/md90".into(), kind: "raid1".into(), parents: vec!["sdx3".into(), "sdy3".into()], ..Default::default() });
+    inv.flex = crate::flex::detect::detect(&inv, inv.records.as_deref(), MIN_TIER);
+    assert!(inv.flex[0].pending.is_empty(), "{:?}", inv.flex[0].pending);
+    let v = View::from_inventory(&inv, &inv.flex[0], "vol2");
+    assert_eq!(v.tiers.len(), 2);
+    let p = plan_complete_at(&inv, &CompletePlanRequest { volume: "vol2".into() }, NOW);
+    assert!(p.valid && p.steps.is_empty(), "{:?}", lines(&p.steps));
+    // its slices without an array are not planned into a tier either
+    inv.arrays.retain(|a| a.name != "md90");
+    inv.graph.devs.remove("md90");
+    for d in ["sdx3", "sdy3"] {
+        inv.graph.devs.get_mut(d).unwrap().children.clear();
+        inv.graph.devs.get_mut(d).unwrap().fstype = None;
+    }
+    inv.flex = crate::flex::detect::detect(&inv, inv.records.as_deref(), MIN_TIER);
+    let p = plan_complete_at(&inv, &CompletePlanRequest { volume: "vol2".into() }, NOW);
+    assert!(p.valid && p.steps.is_empty(), "{:?}", lines(&p.steps));
+    // names of a flexible volume are taken
+    let mut inv = blank_inventory(&[("sde", 4 * TB), ("sdf", 4 * TB)]);
+    let mut req = create_req(&["sde", "sdf"], RaidLevel::Flex1, false);
+    req.label = "store".into();
+    let p = crate::plan::plan_volume(&inv, &req);
+    assert!(p.valid, "{:?}", p.errors);
+    inv.arrays.push(rynas_api_types::storage::MdArray { name: "md80".into(), md_name: Some("nas:store_t2".into()), ..Default::default() });
+    assert!(crate::plan::plan_volume(&inv, &req).issues.iter().any(|i| i.code == PlanIssueCode::LabelTaken));
+    inv.arrays.clear();
+    inv.lvm.vgs.push(crate::lvm::Vg { name: "rynas_store".into(), ..Default::default() });
+    assert!(crate::plan::plan_volume(&inv, &req).issues.iter().any(|i| i.code == PlanIssueCode::LabelTaken));
+    // "store_t2x" or "storex_t1" are other names
+    inv.lvm.vgs.clear();
+    inv.arrays.push(rynas_api_types::storage::MdArray { name: "md80".into(), md_name: Some("nas:store_t2x".into()), ..Default::default() });
+    inv.arrays.push(rynas_api_types::storage::MdArray { name: "md81".into(), md_name: Some("nas:storex_t1".into()), ..Default::default() });
+    assert!(crate::plan::plan_volume(&inv, &req).valid);
+}
+
+/// Without the records the tolerance comes from the tiers, never lowered by a three-way
+/// mirror half way to RAID6 (a RAID5 of two disks for a while): complete finishes it as RAID6.
+#[test]
+fn the_tolerance_without_records_is_never_lowered() {
+    let start = with_blank(&created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8), ("sdd", 8)], 2), &[("sde", 8)]);
+    let p = plan_grow_at(&inventory_of(&start, None), &grow_req(&["sde"]), NOW);
+    let cut = lines(&p.steps).iter().position(|l| l == "mdadm --grow /dev/md/vol2_t2 --level=5").unwrap() + 1;
+    let mut v = start.clone();
+    for s in &p.steps[..cut] {
+        v.apply(s);
+    }
+    let mut inv = inventory_of(&v, None);
+    inv.records = None;
+    inv.flex = crate::flex::detect::detect(&inv, None, MIN_TIER);
+    assert_eq!(inv.flex[0].tolerance, 1, "the layout alone reads 1");
+    let w = View::from_inventory(&inv, &inv.flex[0], "vol2");
+    assert_eq!(w.tolerance, 2);
+    let mut end = v.clone();
+    for s in &p.steps[cut..] {
+        end.apply(s);
+    }
+    let mut w2 = v.clone();
+    w2.tolerance = w.tolerance;
+    let named = Goal { old: None, new: vec!["sde".into()] };
+    growth_steps(&mut w2, &named, None).unwrap();
+    let t = w2.tiers.iter().find(|t| t.index == 2).unwrap();
+    assert_eq!((t.level, t.raid_disks), (Some(RaidLevel::Raid6), 4));
+    assert_eq!(shape(&w2), shape(&end));
+}
+
+/// A three-way mirror on its way to RAID6 stopped between `--fail` and `--remove`: complete
+/// removes it and goes on, instead of rebuilding the mirror to take it out again.
+#[test]
+fn complete_a_three_way_mirror_stopped_after_fail() {
+    let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8), ("sdd", 8)], 2);
+    let Grown { begin, steps, end, goal, .. } = grow_view(&start, &[("sde", 8)]);
+    let cut = lines(&steps).iter().position(|l| l == "mdadm /dev/md/vol2_t2 --fail /dev/sdd2").unwrap() + 1;
+    let mut v = begin.clone();
+    for s in &steps[..cut] {
+        v.apply(s);
+    }
+    let got = growth_steps(&mut v.clone(), &goal, None).unwrap();
+    let l = lines(&got);
+    assert_eq!(l[..3], ["mdadm /dev/md/vol2_t2 --remove /dev/sdd2", "mdadm --zero-superblock /dev/sdd2", "mdadm --grow /dev/md/vol2_t2 --raid-devices=2"], "{l:?}");
+    assert!(!l.iter().any(|x| x.contains("--add /dev/sde2") && x.contains("vol2_t2") && !x.contains("sdd2")), "{l:?}");
+    for s in &got {
+        v.apply(s);
+    }
+    assert_eq!(shape(&v), shape(&end));
+}
+
+/// A replace that makes a new top tier rebuilds the degraded tiers first: the new tier comes
+/// after the rebuilds end.
+#[test]
+fn rebuilds_come_before_a_new_tier() {
+    let mut start = with_blank(&created_view(&[("sda", 4), ("sdb", 8), ("sdc", 12)], 1), &[("sdd", 12)]);
+    for t in &mut start.tiers {
+        for m in t.members.iter_mut().filter(|m| m.disk == "sdb") {
+            m.role = MemberRole::Faulty;
+        }
+    }
+    let p = plan_replace_at(&inventory_of(&start, None), &replace_req("sdb", "sdd"), NOW);
+    assert!(p.valid, "{:?}", p.errors);
+    let l = lines(&p.steps);
+    let create = l.iter().position(|x| x.starts_with("mdadm --create /dev/md/vol2_t3")).expect("a new top tier");
+    let last_wait = l.iter().rposition(|x| x.starts_with("wait /sys/block/md10") && !x.contains("md103")).unwrap();
+    let last_add = l.iter().rposition(|x| x.contains("--add /dev/sdd2")).unwrap();
+    assert!(last_add < create && last_wait < create, "{l:?}");
+}
+
+/// "missing" with the old slice of a disk that still works below: the three-way mirror tier
+/// becomes RAID6 with it and the new disk; the plan shows that and warns about the window.
+#[test]
+fn replace_missing_shows_the_raid6_it_makes() {
+    let mut start = with_blank(&created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8), ("sdd", 8)], 2), &[("sde", 8)]);
+    let t2 = start.tiers.iter_mut().find(|t| t.index == 2).unwrap();
+    t2.members.retain(|m| m.part != "sdd2");
+    for p in start.disks.iter_mut().flat_map(|d| d.parts.iter_mut()).filter(|p| p.kname == "sdd2") {
+        p.fresh = false;
+    }
+    let p = plan_replace_at(&inventory_of(&start, None), &replace_req(MISSING, "sde"), NOW);
+    assert!(p.valid, "{:?}", p.errors);
+    let t = p.tiers_after.iter().find(|t| t.index == 2).unwrap();
+    assert_eq!((t.level, t.members.len()), (Some(RaidLevel::Raid6), 4), "{:?}", p.tiers_after);
+    assert!(p.warning_items.iter().any(|w| w.code == PlanWarningCode::FlexReducedToleranceWindow && w.args.subject.as_deref() == Some("2")), "{:?}", p.warnings);
+    let mut end = start.clone();
+    for s in &p.steps {
+        end.apply(s);
+    }
+    assert_eq!(p.usable_bytes, lvm_usable(&end.shapes()));
+}
+
+/// A working disk of a tier that misses another disk is not replaced: md would put the new
+/// disk in the empty slot, not in its place (the message says what to do instead).
+#[test]
+fn a_working_disk_of_a_degraded_tier_is_not_replaced() {
+    let mut start = with_blank(&created_view(&[("sda", 8), ("sdb", 8), ("sdc", 8), ("sdd", 8)], 2), &[("sde", 8)]);
+    for t in &mut start.tiers {
+        t.members.retain(|m| m.disk != "sdd");
+    }
+    start.disks.retain(|d| d.name != "sdd");
+    let p = plan_replace_at(&inventory_of(&start, None), &replace_req("sda", "sde"), NOW);
+    assert!(p.issues.iter().any(|i| i.code == PlanIssueCode::ArrayNotHealthy), "{:?}", p.issues);
+    assert!(p.errors.iter().any(|e| e.contains("replace the missing disk first")), "{:?}", p.errors);
+    assert!(plan_replace_at(&inventory_of(&start, None), &replace_req(MISSING, "sde"), NOW).valid);
 }
