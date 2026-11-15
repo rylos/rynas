@@ -177,7 +177,9 @@ fn lvm_layout_report() -> Option<String> {
     };
     let lvs = json("lvs", "vg_name,lv_name,lv_uuid,lv_size,lv_attr,pool_lv,origin,segtype,stripes,seg_size,devices")?;
     let mut merged = serde_json::Map::new();
-    for v in [Some(lvs), json("vgs", "vg_name,vg_uuid,vg_extent_size,vg_size,vg_free"), json("pvs", "pv_name,pv_uuid,pv_size,pe_start,vg_name")].into_iter().flatten() {
+    // the system ID is a newer field: without it when this LVM does not know it
+    let vgs = json("vgs", "vg_name,vg_uuid,vg_systemid,vg_extent_size,vg_size,vg_free").or_else(|| json("vgs", "vg_name,vg_uuid,vg_extent_size,vg_size,vg_free"));
+    for v in [Some(lvs), vgs, json("pvs", "pv_name,pv_uuid,pv_size,pe_start,vg_name")].into_iter().flatten() {
         for r in v.get("report").and_then(|r| r.as_array()).into_iter().flatten() {
             for (k, rows) in r.as_object().into_iter().flatten() {
                 merged.insert(k.clone(), rows.clone());
@@ -371,6 +373,11 @@ pub fn collect(captures: &BTreeMap<String, CaptureMethod>) -> Manifest {
     let lvm_report = (filesystems.iter().any(|f| matches!(f.source, FsSource::Lvm { .. })) || swap.iter().any(|s| matches!(s.source, FsSource::Lvm { .. })) || luks.iter().any(|l| matches!(l.source, FsSource::Lvm { .. })))
         .then(lvm_layout_report)
         .flatten();
+    let lvm_filters: Vec<String> = if lvm_report.is_some() {
+        ["/etc/lvm/lvm.conf", "/etc/lvm/lvmlocal.conf"].iter().flat_map(|f| crate::restore::lvm::filter_settings(&read(f))).collect()
+    } else {
+        Vec::new()
+    };
     let md: Vec<String> = std::fs::read_dir("/sys/block")
         .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("md")).collect::<Vec<_>>())
         .unwrap_or_default()
@@ -400,6 +407,7 @@ pub fn collect(captures: &BTreeMap<String, CaptureMethod>) -> Manifest {
         luks,
         swap,
         lvm_report,
+        lvm_filters,
         md,
         fstab: read("/etc/fstab"),
         crypttab: std::fs::read_to_string("/etc/crypttab").ok(),

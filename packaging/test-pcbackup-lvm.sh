@@ -5,9 +5,9 @@
 #   packaging/test-pcbackup-lvm.sh <static rynas-agent> [work dir on disk]
 #
 # The PC is the Arch layout of docs/research/pc-backup.md §4.4: GPT with an ESP at /boot and
-# an LVM partition, volume group ArchinstallVg with root and home (ext4) and 256 MiB free,
+# an LVM partition, a volume group with root and home (ext4) and 256 MiB free,
 # mkinitcpio (its HOOKS without lvm2, to see it added), systemd-boot with a UKI, the command
-# line root=/dev/ArchinstallVg/root. Its system files are the container's own (Debian, with
+# line root=/dev/<vg>/root. Its system files are the container's own (Debian, with
 # lvm2), so the restore's chroot steps run; mkinitcpio and bootctl are stand-ins that log.
 #
 # 1. The manifest is taken by `rynas-agent manifest --print` chrooted into the PC (its
@@ -21,10 +21,14 @@
 #    ran, the group deactivated at the end.
 # 4. With that disk detached, the restore onto a smaller disk: volumes shrunk, data there.
 #
-# LVM inside the container sees only the test's loop devices (its own lvm.conf through
-# LVM_SYSTEM_DIR: a filter on them, no devices file, no udev sync). At the end: no loop
-# device, no device-mapper node and no volume group of the test is left, the container is
-# removed (docker run --rm), the images are deleted.
+# The container shares the host's /dev and device mapper. The volume group gets a new name
+# on every run, with a dash (Rt-Vg<random>: its mapper names double the dash, as
+# ArchinstallVg's would not), refused when the host already has it; only the test's own
+# mappings are ever removed. The test's LVM commands see only its loop devices (its own
+# lvm.conf through LVM_SYSTEM_DIR: a filter on them, no devices file, no udev sync); the
+# restore's look for other disks reads every device's LVM label (read only), as on a real
+# PC. At the end: no loop device, no device-mapper node and no volume group of the test is
+# left, the container is removed (docker run --rm), the images are deleted.
 set -eu
 
 if [ "${1:-}" != "--inside" ]; then
@@ -33,12 +37,18 @@ if [ "${1:-}" != "--inside" ]; then
     work=${2:-$repo/target/lvm-restore-test}
     mkdir -p "$work"
     work=$(realpath "$work")
+    vg="Rt-Vg$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+    vgm=$(printf '%s' "$vg" | sed 's/-/--/g')
+    if ls /dev/mapper | grep -qF -- "$vgm-" || [ -e "/dev/$vg" ]; then
+        echo "the host already has a volume group named $vg: run again" >&2
+        exit 1
+    fi
     rc=0
     docker run --rm --privileged -v /dev:/dev -v "$work:/work" -v "$agent:/rynas-agent:ro" \
-        -v "$(realpath "$0"):/test.sh:ro" debian:trixie sh /test.sh --inside || rc=$?
+        -e RYNAS_TEST_VG="$vg" -v "$(realpath "$0"):/test.sh:ro" debian:trixie sh /test.sh --inside || rc=$?
     # nothing of the test may be left on the host
     left=$(losetup -a | grep -F "$work/" || true)
-    maps=$(ls /dev/mapper | grep -E '^ArchinstallVg-' || true)
+    maps=$(ls /dev/mapper | grep -F -- "$vgm-" || true)
     [ -z "$left$maps" ] || { echo "LEFT ON THE HOST: $left $maps" >&2; rc=1; }
     rm -rf "$work"
     [ "$rc" = 0 ] && echo "== all ok" || echo "== FAILED ($rc)"
@@ -50,7 +60,9 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get -qq update >/dev/null
 apt-get -qq install -y --no-install-recommends lvm2 e2fsprogs dosfstools fdisk util-linux coreutils >/dev/null
 
-VG=ArchinstallVg
+VG=${RYNAS_TEST_VG:?}
+# the device-mapper names of the group's volumes (a dash in a group name is doubled)
+VGM=$(printf '%s' "$VG" | sed 's/-/--/g')
 S=""; T=""; T2=""
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok: $*"; }
@@ -60,13 +72,19 @@ cleanup() {
     for m in /src/work/lvm /src/tmp/rynas-agent /src/run /src/sys /src/proc /src/dev /src/home /src/boot /src /mnt/chk/home /mnt/chk/boot /mnt/chk; do
         mountpoint -q "$m" && umount "$m"
     done
-    vgchange -an "$VG" >/dev/null 2>&1
-    for d in /dev/mapper/"$VG"-*; do [ -e "$d" ] && dmsetup remove "$(basename "$d")"; done
+    [ -f /work/lvm/lvm.conf ] && LVM_SYSTEM_DIR=/work/lvm vgchange -an "$VG" >/dev/null 2>&1
+    # only the test's own mappings, by their exact names
+    for lv in root home; do dmsetup info "$VGM-$lv" >/dev/null 2>&1 && dmsetup remove "$VGM-$lv"; done
     for l in "$S" "$T" "$T2"; do [ -n "$l" ] && losetup -d "$l" 2>/dev/null; done
     rm -f /work/*.img
-    rm -rf /work/tree /work/lvm
+    rm -rf /work/tree /work/lvm /work/live
 }
 trap cleanup EXIT INT TERM
+
+# the host must not have the group's name: its mappings, or a group LVM finds on any device
+# (a read-only look, without a filter or devices file)
+dmsetup ls 2>/dev/null | grep -qF -- "$VGM-" && { echo "the host has device mappings of $VG: run again" >&2; trap - EXIT; exit 1; }
+vgs --devicesfile "" --config 'devices{filter=["a|.*|"] global_filter=["a|.*|"] obtain_device_list_from_udev=0}' --foreign --noheadings -o vg_name 2>/dev/null | grep -qx " *$VG" && { echo "a volume group named $VG exists: run again" >&2; trap - EXIT; exit 1; }
 
 for n in src tgt small; do rm -f "/work/$n.img"; done
 truncate -s 3G /work/src.img; truncate -s 3G /work/tgt.img; truncate -s 1600M /work/small.img
@@ -97,6 +115,15 @@ backup {
 EOF
 export LVM_SYSTEM_DIR=/work/lvm
 export RYNAS_TEST_LOOP_DISKS=1
+
+# the live system the restore runs on is unhelpful on purpose: a global filter that hides
+# every device, a devices file that lists none, and a system ID from the host name. The
+# restore must neither miss the PC's group (step 2) nor make the groups foreign or hidden.
+mkdir -p /work/live/devices
+sed -e 's/global_filter = .*/global_filter = [ "r|.*|" ]/' -e 's/use_devicesfile = 0/use_devicesfile = 1/' /work/lvm/lvm.conf > /work/live/lvm.conf
+printf 'global {\n    system_id_source = "uname"\n}\n' >> /work/live/lvm.conf
+printf '# LVM uses devices listed in this file.\nVERSION=1.1.1\n' > /work/live/devices/system.devices
+restore() { LVM_SYSTEM_DIR=/work/live /rynas-agent restore "$@"; }
 
 # ---- the PC
 printf 'label: gpt\nlabel-id: 1E2B8F6D-3643-4D8D-AAC5-AB7EDEBECACC\n\nstart=2048, size=256MiB, type=U, uuid=0397CC02-0000-4000-8000-000000000001\ntype=E6D6D379-F507-44C2-A23C-238F2A3DF928, uuid=3612A9BF-0000-4000-8000-000000000002\n' | sfdisk -q "$S"
@@ -140,6 +167,12 @@ printf 'timeout 3\n' > /src/boot/loader/loader.conf
 mkdir -p /src/home/user
 head -c 20M /dev/urandom > /src/home/user/data.bin
 echo "restored from LVM" > /src/etc/rynas-marker
+# the PC's lvm.conf has a device filter on its disk, and a devices file with its PV and a PV
+# of a second disk (outside the backup): the restore rewrites the one, keeps the other's line
+# (and uses its devices file, as newer Fedora and RHEL do)
+awk -v f="    filter = [ \"a|^/dev/${s}p2\$|\", \"r|.*|\" ]" '{ print } /^devices \{/ && !done { print f; print "    use_devicesfile = 1"; done = 1 }' /src/etc/lvm/lvm.conf > /src/etc/lvm/lvm.conf.new
+mv /src/etc/lvm/lvm.conf.new /src/etc/lvm/lvm.conf
+grep -q "^    filter = \[ \"a|^/dev/${s}p2\\$|\"" /src/etc/lvm/lvm.conf || fail "the PC's lvm.conf filter was not written"
 u_root=$(blkid -s UUID -o value "/dev/$VG/root"); u_home=$(blkid -s UUID -o value "/dev/$VG/home"); u_esp=$(blkid -s UUID -o value "${S}p1")
 printf 'UUID=%s / ext4 rw,relatime 0 1\nUUID=%s /home ext4 rw,relatime 0 2\nUUID=%s /boot vfat rw,fmask=0077,dmask=0077 0 2\n' "$u_root" "$u_home" "$u_esp" > /src/etc/fstab
 sum=$(sha256sum /src/home/user/data.bin | cut -d' ' -f1)
@@ -147,6 +180,9 @@ vg_uuid=$(vgs --noheadings -o vg_uuid "$VG" | tr -d ' ')
 pv_uuid=$(pvs --noheadings -o pv_uuid "${S}p2" | tr -d ' ')
 lvs_before=$(lvs --noheadings -o lv_name,lv_uuid,seg_size_pe --units b "$VG" | sort)
 free_before=$(vgs --noheadings -o vg_free_count "$VG" | tr -d ' ')
+pvid=$(echo "$pv_uuid" | tr -d -)
+mkdir -p /src/etc/lvm/devices
+printf '# LVM uses devices listed in this file.\nVERSION=1.1.4\nIDTYPE=devname IDNAME=/dev/%sp2 DEVNAME=/dev/%sp2 PVID=%s PART=2\nIDTYPE=sys_wwid IDNAME=naa.5000000000000001 DEVNAME=/dev/sdx1 PVID=OtherDiskPV0000000000000000000000 PART=1\n' "$s" "$s" "$pvid" > /src/etc/lvm/devices/system.devices
 # the GPT's IDs, starts and types (the restore writes first-lba 34, and the last partition
 # reaches the end of the disk)
 gpt_ids() { sfdisk --dump "$1" | grep -E '^(label-id|/dev)' | sed -e "s|$1|DISK|" -e 's/size= *[0-9]*, //'; }
@@ -172,7 +208,7 @@ ok "manifest: LVM report with UUIDs and extent size, systemd-boot, mkinitcpio"
 mkdir -p /work/tree && cp -a /src/. /work/tree/
 
 # ---- 2. the PC's disk still attached: its group's name is taken
-out=$(/rynas-agent restore --test-manifest /work/manifest.json --test-tree /work/tree --disk "$T" --dry-run 2>&1) && fail "a dry run with the PC's group attached passed: $out"
+out=$(restore --test-manifest /work/manifest.json --test-tree /work/tree --disk "$T" --dry-run 2>&1) && fail "a dry run with the PC's group attached passed: $out"
 echo "$out" | grep -q "volume group named $VG is on another attached disk" || fail "unexpected refusal: $out"
 ok "refused while a group of the same name is attached"
 
@@ -182,16 +218,16 @@ losetup -d "$S"; S=""
 ok "PC disk detached"
 
 # ---- 3. same size
-/rynas-agent restore --test-manifest /work/manifest.json --test-tree /work/tree --disk "$T" --dry-run > /work/dry.txt 2>&1 || { cat /work/dry.txt; fail "dry run"; }
+restore --test-manifest /work/manifest.json --test-tree /work/tree --disk "$T" --dry-run > /work/dry.txt 2>&1 || { cat /work/dry.txt; fail "dry run"; }
 for w in "pvcreate --uuid $pv_uuid --norestorefile ${T}p2" "vgcreate -s 4096k $VG ${T}p2" "lvcreate -l 256 -n root $VG" "mkfs.ext4 -F -q -U $u_root /dev/$VG/root" "lvm2 hook"; do
     grep -qF -- "$w" /work/dry.txt || { cat /work/dry.txt; fail "dry run lacks: $w"; }
 done
 ok "dry run"
 sed 's/^/  | /' /work/dry.txt
-/rynas-agent restore --test-manifest /work/manifest.json --test-tree /work/tree --disk "$T" --confirm "$t" --no-nvram > /work/run.txt 2>&1 || { cat /work/run.txt; fail "restore"; }
+restore --test-manifest /work/manifest.json --test-tree /work/tree --disk "$T" --confirm "$t" --no-nvram > /work/run.txt 2>&1 || { cat /work/run.txt; fail "restore"; }
 grep -q "restore finished" /work/run.txt || { cat /work/run.txt; fail "no end"; }
 grep -q "check failed" /work/run.txt && { grep "check failed" /work/run.txt; fail "the restore reported problems"; }
-[ -z "$(dmsetup ls | grep "^$VG-" || true)" ] || fail "the group is still active after the restore"
+[ -z "$(dmsetup ls | grep -F -- "$VGM-" || true)" ] || fail "the group is still active after the restore"
 ok "restore ran; group deactivated at the end"
 grep -E '^\$ (pvcreate|vgcreate|lvcreate|vgcfg|vgchange|mkfs|chroot /mnt/rynas-restore mkinitcpio)|lvm2 hook|UUIDs set|restore finished' /work/run.txt | sed 's/^/  | /'
 
@@ -211,15 +247,30 @@ cmp -s /mnt/chk/etc/fstab /work/tree/etc/fstab || fail "fstab changed"
 grep -q '^HOOKS=(.* block lvm2 filesystems .*)' /mnt/chk/etc/mkinitcpio.conf || fail "HOOKS: $(grep HOOKS /mnt/chk/etc/mkinitcpio.conf)"
 grep -q '^args: -P' /mnt/chk/var/log/fake-mkinitcpio.log && grep -q 'block lvm2 filesystems' /mnt/chk/var/log/fake-mkinitcpio.log || fail "mkinitcpio: $(cat /mnt/chk/var/log/fake-mkinitcpio.log)"
 grep -q 'install --esp-path=/boot' /mnt/chk/var/log/fake-bootctl.log || fail "bootctl"
+[ -z "$(vgs --noheadings -o vg_systemid "$VG" | tr -d ' ')" ] || fail "the group got the live system's system ID: $(vgs -o vg_name,vg_systemid "$VG")"
+grep -q "^    filter = \[ \"a|^/dev/${t}p2\\$|\", \"r|.\*|\" \]" /mnt/chk/etc/lvm/lvm.conf || fail "lvm.conf filter: $(grep -n '^ *filter' /mnt/chk/etc/lvm/lvm.conf)"
+grep -q "device filter rewritten" /work/run.txt || fail "no filter rewrite in the log"
+grep -q "names the old disk: rewritten to" /work/dry.txt || fail "the dry run does not say the filter is rewritten"
+cmp -s /mnt/chk/etc/lvm/devices/system.devices.rynas-old /work/tree/etc/lvm/devices/system.devices || fail "the PC's devices file was not kept"
+if [ -f /mnt/chk/etc/lvm/devices/system.devices ]; then
+    d=/mnt/chk/etc/lvm/devices/system.devices
+    grep -q "PVID=OtherDiskPV" "$d" || fail "the other disk's line is gone: $(cat "$d")"
+    grep -q "DEVNAME=/dev/${s}p2" "$d" && fail "the old PV line stayed: $(cat "$d")"
+    grep -q "PVID=$pvid" "$d" || fail "the restored PV is not in the devices file: $(cat "$d")"
+    ok "devices file: the other disk's line kept, the restored PV added by vgimportdevices"
+else
+    grep "vgimportdevices" /work/run.txt | sed 's/^/  | /'
+    fail "the devices file is gone"
+fi
 ls /mnt/chk/var/log/rynas-restore-*.log >/dev/null || fail "restore log"
 cmp -s /mnt/chk/boot/EFI/Linux/arch-linux.efi /work/tree/boot/EFI/Linux/arch-linux.efi || fail "UKI"
-ok "same size: GPT, VG/PV/LV names+UUIDs+sizes, free space, FS UUIDs, files, fstab, cmdline, lvm2 hook before mkinitcpio -P"
+ok "same size: GPT, VG/PV/LV names+UUIDs+sizes, no system ID, free space, FS UUIDs, files, fstab, cmdline, lvm.conf filter, lvm2 hook before mkinitcpio -P"
 umount /mnt/chk/boot /mnt/chk/home /mnt/chk
 vgchange -an "$VG" >/dev/null
 
 # ---- 4. a smaller disk (the first target detached: its group would be in the way)
 losetup -d "$T"; T=""
-/rynas-agent restore --test-manifest /work/manifest.json --test-tree /work/tree --disk "$T2" --confirm "$t2" --no-nvram > /work/small.txt 2>&1 || { cat /work/small.txt; fail "smaller restore"; }
+restore --test-manifest /work/manifest.json --test-tree /work/tree --disk "$T2" --confirm "$t2" --no-nvram > /work/small.txt 2>&1 || { cat /work/small.txt; fail "smaller restore"; }
 grep -q "note: $VG/home: .* → " /work/small.txt || { cat /work/small.txt; fail "no shrink note"; }
 grep -E '^note: |lvcreate -l' /work/small.txt | sed 's/^/  | /' 
 grep -q "check failed" /work/small.txt && fail "problems on the smaller disk"

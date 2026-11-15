@@ -1114,6 +1114,8 @@ pub struct LvmLayout {
 pub struct LvmVg {
     pub name: String,
     pub uuid: String,
+    /// LVM's system ID of the group (`vg_systemid`; empty: none, or not recorded).
+    pub system_id: String,
     /// 0: not recorded.
     pub extent_bytes: u64,
     pub size_bytes: u64,
@@ -1183,6 +1185,7 @@ impl LvmLayout {
             }
             let vg = vg_of(&mut out, &name);
             vg.uuid = s(r, "vg_uuid");
+            vg.system_id = s(r, "vg_systemid");
             vg.extent_bytes = lvm_bytes(&s(r, "vg_extent_size"));
             vg.size_bytes = lvm_bytes(&s(r, "vg_size"));
             vg.free_bytes = lvm_bytes(&s(r, "vg_free"));
@@ -1197,9 +1200,23 @@ impl LvmLayout {
                 vg.pvs.push(LvmPv { device, uuid: s(r, "pv_uuid"), size_bytes: lvm_bytes(&s(r, "pv_size")), pe_start_bytes: lvm_bytes(&s(r, "pe_start")) });
             }
         }
+        // the agent's own snapshots of a backup that was interrupted (an older agent kept
+        // them in the report): not part of the PC's layout, their extents are free space
+        let mut freed: Vec<(String, String, u64)> = Vec::new();
         for r in rows("lv").into_iter().chain(rows("seg")) {
             let (name, lv_name) = (s(r, "vg_name"), s(r, "lv_name"));
             if name.is_empty() || lv_name.is_empty() {
+                continue;
+            }
+            if lv_name.ends_with(LVM_OWN_SNAPSHOT_SUFFIX) {
+                let seg = lvm_bytes(&s(r, "seg_size"));
+                match freed.iter_mut().find(|(v, l, _)| *v == name && *l == lv_name) {
+                    // one row per segment: their sizes add up; without segment sizes, the
+                    // volume's size once
+                    Some(f) if seg > 0 => f.2 += seg,
+                    Some(_) => {}
+                    None => freed.push((name, lv_name, if seg > 0 { seg } else { lvm_bytes(&s(r, "lv_size")) })),
+                }
                 continue;
             }
             let vg = vg_of(&mut out, &name);
@@ -1231,6 +1248,12 @@ impl LvmLayout {
                 if !d.is_empty() && !lv.devices.iter().any(|x| x == d) {
                     lv.devices.push(d.to_string());
                 }
+            }
+        }
+        for (name, _, bytes) in freed {
+            // a report without `vg` rows has no free space to add to (it comes from the PVs)
+            if let Some(vg) = out.vgs.iter_mut().find(|v| v.name == name && v.size_bytes > 0) {
+                vg.free_bytes += bytes;
             }
         }
         // an older report has no PV rows: the devices the volumes sit on
@@ -1280,6 +1303,33 @@ impl LvmLayout {
     }
 }
 
+/// The name ending of the agent's own LVM snapshots while a backup reads a volume.
+pub const LVM_OWN_SNAPSHOT_SUFFIX: &str = "-rynas-snap";
+
+/// The kernel name of partition `n` of disk `disk` (`sda1`, `nvme0n1p1`, `mmcblk0p1`).
+pub fn partition_name(disk: &str, n: u32) -> String {
+    if disk.chars().last().is_some_and(|c| c.is_ascii_digit()) {
+        format!("{disk}p{n}")
+    } else {
+        format!("{disk}{n}")
+    }
+}
+
+/// What the bare-metal restore does with a volume group of the manifest
+/// ([`Manifest::lvm_vg_check`]); the agent's plan and the NAS's readiness use the same rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LvmVgCheck {
+    /// No physical volume on a restored disk (and not the root's group): left as it is.
+    Elsewhere,
+    /// Made again on the restored disk.
+    Recreate,
+    /// Not something the restore makes again (why), but it holds nothing of the backup: its
+    /// partitions are made again, empty.
+    SkipUnused(Vec<String>),
+    /// Not something the restore makes again (why), and the backup has data on it.
+    Refuse(Vec<String>),
+}
+
 /// Everything a bare-metal restore needs besides the files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Manifest {
@@ -1307,6 +1357,11 @@ pub struct Manifest {
     /// `vgs`/`lvs --reportformat json`, when LVM is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lvm_report: Option<String>,
+    /// The active `filter = […]` and `global_filter = […]` settings of the PC's
+    /// `/etc/lvm/lvm.conf` and `lvmlocal.conf`, as written there (they may name the old
+    /// disks: the restore rewrites the names, the plan shows them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lvm_filters: Vec<String>,
     /// `mdadm --detail --export` of each array.
     #[serde(default)]
     pub md: Vec<String>,
@@ -1493,9 +1548,6 @@ impl Manifest {
         r
     }
 
-    /// What of this PC's LVM the bare-metal restore does not recreate (thin pools,
-    /// snapshots, raid/mirror/striped/cache volumes, an unreadable report), one sentence each;
-    /// empty when the PC has no LVM or only linear volumes.
     pub fn lvm_unsupported(&self) -> Vec<String> {
         let used = self.lvm_report.is_some()
             || self.filesystems.iter().any(|f| matches!(f.source, FsSource::Lvm { .. }))
@@ -1504,10 +1556,121 @@ impl Manifest {
         if !used {
             return Vec::new();
         }
-        match self.lvm_report.as_deref().map(LvmLayout::parse) {
-            None => vec!["the backup's manifest has no LVM report".into()],
-            Some(Err(e)) => vec![e],
-            Some(Ok(l)) => l.unsupported(),
+        let layout = match self.lvm_report.as_deref().map(LvmLayout::parse) {
+            None => return vec!["the backup's manifest has no LVM report".into()],
+            Some(Err(e)) => return vec![e],
+            Some(Ok(l)) => l,
+        };
+        let Some(disk) = self.restore_disk() else {
+            // no disk to restore (another ready reason says so): the volumes' kinds alone
+            return layout.unsupported();
+        };
+        let mut out = Vec::new();
+        for vg in &layout.vgs {
+            if let LvmVgCheck::Refuse(why) = self.lvm_vg_check(vg, &|d| d == disk) {
+                out.extend(why);
+            }
+        }
+        out
+    }
+
+    /// The disk index of an LVM physical volume of the manifest: a partition of a disk with
+    /// a partition table, or a LUKS container on one.
+    pub fn lvm_pv_disk(&self, device: &str) -> Option<usize> {
+        for (i, d) in self.disks.iter().enumerate() {
+            if d.table.as_ref().is_some_and(|t| t.partitions.iter().any(|p| format!("/dev/{}", partition_name(&d.name, p.number)) == device)) {
+                return Some(i);
+            }
+        }
+        self.luks_of_pv(device).and_then(|l| match l.source {
+            FsSource::Partition { disk, .. } => Some(disk),
+            _ => None,
+        })
+    }
+
+    /// The LUKS container a PV device names (`/dev/sda2` or `/dev/mapper/<name>`).
+    fn luks_of_pv(&self, device: &str) -> Option<&Luks> {
+        self.luks.iter().find(|l| l.device == device || (!l.mapper.is_empty() && format!("/dev/mapper/{}", l.mapper) == device))
+    }
+
+    /// The PC's disk the bare-metal restore makes again: the first with a partition table
+    /// that holds the root filesystem (directly, in LUKS, or in an LVM group: the disk of the
+    /// group's first PV), else the first with a table.
+    pub fn restore_disk(&self) -> Option<usize> {
+        let on_lvm = |vg: &str| {
+            let layout = self.lvm_report.as_deref().and_then(|r| LvmLayout::parse(r).ok())?;
+            let g = layout.vgs.into_iter().find(|g| g.name == vg)?;
+            g.pvs.iter().find_map(|p| self.lvm_pv_disk(&p.device))
+        };
+        let disk_of = |s: &FsSource| match s {
+            FsSource::Partition { disk, .. } => Some(*disk),
+            FsSource::Luks { luks } => self.luks.get(*luks).and_then(|l| match &l.source {
+                FsSource::Partition { disk, .. } => Some(*disk),
+                FsSource::Lvm { vg, .. } => on_lvm(vg),
+                _ => None,
+            }),
+            FsSource::Lvm { vg, .. } => on_lvm(vg),
+            _ => None,
+        };
+        self.root()
+            .and_then(|f| disk_of(&f.source))
+            .filter(|d| self.disks.get(*d).is_some_and(|d| d.table.is_some()))
+            .or_else(|| self.disks.iter().position(|d| d.table.is_some()))
+    }
+
+    /// The volume group `vg` holds something the backup restores: a filesystem, swap or a
+    /// LUKS container on one of its volumes.
+    pub fn lvm_vg_used(&self, vg: &str) -> bool {
+        let on = |s: &FsSource| matches!(s, FsSource::Lvm { vg: v, .. } if v == vg);
+        self.filesystems.iter().any(|f| on(&f.source)) || self.swap.iter().any(|s| on(&s.source)) || self.luks.iter().any(|l| on(&l.source))
+    }
+
+    /// What the bare-metal restore does with `vg` when it makes the disks `restored` again
+    /// (one disk in this version): linear volumes on PVs that are partitions (or LUKS
+    /// containers on partitions) of restored disks are made again; a group with a PV on a
+    /// whole disk, on md, or on a disk that is not restored, or with volumes that are not
+    /// linear, is refused when the backup has data on it and left out (its partitions made
+    /// again empty) when not.
+    pub fn lvm_vg_check(&self, vg: &LvmVg, restored: &dyn Fn(usize) -> bool) -> LvmVgCheck {
+        let holds_root = self.root().is_some_and(|f| match &f.source {
+            FsSource::Lvm { vg: v, .. } => *v == vg.name,
+            FsSource::Luks { luks } => self.luks.get(*luks).is_some_and(|l| matches!(&l.source, FsSource::Lvm { vg: v, .. } if *v == vg.name)),
+            _ => false,
+        });
+        let touches = vg.pvs.iter().any(|p| self.lvm_pv_disk(&p.device).is_some_and(restored));
+        let mut why = Vec::new();
+        let mut elsewhere = Vec::new();
+        for p in &vg.pvs {
+            let dev = p.device.as_str();
+            if self.disks.iter().any(|d| format!("/dev/{}", d.name) == dev) {
+                why.push(format!("{}: {dev} is a physical volume on a whole disk, without a partition table", vg.name));
+            } else if dev.starts_with("/dev/md") {
+                why.push(format!("{}: {dev} is a physical volume on md", vg.name));
+            } else if let Some(l) = self.luks_of_pv(dev).filter(|l| !matches!(l.source, FsSource::Partition { .. })) {
+                why.push(format!("{}: {dev} is a physical volume in the LUKS container {}, which is not on a partition", vg.name, l.device));
+            } else {
+                match self.lvm_pv_disk(dev) {
+                    None => why.push(format!("{}: {dev} is not a partition or a LUKS container the manifest knows", vg.name)),
+                    Some(d) if !restored(d) => elsewhere.push(dev.to_string()),
+                    Some(_) => {}
+                }
+            }
+        }
+        if !touches && !holds_root {
+            return LvmVgCheck::Elsewhere;
+        }
+        if !touches {
+            why.push(format!("{}: holds the root filesystem, but none of its physical volumes is on the restored disk", vg.name));
+        } else if !elsewhere.is_empty() {
+            why.push(format!("{}: also has physical volumes on a disk that is not restored ({})", vg.name, elsewhere.join(", ")));
+        }
+        why.extend(LvmLayout { vgs: vec![vg.clone()] }.unsupported());
+        if why.is_empty() {
+            LvmVgCheck::Recreate
+        } else if holds_root || self.lvm_vg_used(&vg.name) {
+            LvmVgCheck::Refuse(why)
+        } else {
+            LvmVgCheck::SkipUnused(why)
         }
     }
 }
@@ -1782,8 +1945,9 @@ mod tests {
 
     #[test]
     fn linear_lvm_is_ready_md_and_thin_are_not() {
-        let mut m = Manifest { disks: vec![Disk { table: Some(PartTable::default()), ..Default::default() }], boot: BootInfo { loader: Loader::SystemdBoot, ..Default::default() }, ..Default::default() };
-        m.filesystems.push(Filesystem { source: FsSource::Lvm { vg: "ArchinstallVg".into(), lv: "root".into() }, ..Default::default() });
+        let table = PartTable { partitions: vec![Partition { number: 1, ..Default::default() }, Partition { number: 2, ..Default::default() }], ..Default::default() };
+        let mut m = Manifest { disks: vec![Disk { name: "nvme0n1".into(), table: Some(table), ..Default::default() }], boot: BootInfo { loader: Loader::SystemdBoot, ..Default::default() }, ..Default::default() };
+        m.filesystems.push(Filesystem { source: FsSource::Lvm { vg: "ArchinstallVg".into(), lv: "root".into() }, mounts: vec![MountEntry { path: "/".into(), ..Default::default() }], ..Default::default() });
         assert!(m.ready_reasons().contains(&ReadyReason::ManualLayout), "LVM without a report");
         m.lvm_report = Some(OLD_LVS.into());
         assert!(!m.ready_reasons().contains(&ReadyReason::ManualLayout), "{:?}", m.ready_reasons());
@@ -1792,5 +1956,102 @@ mod tests {
         m.lvm_report = Some(OLD_LVS.into());
         m.md.push("MD_LEVEL=raid1".into());
         assert!(m.ready_reasons().contains(&ReadyReason::ManualLayout));
+    }
+
+    #[test]
+    fn lvm_report_without_interrupted_snapshots_with_system_id() {
+        let r = r#"{"report":[{"lv":[
+            {"vg_name":"vg","lv_name":"root","lv_size":"1073741824B","lv_attr":"owi-aos---","segtype":"linear","seg_size":"1073741824B","devices":"/dev/sda2(0)"},
+            {"vg_name":"vg","lv_name":"root-rynas-snap","lv_size":"268435456B","lv_attr":"swi-a-s---","origin":"root","segtype":"linear","seg_size":"134217728B","devices":"/dev/sda2(256)"},
+            {"vg_name":"vg","lv_name":"root-rynas-snap","lv_size":"268435456B","lv_attr":"swi-a-s---","origin":"root","segtype":"linear","seg_size":"134217728B","devices":"/dev/sda2(300)"}],
+          "vg":[{"vg_name":"vg","vg_uuid":"u","vg_systemid":"pc1","vg_extent_size":"4194304B","vg_size":"2147483648B","vg_free":"0B"}]}]}"#;
+        let l = LvmLayout::parse(r).unwrap();
+        assert_eq!(l.vgs[0].lvs.len(), 1, "the interrupted snapshot is not a volume of the PC");
+        assert_eq!(l.vgs[0].free_bytes, 256 << 20, "its two segments are free space again");
+        assert_eq!(l.vgs[0].system_id, "pc1");
+        assert!(l.unsupported().is_empty());
+        // an old report (lv rows only, no segment sizes): left out, nothing to add to
+        let l = LvmLayout::parse(&OLD_LVS.replace(r#""lv_name":"home""#, r#""lv_name":"root-rynas-snap", "lv_attr":"swi-a-s---""#)).unwrap();
+        assert_eq!(l.vgs[0].lvs.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["root"]);
+        assert!(l.unsupported().is_empty());
+    }
+
+    /// Disk 0 (`sda`, the PC's system disk: ESP, PV of `sys`) and disk 1 (`sdb`, PV of
+    /// `data`); root on `sys/root`.
+    fn two_disk_lvm(report: &str) -> Manifest {
+        let disk = |name: &str, n: u32| Disk {
+            name: name.into(),
+            table: Some(PartTable { kind: "gpt".into(), partitions: (1..=n).map(|number| Partition { number, ..Default::default() }).collect(), ..Default::default() }),
+            ..Default::default()
+        };
+        let fs = |vg: &str, lv: &str, path: &str| Filesystem {
+            source: FsSource::Lvm { vg: vg.into(), lv: lv.into() },
+            fstype: "ext4".into(),
+            mounts: vec![MountEntry { path: path.into(), ..Default::default() }],
+            ..Default::default()
+        };
+        Manifest {
+            disks: vec![disk("sda", 3), disk("sdb", 1)],
+            boot: BootInfo { loader: Loader::SystemdBoot, ..Default::default() },
+            filesystems: vec![fs("sys", "root", "/"), fs("data", "srv", "/srv")],
+            lvm_report: Some(report.into()),
+            ..Default::default()
+        }
+    }
+
+    fn lv_row(vg: &str, lv: &str, attr: &str, dev: &str) -> String {
+        format!(r#"{{"vg_name":"{vg}","lv_name":"{lv}","lv_size":"1073741824B","lv_attr":"{attr}","segtype":"linear","devices":"{dev}(0)"}}"#)
+    }
+
+    fn pv_row(vg: &str, dev: &str) -> String {
+        format!(r#"{{"pv_name":"{dev}","pv_uuid":"","pv_size":"2147483648B","pe_start":"1048576B","vg_name":"{vg}"}}"#)
+    }
+
+    fn report(lvs: &[String], pvs: &[String]) -> String {
+        format!(r#"{{"report":[{{"lv":[{}],"pv":[{}]}}]}}"#, lvs.join(","), pvs.join(","))
+    }
+
+    #[test]
+    fn the_nas_and_the_agent_judge_lvm_groups_alike() {
+        // the data group on the second disk: left as it is, ready
+        let base = [lv_row("sys", "root", "-wi-ao----", "/dev/sda2"), lv_row("data", "srv", "-wi-ao----", "/dev/sdb1")];
+        let m = two_disk_lvm(&report(&base, &[pv_row("sys", "/dev/sda2"), pv_row("data", "/dev/sdb1")]));
+        assert_eq!(m.restore_disk(), Some(0));
+        assert_eq!(m.lvm_pv_disk("/dev/sdb1"), Some(1));
+        let l = LvmLayout::parse(m.lvm_report.as_deref().unwrap()).unwrap();
+        let on0 = |d: usize| d == 0;
+        assert_eq!(m.lvm_vg_check(&l.vgs[0], &on0), LvmVgCheck::Recreate);
+        assert_eq!(m.lvm_vg_check(&l.vgs[1], &on0), LvmVgCheck::Elsewhere);
+        assert!(m.lvm_unsupported().is_empty());
+        assert!(!m.ready_reasons().contains(&ReadyReason::ManualLayout));
+        // the system group also on the second disk: the NAS is not ready, the agent refuses
+        let m = two_disk_lvm(&report(&base, &[pv_row("sys", "/dev/sda2"), pv_row("sys", "/dev/sdb1")]));
+        let u = m.lvm_unsupported();
+        assert!(u.len() == 1 && u[0].contains("sys: also has physical volumes on a disk that is not restored (/dev/sdb1)"), "{u:?}");
+        assert!(m.ready_reasons().contains(&ReadyReason::ManualLayout));
+        // a PV on a whole disk, on md
+        let m = two_disk_lvm(&report(&base, &[pv_row("sys", "/dev/sda2"), pv_row("sys", "/dev/sdb"), pv_row("sys", "/dev/md0"), pv_row("data", "/dev/sdb1")]));
+        let u = m.lvm_unsupported();
+        assert!(u.iter().any(|x| x.contains("/dev/sdb is a physical volume on a whole disk")) && u.iter().any(|x| x.contains("/dev/md0 is a physical volume on md")), "{u:?}");
+        // a thin pool of virtual machines on the system disk, nothing of the backup on it:
+        // left out, ready
+        let mut lvs = base.to_vec();
+        lvs.push(lv_row("vms", "pool", "twi-aotz--", "/dev/sda3"));
+        let m = two_disk_lvm(&report(&lvs, &[pv_row("sys", "/dev/sda2"), pv_row("vms", "/dev/sda3"), pv_row("data", "/dev/sdb1")]));
+        let l = LvmLayout::parse(m.lvm_report.as_deref().unwrap()).unwrap();
+        let vms = l.vgs.iter().find(|v| v.name == "vms").unwrap();
+        assert!(matches!(m.lvm_vg_check(vms, &on0), LvmVgCheck::SkipUnused(w) if w[0].contains("vms/pool: a thin pool")));
+        assert!(m.lvm_unsupported().is_empty(), "{:?}", m.lvm_unsupported());
+        // the same pool with a filesystem of the backup on a thin volume: refused
+        let mut lvs2 = lvs.clone();
+        lvs2.push(lv_row("vms", "disk1", "Vwi-aotz--", "/dev/sda3"));
+        let mut m = two_disk_lvm(&report(&lvs2, &[pv_row("sys", "/dev/sda2"), pv_row("vms", "/dev/sda3"), pv_row("data", "/dev/sdb1")]));
+        m.filesystems.push(Filesystem { source: FsSource::Lvm { vg: "vms".into(), lv: "disk1".into() }, ..Default::default() });
+        assert!(m.lvm_unsupported().iter().any(|x| x.contains("vms/disk1: a thin volume")), "{:?}", m.lvm_unsupported());
+        // the root's group on a whole disk: the restore cannot make it
+        let m = two_disk_lvm(&report(&base, &[pv_row("sys", "/dev/sdb"), pv_row("data", "/dev/sdb1")]));
+        assert!(m.lvm_unsupported().iter().any(|x| x.contains("whole disk")), "{:?}", m.lvm_unsupported());
+        assert_eq!(partition_name("nvme0n1", 2), "nvme0n1p2");
+        assert_eq!(partition_name("sda", 2), "sda2");
     }
 }

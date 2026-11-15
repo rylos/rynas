@@ -145,10 +145,14 @@ fn run_input(log: &mut Log, argv: &[&str], input: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Runs `argv` inside the target (chroot).
 fn chroot(log: &mut Log, argv: &[&str]) -> Result<String, String> {
     let mut v = vec!["chroot", TARGET];
     v.extend_from_slice(argv);
+    // the restored system's LVM reads its own configuration: a live LVM_SYSTEM_DIR names a
+    // folder of the live system
+    if std::env::var_os("LVM_SYSTEM_DIR").is_some() {
+        return run_env(log, &v, &[("LVM_SYSTEM_DIR", "/etc/lvm")]);
+    }
     run(log, &v)
 }
 
@@ -252,6 +256,13 @@ pub fn disk_in_use(name: &str) -> Option<String> {
             }
             return Some(format!("/dev/{d} is held by a device mapping (LUKS, LVM, md)"));
         }
+    }
+    // an inactive LVM group with PVs here and on another disk: wiping this one breaks it there
+    if let Some((vg, others)) = super::lvm::split_groups(&super::lvm::live_pvs(), name).into_iter().next() {
+        return Some(format!(
+            "/dev/{name} holds physical volumes of the LVM volume group {vg}, which also has physical volumes on {}: wiping it would break that group; move its data off this disk first (pvmove, vgreduce), or detach the other disks if the group is not needed",
+            others.iter().map(|d| format!("/dev/{d}")).collect::<Vec<_>>().join(", ")
+        ));
     }
     // claims that are neither in mountinfo nor in holders (a member of a btrfs mounted from
     // another disk, a ZFS vdev, another restore): Linux refuses an exclusive open of a block
@@ -474,19 +485,24 @@ pub fn execute(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &Pl
     let r = execute_inner(src, v, m, plan, opts, log);
     if r.is_err() {
         umount_all(log);
-        close_all(log, plan);
+        close_all(log, plan, false);
     }
     r
 }
 
 /// Closes what the restore opened, from the top down: LUKS inside logical volumes, the
-/// volume groups, LUKS on partitions.
-fn close_all(log: &mut Log, plan: &Plan) {
+/// volume groups (`done`: with the PC's system ID set, [`super::lvm::finish`]), LUKS on
+/// partitions.
+fn close_all(log: &mut Log, plan: &Plan, done: bool) {
     for l in plan.luks.iter().filter(|l| l.on_lvm) {
         let _ = run(log, &["cryptsetup", "close", &l.mapper]);
     }
     for vg in &plan.lvm {
-        super::lvm::deactivate(log, &vg.name);
+        if done {
+            super::lvm::finish(log, vg);
+        } else {
+            super::lvm::deactivate(log, vg);
+        }
     }
     for l in plan.luks.iter().filter(|l| !l.on_lvm) {
         let _ = run(log, &["cryptsetup", "close", &l.mapper]);
@@ -699,6 +715,7 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
         let _ = std::fs::write(in_target("/.autorelabel"), b"");
         log.line("SELinux enforcing: /.autorelabel set");
     }
+    lvm_conf_filters(log, m, plan);
     lvm_initramfs(log, m, plan);
     // 8. boot
     boot(m, plan, log, boot_files, opts.nvram)?;
@@ -708,7 +725,7 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
     let _ = std::fs::write(in_target(&format!("/var/log/rynas-restore-{ts}.log")), log.text());
     let _ = run(log, &["sync"]);
     umount_all(log);
-    close_all(log, plan);
+    close_all(log, plan, true);
     log.line("restore finished");
     Ok(())
 }
@@ -830,13 +847,17 @@ fn lvm_initramfs(log: &mut Log, m: &Manifest, plan: &Plan) {
         d.sort();
         files.extend(d);
     }
-    let sets_hooks = |f: &String| std::fs::read_to_string(in_target(f)).is_ok_and(|t| t.lines().any(|l| l.trim_start().starts_with("HOOKS=(")));
-    let Some(f) = files.iter().rev().find(|f| sets_hooks(f)) else {
+    let texts: Vec<String> = files.iter().map(|f| std::fs::read_to_string(in_target(f)).unwrap_or_default()).collect();
+    if super::lvm::hooks_have_lvm(&texts) {
+        log.line("mkinitcpio: HOOKS has the lvm2 hook");
+        return;
+    }
+    let Some(i) = super::lvm::hooks_file(&texts) else {
         log.problem("mkinitcpio: no HOOKS=(…) found in the restored system: add the lvm2 hook by hand and rebuild the initramfs".to_string());
         return;
     };
-    let text = std::fs::read_to_string(in_target(f)).unwrap_or_default();
-    match super::lvm::add_lvm_hook(&text) {
+    let f = &files[i];
+    match super::lvm::add_lvm_hook(&texts[i]) {
         Some(t) => match std::fs::write(in_target(f), t) {
             Ok(()) => log.line(format!("{f}: the lvm2 hook added to HOOKS (the volumes are on LVM)")),
             Err(e) => log.problem(format!("{f}: could not add the lvm2 hook: {e}")),
@@ -845,23 +866,81 @@ fn lvm_initramfs(log: &mut Log, m: &Manifest, plan: &Plan) {
     }
 }
 
+/// The restored system's LVM device filters (`filter`/`global_filter` in `/etc/lvm/lvm.conf`
+/// and `lvmlocal.conf`) with the old disk names changed to the new ones, before the
+/// initramfs (which carries lvm.conf) is made; a filter by disk IDs cannot be rewritten and
+/// is reported.
+fn lvm_conf_filters(log: &mut Log, m: &Manifest, plan: &Plan) {
+    if plan.lvm.is_empty() {
+        return;
+    }
+    let renames = super::plan::disk_renames(m, &plan.disks);
+    for f in ["/etc/lvm/lvm.conf", "/etc/lvm/lvmlocal.conf"] {
+        let Ok(text) = std::fs::read_to_string(in_target(f)) else { continue };
+        for s in super::lvm::filter_settings(&text).iter().filter(|s| super::lvm::filter_by_identity(s)) {
+            log.problem(format!("{f}: the device filter `{s}` names disks by their IDs, which the new disk does not have: change it, or LVM may not find the volume groups at boot"));
+        }
+        let Some(new) = super::lvm::rewrite_filters(&text, &renames) else { continue };
+        match std::fs::write(in_target(f), &new) {
+            Ok(()) => {
+                for (a, b) in super::lvm::filter_settings(&text).iter().zip(super::lvm::filter_settings(&new)) {
+                    if *a != b {
+                        log.line(format!("{f}: device filter rewritten for the new disk: `{a}` → `{b}`"));
+                    }
+                }
+            }
+            Err(e) => log.problem(format!("{f}: the device filter names the old disk and could not be rewritten ({e}): change it, or LVM may not find the volume groups at boot")),
+        }
+    }
+}
+
 /// LVM's devices file (`/etc/lvm/devices/system.devices`, the default on newer Fedora and
-/// RHEL) lists the PC's disks by their IDs, so LVM would ignore the new disk: it is set aside
-/// (`system.devices.rynas-old`) and made again for the restored groups with
-/// `vgimportdevices` in the chroot. Without a devices file LVM looks at every disk.
+/// RHEL) lists the PC's disks by their IDs, so LVM would ignore the new disk. The PC's file is
+/// kept as `system.devices.rynas-old`; the new one keeps the lines of the PC's other disks
+/// (a group on a second disk stays visible at boot) without the lines of the restored PVs,
+/// and `vgimportdevices` in the chroot adds the restored groups with the new disk's IDs. If
+/// that fails for a group, there is no devices file at all (LVM then looks at every disk)
+/// rather than one that hides a group.
 fn lvm_devices_file(log: &mut Log, plan: &Plan) {
     let f = in_target("/etc/lvm/devices/system.devices");
     if plan.lvm.is_empty() || !f.is_file() {
         return;
     }
-    if let Err(e) = std::fs::rename(&f, f.with_file_name("system.devices.rynas-old")) {
-        log.problem(format!("/etc/lvm/devices/system.devices: {e}: LVM may ignore the new disk; run vgimportdevices --all after the first boot"));
+    // a system whose LVM does not use the file (use_devicesfile=0) gets nothing changed
+    if let Ok(o) = chroot(log, &["lvm", "lvmconfig", "--typeconfig", "full", "devices/use_devicesfile"])
+        && o.split_whitespace().any(|w| w == "use_devicesfile=0")
+    {
+        log.line("/etc/lvm/devices/system.devices: the restored system's LVM does not use it (use_devicesfile=0), left as it is");
         return;
     }
-    log.line("/etc/lvm/devices/system.devices: the PC's kept as system.devices.rynas-old");
+    let old = f.with_file_name("system.devices.rynas-old");
+    let text = match std::fs::read_to_string(&f) {
+        Ok(t) => t,
+        Err(e) => {
+            log.problem(format!("/etc/lvm/devices/system.devices: {e}: LVM may ignore the new disk; run vgimportdevices --all after the first boot"));
+            return;
+        }
+    };
+    if let Err(e) = std::fs::copy(&f, &old) {
+        log.problem(format!("/etc/lvm/devices/system.devices: keeping the PC's copy: {e}; the file is left as it was: LVM may ignore the new disk, run vgimportdevices --all after the first boot"));
+        return;
+    }
+    let pvids: Vec<String> = plan.lvm.iter().flat_map(|vg| vg.pvs.iter().flat_map(|p| [p.orig_uuid.clone(), p.uuid.clone().unwrap_or_default()])).collect();
+    let (kept, dropped) = super::lvm::devices_file_without(&text, &pvids);
+    let no_file = |log: &mut Log, why: String| match std::fs::remove_file(&f).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) {
+        Ok(()) => log.line(format!("warning: {why}; /etc/lvm/devices/system.devices removed (LVM looks at every disk; the PC's is system.devices.rynas-old): run vgimportdevices --all after the first boot to have one again")),
+        Err(e) => log.problem(format!("{why}; /etc/lvm/devices/system.devices could not be removed ({e}): LVM may ignore the restored groups at boot")),
+    };
+    if let Err(e) = std::fs::write(&f, kept) {
+        no_file(log, format!("/etc/lvm/devices/system.devices: {e}"));
+        return;
+    }
+    log.line(format!("/etc/lvm/devices/system.devices: the PC's kept as system.devices.rynas-old; {dropped} lines of the restored PVs taken out, the other disks' kept"));
     for vg in &plan.lvm {
-        if let Err(e) = chroot(log, &["vgimportdevices", &vg.name]) {
-            log.line(format!("warning: vgimportdevices {}: {e}; without a devices file LVM looks at every disk", vg.name));
+        // through `lvm`: not every distribution links each LVM command as a program
+        if let Err(e) = chroot(log, &["lvm", "vgimportdevices", &vg.name]) {
+            no_file(log, format!("vgimportdevices {}: {e}", vg.name));
+            return;
         }
     }
 }

@@ -87,13 +87,8 @@ pub struct Plan {
     pub notes: Vec<String>,
 }
 
-/// The kernel name of partition `n` of disk `disk` (`sda1`, `nvme0n1p1`, `mmcblk0p1`).
 pub fn part_name(disk: &str, n: u32) -> String {
-    if disk.chars().last().is_some_and(|c| c.is_ascii_digit()) {
-        format!("{disk}p{n}")
-    } else {
-        format!("{disk}{n}")
-    }
+    partition_name(disk, n)
 }
 
 fn random_uuid() -> String {
@@ -110,6 +105,27 @@ fn random_fat_id() -> String {
 /// Bytes a filesystem needs on a target: its used bytes plus room (10 %, at least 256 MiB).
 pub(crate) fn needed(used: u64) -> u64 {
     used + (used / 10).max(256 << 20)
+}
+
+/// [`needed`] for a filesystem of type `fstype`: never below the smallest filesystem of that
+/// type mkfs makes (XFS: 300 MiB with newer xfsprogs).
+pub(crate) fn needed_fs(fstype: &str, used: u64) -> u64 {
+    let n = needed(used);
+    if fstype == "xfs" { n.max(super::lvm::XFS_MIN) } else { n }
+}
+
+/// The kernel names that change from the PC to the targets: each restored disk and its
+/// partitions (`sda` → `nvme0n1`, `sda2` → `nvme0n1p2`).
+pub fn disk_renames(m: &Manifest, disks: &[DiskPlan]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for d in disks {
+        let Some(src) = m.disks.get(d.source) else { continue };
+        out.push((src.name.clone(), d.target.name.clone()));
+        for p in src.table.iter().flat_map(|t| t.partitions.iter()) {
+            out.push((part_name(&src.name, p.number), part_name(&d.target.name, p.number)));
+        }
+    }
+    out
 }
 
 /// Builds the plan. `in_use(uuid)` says whether another attached device has that ID
@@ -185,18 +201,15 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
         if let Some(n) = last_part {
             let e = &g.entries[n as usize - 1];
             let new_bytes = (e.last_lba - e.first_lba + 1) * sector;
-            let used: u64 = m
-                .filesystems
-                .iter()
-                .filter(|f| fs_on_partition(m, f, *src, n))
-                .map(|f| f.used_bytes)
-                .sum();
-            if used > 0 && needed(used) > new_bytes {
+            let on: Vec<&Filesystem> = m.filesystems.iter().filter(|f| fs_on_partition(m, f, *src, n)).collect();
+            let used: u64 = on.iter().map(|f| f.used_bytes).sum();
+            let need = if on.iter().any(|f| f.fstype == "xfs") { needed_fs("xfs", used) } else { needed(used) };
+            if used > 0 && need > new_bytes {
                 return Err(format!(
                     "{} is too small: partition {n} would have {} MiB, the data needs about {} MiB",
                     t.name,
                     new_bytes >> 20,
-                    needed(used) >> 20
+                    need >> 20
                 ));
             }
         }
@@ -253,12 +266,10 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
         let orig_bytes = |disk: usize, number: u32| -> u64 {
             m.disks.get(disk).and_then(|d| d.table.as_ref().map(|t| (t, u64::from(d.logical_sector)))).and_then(|(t, s)| t.partitions.iter().find(|p| p.number == number).map(|p| p.size_lba * s)).unwrap_or(0)
         };
+        // the PVs [`Manifest::lvm_vg_check`] accepts: partitions, LUKS containers on them
         let pv_target = |dev: &str| -> super::lvm::PvTarget {
             use super::lvm::PvTarget;
             for (di, d) in m.disks.iter().enumerate() {
-                if format!("/dev/{}", d.name) == dev {
-                    return PvTarget::Unsupported(format!("a physical volume on the whole disk {}, without a partition table: not recreated by this version", d.name));
-                }
                 let Some(t) = &d.table else { continue };
                 if let Some(p) = t.partitions.iter().find(|p| format!("/dev/{}", part_name(&d.name, p.number)) == dev) {
                     return match (target_part(di, p.number), part_bytes(di, p.number)) {
@@ -267,25 +278,17 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
                     };
                 }
             }
-            if let Some((i, l)) = m.luks.iter().enumerate().find(|(_, l)| l.device == dev || (!l.mapper.is_empty() && format!("/dev/mapper/{}", l.mapper) == dev)) {
-                let FsSource::Partition { disk, number } = l.source else {
-                    return PvTarget::Unsupported("a physical volume in a LUKS container that is not on a partition".into());
-                };
-                return match (luks.iter().find(|a| a.luks == i), part_bytes(disk, number)) {
-                    (Some(a), Some(bytes)) => PvTarget::On {
-                        device: format!("/dev/mapper/{}", a.mapper),
-                        bytes: bytes.saturating_sub(super::lvm::LUKS_HEADER),
-                        orig_bytes: orig_bytes(disk, number).saturating_sub(super::lvm::LUKS_HEADER),
-                    },
-                    _ => PvTarget::NoTarget,
-                };
+            if let Some((i, l)) = m.luks.iter().enumerate().find(|(_, l)| l.device == dev || (!l.mapper.is_empty() && format!("/dev/mapper/{}", l.mapper) == dev))
+                && let FsSource::Partition { disk, number } = l.source
+                && let (Some(a), Some(bytes)) = (luks.iter().find(|a| a.luks == i), part_bytes(disk, number))
+            {
+                let header = super::lvm::luks_header(l.version);
+                return PvTarget::On { device: format!("/dev/mapper/{}", a.mapper), bytes: bytes.saturating_sub(header), orig_bytes: orig_bytes(disk, number).saturating_sub(header) };
             }
-            if dev.starts_with("/dev/md") {
-                return PvTarget::Unsupported("a physical volume on md: not recreated by this version".into());
-            }
-            PvTarget::Unsupported("not a partition or a LUKS container the manifest knows".into())
+            PvTarget::NoTarget
         };
-        super::lvm::plan(m, &layout, &pv_target, in_use, &mut notes)?
+        let restored = |d: usize| disks.iter().any(|x| x.source == d);
+        super::lvm::plan(m, &layout, &pv_target, &restored, in_use, &mut notes)?
     };
     let lv_device = |src: &FsSource| -> Option<String> {
         let FsSource::Lvm { vg, lv } = src else { return None };
@@ -359,6 +362,9 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
         && m.filesystems.iter().any(|f| matches!(f.source, FsSource::Partition { disk, .. } if !targets.iter().any(|(s, _)| *s == disk)) && f.capture != Some(CaptureMethod::Skipped))
     {
         notes.push("some disks of the PC get no target: their filesystems are left out".into());
+    }
+    if !lvm.is_empty() {
+        notes.extend(super::lvm::filter_notes(&m.lvm_filters, &disk_renames(m, &disks)));
     }
     Ok(Plan {
         disks,
@@ -1043,7 +1049,7 @@ pub(crate) mod tests {
         assert_eq!(p.lvm.len(), 1);
         let vg = &p.lvm[0];
         assert_eq!((vg.name.as_str(), vg.uuid.as_deref(), vg.extent_bytes), ("ArchinstallVg", Some(VG_UUID), 4 << 20));
-        assert_eq!(vg.pvs, [super::super::lvm::PvAction { device: "/dev/nvme1n1p2".into(), uuid: Some(PV_UUID.into()) }]);
+        assert_eq!(vg.pvs, [super::super::lvm::PvAction { device: "/dev/nvme1n1p2".into(), uuid: Some(PV_UUID.into()), orig_uuid: PV_UUID.into() }]);
         assert_eq!(vg.lvs.iter().map(|l| (l.name.as_str(), l.extents, l.uuid.as_deref())).collect::<Vec<_>>(), [("root", 11776, Some(ROOT_UUID)), ("home", 107136, Some(HOME_UUID))]);
         assert_eq!(vg.orig_free, 64);
         assert!(vg.free() >= 64, "{}", vg.free());
@@ -1131,7 +1137,8 @@ pub(crate) mod tests {
         let mut span = m.clone();
         span.lvm_report = Some(lvm_report("-wi-ao----").replace(r#""vg_name":"ArchinstallVg"}]}]}"#, r#""vg_name":"ArchinstallVg"},{"pv_name":"/dev/sda1","pv_uuid":"","pv_size":"1B","pe_start":"0B","vg_name":"ArchinstallVg"}]}]}"#));
         let e = build(&span, &target, &|_| false).unwrap_err();
-        assert!(e.contains("no target") && e.contains("/dev/sda1"), "{e}");
+        assert!(e.contains("not restored") && e.contains("/dev/sda1") && !e.contains("as many disks"), "{e}");
+        assert!(span.ready_reasons().contains(&ReadyReason::ManualLayout), "the NAS says the same");
         // a PV on a whole disk
         let mut whole = m.clone();
         whole.lvm_report = Some(lvm_report("-wi-ao----").replace("/dev/nvme0n1p2", "/dev/nvme0n1"));
@@ -1158,5 +1165,83 @@ pub(crate) mod tests {
         assert_eq!(super::super::source_disk(&m), Some(1));
         // the LUKS header comes off what LVM gets
         assert!(p.lvm[0].available < build(&arch_lvm(), &[(1, nvme(500_107_862_016))], &|_| false).unwrap().lvm[0].available);
+    }
+
+    #[test]
+    fn lvm_in_luks1_loses_its_smaller_header_only() {
+        let luks = |version: u32| {
+            let mut m = arch_lvm();
+            m.luks = vec![Luks { device: "/dev/nvme0n1p2".into(), source: FsSource::Partition { disk: 1, number: 2 }, uuid: "11111111-2222-4333-8444-555555555555".into(), version, mapper: "cryptlvm".into(), ..Default::default() }];
+            m.lvm_report = Some(lvm_report("-wi-ao----").replace("\"/dev/nvme0n1p2", "\"/dev/mapper/cryptlvm"));
+            build(&m, &[(1, nvme(500_107_862_016))], &|_| false).unwrap().lvm[0].available
+        };
+        // 16 MiB against 2 MiB: 3 or 4 extents of 4 MiB more for LVM in LUKS1
+        let (v1, v2) = (luks(1), luks(2));
+        assert!((3..=4).contains(&(v1 - v2)), "{v1} {v2}");
+        assert_eq!((super::super::lvm::luks_header(1), super::super::lvm::luks_header(2)), (2 << 20, 16 << 20));
+    }
+
+    #[test]
+    fn lvm_group_of_something_else_on_the_disk_is_left_out() {
+        // a thin pool of virtual machines on a third partition, nothing of it in the backup
+        let mut m = arch_lvm();
+        let t = m.disks[1].table.as_mut().unwrap();
+        t.partitions[1].size_lba -= 40 << 21;
+        let start = t.partitions[1].start_lba + t.partitions[1].size_lba;
+        t.partitions.push(Partition { number: 3, start_lba: start, size_lba: 40 << 21, type_guid: LVM_TYPE.into(), part_guid: "BBBBBBBB-0000-4000-8000-000000000003".into(), ..Default::default() });
+        let r = lvm_report("-wi-ao----")
+            .replace(r#"(11776)"}"#, r#"(11776)"},{"vg_name":"vms","lv_name":"pool","lv_size":"21474836480B","lv_attr":"twi-aotz--","pool_lv":"","origin":"","segtype":"thin-pool","devices":"pool_tdata(0)"}"#)
+            .replace(r#""vg_name":"ArchinstallVg"}]}]}"#, r#""vg_name":"ArchinstallVg"},{"pv_name":"/dev/nvme0n1p3","pv_uuid":"","pv_size":"21474836480B","pe_start":"1048576B","vg_name":"vms"}]}]}"#);
+        m.lvm_report = Some(r);
+        let p = build(&m, &[(1, nvme(500_107_862_016))], &|_| false).unwrap();
+        assert_eq!(p.lvm.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["ArchinstallVg"]);
+        assert!(p.notes.iter().any(|n| n.contains("volume group vms holds nothing of the backup") && n.contains("thin pool")), "{:?}", p.notes);
+        assert!(!m.ready_reasons().contains(&ReadyReason::ManualLayout), "the NAS agrees: ready");
+        // with a filesystem of the backup in it: refused, by both
+        m.filesystems.push(Filesystem { device: "/dev/mapper/vms-pool".into(), source: FsSource::Lvm { vg: "vms".into(), lv: "pool".into() }, fstype: "ext4".into(), ..Default::default() });
+        assert!(build(&m, &[(1, nvme(500_107_862_016))], &|_| false).unwrap_err().contains("vms/pool: a thin pool"));
+        assert!(m.ready_reasons().contains(&ReadyReason::ManualLayout));
+    }
+
+    #[test]
+    fn lvm_swap_shrinks_and_xfs_keeps_its_minimum() {
+        let mut m = arch_lvm();
+        // a 16 GiB swap volume after home, the group's free space as it was
+        m.lvm_report = Some(lvm_report("-wi-ao----").replace(
+            r#"(11776)"}"#,
+            r#"(11776)"},{"vg_name":"ArchinstallVg","lv_name":"swap","lv_uuid":"","lv_size":"17179869184B","lv_attr":"-wi-ao----","pool_lv":"","origin":"","segtype":"linear","devices":"/dev/nvme0n1p2(118912)"}"#,
+        ));
+        m.swap.push(Swap { path: "/dev/mapper/ArchinstallVg-swap".into(), source: FsSource::Lvm { vg: "ArchinstallVg".into(), lv: "swap".into() }, uuid: "77777777-2222-4333-8444-555555555555".into(), ..Default::default() });
+        let p = build(&m, &[(1, nvme(256_060_514_304))], &|_| false).unwrap();
+        let swap = p.lvm[0].lvs.iter().find(|l| l.name == "swap").unwrap();
+        assert_eq!(swap.min_extents, 64, "256 MiB");
+        assert!(swap.extents < swap.orig_extents, "{swap:?}");
+        assert!(p.swap.iter().any(|s| s.device == "/dev/ArchinstallVg/swap" && s.uuid.starts_with("7777")), "mkswap with its UUID");
+        // XFS: never below the smallest filesystem mkfs.xfs makes
+        assert_eq!(needed_fs("xfs", 1 << 20), 300 << 20);
+        assert_eq!(needed_fs("ext4", 1 << 20), (1 << 20) + (256 << 20));
+        assert_eq!(needed_fs("xfs", 10 << 30), needed(10 << 30));
+    }
+
+    #[test]
+    fn lvm_system_id_filters_and_interrupted_snapshots() {
+        let mut m = arch_lvm();
+        m.lvm_report = Some(lvm_report("-wi-ao----").replace(r#""vg_uuid":"#, r#""vg_systemid":"arch-pc","vg_uuid":"#));
+        m.lvm_filters = vec![r#"filter = [ "a|^/dev/nvme0n1p2$|", "r|.*|" ]"#.into(), r#"global_filter = [ "a|/dev/disk/by-id/nvme-Samsung_1-part2|", "r|.*|" ]"#.into()];
+        let p = build(&m, &[(1, nvme(500_107_862_016))], &|_| false).unwrap();
+        assert_eq!(p.lvm[0].system_id.as_deref(), Some("arch-pc"));
+        let text = describe(&m, &p, false).join("\n");
+        assert!(text.contains("vgchange --systemid arch-pc ArchinstallVg"), "{text}");
+        assert!(text.contains(r#"rewritten to `filter = [ "a|^/dev/nvme1n1p2$|", "r|.*|" ]`"#), "{text}");
+        assert!(text.contains("names disks by their IDs"), "{text}");
+        // an older manifest with the agent's snapshot of an interrupted backup: not refused
+        let mut old = arch_lvm();
+        old.lvm_report = Some(lvm_report("owi-aos---").replace(
+            r#"(11776)"}"#,
+            r#"(11776)"},{"vg_name":"ArchinstallVg","lv_name":"root-rynas-snap","lv_uuid":"","lv_size":"268435456B","lv_attr":"swi-a-s---","pool_lv":"","origin":"root","segtype":"linear","seg_size":"268435456B","devices":"/dev/nvme0n1p2(118912)"}"#,
+        ));
+        let p = build(&old, &[(1, nvme(500_107_862_016))], &|_| false).unwrap();
+        assert_eq!(p.lvm[0].lvs.len(), 2);
+        assert_eq!(p.lvm[0].orig_free, 64 + 64, "its extents are free space");
     }
 }

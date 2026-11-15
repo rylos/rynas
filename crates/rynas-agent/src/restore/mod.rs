@@ -155,82 +155,34 @@ fn in_use_except(targets: &[String]) -> impl Fn(&str) -> bool + '_ {
     }
 }
 
-/// The whole disks a block device sits on (`sda2` → `sda`; `dm-3` → the disks below it).
-fn base_disks(name: &str) -> Vec<String> {
-    let sys = Path::new("/sys/class/block").join(name);
-    if sys.join("partition").exists() {
-        return std::fs::canonicalize(&sys).ok().and_then(|p| p.parent().and_then(|d| d.file_name()).map(|n| vec![n.to_string_lossy().into_owned()])).unwrap_or_default();
-    }
-    let slaves: Vec<String> = std::fs::read_dir(sys.join("slaves")).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
-    if slaves.is_empty() {
-        return vec![name.to_string()];
-    }
-    slaves.iter().flat_map(|s| base_disks(s)).collect()
-}
-
 /// The live system's LVM outside the target disks, as IDs for the plan's `in_use`: `vg:<name>`
 /// of every volume group with a PV elsewhere, the UUIDs of such groups, their PVs and
-/// volumes, and of lone PVs elsewhere. Nothing when LVM is not installed.
+/// volumes, of lone PVs elsewhere, and of the PVs udev saw elsewhere. LVM looks at every
+/// device ([`lvm::live_pvs`]): the live system's devices file or filter does not hide the
+/// PC's old disk. Nothing from LVM when it is not installed.
 fn lvm_ids_outside(targets: &[String]) -> Vec<String> {
-    if !exec::has("pvs") {
-        return Vec::new();
-    }
-    let rows = |prog: &str, fields: &str, key: &str| -> Vec<serde_json::Map<String, serde_json::Value>> {
-        let Some(o) = std::process::Command::new(prog).args(["--reportformat", "json", "-o", fields]).output().ok().filter(|o| o.status.success()) else {
-            return Vec::new();
-        };
-        let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap_or_default();
-        v.get("report").and_then(|r| r.as_array()).into_iter().flatten().filter_map(|r| r.get(key).and_then(|a| a.as_array())).flatten().filter_map(|x| x.as_object().cloned()).collect()
-    };
-    let s = |r: &serde_json::Map<String, serde_json::Value>, k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let outside = |disks: &[String]| disks.is_empty() || !disks.iter().all(|d| targets.contains(d));
     let mut ids = Vec::new();
     let mut groups: Vec<String> = Vec::new();
-    for r in rows("pvs", "pv_name,pv_uuid,vg_name,vg_uuid", "pv") {
-        let name = std::fs::canonicalize(s(&r, "pv_name")).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
-        let disks = if name.is_empty() { Vec::new() } else { base_disks(&name) };
-        if !disks.is_empty() && disks.iter().all(|d| targets.contains(d)) {
+    for p in lvm::live_pvs() {
+        if !outside(&p.disks) {
             continue;
         }
-        ids.push(s(&r, "pv_uuid"));
-        let vg = s(&r, "vg_name");
-        if !vg.is_empty() {
-            ids.extend([format!("vg:{vg}"), s(&r, "vg_uuid")]);
-            groups.push(vg);
+        ids.push(p.uuid);
+        if !p.vg.is_empty() {
+            ids.extend([format!("vg:{}", p.vg), p.vg_uuid]);
+            groups.push(p.vg);
         }
     }
-    for r in rows("lvs", "vg_name,lv_uuid", "lv") {
-        if groups.contains(&s(&r, "vg_name")) {
-            ids.push(s(&r, "lv_uuid"));
-        }
-    }
+    ids.extend(lvm::live_lv_uuids(&groups));
+    ids.extend(lvm::udev_pvs().into_iter().filter(|(_, d)| outside(d)).map(|(u, _)| u));
     ids.retain(|i| !i.is_empty());
     ids
 }
 
-/// The PC's disk this version restores: the first with a partition table that holds the root
-/// filesystem (directly, in LUKS, or in an LVM group: the disk of the group's first PV), else
-/// the first with a table.
+/// The PC's disk this version restores ([`rynas_api_types::pcagent::Manifest::restore_disk`]).
 pub fn source_disk(m: &rynas_api_types::pcagent::Manifest) -> Option<usize> {
-    use rynas_api_types::pcagent::{FsSource, LvmLayout};
-    let on_lvm = |vg: &str| {
-        let layout = m.lvm_report.as_deref().and_then(|r| LvmLayout::parse(r).ok())?;
-        let g = layout.vgs.into_iter().find(|g| g.name == vg)?;
-        g.pvs.iter().find_map(|p| lvm::pv_disk(m, &p.device))
-    };
-    let disk_of = |s: &FsSource| match s {
-        FsSource::Partition { disk, .. } => Some(*disk),
-        FsSource::Luks { luks } => m.luks.get(*luks).and_then(|l| match &l.source {
-            FsSource::Partition { disk, .. } => Some(*disk),
-            FsSource::Lvm { vg, .. } => on_lvm(vg),
-            _ => None,
-        }),
-        FsSource::Lvm { vg, .. } => on_lvm(vg),
-        _ => None,
-    };
-    m.root()
-        .and_then(|r| disk_of(&r.source))
-        .filter(|d| m.disks.get(*d).is_some_and(|x| x.table.is_some()))
-        .or_else(|| m.disks.iter().position(|d| d.table.is_some()))
+    m.restore_disk()
 }
 
 /// Preflight: the tools the plan needs on the live system, and the firmware mode.
