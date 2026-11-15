@@ -265,13 +265,19 @@ pub async fn same_disk<M: Machine>(m: &M, want: &DiskSummary) -> Result<(), Stri
 /// replaced disk, cleared hours after the plan by a flexible RAID `label`): what the step
 /// touches is still a slice of the volume (partition label `rynas-<label>-t<N>`), not
 /// mounted and holding nothing (no md array, no mapping), and the kernel lets it be
-/// claimed; `sgdisk --zap-all` needs every partition of the disk to be such a slice.
-async fn still_leftover<M: Machine>(m: &M, argv: &[String], disk: &str, label: &str) -> Result<(), String> {
+/// claimed; `sgdisk --zap-all` and `wipefs --all` of the whole disk need every partition of
+/// the disk to be such a slice.
+pub(crate) async fn still_leftover<M: Machine>(m: &M, argv: &[String], disk: &str, label: &str) -> Result<(), String> {
     let a: Vec<&str> = argv.iter().map(String::as_str).collect();
     // the partitions touched (kernel name, or number), `None`: all of them
     let (names, numbers, all): (Vec<&str>, Vec<u32>, bool) = match a.as_slice() {
         ["mdadm", "--zero-superblock", p] => (vec![p.trim_start_matches("/dev/")], vec![], false),
         ["sgdisk", "--zap-all", _] => (vec![], vec![], true),
+        // the whole disk's signatures (its partition table) or one partition's
+        ["wipefs", "--all", p] => {
+            let p = p.trim_start_matches("/dev/");
+            if p == disk { (vec![], vec![], true) } else { (vec![p], vec![], false) }
+        }
         ["sgdisk", rest @ ..] if rest.iter().any(|x| x.starts_with("--delete=")) => (
             vec![],
             rest.iter().filter_map(|x| x.strip_prefix("--delete=")?.parse().ok()).collect(),
@@ -363,6 +369,11 @@ pub(crate) fn disks_written<'a>(argv: &[String], inv: &'a Inventory) -> Vec<&'a 
 
 pub(crate) fn timeout_for(argv: &[String]) -> Duration {
     const MIN: u64 = 60;
+    // without systemd `mdadm --grow --continue` stays with the reshape it resumes, which may
+    // take days: it is never killed for its time
+    if argv.len() >= 3 && argv[0] == "mdadm" && argv[1] == "--grow" && argv[2] == "--continue" {
+        return RESHAPE_TIMEOUT;
+    }
     if critical(argv) {
         return CRITICAL_TIMEOUT;
     }
@@ -377,6 +388,48 @@ pub(crate) fn timeout_for(argv: &[String]) -> Duration {
         _ => 2 * MIN,
     };
     Duration::from_secs(s)
+}
+
+/// How long `mdadm --grow --continue` may run (a reshape of large disks takes days).
+pub(crate) const RESHAPE_TIMEOUT: Duration = Duration::from_secs(60 * 24 * 3600);
+
+/// The LVM tools: they accept `--config`.
+fn is_lvm(prog: &str) -> bool {
+    matches!(
+        prog,
+        "pvcreate" | "pvresize" | "pvremove" | "pvmove" | "pvs" | "pvscan" | "pvdisplay" | "pvchange"
+            | "vgcreate" | "vgextend" | "vgreduce" | "vgchange" | "vgremove" | "vgs" | "vgscan"
+            | "vgdisplay" | "vgcfgbackup" | "lvcreate" | "lvextend" | "lvresize" | "lvreduce"
+            | "lvremove" | "lvchange" | "lvs" | "lvscan" | "lvdisplay"
+    )
+}
+
+/// LVM configuration given to every LVM command: fail at once when another LVM command holds
+/// a lock instead of waiting for it without limit (LVM has no bounded lock wait). A command
+/// stuck behind a lock would otherwise hold the task, and its disk reservations, until
+/// [`CRITICAL_TIMEOUT`]; the contention is retried a while ([`LVM_LOCK_RETRY`]).
+pub(crate) const LVM_NO_WAIT: &str = "global { wait_for_locks = 0 }";
+/// How long a step retries an LVM command that found a lock held, and how often.
+pub(crate) const LVM_LOCK_RETRY: Duration = Duration::from_secs(120);
+const LVM_LOCK_PAUSE: Duration = Duration::from_secs(3);
+
+/// `argv` with [`LVM_NO_WAIT`] when it runs an LVM tool.
+pub(crate) fn lvm_no_wait(argv: Vec<String>) -> Vec<String> {
+    if !argv.first().is_some_and(|p| is_lvm(p)) || argv.iter().any(|a| a == "--config") {
+        return argv;
+    }
+    let mut out = Vec::with_capacity(argv.len() + 2);
+    out.push(argv[0].clone());
+    out.push("--config".into());
+    out.push(LVM_NO_WAIT.into());
+    out.extend(argv.into_iter().skip(1));
+    out
+}
+
+/// The error of an LVM command that did not get a lock another command holds (with
+/// `wait_for_locks = 0` the lock request fails with EAGAIN instead of blocking).
+pub(crate) fn lvm_lock_busy(err: &str) -> bool {
+    err.contains("Resource temporarily unavailable") || err.contains("Can't get lock")
 }
 
 /// How long a [`critical`] command may take: it is never killed half way, so only a hung
@@ -477,12 +530,31 @@ async fn run_cmd<M: Machine>(
     quiet: bool,
     cancellable: bool,
 ) -> Result<Output, String> {
-    let mut o = RunOpts::new(timeout_for(&argv));
-    o.stdin = stdin;
-    o.quiet = quiet;
-    // a cancel never kills a critical command: the plan stops after it
-    o.cancellable = cancellable && !critical(&argv);
-    m.run(argv, o).await
+    let lvm = argv.first().is_some_and(|p| is_lvm(p));
+    let argv = lvm_no_wait(argv);
+    let mut waited = Duration::ZERO;
+    loop {
+        let mut o = RunOpts::new(timeout_for(&argv));
+        o.stdin = stdin.clone();
+        o.quiet = quiet;
+        // a cancel never kills a critical command: the plan stops after it
+        o.cancellable = cancellable && !critical(&argv);
+        match m.run(argv.clone(), o).await {
+            // nothing was changed: another LVM command held the lock
+            Err(e) if lvm && lvm_lock_busy(&e) => {
+                if waited >= LVM_LOCK_RETRY || (cancellable && m.is_cancelled()) {
+                    return Err(format!(
+                        "{e} (another LVM command still holds the lock after {} s: try again when it ends)",
+                        waited.as_secs()
+                    ));
+                }
+                m.log("another LVM command holds the lock: trying again in a few seconds");
+                m.sleep(LVM_LOCK_PAUSE).await;
+                waited += LVM_LOCK_PAUSE;
+            }
+            r => return r,
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------- undo
@@ -1181,8 +1253,11 @@ pub async fn run_plan_with<M: Machine>(
                 if !matches!(prog, "wipefs" | "sgdisk" | "udevadm" | "partx") {
                     touched_array = true;
                 }
+                // only a disk prepared whole is cleared back on failure: wiping one slice of
+                // a disk that keeps other partitions never makes its table erasable
                 if prog == "wipefs"
                     && let Some(disk) = step.destroys.first()
+                    && argv.last().is_some_and(|d| d.trim_start_matches("/dev/") == disk)
                 {
                     let dev = format!("/dev/{disk}");
                     if !undo.iter().any(|u| matches!(u, Undo::Disk { dev: d, .. } if d == &dev)) {
@@ -1413,6 +1488,8 @@ pub struct FakeMachine {
     pub log: std::sync::Mutex<Vec<String>>,
     /// Command lines run, with `<stdin>` appended when a secret was fed.
     pub ran: std::sync::Mutex<Vec<String>>,
+    /// LVM commands as run, with [`LVM_NO_WAIT`] (left out of `ran`).
+    pub lvm_no_wait: std::sync::Mutex<Vec<Vec<String>>>,
     pub outputs: std::collections::HashMap<String, Output>,
     pub fail: std::collections::HashMap<String, String>,
     pub files: std::sync::Mutex<std::collections::HashMap<String, String>>,
@@ -1462,7 +1539,14 @@ impl Machine for FakeMachine {
         argv: Vec<String>,
         opts: RunOpts,
     ) -> impl Future<Output = Result<Output, String>> + Send {
-        let line = argv.join(" ");
+        // the golden sequences show the plan's command lines: the LVM lock setting given
+        // to every LVM tool is recorded apart
+        let lvm_cfg = format!(" --config {LVM_NO_WAIT}");
+        let full = argv.join(" ");
+        if full.contains(&lvm_cfg) {
+            self.lvm_no_wait.lock().unwrap().push(argv.clone());
+        }
+        let line = full.replacen(&lvm_cfg, "", 1);
         self.ran.lock().unwrap().push(if opts.stdin.is_some() {
             format!("{line} <stdin>")
         } else {

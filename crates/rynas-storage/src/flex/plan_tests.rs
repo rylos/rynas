@@ -883,6 +883,49 @@ fn a_disk_with_leftover_slices_is_cleared_and_used() {
     assert!(steps.is_empty(), "{:?}", lines(&steps));
 }
 
+/// The same disk with a partition that is not the volume's: only the old slices are wiped
+/// and deleted, the disk is never wiped or its table cleared whole, and the new slices are
+/// made one by one as on a disk in use.
+#[test]
+fn leftover_slices_next_to_other_partitions_keep_them() {
+    let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
+    let (b1, b2) = (reach(4 * TB), reach(8 * TB));
+    let mut v = start.clone();
+    v.disks.push(VDisk {
+        name: "sdd".into(),
+        size: 8 * TB,
+        parts: vec![
+            VPart { tier: 1, kname: "sdd1".into(), start: MIB, end: b1 - 64 * MIB, fresh: false, partn: 1 },
+            VPart { tier: 2, kname: "sdd2".into(), start: b1 - 64 * MIB, end: b2, fresh: true, partn: 2 },
+        ],
+        others: 1,
+    });
+    let ns = vec![("sdd".to_string(), 8 * TB)];
+    let growth = tiers::grow(&v.shapes(), &v.layout_disks(), &ns, 1, MIN_TIER);
+    let goal = Goal { old: None, new: vec!["sdd".into()] };
+    let steps = growth_steps(&mut v, &goal, Some(&growth.tiers)).unwrap();
+    kinds_ok(&steps);
+    let l = lines(&steps);
+    assert!(!l.iter().any(|x| x == "wipefs --all /dev/sdd" || x.contains("--zap-all")), "{l:?}");
+    assert_eq!(
+        l[..4],
+        [
+            // only the stale slice carries a superblock to wipe
+            "wipefs --all /dev/sdd1".to_string(),
+            "sgdisk --delete=1 --delete=2 /dev/sdd".into(),
+            "partx --update --nr 1 /dev/sdd".into(),
+            "partx --update --nr 2 /dev/sdd".into(),
+        ]
+    );
+    assert_eq!(steps[1].kind, Some(PlanStepKind::DeletePartitions));
+    assert_eq!(steps[2].kind, Some(PlanStepKind::RemovePartitionLive));
+    assert!(steps[..2].iter().all(|s| s.destroys == ["sdd"]));
+    assert!(l.contains(&format!("sgdisk {} /dev/sdd", new_arg(1, MIB, b1))), "{l:?}");
+    assert!(l.contains(&format!("sgdisk {} /dev/sdd", new_arg(2, b1, b2))), "{l:?}");
+    assert!(l.contains(&"mdadm /dev/md/vol2_t1 --add /dev/sdd1".to_string()), "{l:?}");
+    assert!(l.contains(&"mdadm /dev/md/vol2_t2 --add /dev/sdd2".to_string()), "{l:?}");
+}
+
 /// "missing": the disk gone and back (its slices in no array) is the new disk: cleared and
 /// rebuilt on; another disk takes its place: the old one is never erased (the request does
 /// not name it; the plan warns about it, see `replace_missing_warns_about_a_leftover_disk`).

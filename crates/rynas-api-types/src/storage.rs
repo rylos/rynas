@@ -1461,6 +1461,9 @@ pub enum PlanStepKind {
     /// Flexible RAID: delete the volume's own partitions `items` of disk `subject` (the disk
     /// has other partitions, which stay).
     DeletePartitions,
+    /// Flexible RAID: tell the kernel that partition `subject`, deleted on a disk in use, is
+    /// gone.
+    RemovePartitionLive,
     /// A kind this client does not know (newer server): show the English text.
     #[serde(other)]
     Other,

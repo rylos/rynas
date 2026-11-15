@@ -27,9 +27,18 @@ pub struct ApplyCtx<'a> {
     pub(crate) replaced: Mutex<Vec<PathBuf>>,
     /// Units restarted through [`ApplyCtx::restart_unit`] during this apply (or rollback).
     pub(crate) restarted: Mutex<Vec<String>>,
+    /// The reconcile puts a failed apply's previous values back ([`ApplyCtx::rolling_back`]).
+    pub(crate) rolling_back: bool,
 }
 
 impl ApplyCtx<'_> {
+    /// Whether this reconcile is the rollback of a failed apply: a domain does only what
+    /// puts the previous configuration in force again and skips slow side work (it ran, or
+    /// was skipped, when that configuration was applied).
+    pub fn rolling_back(&self) -> bool {
+        self.rolling_back
+    }
+
     /// Whether this apply replaced or removed the system file `abs` (its content changed):
     /// a domain restarts its service only then. A rollback counts the files it put back.
     pub fn replaced(&self, abs: &Path) -> bool {

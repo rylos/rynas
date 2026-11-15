@@ -1345,6 +1345,8 @@ fn main() -> std::io::Result<()> {
         // arrays of rynas volumes left inactive after boot by a missing drive
         if !args.dry_system {
             rynasd::notifications::spawn_degraded_start(state.clone(), notifier.clone());
+            // an initramfs refresh after a change of the arrays that failed or was rejected
+            rynasd::notifications::spawn_initramfs_alerts(notifier.clone());
         }
         if args.storage_check_interval > 0 {
             rynasd::notifications::spawn_storage_watch(

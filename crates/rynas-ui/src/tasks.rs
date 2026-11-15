@@ -366,12 +366,23 @@ fn TaskList() -> impl IntoView {
 /// Ask the server to stop task `id`; `busy` while the request runs, `err` when it was refused
 /// (a task that already ended is not an error).
 pub fn cancel_task(id: String, busy: RwSignal<bool>, err: RwSignal<Option<String>>) {
+    request_stop(id, busy, err, None);
+}
+
+/// [`cancel_task`], setting `sent` once the server took the request: the task may go on a
+/// while (a storage step that changes the disks is never killed half way, the task stops
+/// after it), which the views say ([`stop_waits`]).
+fn request_stop(id: String, busy: RwSignal<bool>, err: RwSignal<Option<String>>, sent: Option<RwSignal<bool>>) {
     busy.set(true);
     err.set(None);
     spawn_local(async move {
         let url = format!("/api/v1/tasks/{}/cancel", api::encode(&id));
         match api::post_empty::<()>(&url, None).await {
-            Ok(()) => {}
+            Ok(()) => {
+                if let Some(s) = sent {
+                    let _ = s.try_set(true);
+                }
+            }
             Err(e) if e.code() == rynas_api_types::error_codes::TASK_FINISHED => {}
             Err(e) => {
                 let _ = err.try_set(Some(e.text()));
@@ -379,6 +390,16 @@ pub fn cancel_task(id: String, busy: RwSignal<bool>, err: RwSignal<Option<String
         }
         let _ = busy.try_set(false);
     });
+}
+
+/// Under a task asked to stop that still runs: the command running now may not be
+/// cancelable until it ends (a step that changes the disks), the task stops right after it.
+fn stop_waits(sent: RwSignal<bool>, running: Signal<bool>) -> impl IntoView {
+    move || {
+        (sent.get() && running.get()).then(|| view! {
+            <p class="muted small" role="status">{tr("tasks.stop_waits")}</p>
+        })
+    }
 }
 
 /// Characters of a log kept in the view (the server caps a task log at 1 MiB).
@@ -487,6 +508,7 @@ fn LogView(id: String) -> impl IntoView {
     let s = tasks();
     let cancel_err = RwSignal::new(None::<String>);
     let cancelling = RwSignal::new(false);
+    let stop_sent = RwSignal::new(false);
     let task = {
         let id = id.clone();
         Memo::new(move |_| s.list.with(|l| l.iter().find(|t| t.id == id).cloned()))
@@ -508,7 +530,7 @@ fn LogView(id: String) -> impl IntoView {
                 <Show when=move || running.get()>
                     <button class="btn ghost sm" disabled=move || cancelling.get() on:click={
                         let id = cancel_id.clone();
-                        move |_| cancel_task(id.clone(), cancelling, cancel_err)
+                        move |_| request_stop(id.clone(), cancelling, cancel_err, Some(stop_sent))
                     }>
                         <Icon icon=icons::CIRCLE_X size=14 />{tr("tasks.cancel")}
                     </button>
@@ -518,6 +540,7 @@ fn LogView(id: String) -> impl IntoView {
                 </button>
             </div>
             {crate::form::form_error(cancel_err)}
+            {stop_waits(stop_sent, running)}
             <LogTail id=id running=running />
         </div>
     }
@@ -532,6 +555,7 @@ pub fn TaskRun(id: String, on_done: Callback<TaskInfo>) -> impl IntoView {
     let lost = RwSignal::new(None::<String>);
     let cancelling = RwSignal::new(false);
     let cancel_err = RwSignal::new(None::<String>);
+    let stop_sent = RwSignal::new(false);
     let task = {
         let id = id.clone();
         Memo::new(move |_| s.list.with(|l| l.iter().find(|t| t.id == id).cloned()))
@@ -573,12 +597,13 @@ pub fn TaskRun(id: String, on_done: Callback<TaskInfo>) -> impl IntoView {
             })}
             {crate::form::form_error(lost)}
             {crate::form::form_error(cancel_err)}
+            {stop_waits(stop_sent, running)}
             <LogTail id=id running=running class="run-log" />
             {move || running.get().then(|| view! {
                 <div class="dialog-foot">
                     <span class="muted small">{tr("tasks.background")}</span>
                     <button class="btn ghost sm" type="button" disabled=move || cancelling.get()
-                        on:click=move |_| cancel_task(cancel_id.get_value(), cancelling, cancel_err)>
+                        on:click=move |_| request_stop(cancel_id.get_value(), cancelling, cancel_err, Some(stop_sent))>
                         {tr("tasks.cancel")}
                     </button>
                 </div>

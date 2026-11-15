@@ -174,6 +174,9 @@ pub(crate) fn step_english(kind: PlanStepKind, a: &PlanArgs) -> String {
         K::DeletePartitions => {
             return format!("Delete the partitions {} of {s} (its other partitions stay)", a.items.join(", "));
         }
+        K::RemovePartitionLive => {
+            return format!("Tell the kernel that the partition {s} is gone (the disk is in use)");
+        }
         K::WaitUdev => "Wait for udev to create the partition nodes",
         K::RecordArray => "Record the array so it is assembled at boot",
         K::LuksFormat => "Format the array as LUKS2 (Argon2id, 256 MiB memory, 4 KiB sectors)",
@@ -969,8 +972,9 @@ fn array_busy(a: &MdArray, p: &mut StoragePlan) {
     }
 }
 
-/// Bytes a new member partition of `a` needs: md's data offset plus the size md uses of each
-/// member (`component_size`), or the smallest active member partition when md does not say
+/// Bytes a new member partition of `a` needs: the size md uses of each member
+/// (`component_size`) after the data offset mdadm gives the new member
+/// ([`need_for_component`]), or the smallest active member partition when md does not say
 /// (md uses no more of any member than the smallest one holds).
 fn member_need(inv: &Inventory, a: &MdArray) -> u64 {
     let active = || a.members.iter().filter(|m| m.role == MemberRole::Active);
@@ -980,15 +984,34 @@ fn member_need(inv: &Inventory, a: &MdArray) -> u64 {
         .min()
         .unwrap_or(0);
     match a.component_size {
-        Some(c) => {
-            let offset = active()
-                .filter_map(|m| m.data_offset)
-                .max()
-                .unwrap_or_else(|| md_data_offset(smallest.max(c)));
-            c + offset
-        }
+        Some(c) => need_for_component(c, active().filter_map(|m| m.data_offset).max()),
         None => smallest,
     }
+}
+
+/// The smallest member partition that holds a component of `c` bytes whatever data offset
+/// `mdadm --add` gives it: mdadm picks the offset of a new member from that member's own
+/// size (metadata 1.2 defaults, [`md_data_offset`]), not from the members already in the
+/// array, so it may be larger than theirs (members made by an older mdadm, or smaller
+/// ones). The partition holds the larger of the two.
+fn need_for_component(c: u64, existing_offset: Option<u64>) -> u64 {
+    let floor = existing_offset.unwrap_or(0);
+    let mut need = c + floor.max(md_data_offset(c));
+    // the default offset grows with the partition: a few rounds settle it
+    for _ in 0..8 {
+        let next = c + floor.max(md_data_offset(need));
+        if next <= need {
+            break;
+        }
+        need = next;
+    }
+    need
+}
+
+/// `mdadm --add` of a partition of `part` bytes leaves md at least `c` bytes after the data
+/// offset it picks for it ([`need_for_component`]).
+fn holds_component(part: u64, c: Option<u64>) -> bool {
+    c.is_none_or(|c| part.saturating_sub(md_data_offset(part)) >= c)
 }
 
 /// The size md uses of each member of `a`: `component_size`, or what md would make of the
@@ -999,11 +1022,15 @@ fn member_component(inv: &Inventory, a: &MdArray, level: RaidLevel) -> u64 {
 }
 
 /// Where the md partition of a disk of `size` bytes joining an array whose members need
-/// `need` bytes ends: `None` for the usual partition (up to [`END_RESERVE`] before the end),
-/// an absolute end for a disk too small for that (a disk "of the same size" a few MB
-/// smaller: the partition holds exactly `need`), the bytes missing when it is too small.
-fn member_partition_end(size: u64, need: u64) -> Result<Option<u64>, u64> {
-    if usable_partition(size) >= need {
+/// `need` bytes (md using `component` of each) ends: `None` for the usual partition (up to
+/// [`END_RESERVE`] before the end), an absolute end for a disk too small for that (a disk
+/// "of the same size" a few MB smaller: the partition holds exactly `need`), the bytes
+/// missing when it is too small.
+fn member_partition_end(size: u64, need: u64, component: Option<u64>) -> Result<Option<u64>, u64> {
+    let usual = usable_partition(size);
+    // a larger partition may get a larger data offset ([`holds_component`]): then the
+    // partition holds exactly `need`
+    if usual >= need && holds_component(usual, component) {
         return Ok(None);
     }
     let end = PART_START + need.div_ceil(MIB) * MIB;
@@ -1112,7 +1139,7 @@ pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
     let mut new: Vec<(DiskSummary, Option<u64>)> = Vec::new();
     for name in &req.disks {
         if let Some(d) = check_new_disk(inv, name, "disks", &mut p) {
-            match member_partition_end(d.size, need) {
+            match member_partition_end(d.size, need, a.component_size) {
                 Err(missing) => {
                     let m = format!(
                         "{name}: too small ({:.1} GB, {:.1} GB missing: members use {:.1} GB)",
@@ -1317,7 +1344,11 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
             .filter_map(|m| {
                 let disk = m.disk.clone()?;
                 let size = disk_size(&disk)?;
-                (size <= nd.size).then_some((size, disk, m.device.clone()))
+                // a copy of its partition must hold what md uses after the data offset
+                // mdadm picks for the new member, which may exceed this member's
+                let part = inv.graph.get(&m.device).map_or(0, |d| d.size);
+                (size <= nd.size && part >= need && holds_component(part, a.component_size))
+                    .then_some((size, disk, m.device.clone()))
             })
             .max_by_key(|(size, _, _)| *size)
             .map(|(_, disk, dev)| (disk, dev))
@@ -2291,6 +2322,54 @@ mod tests {
         assert!(!p.valid);
         assert!(p.issues.iter().any(|i| i.code == PlanIssueCode::DiskTooSmall), "{:?}", p.issues);
         assert!(p.errors.iter().any(|e| e.contains("GB missing")), "{:?}", p.errors);
+    }
+
+    /// Members made with a small data offset (an older mdadm): a new member's partition holds
+    /// the component after the offset mdadm picks for the new member itself, the larger one.
+    #[test]
+    fn new_member_holds_the_default_data_offset() {
+        let c = 3_900 * 1000 * MIB;
+        // existing members at 1 MiB: the new partition gets the default (129 MiB) room
+        let need = need_for_component(c, Some(MIB));
+        assert_eq!(need, c + md_data_offset(need));
+        assert!(holds_component(need, Some(c)));
+        assert!(!holds_component(c + MIB, Some(c)));
+        // existing members with a larger offset than the default keep theirs
+        assert_eq!(need_for_component(c, Some(200 * MIB)), c + 200 * MIB);
+        // small members: the default grows with the size, the result settles on a fit
+        for c in [100 * MIB, 1000 * MIB, 63 * 1024 * MIB, 64 * 1024 * MIB] {
+            let need = need_for_component(c, None);
+            assert!(holds_component(need, Some(c)), "{c}");
+        }
+        // a disk whose usual partition is just past a step of the default offset: the
+        // partition is sized exactly, never the usual one that md could not fill
+        let c = 64 * 1024 * MIB - 70 * MIB;
+        let need = need_for_component(c, Some(MIB));
+        let size = need + PART_START + 128 * MIB;
+        match member_partition_end(size, need, Some(c)) {
+            Ok(None) => assert!(holds_component(usable_partition(size), Some(c))),
+            Ok(Some(end)) => assert!(holds_component(end - PART_START, Some(c))),
+            Err(m) => panic!("{m} missing"),
+        }
+        // the add plan sizes the partition with the default offset, not the members' 1 MiB
+        let mut inv = mixed_raid5(4 * TB - 5_000_000);
+        let part = usable_partition(4 * TB);
+        let c = md_component(RaidLevel::Raid5, part) - 200 * MIB;
+        let a = inv.arrays.iter_mut().find(|a| a.name == "md2").unwrap();
+        a.component_size = Some(c);
+        for m in &mut a.members {
+            m.data_offset = Some(MIB);
+        }
+        let p = grow_md2(&inv);
+        assert!(p.valid, "{:?}", p.errors);
+        let line = argvs(&p).into_iter().find(|l| l.starts_with("sgdisk --new=1:")).expect("partition");
+        let end = line.split(':').nth(2).and_then(|x| x.split(' ').next()).unwrap();
+        let size = match end.parse::<u64>() {
+            Ok(sector) => (sector + 1) * 512 - PART_START,
+            // the usual partition, up to the reserve before the end
+            Err(_) => usable_partition(4 * TB - 5_000_000),
+        };
+        assert!(holds_component(size, Some(c)), "{line}");
     }
 
     /// An inventory of blank HDDs of `sizes` (sda, sdb, ...).

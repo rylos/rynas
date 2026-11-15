@@ -141,6 +141,30 @@ impl StorageOps {
         })
     }
 
+    /// Whether a storage operation works on a disk or a volume now (a quick look before the
+    /// degraded start reads the inventory; [`StorageOps::reserve_for_recovery`] decides).
+    pub fn storage_busy(&self) -> bool {
+        let r = self.reserved.lock().unwrap();
+        r.iter().any(|k| k.starts_with("disk:") || k.starts_with("volume:"))
+    }
+
+    /// The reservation the start of degraded volume `label` holds while it runs, taken in one
+    /// step with the check: `None` while an operation works on any disk (it may stop or
+    /// assemble arrays) or on that volume ([`recovery_blocked`]). Operations started
+    /// meanwhile are refused as busy, as for any other operation on the volume.
+    pub fn reserve_for_recovery(self: &Arc<Self>, label: &str) -> Option<Reservation> {
+        let key = format!("volume:{label}");
+        let mut r = self.reserved.lock().unwrap();
+        if recovery_blocked(&r, label) {
+            return None;
+        }
+        r.insert(key.clone());
+        Some(Reservation {
+            ops: self.clone(),
+            keys: vec![key],
+        })
+    }
+
     fn keep_recovery_key(&self, label: &str, key: String) {
         let now = now_ms();
         let mut r = self.recovery.lock().unwrap();
@@ -170,6 +194,15 @@ impl StorageOps {
             .map_err(|e| e.to_string())?;
         parse_volumes(v.as_ref())
     }
+}
+
+/// A reservation in `reserved` keeps the degraded start of volume `label` away: one on any
+/// disk (an operation that creates, grows or replaces may stop or assemble arrays) or on the
+/// volume itself.
+pub(crate) fn recovery_blocked(reserved: &HashSet<String>, label: &str) -> bool {
+    reserved
+        .iter()
+        .any(|k| k.starts_with("disk:") || k.strip_prefix("volume:") == Some(label))
 }
 
 /// Released when the task that holds it ends.
@@ -1969,6 +2002,18 @@ mod tests {
         let mut now = before.clone();
         now.disks[1].wwn = Some("0x5000".into());
         assert!(same_disks(&before, &now, &names).is_err());
+    }
+
+    /// The degraded start of a volume waits for every operation on a disk or on that volume;
+    /// an operation on another volume's subvolumes or a scrub does not hold it back.
+    #[test]
+    fn degraded_start_is_kept_away_from_storage_operations() {
+        let set = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect::<HashSet<String>>();
+        assert!(!recovery_blocked(&set(&[]), "vol2"));
+        assert!(recovery_blocked(&set(&["disk:sdd", "volume:vol1"]), "vol2"));
+        assert!(recovery_blocked(&set(&["volume:vol2"]), "vol2"));
+        assert!(!recovery_blocked(&set(&["volume:vol1", "scrub:vol2"]), "vol2"));
+        assert!(!recovery_blocked(&set(&["volume:vol22"]), "vol2"));
     }
 
     /// The whole disks a plan erases, for their reservation and the identity check.

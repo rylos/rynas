@@ -1049,7 +1049,10 @@ fn partition_steps(v: &mut View, target: &[Tier], new: &[String]) -> Result<Vec<
         let wanted: Vec<&Tier> = target.iter().filter(|t| t.members.contains(&disk)).collect();
         let live = v.tiers.iter().any(|t| t.members.iter().any(|m| m.disk == disk));
         let leftover = new.contains(&disk) && !live && !vd.parts.is_empty();
-        let blank = new.contains(&disk) && (vd.parts.is_empty() || leftover);
+        // slices left over next to partitions that are not the volume's: only the slices go,
+        // the disk is never wiped or its table cleared whole
+        let split = leftover && vd.others > 0;
+        let blank = new.contains(&disk) && (vd.parts.is_empty() || leftover) && !split;
         if !leftover {
             for t in &wanted {
                 if let Some(p) = vd.parts.iter().find(|p| p.tier == t.index)
@@ -1064,7 +1067,7 @@ fn partition_steps(v: &mut View, target: &[Tier], new: &[String]) -> Result<Vec<
         }
         let missing: Vec<&Tier> = wanted
             .iter()
-            .filter(|t| blank || !vd.parts.iter().any(|p| p.tier == t.index))
+            .filter(|t| blank || split || !vd.parts.iter().any(|p| p.tier == t.index))
             .copied()
             .collect();
         if missing.is_empty() {
@@ -1113,6 +1116,42 @@ fn partition_steps(v: &mut View, target: &[Tier], new: &[String]) -> Result<Vec<
                 argv,
             ));
         } else {
+            if split {
+                let mut old: Vec<&VPart> = vd.parts.iter().collect();
+                old.sort_by_key(|p| p.partn);
+                for p in old.iter().filter(|p| !p.fresh) {
+                    batch.push(destroying(
+                        run(on(PlanStepKind::WipeSignatures, &p.kname), s(&["wipefs", "--all", &dev(&p.kname)])),
+                        &[&disk],
+                    ));
+                }
+                let mut argv = vec!["sgdisk".to_string()];
+                argv.extend(old.iter().map(|p| format!("--delete={}", p.partn)));
+                argv.push(devp.clone());
+                batch.push(destroying(
+                    run(
+                        D(
+                            PlanStepKind::DeletePartitions,
+                            PlanArgs {
+                                subject: Some(disk.clone()),
+                                items: old.iter().map(|p| p.kname.clone()).collect(),
+                                ..Default::default()
+                            },
+                        ),
+                        argv,
+                    ),
+                    &[&disk],
+                ));
+                // the kernel forgets every deleted slice before any is made again where it
+                // may overlap another (`--update` drops a partition no longer in the table,
+                // and does nothing when udev already did)
+                for p in &old {
+                    batch.push(run(
+                        on(PlanStepKind::RemovePartitionLive, &p.kname),
+                        s(&["partx", "--update", "--nr", &p.partn.to_string(), &devp]),
+                    ));
+                }
+            }
             for t in &missing {
                 let p = part_name(&disk, t.index);
                 let mut argv = vec!["sgdisk".to_string()];

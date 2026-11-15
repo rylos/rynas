@@ -215,8 +215,9 @@ fn restore_initrd(backup: &Path, target: &Path) -> std::io::Result<()> {
 
 /// Regenerates the initramfs of the newest kernel (it carries a copy of mdadm.conf) and
 /// checks that the new one still has kernel modules; if it lost them, the copy taken before
-/// is put back and the step fails. A failure of update-initramfs itself is only logged.
-fn refresh_initramfs(ctx: &ApplyCtx) -> Result<(), String> {
+/// is put back. Never fails the change: a failure or a rejected initramfs is logged and left
+/// in [`INITRAMFS_ALERT`] for rynasd to tell the administrators.
+fn refresh_initramfs(ctx: &ApplyCtx) {
     let outside = ctx.root == Path::new("/") && systemd_running();
     let boot = ctx.path(Path::new("/boot"));
     let Some(release) = newest_initrd(&boot) else {
@@ -225,8 +226,9 @@ fn refresh_initramfs(ctx: &ApplyCtx) -> Result<(), String> {
             (ctx.log)(&format!(
                 "storage.volumes: warning: update-initramfs failed ({e}); run `update-initramfs -u` by hand"
             ));
+            raise_initramfs_alert(ctx, InitramfsAlertKind::Failed, "", &e);
         }
-        return Ok(());
+        return;
     };
     let target = boot.join(format!("initrd.img-{release}"));
     let backup_dir = ctx.path(Path::new(INITRAMFS_BACKUP_DIR));
@@ -241,11 +243,13 @@ fn refresh_initramfs(ctx: &ApplyCtx) -> Result<(), String> {
             target.display(),
             backup.display()
         ));
-        return Ok(());
+        raise_initramfs_alert(ctx, InitramfsAlertKind::Failed, &release, &format!("no room for a copy of the current one: {e}"));
+        return;
     }
     let before = initrd_modules(ctx, &target);
     let run = ctx.system.run(&update_initramfs_cmd(&["-u", "-k", &release], outside));
-    if let Err(e) = &run {
+    let mut failed = None;
+    if let Err(e) = run {
         if e.contains("timed out") {
             // the unit keeps running (keep_running): checking or restoring now would race it
             let _ = std::fs::remove_file(&backup);
@@ -253,45 +257,94 @@ fn refresh_initramfs(ctx: &ApplyCtx) -> Result<(), String> {
                 "storage.volumes: warning: update-initramfs is still running after {} min ({e}); check /boot/initrd.img-{release} with lsinitramfs when it ends",
                 INITRAMFS_TIMEOUT.as_secs() / 60
             ));
-            return Ok(());
+            return;
         }
         (ctx.log)(&format!(
             "storage.volumes: warning: update-initramfs failed ({e}); run `update-initramfs -u -k {release}` by hand"
         ));
+        failed = Some(e);
     }
     let after = initrd_modules(ctx, &target);
     match check_initrd(before, after) {
+        InitrdCheck::Fine | InitrdCheck::Unverified if failed.is_some() => {
+            let _ = std::fs::remove_file(&backup);
+            raise_initramfs_alert(ctx, InitramfsAlertKind::Failed, &release, failed.as_deref().unwrap_or(""));
+        }
         InitrdCheck::Fine => {
             let _ = std::fs::remove_file(&backup);
-            Ok(())
         }
         InitrdCheck::Unverified => {
             let _ = std::fs::remove_file(&backup);
             (ctx.log)(&format!(
                 "storage.volumes: warning: the new initramfs of {release} could not be checked (lsinitramfs missing or failing)"
             ));
-            Ok(())
         }
         InitrdCheck::Broken(why) => match restore_initrd(&backup, &target) {
             Ok(()) => {
                 let _ = std::fs::remove_file(&backup);
-                let msg = format!(
-                    "the regenerated initramfs of {release} was unusable ({why}): the previous one was put back; the initramfs copy of mdadm.conf is outdated, run `update-initramfs -u -k {release}` from a root shell and check it with lsinitramfs"
-                );
-                (ctx.log)(&format!("storage.volumes: ERROR: {msg}"));
-                Err(msg)
+                (ctx.log)(&format!(
+                    "storage.volumes: ERROR: the regenerated initramfs of {release} was unusable ({why}): the previous one was put back; the initramfs copy of mdadm.conf is outdated, run `update-initramfs -u -k {release}` from a root shell and check it with lsinitramfs"
+                ));
+                raise_initramfs_alert(ctx, InitramfsAlertKind::Rejected, &release, &why);
             }
             Err(e) => {
                 let msg = format!(
-                    "the regenerated initramfs of {release} is unusable ({why}) and the previous one could not be put back ({e}): copy {} to {} before rebooting, or the machine may not boot",
+                    "{why}; putting the previous one back failed ({e}): copy {} to {} before restarting",
                     backup.display(),
                     target.display()
                 );
-                (ctx.log)(&format!("storage.volumes: ERROR: {msg}"));
-                Err(msg)
+                (ctx.log)(&format!(
+                    "storage.volumes: ERROR: the regenerated initramfs of {release} is unusable: {msg}, or the machine may not boot"
+                ));
+                raise_initramfs_alert(ctx, InitramfsAlertKind::NotRestored, &release, &msg);
             }
         },
     }
+}
+
+/// File (below the root) telling rynasd that the last initramfs refresh went wrong: the
+/// change that asked for it is kept (the volumes work; the initramfs copy of mdadm.conf
+/// only matters for arrays assembled before the root), the administrators are told.
+pub const INITRAMFS_ALERT: &str = "/var/lib/rynas/initramfs/alert.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitramfsAlertKind {
+    /// update-initramfs failed (or could not start): the previous initramfs stays.
+    Failed,
+    /// The new initramfs had lost its kernel modules: the previous one was put back.
+    Rejected,
+    /// The new initramfs is unusable and the previous one could not be put back.
+    NotRestored,
+}
+
+/// What [`INITRAMFS_ALERT`] holds.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InitramfsAlert {
+    pub kind: InitramfsAlertKind,
+    /// Kernel release of the initramfs (empty when none was found).
+    pub release: String,
+    pub detail: String,
+}
+
+fn raise_initramfs_alert(ctx: &ApplyCtx, kind: InitramfsAlertKind, release: &str, detail: &str) {
+    let a = InitramfsAlert { kind, release: release.to_string(), detail: detail.to_string() };
+    let path = ctx.path(Path::new(INITRAMFS_ALERT));
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|_| std::fs::write(&path, serde_json::to_vec(&a).unwrap_or_default()));
+    if let Err(e) = written {
+        (ctx.log)(&format!("storage.volumes: cannot write {} ({e})", path.display()));
+    }
+}
+
+/// Takes the alert of the last initramfs refresh below `root`, if any (read once).
+pub fn take_initramfs_alert(root: &Path) -> Option<InitramfsAlert> {
+    let path = root.join(INITRAMFS_ALERT.trim_start_matches('/'));
+    let text = std::fs::read(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    serde_json::from_slice(&text).ok()
 }
 
 // ------------------------------------------------------------------------------- volumes
@@ -452,16 +505,24 @@ impl Applier for VolumesDomain {
         if md_uuids(from) == md_uuids(to) {
             return Ok(());
         }
+        if ctx.rolling_back() {
+            // a rollback never waits minutes for mkinitramfs under the configuration lock;
+            // the arrays put back are assembled from /etc/mdadm/mdadm.conf after the root
+            (ctx.log)("storage.volumes: rolling back: the initramfs is not regenerated; run `update-initramfs -u` if an array must be assembled before the root");
+            return Ok(());
+        }
         if ctx.root == Path::new("/") && !Path::new(UPDATE_INITRAMFS).exists() {
             (ctx.log)("storage.volumes: update-initramfs not found, initramfs mdadm.conf not refreshed");
             return Ok(());
         }
         (ctx.log)("storage.volumes: arrays changed, refreshing the initramfs");
-        // not fatal: data arrays are assembled after the root from /etc/mdadm/mdadm.conf; the
-        // initramfs copy only matters for early assembly. A failure must not undo the volume,
-        // but an initramfs left without kernel modules (the machine would not boot) is put
-        // back and fails the step.
-        refresh_initramfs(ctx)
+        // never fatal: data arrays are assembled after the root from /etc/mdadm/mdadm.conf;
+        // the initramfs copy only matters for early assembly. A failure must not undo the
+        // volume (nor stop a growth half way): an initramfs left without kernel modules (the
+        // machine would not boot) is put back, and the administrators are told
+        // ([`INITRAMFS_ALERT`]).
+        refresh_initramfs(ctx);
+        Ok(())
     }
 
     fn reload(&self, _value: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {
@@ -1037,12 +1098,66 @@ mod tests {
         let mut c = StorageVolumes::default();
         c.volumes.push(record("photos", false));
         cfg.stage("alice", VOLUMES_KEY, Some(serde_json::to_value(&c).unwrap())).unwrap();
-        let e = cfg.apply("alice", "alice", "", &|_| {}, &|| false).unwrap_err();
-        assert!(format!("{e:?}").contains("put back"), "{e:?}");
+        // the volume is kept: the initramfs is put back and the administrators are told
+        cfg.apply("alice", "alice", "", &|_| {}, &|| false).unwrap();
+        assert!(cfg.applied(VOLUMES_KEY).unwrap().is_some());
         let target = sys.root.join("boot/initrd.img-6.12.10-amd64");
         assert_eq!(std::fs::read_to_string(target).unwrap(), "GOOD");
         assert_eq!(std::fs::read_to_string(sys.root.join("boot/initrd.img-6.12.9-amd64")).unwrap(), "GOOD");
         assert!(!sys.root.join("var/lib/rynas/initramfs/initrd.img-6.12.10-amd64").exists());
+        let a = take_initramfs_alert(&sys.root).expect("alert");
+        assert_eq!(a.kind, InitramfsAlertKind::Rejected);
+        assert_eq!(a.release, "6.12.10-amd64");
+        assert!(take_initramfs_alert(&sys.root).is_none(), "read once");
+        // update-initramfs ran once: no second run for a rollback
+        let runs = sys.calls.lock().unwrap().iter().filter(|c| c.contains("update-initramfs")).count();
+        assert_eq!(runs, 1);
+    }
+
+    /// A rollback of a change of the arrays never regenerates the initramfs (minutes under
+    /// the configuration lock): only the apply does.
+    #[test]
+    fn a_rollback_does_not_regenerate_the_initramfs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("etc/mdadm")).unwrap();
+        std::fs::write(root.join("etc/fstab"), "").unwrap();
+        let sys = Arc::new(MemorySystem::new("nas"));
+        let cfg = Config::open(
+            ConfigOptions::new(dir.path().join("state"), &root),
+            sys.clone(),
+            vec![Arc::new(VolumesDomain), Arc::new(FailsHealth)],
+        )
+        .unwrap();
+        let count = || sys.state().calls.iter().filter(|c| c.contains("update-initramfs")).count();
+        let mut c = StorageVolumes::default();
+        c.volumes.push(record("photos", false));
+        cfg.stage("alice", VOLUMES_KEY, Some(serde_json::to_value(&c).unwrap())).unwrap();
+        cfg.stage("alice", "test.fails", Some(serde_json::json!(1))).unwrap();
+        assert!(cfg.apply("alice", "alice", "", &|_| {}, &|| false).is_err());
+        assert_eq!(count(), 1, "the apply regenerates it, the rollback does not");
+        assert!(cfg.applied(VOLUMES_KEY).unwrap().is_none());
+    }
+
+    /// A later domain whose health check always fails (its apply is rolled back).
+    struct FailsHealth;
+
+    impl rynas_config::Applier for FailsHealth {
+        fn key(&self) -> &str {
+            "test.fails"
+        }
+        fn order(&self) -> i32 {
+            50
+        }
+        fn validate(&self, value: Value) -> Result<Value, rynas_config::Invalid> {
+            Ok(value)
+        }
+        fn render(&self, _: &Value, _: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
+            Ok(Vec::new())
+        }
+        fn health(&self, _: Option<&Value>, _: &ApplyCtx) -> Result<(), String> {
+            Err("always".into())
+        }
     }
 
     #[test]

@@ -399,7 +399,9 @@ const DEGRADED_START_INTERVAL: Duration = Duration::from_secs(60);
 /// Starts the arrays of rynas volumes that stayed inactive because a drive is missing, once
 /// the boot has settled, then the volume group and the mount of the volume; tells the
 /// administrators. The decisions and the reasons are in [`rynas_storage::recover`]. Never
-/// under `--dry-system`, never while a storage task runs (it may stop arrays on purpose).
+/// under `--dry-system`, only for arrays seen inactive soon after boot, never while a storage
+/// operation holds a disk or the volume (it may stop arrays on purpose): the start holds the
+/// volume's reservation itself.
 pub fn spawn_degraded_start(st: crate::server::DaemonState, notifier: Arc<dyn Notifier>) {
     use rynas_storage::host::SystemHost;
     use rynas_storage::recover::{self, Recovery};
@@ -413,17 +415,18 @@ pub fn spawn_degraded_start(st: crate::server::DaemonState, notifier: Arc<dyn No
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
             let uptime = recover::uptime_s(&SystemHost);
+            // only what the boot left inactive (an array stopped later stays stopped)
+            if seen.finished(uptime) {
+                tracing::debug!("degraded start: past the boot window, no longer watching");
+                return;
+            }
             let mdstat = tokio::fs::read_to_string("/proc/mdstat").await.unwrap_or_default();
             if !mdstat.lines().any(|l| l.contains(" : inactive ")) {
                 seen.due(Vec::new(), now, uptime);
                 continue;
             }
-            let busy = st.ops.as_ref().is_some_and(|o| {
-                o.tasks.list(64).iter().any(|t| {
-                    t.kind.starts_with("storage.") && matches!(t.status, rynas_api_types::TaskStatus::Running | rynas_api_types::TaskStatus::Queued)
-                })
-            });
-            if busy {
+            // a quick look first; the reservation below decides
+            if st.storage_ops.as_ref().is_some_and(|o| o.storage_busy()) {
                 continue;
             }
             let inv = match crate::server::inventory(&st).await {
@@ -436,18 +439,48 @@ pub fn spawn_degraded_start(st: crate::server::DaemonState, notifier: Arc<dyn No
             // without the records nothing is known to be rynas's
             let Some(records) = inv.records.clone() else { continue };
             for v in seen.due(recover::startable(&inv, &records), now, uptime) {
+                // the volume reserved for the start, checked in the same step: never while an
+                // operation works on a disk or on this volume (it may stop arrays on purpose)
+                let held = match &st.storage_ops {
+                    Some(o) => match o.reserve_for_recovery(&v.label) {
+                        Some(h) => Some(h),
+                        None => continue,
+                    },
+                    // no write side: no operation can run
+                    None => None,
+                };
+                // what was read before the reservation may be stale: read again under it
+                st.storage.invalidate();
+                let still = match crate::server::inventory(&st).await {
+                    Ok(i) => i.records.as_ref().is_some_and(|r| recover::startable(&i, r).contains(&v)),
+                    Err(_) => false,
+                };
+                if !still {
+                    continue;
+                }
                 seen.forget(&v);
-                let names: Vec<String> = v.arrays.iter().map(|a| format!("{} ({}, {} of {} drives)", a.array, a.level, a.present, a.raid_disks)).collect();
-                tracing::warn!("volume {}: starting {} without the missing drives", v.label, names.join(", "));
+                let names = degraded_arrays(&v);
+                tracing::warn!("volume {}: starting {} without the missing drives", v.label, names);
                 let job = v.clone();
                 let r = tokio::task::spawn_blocking(move || recover::start(&SystemHost, &job))
                     .await
                     .unwrap_or_else(|e| Err(e.to_string()));
+                drop(held);
                 st.storage.invalidate();
-                notifier.emit(degraded_start_event(&v.label, &names.join(", "), r));
+                notifier.emit(degraded_start_event(&v.label, &names, r));
             }
         }
     });
+}
+
+/// The arrays of a degraded start as the notification lists them: each with the drives it
+/// started on (`md127 (raid1) on 1 of 2 drives`).
+fn degraded_arrays(v: &rynas_storage::recover::VolumeStart) -> String {
+    v.arrays
+        .iter()
+        .map(|a| format!("{} ({}) on {} of {} drives", a.array, a.level, a.present, a.raid_disks))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn degraded_start_event(volume: &str, arrays: &str, r: Result<bool, String>) -> rynas_api_types::notify::NewEvent {
@@ -462,10 +495,10 @@ fn degraded_start_event(volume: &str, arrays: &str, r: Result<bool, String>) -> 
                 NotifySeverity::Warning,
                 "storage",
                 key,
-                format!("Volume {volume} started with a drive missing"),
+                format!("Volume {volume} started degraded"),
             );
             ev.body = format!(
-                "{arrays} stayed inactive after boot because a drive is missing; they were started without it so that the volume is available. Reconnect or replace the missing drive to restore redundancy."
+                "Started degraded: {arrays}. They stayed inactive after boot because a drive is missing and were started on the drives present so that the volume is available. If the missing drive had dropped out earlier and came back later, the drives present may hold older data than it. Reconnect or replace the missing drive to restore redundancy: it is rebuilt from the drives present."
             );
             code(ev, "storage.volume_started_degraded")
         }
@@ -483,4 +516,123 @@ fn degraded_start_event(volume: &str, arrays: &str, r: Result<bool, String>) -> 
         }
     };
     field(field(ev, "volume", volume), "arrays", arrays)
+}
+
+/// How often rynasd looks for the alert a storage change leaves when the initramfs refresh
+/// went wrong ([`rynas_storage::domain::INITRAMFS_ALERT`], a missing file).
+const INITRAMFS_ALERT_INTERVAL: Duration = Duration::from_secs(20);
+
+/// Tells the administrators when regenerating the initramfs after a change of the arrays
+/// failed or was rejected: the change itself is kept (never under `--dry-system`).
+pub fn spawn_initramfs_alerts(notifier: Arc<dyn Notifier>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(INITRAMFS_ALERT_INTERVAL);
+        loop {
+            tick.tick().await;
+            let found = tokio::task::spawn_blocking(|| rynas_storage::domain::take_initramfs_alert(std::path::Path::new("/")))
+                .await
+                .ok()
+                .flatten();
+            if let Some(a) = found {
+                notifier.emit(initramfs_event(&a));
+            }
+        }
+    });
+}
+
+fn initramfs_event(a: &rynas_storage::domain::InitramfsAlert) -> NewEvent {
+    use rynas_notify::event::{code, field, oneshot};
+    use rynas_storage::domain::InitramfsAlertKind as K;
+    let release = if a.release.is_empty() { "-" } else { a.release.as_str() };
+    let d = &a.detail;
+    let (severity, c, title, body) = match a.kind {
+        K::Failed => (
+            NotifySeverity::Warning,
+            "storage.initramfs_refresh_failed",
+            "Boot image not brought up to date".to_string(),
+            format!(
+                "Regenerating the initial boot image (initramfs) of kernel {release} after a change of the arrays failed: {d}. The change was kept and the volumes work; the boot image still lists the arrays from before, which matters only for an array needed before the system starts. Run update-initramfs -u from a root shell."
+            ),
+        ),
+        K::Rejected => (
+            NotifySeverity::Warning,
+            "storage.initramfs_refresh_rejected",
+            "Boot image not updated: the new one was unusable".to_string(),
+            format!(
+                "The regenerated initial boot image (initramfs) of kernel {release} was unusable ({d}), so the previous one was put back and the NAS still starts. The change was kept; the boot image still lists the arrays from before. Run update-initramfs -u -k {release} from a root shell and check the result."
+            ),
+        ),
+        K::NotRestored => (
+            NotifySeverity::Error,
+            "storage.initramfs_restore_failed",
+            "The NAS may not start: its boot image is unusable".to_string(),
+            format!(
+                "The regenerated initial boot image (initramfs) of kernel {release} is unusable and the previous one could not be put back: {d}. Fix it from a root shell before restarting the NAS."
+            ),
+        ),
+    };
+    match a.kind {
+        K::NotRestored => tracing::error!("initramfs of {release}: {d}"),
+        _ => tracing::warn!("initramfs of {release}: {d}"),
+    }
+    let mut ev = oneshot(NotifyCategory::Storage, severity, "storage", format!("storage:initramfs:{release}"), title);
+    ev.body = body;
+    field(field(code(ev, c), "release", release), "detail", d.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rynas_storage::domain::{InitramfsAlert, InitramfsAlertKind};
+    use rynas_storage::recover::{Runnable, VolumeStart};
+
+    fn fields(ev: &NewEvent) -> String {
+        serde_json::to_string(ev).unwrap()
+    }
+
+    /// The notification says on how many of how many drives each array started.
+    #[test]
+    fn degraded_start_says_on_how_many_drives() {
+        let a = |name: &str, level: &str, present: u32, raid_disks: u32| Runnable {
+            array: name.into(),
+            path: format!("/dev/{name}"),
+            uuid: "AA:01".into(),
+            level: level.into(),
+            present,
+            raid_disks,
+            members: Vec::new(),
+        };
+        let v = VolumeStart {
+            label: "vol2".into(),
+            arrays: vec![a("md126", "raid1", 1, 2), a("md127", "raid5", 2, 3)],
+            vg: Some("rynas_vol2".into()),
+            mount_unit: None,
+        };
+        let names = degraded_arrays(&v);
+        assert_eq!(names, "md126 (raid1) on 1 of 2 drives, md127 (raid5) on 2 of 3 drives");
+        let ev = degraded_start_event("vol2", &names, Ok(true));
+        assert_eq!(ev.title, "Volume vol2 started degraded");
+        assert!(ev.body.starts_with("Started degraded: md126 (raid1) on 1 of 2 drives"), "{}", ev.body);
+        assert!(ev.body.contains("older data"), "{}", ev.body);
+        assert!(fields(&ev).contains("storage.volume_started_degraded"));
+    }
+
+    /// Each outcome of an initramfs refresh has its code; only an initramfs left unusable
+    /// is an error.
+    #[test]
+    fn initramfs_alerts_become_notifications() {
+        let alert = |kind| InitramfsAlert { kind, release: "6.12.10-amd64".into(), detail: "no kernel modules".into() };
+        let ev = initramfs_event(&alert(InitramfsAlertKind::Rejected));
+        assert_eq!(ev.severity, NotifySeverity::Warning);
+        let j = fields(&ev);
+        assert!(j.contains("storage.initramfs_refresh_rejected"), "{j}");
+        assert!(j.contains("6.12.10-amd64") && j.contains("no kernel modules"), "{j}");
+        let ev = initramfs_event(&alert(InitramfsAlertKind::Failed));
+        assert!(fields(&ev).contains("storage.initramfs_refresh_failed"));
+        let ev = initramfs_event(&alert(InitramfsAlertKind::NotRestored));
+        assert_eq!(ev.severity, NotifySeverity::Error);
+        assert!(fields(&ev).contains("storage.initramfs_restore_failed"));
+        let ev = initramfs_event(&InitramfsAlert { kind: InitramfsAlertKind::Failed, release: String::new(), detail: "x".into() });
+        assert!(ev.body.contains("of kernel -"), "{}", ev.body);
+    }
 }

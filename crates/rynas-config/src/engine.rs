@@ -286,6 +286,7 @@ impl Config {
             log,
             replaced: Mutex::new(Vec::new()),
             restarted: Mutex::new(Vec::new()),
+            rolling_back: false,
         }
     }
 
@@ -997,7 +998,8 @@ impl Config {
     /// values. Best effort: failures are logged.
     fn rollback(&self, steps: &[Step], restore: &[Restore], reloaded: usize, log: &dyn Fn(&str)) {
         log("rolling back");
-        let ctx = self.ctx_logging(log);
+        let mut ctx = self.ctx_logging(log);
+        ctx.rolling_back = true;
         for r in restore.iter().rev() {
             ctx.replaced.lock().unwrap().push(r.target.clone());
             let res = match &r.backup {

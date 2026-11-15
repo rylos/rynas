@@ -310,8 +310,9 @@ async fn a_flexible_volume_is_recorded_with_its_tiers() {
     let log = e.ops.tasks.read_log(&id, 0, 1 << 20).unwrap().text;
     assert_eq!(info.status, TaskStatus::Ok, "{log}");
     assert!(log.contains("$ mdadm --create /dev/md/flex_t1"), "{log}");
-    assert!(log.contains("$ vgcreate rynas_flex /dev/md/flex_t1"), "{log}");
-    assert!(log.contains("$ lvcreate --yes -l 100%FREE -n data rynas_flex"), "{log}");
+    // every LVM command fails at once on a held lock instead of waiting without limit
+    assert!(log.contains("$ vgcreate --config global { wait_for_locks = 0 } rynas_flex /dev/md/flex_t1"), "{log}");
+    assert!(log.contains("$ lvcreate --config global { wait_for_locks = 0 } --yes -l 100%FREE -n data rynas_flex"), "{log}");
     let doc: StorageVolumes =
         serde_json::from_value(e.ops.config.current(VOLUMES_KEY).unwrap().unwrap()).unwrap();
     let r = &doc.volumes[0];

@@ -87,10 +87,16 @@ nev.storage.raid_failed.body	{array} ({level}) è guasto: mancano {degraded} mem
 nev.storage.raid_failed.body_2	{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato «{state}».
 nev.storage.raid_inactive.title	RAID {array} inattivo
 nev.storage.raid_inactive.body	{array} ({level}) non è in funzione, stato «{state}».
-nev.storage.volume_started_degraded.title	Volume {volume} avviato senza un disco
-nev.storage.volume_started_degraded.body	{arrays} sono rimasti inattivi dopo l'avvio perché manca un disco; sono stati avviati senza, così il volume è disponibile. Ricollega o sostituisci il disco mancante per ripristinare la ridondanza.
+nev.storage.volume_started_degraded.title	Volume {volume} avviato in modalità degradata
+nev.storage.volume_started_degraded.body	Avviati in modalità degradata: {arrays}. Erano rimasti inattivi dopo l'avvio perché manca un disco e sono stati avviati sui dischi presenti, così il volume è disponibile. Se il disco mancante era uscito prima ed è tornato dopo, i dischi presenti possono avere dati più vecchi dei suoi. Ricollega o sostituisci il disco mancante per ripristinare la ridondanza: viene ricostruito dai dischi presenti.
 nev.storage.volume_start_failed.title	Impossibile avviare il volume {volume}
 nev.storage.volume_start_failed.body	{arrays} sono rimasti inattivi dopo l'avvio perché manca un disco, e l'avvio senza di esso non è riuscito: {error}
+nev.storage.initramfs_refresh_failed.title	Immagine di avvio non aggiornata
+nev.storage.initramfs_refresh_failed.body	La rigenerazione dell'immagine di avvio iniziale (initramfs) del kernel {release} dopo una modifica degli array non è riuscita: {detail}. La modifica è stata mantenuta e i volumi funzionano; l'immagine di avvio elenca ancora gli array di prima, il che conta solo per un array necessario prima dell'avvio del sistema. Esegui update-initramfs -u da una shell di root.
+nev.storage.initramfs_refresh_rejected.title	Immagine di avvio non aggiornata: la nuova era inutilizzabile
+nev.storage.initramfs_refresh_rejected.body	L'immagine di avvio iniziale (initramfs) rigenerata del kernel {release} era inutilizzabile ({detail}), quindi è stata rimessa la precedente e il NAS si avvia ancora. La modifica è stata mantenuta; l'immagine di avvio elenca ancora gli array di prima. Esegui update-initramfs -u -k {release} da una shell di root e controlla il risultato.
+nev.storage.initramfs_restore_failed.title	Il NAS potrebbe non avviarsi: la sua immagine di avvio è inutilizzabile
+nev.storage.initramfs_restore_failed.body	L'immagine di avvio iniziale (initramfs) rigenerata del kernel {release} è inutilizzabile e non è stato possibile rimettere la precedente: {detail}. Correggila da una shell di root prima di riavviare il NAS.
 nev.storage.raid_ok.title	RAID {array} di nuovo integro
 nev.storage.flex_degraded.title	RAID flessibile {array} degradato
 nev.storage.flex_failed.title	RAID flessibile {array} guasto
@@ -194,6 +200,7 @@ tasks.log	Log dell'attività
 tasks.cancel	Interrompi
 tasks.close_log	Chiudi log
 tasks.background	Puoi chiudere questa finestra: l'attività continua.
+tasks.stop_waits	Arresto richiesto: il comando in corso potrebbe non essere annullabile finché non termina; l'attività si ferma subito dopo.
 task.failed	Non riuscita
 tech_details	Dettagli tecnici:
 task.st.ok	OK
@@ -5434,6 +5441,7 @@ plan.s.bitmap_off	Disattiva la bitmap write-intent di {subject}
 plan.s.bitmap_on	Riattiva la bitmap write-intent di {subject}
 plan.s.add_partition_live	Fai vedere al kernel la nuova partizione {subject}
 plan.s.delete_partitions	Elimina le partizioni {items} di {subject} (le altre partizioni restano)
+plan.s.remove_partition_live	Fai dimenticare al kernel la partizione eliminata {subject}
 plan.w.flex_leftover_disk	{subject} ha ancora vecchie parti di questo volume che nessuna fascia usa e non viene cancellato: aggiungilo a un volume o cancellalo, perché una vecchia copia di una fascia può disturbare l'avvio del volume
 plan.w.flex_unused_space	{items}: {size} inutilizzati finché un altro disco non raggiunge la stessa dimensione
 plan.w.flex_long_reshape	Le fasce vengono rimodellate una alla volta: {size} da spostare, circa {n} h in tutto; il volume resta disponibile

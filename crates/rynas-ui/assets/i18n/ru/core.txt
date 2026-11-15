@@ -87,10 +87,16 @@ nev.storage.raid_failed.body	{array} ({level}) отказал: отсутств�
 nev.storage.raid_failed.body_2	{array} ({level}) отказал: отсутствует участников — {degraded} из {raid_disks}, состояние «{state}».
 nev.storage.raid_inactive.title	RAID {array} неактивен
 nev.storage.raid_inactive.body	{array} ({level}) не работает, состояние «{state}».
-nev.storage.volume_started_degraded.title	Том {volume} запущен без одного диска
-nev.storage.volume_started_degraded.body	{arrays} остались неактивными после загрузки, потому что отсутствует диск; они запущены без него, чтобы том был доступен. Подключите снова или замените отсутствующий диск, чтобы восстановить избыточность.
+nev.storage.volume_started_degraded.title	Том {volume} запущен в деградированном режиме
+nev.storage.volume_started_degraded.body	Запущены в деградированном режиме: {arrays}. Они остались неактивными после загрузки, потому что отсутствует диск, и были запущены на имеющихся дисках, чтобы том был доступен. Если отсутствующий диск выпал раньше и вернулся позже, на имеющихся дисках могут быть более старые данные, чем на нём. Подключите снова или замените отсутствующий диск, чтобы восстановить избыточность: он будет восстановлен с имеющихся дисков.
 nev.storage.volume_start_failed.title	Не удалось запустить том {volume}
 nev.storage.volume_start_failed.body	{arrays} остались неактивными после загрузки, потому что отсутствует диск, и запустить их без него не удалось: {error}
+nev.storage.initramfs_refresh_failed.title	Загрузочный образ не обновлён
+nev.storage.initramfs_refresh_failed.body	Не удалось пересоздать начальный загрузочный образ (initramfs) ядра {release} после изменения массивов: {detail}. Изменение сохранено, тома работают; загрузочный образ по-прежнему содержит прежний список массивов, что важно только для массива, нужного до запуска системы. Выполните update-initramfs -u в оболочке root.
+nev.storage.initramfs_refresh_rejected.title	Загрузочный образ не обновлён: новый оказался непригодным
+nev.storage.initramfs_refresh_rejected.body	Пересозданный начальный загрузочный образ (initramfs) ядра {release} оказался непригодным ({detail}), поэтому возвращён прежний, и NAS по-прежнему загружается. Изменение сохранено; загрузочный образ по-прежнему содержит прежний список массивов. Выполните update-initramfs -u -k {release} в оболочке root и проверьте результат.
+nev.storage.initramfs_restore_failed.title	NAS может не загрузиться: его загрузочный образ непригоден
+nev.storage.initramfs_restore_failed.body	Пересозданный начальный загрузочный образ (initramfs) ядра {release} непригоден, и вернуть прежний не удалось: {detail}. Исправьте это в оболочке root до перезагрузки NAS.
 nev.storage.raid_ok.title	RAID {array} снова исправен
 nev.storage.flex_degraded.title	Гибкий RAID {array} деградирован
 nev.storage.flex_failed.title	Отказ гибкого RAID {array}
@@ -194,6 +200,7 @@ tasks.log	Журнал задачи
 tasks.cancel	Остановить
 tasks.close_log	Закрыть журнал
 tasks.background	Это окно можно закрыть: задача продолжит выполняться.
+tasks.stop_waits	Остановка запрошена: выполняемую сейчас команду, возможно, нельзя отменить, пока она не завершится; задача остановится сразу после неё.
 task.failed	Ошибка
 tech_details	Технические подробности:
 task.st.ok	OK
@@ -5474,6 +5481,7 @@ plan.s.bitmap_off	Отключить битовую карту намерени�
 plan.s.bitmap_on	Снова включить битовую карту намерений записи {subject}
 plan.s.add_partition_live	Сообщить ядру о новом разделе {subject}
 plan.s.delete_partitions	Удалить разделы {items} диска {subject} (остальные разделы остаются)
+plan.s.remove_partition_live	Сообщить ядру, что удалённого раздела {subject} больше нет
 plan.w.flex_leftover_disk	На {subject} остались старые части этого тома, которые не использует ни один ярус, и он не очищается: добавьте его в том или очистите, потому что старая копия яруса может помешать запуску тома
 plan.w.flex_unused_space	{items}: {size} не используется, пока другой диск не достигнет того же размера
 plan.w.flex_long_reshape	Ярусы перестраиваются по одному: нужно переместить {size}, всего около {n} ч; том остаётся доступным

@@ -886,6 +886,34 @@ async fn the_replaced_disk_is_checked_again_right_before_it_is_cleared() {
     assert!(erased(&m).is_empty(), "{:?}", m.ran());
 }
 
+/// `wipefs --all` is checked like the other erasing commands: of one slice, that slice must
+/// still be the volume's and unused; of the whole disk, every partition must be.
+#[tokio::test]
+async fn wipefs_of_a_leftover_disk_is_checked_again() {
+    let ours = [("sdb1", 1, "rynas-vol2-t1", false), ("sdb2", 2, "rynas-vol2-t2", false)];
+    let machine = |parts: &[(&str, u32, &str, bool)]| {
+        let mut m = FakeMachine::default();
+        let (line, out) = lsblk_parts("sdb", parts);
+        m.output(&line, &out);
+        m
+    };
+    let argv = |dev: &str| vec!["wipefs".to_string(), "--all".into(), dev.into()];
+    let m = machine(&ours);
+    assert_eq!(still_leftover(&m, &argv("/dev/sdb1"), "sdb", "vol2").await, Ok(()));
+    assert_eq!(still_leftover(&m, &argv("/dev/sdb"), "sdb", "vol2").await, Ok(()));
+    // another partition on the disk: a slice may go, the whole disk never
+    let m = machine(&[ours[0], ours[1], ("sdb3", 3, "data", false)]);
+    assert_eq!(still_leftover(&m, &argv("/dev/sdb2"), "sdb", "vol2").await, Ok(()));
+    let e = still_leftover(&m, &argv("/dev/sdb"), "sdb", "vol2").await.unwrap_err();
+    assert!(e.contains("sdb3 is not a slice of this volume"), "{e}");
+    let e = still_leftover(&m, &argv("/dev/sdb3"), "sdb", "vol2").await.unwrap_err();
+    assert!(e.contains("sdb3 is not a slice of this volume"), "{e}");
+    // a slice holding an array again
+    let m = machine(&[("sdb1", 1, "rynas-vol2-t1", true), ours[1]]);
+    let e = still_leftover(&m, &argv("/dev/sdb1"), "sdb", "vol2").await.unwrap_err();
+    assert!(e.contains("sdb1 is in use"), "{e}");
+}
+
 /// The replaced disk is cleared last, best effort, and only while it is still the disk the
 /// plan was made for.
 #[tokio::test]
@@ -1121,4 +1149,50 @@ async fn disks_are_checked_again_after_a_wait() {
     assert_eq!(names(&["mdadm", "/dev/md2", "--add", "/dev/nvme0n1p2"]), ["nvme0n1"]);
     assert!(names(&["mdadm", "/dev/md2", "--fail", "/dev/sdb1"]).is_empty());
     assert!(names(&["mdadm", "--grow", "/dev/md2", "--raid-devices=4"]).is_empty());
+}
+
+/// Every LVM command fails at once on a held lock instead of waiting without limit, and the
+/// step retries it for a bounded time; other commands run as the plan wrote them.
+#[tokio::test]
+async fn lvm_commands_never_wait_for_a_lock_without_limit() {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        lvm_no_wait(s(&["vgchange", "-ay", "rynas_vol2"])),
+        s(&["vgchange", "--config", LVM_NO_WAIT, "-ay", "rynas_vol2"])
+    );
+    assert_eq!(lvm_no_wait(s(&["mdadm", "--run", "/dev/md127"])), s(&["mdadm", "--run", "/dev/md127"]));
+    assert!(lvm_lock_busy("vgchange: exit code Some(5): /run/lock/lvm/V_rynas_vol2:aux: flock failed: Resource temporarily unavailable"));
+    assert!(lvm_lock_busy("Can't get lock for rynas_vol2."));
+    assert!(!lvm_lock_busy("Volume group \"rynas_vol2\" not found"));
+    // runs with the setting
+    let m = machine();
+    run_commands(&m, vec![s(&["lvextend", "-l", "+100%FREE", "rynas_vol2/data"])]).await.unwrap();
+    assert_eq!(m.ran(), ["lvextend -l +100%FREE rynas_vol2/data"]);
+    assert_eq!(
+        m.lvm_no_wait.lock().unwrap().clone(),
+        [s(&["lvextend", "--config", LVM_NO_WAIT, "-l", "+100%FREE", "rynas_vol2/data"])]
+    );
+    // a lock held all along: retried for a while, then the step fails
+    let mut m = machine();
+    m.fail.insert("lvextend".into(), "lvextend: Can't get lock for rynas_vol2".into());
+    let e = run_commands(&m, vec![s(&["lvextend", "-l", "+100%FREE", "rynas_vol2/data"])]).await.unwrap_err();
+    assert!(e.contains("still holds the lock"), "{e}");
+    let tries = m.ran().len() as u64;
+    assert_eq!(tries, LVM_LOCK_RETRY.as_secs() / 3 + 1);
+    // another failure is not retried
+    let mut m = machine();
+    m.fail.insert("lvextend".into(), "lvextend: Insufficient free space".into());
+    assert!(run_commands(&m, vec![s(&["lvextend", "-l", "+100%FREE", "rynas_vol2/data"])]).await.is_err());
+    assert_eq!(m.ran().len(), 1);
+}
+
+/// `mdadm --grow --continue` stays with a reshape that may take days without systemd: never
+/// killed after the day other critical commands get.
+#[test]
+fn a_resumed_reshape_is_not_killed_after_a_day() {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let t = timeout_for(&s(&["mdadm", "--grow", "--continue", "/dev/md/vol2_t1"]));
+    assert_eq!(t, RESHAPE_TIMEOUT);
+    assert!(t > CRITICAL_TIMEOUT * 30);
+    assert_eq!(timeout_for(&s(&["mdadm", "--grow", "/dev/md2", "--raid-devices=4"])), CRITICAL_TIMEOUT);
 }

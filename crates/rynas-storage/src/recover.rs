@@ -22,11 +22,23 @@
 //! - nothing happens until the machine is up for [`MIN_UPTIME_S`] and the same array was
 //!   seen inactive with the same members for at least [`STABLE_MS`]: a drive that is merely
 //!   slow to appear gets its chance to join, and the boot's own last resort goes first;
+//! - only arrays first seen inactive within [`MAX_UPTIME_S`] of the boot: later an inactive
+//!   array may have been stopped on purpose, and a rynasd restarted at noon starts nothing;
+//! - a reservation of the volume (taken by rynasd, as a storage operation does) keeps the
+//!   start away from any operation on the volume or its disks;
 //! - a volume is handled as a whole: all its arrays must be active already or candidates,
 //!   otherwise none is started (a flexible RAID with one tier missing could not be used);
 //! - then `mdadm --run` on each candidate, `vgchange -ay` on the volume group of a flexible
 //!   RAID, and, for an unencrypted volume that is not mounted, `systemctl start` of its
 //!   mount unit (the `/etc/fstab` line rynas wrote; an encrypted volume waits for its unlock).
+//!
+//! Caveat, the same as mdadm's own last resort: a degraded array starts on the members that
+//! are present. When the missing drive left the array earlier and came back later (it is
+//! the one with the newer data), or a mirror is started on its only present member that had
+//! dropped out before, the started array runs on older data, and the missing member is
+//! rebuilt from it once it is added back. md refuses members whose event counts disagree
+//! too much (no `--force` is ever used), which rules out the clearly stale ones; the
+//! notification says on how many of how many drives each array started.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -40,6 +52,9 @@ use crate::host::Host;
 pub const MIN_UPTIME_S: u64 = 180;
 /// An array must stay inactive with the same members this long.
 pub const STABLE_MS: u64 = 120_000;
+/// Only arrays first seen inactive within this long after boot are started; one seen later
+/// (rynasd restarted hours after boot, an array an administrator stopped) is left alone.
+pub const MAX_UPTIME_S: u64 = 15 * 60;
 const CMD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// An inactive array of a volume that can run with the members it has.
@@ -170,14 +185,19 @@ pub struct Recovery {
 
 impl Recovery {
     /// The volumes of `found` (from [`startable`]) that are due at `now_ms` with the machine
-    /// up for `uptime_s`: every array seen with the same members for [`STABLE_MS`]. Arrays
-    /// no longer candidates are forgotten.
+    /// up for `uptime_s`: every array seen with the same members for [`STABLE_MS`], first
+    /// seen within [`MAX_UPTIME_S`] of the boot. Arrays no longer candidates are forgotten.
     pub fn due(&mut self, found: Vec<VolumeStart>, now_ms: u64, uptime_s: u64) -> Vec<VolumeStart> {
         let current: Vec<&Runnable> = found.iter().flat_map(|v| &v.arrays).collect();
         self.seen.retain(|k, _| current.iter().any(|a| &a.array == k));
         for a in &current {
             match self.seen.get(&a.array) {
                 Some((_, m)) if *m == a.members => {}
+                // only arrays left inactive by the boot: past the window an inactive array
+                // may have been stopped on purpose (a rynasd restarted at noon acts on none)
+                _ if uptime_s > MAX_UPTIME_S => {
+                    self.seen.remove(&a.array);
+                }
                 _ => {
                     self.seen.insert(a.array.clone(), (now_ms, a.members.clone()));
                 }
@@ -196,6 +216,11 @@ impl Recovery {
                 })
             })
             .collect()
+    }
+
+    /// Nothing is left to do: the boot window is over and no array seen inside it waits.
+    pub fn finished(&self, uptime_s: u64) -> bool {
+        uptime_s > MAX_UPTIME_S && self.seen.is_empty()
     }
 
     /// Forgets the arrays of a volume once it was handled (started or failed).
@@ -396,6 +421,38 @@ mod tests {
         assert!(r.due(found(&["a", "b", "c", "d"]), t0 + 2 * STABLE_MS, 300).is_empty(), "forgotten: waits again");
         // gone (it started by itself): forgotten
         r.due(Vec::new(), t0 + 3 * STABLE_MS, 300);
+        assert!(r.seen.is_empty());
+    }
+
+    /// Only arrays the boot left inactive: one first seen past the window is never started
+    /// (rynasd restarted at noon, an array stopped on purpose); one seen inside it still
+    /// gets its stability wait, even if that ends past the window.
+    #[test]
+    fn acts_only_on_arrays_seen_soon_after_boot() {
+        let records = vec![classic("vol1", "AA:01", false)];
+        let found = || {
+            startable(&inv(vec![array("md127", "AA:01", "raid1", 2, ArrayHealth::Inactive, &["a"])]), &records)
+        };
+        let t0 = 1_000_000;
+        // a restart hours after boot
+        let mut r = Recovery::default();
+        assert!(r.due(found(), t0, 6 * 3600).is_empty());
+        assert!(r.due(found(), t0 + 10 * STABLE_MS, 6 * 3600 + 1200).is_empty());
+        assert!(r.seen.is_empty());
+        assert!(r.finished(6 * 3600));
+        // seen at the end of the window: started after the wait
+        let mut r = Recovery::default();
+        assert!(r.due(found(), t0, MAX_UPTIME_S - 10).is_empty());
+        assert!(!r.finished(MAX_UPTIME_S + 100));
+        let due = r.due(found(), t0 + STABLE_MS, MAX_UPTIME_S - 10 + STABLE_MS / 1000);
+        assert_eq!(due.len(), 1);
+        r.forget(&due[0]);
+        assert!(r.finished(MAX_UPTIME_S + STABLE_MS / 1000));
+        // its members changed past the window: no new wait, never started
+        let mut r = Recovery::default();
+        r.due(found(), t0, MAX_UPTIME_S - 10);
+        let other = startable(&inv(vec![array("md127", "AA:01", "raid1", 2, ArrayHealth::Inactive, &["b"])]), &records);
+        assert!(r.due(other, t0 + STABLE_MS, MAX_UPTIME_S + 200).is_empty());
         assert!(r.seen.is_empty());
     }
 

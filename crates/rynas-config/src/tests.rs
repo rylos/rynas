@@ -1031,3 +1031,58 @@ fn removing_a_key_writes_what_it_leaves_behind() {
     assert_eq!(cfg.applied("test.leaves").unwrap(), None);
     assert_eq!(cfg.drift().unwrap().checked, 0, "no longer tracked");
 }
+
+/// Records whether each reconcile is a rollback; its health check fails for `"bad"`.
+struct SeesRollback(Arc<Mutex<Vec<bool>>>);
+
+impl Applier for SeesRollback {
+    fn key(&self) -> &str {
+        "test.rollback"
+    }
+
+    fn validate(
+        &self,
+        value: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, Invalid> {
+        Ok(value)
+    }
+
+    fn render(
+        &self,
+        value: &serde_json::Value,
+        _ctx: &ApplyCtx,
+    ) -> std::result::Result<Vec<ManagedFile>, String> {
+        Ok(vec![ManagedFile::whole("/etc/rollback.conf", format!("{value}\n"), true)])
+    }
+
+    fn reconcile(
+        &self,
+        _from: Option<&serde_json::Value>,
+        _to: Option<&serde_json::Value>,
+        ctx: &ApplyCtx,
+    ) -> std::result::Result<(), String> {
+        self.0.lock().unwrap().push(ctx.rolling_back());
+        Ok(())
+    }
+
+    fn health(&self, value: Option<&serde_json::Value>, _ctx: &ApplyCtx) -> std::result::Result<(), String> {
+        if value == Some(&json!("bad")) { Err("bad value".into()) } else { Ok(()) }
+    }
+}
+
+/// A domain tells the reconcile of an apply from the one that rolls a failed apply back.
+#[test]
+fn a_domain_knows_when_it_is_rolled_back() {
+    let e = env();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut domains = appliers();
+    domains.push(Arc::new(SeesRollback(seen.clone())));
+    let cfg = Config::open(ConfigOptions::new(e.state.join("2"), &e.root), e.sys.clone(), domains).unwrap();
+    cfg.stage("alice", "test.rollback", Some(json!("good"))).unwrap();
+    cfg.apply("alice", "alice", "", &|_| {}, &|| false).unwrap();
+    assert_eq!(*seen.lock().unwrap(), [false]);
+    cfg.stage("alice", "test.rollback", Some(json!("bad"))).unwrap();
+    assert!(cfg.apply("alice", "alice", "", &|_| {}, &|| false).is_err());
+    assert_eq!(*seen.lock().unwrap(), [false, false, true]);
+    assert!(read(&e.root, "/etc/rollback.conf").ends_with("\n\"good\"\n"));
+}
