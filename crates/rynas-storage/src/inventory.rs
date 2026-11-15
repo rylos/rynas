@@ -335,6 +335,14 @@ fn worst(a: HealthVerdict, b: HealthVerdict) -> HealthVerdict {
     a.max(b)
 }
 
+/// A flexible RAID's volume is as healthy as its worst tier, also a tier the layers below the
+/// filesystem do not reach (a degraded tier array the device graph lost track of).
+fn flex_health(v: &mut VolumeTree) {
+    if let Some(f) = &v.flexible {
+        v.health = worst(v.health, array_verdict(f.health()));
+    }
+}
+
 /// The node for a block device and everything below it.
 fn layer(inv: &Inventory, kname: &str, depth: usize) -> Option<TreeNode> {
     let d = inv.graph.get(kname)?;
@@ -453,6 +461,7 @@ pub fn tree(inv: &Inventory) -> StorageTree {
             }
         }
         v.encrypted = v.layers.iter().any(|l| l.kind == NodeKind::Crypt);
+        flex_health(&mut v);
         v.subvolumes = f
             .subvolumes
             .iter()
@@ -497,6 +506,7 @@ pub fn tree(inv: &Inventory) -> StorageTree {
             v.layers.push(n);
         }
         v.encrypted = v.layers.iter().any(|l| l.kind == NodeKind::Crypt);
+        flex_health(&mut v);
         t.volumes.push(v);
     }
     for c in crate::luks::containers(&inv.graph) {

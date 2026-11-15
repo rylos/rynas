@@ -716,7 +716,7 @@ pub async fn create_volume<M: Machine>(
     }
     // the device under LUKS/btrfs: the md array, or the logical volume of a flexible RAID
     let (Some(md), Some(fs_dev), Some(mountpoint)) = (
-        summary(plan, "luks_device").or_else(|| summary(plan, "md")),
+        summary(plan, "lv").or_else(|| summary(plan, "md")),
         summary(plan, "filesystem_device"),
         summary(plan, "mountpoint"),
     ) else {

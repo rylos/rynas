@@ -572,6 +572,10 @@ like every configuration key (A19). Types in `rynas_api_types::storage`.
 | GET / PUT | `/api/v1/storage/disks/{name}/settings` | `DiskSettings` {scheduler?, read_ahead_kb?, apm?, standby_s?} | `DiskSettingsState` {defaults, applied?, pending?, effective, current_*} (PUT stages `storage.disks`) |
 | POST | `/api/v1/shares` | `Share` with `subvolume` {volume, compression} and an empty `path` | as before: the share is staged with path `/<volume>/<name>`, its subvolume is created by the apply |
 
+Grow and replace: `serials` lists every disk the plan erases (step `destroys` naming a whole
+disk), not only the new ones: the old disk a replace clears at the end, a leftover disk of a
+flexible volume a growth reuses. A disk without a serial is named by its kernel name.
+
 Rules:
 - **Checked at once, then again by the task** (fresh inventory, the plan must still be the
   same): a valid plan (400 `invalid_value` with the planner's errors: disk in use, system

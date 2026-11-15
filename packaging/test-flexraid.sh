@@ -378,14 +378,21 @@ after() { # VOLUME [TIERS]: checks after every step
 }
 serials() { printf '%s\n' "$@" | jq -R . | jq -sc .; }
 disks_json() { serials "$@"; }
+# the serials of a grow or replace: DISK... and every other disk $PLAN erases (the old disk a
+# replace clears, a leftover disk a growth reuses); loop devices have no serial, their name
+# stands for it
+erased_serials() {
+    { printf '%s\n' "$@"; echo "$PLAN" | jq -r '[.steps[].destroys[]?] | .[]' | grep -E '^loop[0-9]+$' || true; } \
+        | awk 'NF && !seen[$0]++' | jq -R . | jq -sc .
+}
 grow() { # VOLUME DISK...: add disks
     local l=$1; shift
     plan /storage/plan/grow "{\"volume\":\"$l\",\"disks\":$(disks_json "$@")}"
-    run POST "/storage/volumes/$l/grow" "{\"disks\":$(disks_json "$@"),\"confirm\":\"$l\",\"serials\":$(serials "$@")${PASSJ:-}}" ok
+    run POST "/storage/volumes/$l/grow" "{\"disks\":$(disks_json "$@"),\"confirm\":\"$l\",\"serials\":$(erased_serials "$@")${PASSJ:-}}" ok
 }
 replace() { # VOLUME OLD NEW
     plan /storage/plan/replace "{\"volume\":\"$1\",\"old\":\"$2\",\"new_disk\":\"$3\"}"
-    run POST "/storage/volumes/$1/replace" "{\"old\":\"$2\",\"new_disk\":\"$3\",\"confirm\":\"$1\",\"serials\":$(serials "$3")${PASSJ:-}}" ok
+    run POST "/storage/volumes/$1/replace" "{\"old\":\"$2\",\"new_disk\":\"$3\",\"confirm\":\"$1\",\"serials\":$(erased_serials "$3")${PASSJ:-}}" ok
 }
 create() { # LABEL LEVEL DISK...
     local l=$1 lvl=$2; shift 2
@@ -491,7 +498,7 @@ plan /storage/plan/grow "{\"volume\":\"$F1\",\"disks\":[\"$I\"]}"
 # slow reshapes down so that one is caught running
 echo 1000 >/proc/sys/dev/raid/speed_limit_min
 echo 5000 >/proc/sys/dev/raid/speed_limit_max
-start POST "/storage/volumes/$F1/grow" "{\"disks\":[\"$I\"],\"confirm\":\"$F1\",\"serials\":[\"$I\"]}"
+start POST "/storage/volumes/$F1/grow" "{\"disks\":[\"$I\"],\"confirm\":\"$F1\",\"serials\":$(erased_serials "$I")}"
 for _ in $(seq 600); do
     grep -A3 -E "^($(tiers_of "$F1" | paste -sd'|')) " /proc/mdstat | grep -q reshape && break
     sleep 0.2
@@ -555,9 +562,13 @@ kill_rynasd() {
     for pid in $(ps -eo pid=,comm= | awk '$2 == "mdadm" {print $1}'); do kill -9 "$pid" 2>/dev/null || true; done
     echo "  rynasd killed during:"; grep -A3 "^$1 " /proc/mdstat | sed 's/^/    /' || true
 }
-REPLACE_J="{\"old\":\"$H\",\"new_disk\":\"$J\",\"confirm\":\"$F1\",\"serials\":$(serials "$J")}"
 slow "${T[0]}"
 plan /storage/plan/replace "{\"volume\":\"$F1\",\"old\":\"$H\",\"new_disk\":\"$J\"}"
+# the old disk, still attached and cleared at the end, is confirmed by its serial too
+echo "$PLAN" | jq -e --arg h "$H" '[.steps[].destroys[]?] | index($h)' >/dev/null || fail "the replace does not clear $H"
+REPLACE_J="{\"old\":\"$H\",\"new_disk\":\"$J\",\"confirm\":\"$F1\",\"serials\":$(erased_serials "$J")}"
+api POST "/storage/volumes/$F1/replace" "{\"old\":\"$H\",\"new_disk\":\"$J\",\"confirm\":\"$F1\",\"serials\":$(serials "$J"),\"dry_run\":true}"
+[ "$CODE" = 400 ] || fail "a replace confirmed without the old disk's serial: HTTP $CODE"
 start POST "/storage/volumes/$F1/replace" "$REPLACE_J"
 copying "${T[0]}"
 kill_rynasd "${T[0]}"
@@ -571,6 +582,7 @@ echo "$BODY" | jq -e --arg l "$F1" '.volumes[] | select(.label == $l) | .flexibl
     || fail "the interrupted replace is not pending"
 # the same request again goes on ($J already holds a member of tier 1)
 plan /storage/plan/replace "{\"volume\":\"$F1\",\"old\":\"$H\",\"new_disk\":\"$J\"}"
+REPLACE_J="{\"old\":\"$H\",\"new_disk\":\"$J\",\"confirm\":\"$F1\",\"serials\":$(erased_serials "$J")}"
 start POST "/storage/volumes/$F1/replace" "$REPLACE_J"
 copying "${T[1]}"
 kill_rynasd "${T[1]}"

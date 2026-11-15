@@ -14,7 +14,7 @@
 use std::collections::BTreeSet;
 
 use rynas_api_types::storage::{
-    ArrayHealth, DiskRef, FlexLayout, FlexPending, FlexPendingKind, FlexTier, MdArray, MemberRole,
+    ArrayHealth, DiskRef, FlexBlocker, FlexBlockerKind, FlexLayout, FlexPending, FlexPendingKind, FlexTier, MdArray, MemberRole,
     RaidLevel, VolumeRecord,
 };
 
@@ -237,7 +237,16 @@ fn layout(
     }
     found.sort_by_key(|f| (f.start, f.md.kname.clone()));
 
-    let mut blockers: Vec<String> = Vec::new();
+    // (code, English text)
+    let mut blockers: Vec<(FlexBlocker, String)> = Vec::new();
+    let block = |kind: FlexBlockerKind, subject: Option<&str>, other: Option<&str>, text: String| {
+        let b = FlexBlocker {
+            kind,
+            subject: subject.map(str::to_string),
+            other: other.map(str::to_string),
+        };
+        (b, text)
+    };
     let mut pending: Vec<FlexPending> = Vec::new();
     let pend = |pending: &mut Vec<FlexPending>, kind, subject: &str| {
         pending.push(FlexPending {
@@ -249,9 +258,11 @@ fn layout(
     // identical slices on every member
     for f in &found {
         if f.parts.iter().any(|p| p.start.is_none() || p.start != Some(f.start) || p.size != f.size) {
-            blockers.push(format!(
-                "{}: its partitions do not have the same offset and size on every disk",
-                f.md.kname
+            blockers.push(block(
+                FlexBlockerKind::UnevenSlices,
+                Some(&f.md.kname),
+                None,
+                format!("{}: its partitions do not have the same offset and size on every disk", f.md.kname),
             ));
         }
     }
@@ -285,12 +296,19 @@ fn layout(
     }
     for (i, w) in found.windows(2).enumerate() {
         if w[0].start + w[0].size > w[1].start {
-            blockers.push(format!("{} and {} overlap", w[0].md.kname, w[1].md.kname));
+            blockers.push(block(
+                FlexBlockerKind::TiersOverlap,
+                Some(&w[0].md.kname),
+                Some(&w[1].md.kname),
+                format!("{} and {} overlap", w[0].md.kname, w[1].md.kname),
+            ));
         }
         if !members[i + 1].iter().all(|d| members[i].contains(d)) {
-            blockers.push(format!(
-                "the disks of {} are not all in {}",
-                w[1].md.kname, w[0].md.kname
+            blockers.push(block(
+                FlexBlockerKind::NotInLowerTier,
+                Some(&w[1].md.kname),
+                Some(&w[0].md.kname),
+                format!("the disks of {} are not all in {}", w[1].md.kname, w[0].md.kname),
             ));
         }
     }
@@ -300,7 +318,12 @@ fn layout(
             .filter_map(|f| slice_on(d, f).and_then(|p| p.partn))
             .collect();
         if partns.windows(2).any(|w| w[0] >= w[1]) {
-            blockers.push(format!("the partitions on {d} are not in tier order"));
+            blockers.push(block(
+                FlexBlockerKind::PartitionOrder,
+                Some(d),
+                None,
+                format!("the partitions on {d} are not in tier order"),
+            ));
         }
     }
 
@@ -358,7 +381,7 @@ fn layout(
         }
     }
     if tolerance == 0 {
-        blockers.push("a tier has no redundancy".into());
+        blockers.push(block(FlexBlockerKind::NoRedundancy, None, None, "a tier has no redundancy".into()));
     }
 
     // naming: rynas_<label>/data, <label>_tN arrays, rynas-<label>-tN partitions, btrfs <label>
@@ -412,7 +435,12 @@ fn layout(
         || found.iter().any(|f| inv.lvm_stale.contains(&f.md.kname));
     if let Some(v) = vg_report {
         if v.partial || pvs.iter().any(|p| p.missing) {
-            blockers.push(format!("the volume group {vg} is missing a physical volume"));
+            blockers.push(block(
+                FlexBlockerKind::VgMissingPv,
+                Some(&vg),
+                None,
+                format!("the volume group {vg} is missing a physical volume"),
+            ));
         }
         let extent = v.extent_size.max(4 * MIB);
         for p in &pvs {
@@ -473,7 +501,8 @@ fn layout(
         unused,
         managed,
         pending,
-        blockers,
+        blocker_items: blockers.iter().map(|(b, _)| b.clone()).collect(),
+        blockers: blockers.into_iter().map(|(_, t)| t).collect(),
         stale,
     })
 }
@@ -710,6 +739,15 @@ mod tests {
             l.blockers.iter().any(|b| b.contains("md127") && b.contains("offset")),
             "{:?}",
             l.blockers
+        );
+        // the same blockers by code, in the same order, for a translated text
+        assert_eq!(l.blocker_items.len(), l.blockers.len());
+        assert!(
+            l.blocker_items
+                .iter()
+                .any(|b| b.kind == FlexBlockerKind::UnevenSlices && b.subject.as_deref() == Some("md127")),
+            "{:?}",
+            l.blocker_items
         );
 
         let mut inv = flex_inventory(FlexState::Healthy, true);

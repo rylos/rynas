@@ -1842,7 +1842,8 @@ pub fn plan_create(
     p.summary = vec![
         ("level".into(), level_name(req.level).into()),
         ("vg".into(), vg),
-        ("luks_device".into(), base),
+        // the device under LUKS (encrypted) or the file system
+        ("lv".into(), base),
         ("filesystem_device".into(), fs_dev),
         ("mountpoint".into(), format!("/{label}")),
     ];

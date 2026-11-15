@@ -832,10 +832,12 @@ async fn volume_grow(
     if !p.valid {
         return Err(invalid_plan(&p));
     }
+    // the serials name every disk the plan erases: the new ones and any other (a leftover
+    // disk of the volume the growth reuses)
     confirm(
         &name,
         &req.confirm,
-        &disks_of(&inv, &req.disks)?,
+        &disks_of(&inv, &with_erased(&inv, &p, &req.disks))?,
         &req.serials,
     )?;
     let secrets = secrets_for(&p, req.passphrase.take())?;
@@ -980,6 +982,18 @@ fn erased_disks(inv: &Inventory, p: &StoragePlan) -> Vec<String> {
     v
 }
 
+/// `disks` and the disks the plan erases besides them, each once: the disks whose serials
+/// confirm a grow or replace.
+fn with_erased(inv: &Inventory, p: &StoragePlan, disks: &[String]) -> Vec<String> {
+    let mut v = disks.to_vec();
+    for d in erased_disks(inv, p) {
+        if !v.contains(&d) {
+            v.push(d);
+        }
+    }
+    v
+}
+
 /// The disks a task works on are still the ones its request was checked against (serial or
 /// name, WWN, size): a disk swapped under the same kernel name while the task waited in the
 /// queue gets the same steps, so comparing the plans cannot tell.
@@ -1047,7 +1061,14 @@ async fn volume_replace(
         return Err(invalid_plan(&p));
     }
     let disks = vec![req.new_disk.clone()];
-    confirm(&name, &req.confirm, &disks_of(&inv, &disks)?, &req.serials)?;
+    // the serials name every disk the plan erases: the new one, and the old one when it is
+    // still attached and cleared at the end
+    confirm(
+        &name,
+        &req.confirm,
+        &disks_of(&inv, &with_erased(&inv, &p, &disks))?,
+        &req.serials,
+    )?;
     let secrets = secrets_for(&p, req.passphrase.take())?;
     let flex = v.flex;
     // a replace going on again: a new disk already holding members is the volume's

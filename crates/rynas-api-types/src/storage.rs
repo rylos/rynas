@@ -755,7 +755,7 @@ pub struct FlexTier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlexPendingKind {
-    /// A reshape stopped half way (md `reshape_position` set, no reshape running).
+    /// A reshape stopped halfway (md `reshape_position` set, no reshape running).
     ReshapeInterrupted,
     /// The tier array is larger than its LVM physical volume (`pvresize` missing).
     ResizePv,
@@ -790,6 +790,37 @@ pub struct FlexPending {
     pub subject: Option<String>,
 }
 
+/// Why rynas cannot change a flexible RAID, for a translated text ([`FlexLayout::blocker_items`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlexBlockerKind {
+    /// The partitions of tier array `subject` differ in offset or size between the disks.
+    UnevenSlices,
+    /// Tier arrays `subject` and `other` overlap on the disks.
+    TiersOverlap,
+    /// The disks of tier array `subject` are not all in the tier below, `other`.
+    NotInLowerTier,
+    /// The partitions on disk `subject` are not in tier order.
+    PartitionOrder,
+    /// A tier has no redundancy.
+    NoRedundancy,
+    /// The volume group `subject` is missing a physical volume.
+    VgMissingPv,
+    /// A kind this client does not know (newer server): show the English text.
+    #[serde(other)]
+    Other,
+}
+
+/// One item of [`FlexLayout::blocker_items`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlexBlocker {
+    pub kind: FlexBlockerKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
+}
+
 /// A flexible RAID as found on the system: md tiers → LVM volume group → one logical volume.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct FlexLayout {
@@ -820,6 +851,9 @@ pub struct FlexLayout {
     /// group...
     #[serde(default)]
     pub blockers: Vec<String>,
+    /// [`FlexLayout::blockers`] by code, in the same order (an older server sends none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocker_items: Vec<FlexBlocker>,
     /// The LVM facts were not refreshed because a disk under them is in standby (or LVM
     /// could not be read): the checks that need them are skipped.
     #[serde(default)]
@@ -1482,7 +1516,8 @@ pub struct VolumeGrowRequest {
     /// The volume label.
     #[serde(default)]
     pub confirm: String,
-    /// Serials of the new disks.
+    /// Serials of every disk the plan erases: the new disks, and any other disk its steps
+    /// destroy (a leftover disk of a flexible volume).
     #[serde(default)]
     pub serials: Vec<String>,
     /// Needed when the volume is encrypted and the LUKS mapping is grown.
@@ -1500,7 +1535,8 @@ pub struct VolumeReplaceRequest {
     pub new_disk: String,
     #[serde(default)]
     pub confirm: String,
-    /// Serial of the new disk (one entry).
+    /// Serials of every disk the plan erases: the new disk, and the old one when it is still
+    /// attached and the plan clears it.
     #[serde(default)]
     pub serials: Vec<String>,
     /// Flexible RAID, encrypted: needed when a bigger disk grows the LUKS mapping.

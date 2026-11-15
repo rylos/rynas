@@ -236,7 +236,10 @@ fn create_4_8_8_one_disk_tolerance() {
     );
     let get = |k: &str| p.summary.iter().find(|(x, _)| x == k).map(|(_, v)| v.clone());
     assert_eq!(get("vg").as_deref(), Some("rynas_vol2"));
-    assert_eq!(get("luks_device").as_deref(), Some("/dev/rynas_vol2/data"));
+    assert_eq!(get("lv").as_deref(), Some("/dev/rynas_vol2/data"));
+    // unencrypted: no LUKS device in the summary
+    assert_eq!(get("luks_device"), None);
+    assert_eq!(get("mapper"), None);
     assert_eq!(get("level").as_deref(), Some("flex1"));
 }
 
