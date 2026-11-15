@@ -341,12 +341,15 @@ async fn stop(child: &mut tokio::process::Child, unit: Option<&str>) {
 mod tests {
     use super::*;
     use rynas_api_types::backup::{RepoSpec, WorkerOp};
-    use std::os::unix::fs::PermissionsExt;
 
     fn fake(dir: &std::path::Path, body: &str) -> PathBuf {
-        let p = dir.join("worker");
-        std::fs::write(&p, format!("#!/bin/sh\ncat > {}/req.json\n{body}\n", dir.display())).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (p, src) = (dir.join("worker"), dir.join("worker.src"));
+        std::fs::write(&src, format!("#!/bin/sh\ncat > {}/req.json\n{body}\n", dir.display())).unwrap();
+        // the executable is written by another process: a test thread that forks while this
+        // one holds it open for writing would make its exec fail with ETXTBSY
+        let _ = std::fs::remove_file(&p);
+        let ok = std::process::Command::new("install").arg("-m755").arg(&src).arg(&p).status().unwrap();
+        assert!(ok.success());
         p
     }
 
