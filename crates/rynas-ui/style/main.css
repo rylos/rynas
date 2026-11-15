@@ -1655,6 +1655,8 @@ button.bay { text-align: left; cursor: pointer; }
 .bay-health.ok { color: var(--led-ok); } .bay-health.warn { color: var(--led-warn); } .bay-health.err { color: var(--led-err); }
 .cell-btn { display: flex; flex-direction: column; align-items: flex-start; gap: 0; text-align: left; max-width: 280px; padding: var(--s-1) 0; overflow-wrap: anywhere; }
 .cell-btn:hover .strong { color: var(--accent); text-decoration: underline; }
+.cell-btn .ellipsis { max-width: 100%; }
+.members-list .cell-btn { min-width: 0; }
 .table.compact td { height: 32px; }
 .used-cell { max-width: 240px; overflow-wrap: anywhere; }
 /* the drive name and model get room before the free-text used-by column (the model wrapped to
@@ -1725,6 +1727,7 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .tier-item:first-child { border-top: 0; }
 .tier-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); min-width: 0; font-size: var(--fs-13); }
 .tier-sub { overflow-wrap: anywhere; }
+.tier-warn { display: flex; align-items: center; gap: var(--s-1); }
 .tier-compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--s-3); }
 
 /* tasks */

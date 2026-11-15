@@ -357,7 +357,7 @@ pub fn tier_list(tiers: &[FlexTier], live: bool) -> AnyView {
                         {live.then(|| x.sync.as_ref().map(super::sync_row))}
                         {(live && lost > 0).then(|| {
                             let names = if x.missing.is_empty() { String::new() } else { format!(" ({})", x.missing.join(", ")) };
-                            view! { <div class="warn tone-text small"><Icon icon=icons::TRIANGLE_ALERT size=14 />{tf("sto.missing_members", &[("n", &lost.to_string())])}{names}</div> }
+                            view! { <div class="warn tone-text small tier-warn"><Icon icon=icons::TRIANGLE_ALERT size=14 /><span>{tf("sto.missing_members", &[("n", &lost.to_string())])}{names}</span></div> }
                         })}
                     </li>
                 }
