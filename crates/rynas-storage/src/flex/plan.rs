@@ -12,7 +12,8 @@
 //!
 //! Order of a growth, lowest tier first so that a crash leaves less undone:
 //! - partitions for every tier a disk joins (a disk in use gets its new partition with
-//!   `sgdisk --new` and `partx --add`: the kernel cannot re-read the table of a busy disk);
+//!   `sgdisk --new` and `partx --update`: the kernel cannot re-read the table of a busy
+//!   disk, and a recent udev may have added the partition already);
 //! - new top tiers created and **recorded before** they become physical volumes (a volume
 //!   group with an array the boot does not assemble would come up partial);
 //! - per tier: bitmap off, level change, `--add`, `--grow --raid-devices`, wait, bitmap on;
@@ -1037,7 +1038,9 @@ fn partition_steps(v: &mut View, target: &[Tier], new: &[String]) -> Result<Vec<
                 ));
                 batch.push(run(
                     on(PlanStepKind::AddPartitionLive, &p),
-                    s(&["partx", "--add", "--nr", &t.index.to_string(), &devp]),
+                    // --update adds the partition, or leaves it when udev already did (a
+                    // recent udev updates the partitions of a busy disk itself after sgdisk)
+                    s(&["partx", "--update", "--nr", &t.index.to_string(), &devp]),
                 ));
             }
         }

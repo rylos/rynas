@@ -394,9 +394,9 @@ fn a_new_top_tier_on_disks_in_use() {
         l[..9],
         [
             format!("sgdisk {} /dev/sdc", new_arg(2, b1, b2)),
-            "partx --add --nr 2 /dev/sdc".into(),
+            "partx --update --nr 2 /dev/sdc".into(),
             format!("sgdisk {} /dev/sdd", new_arg(2, b1, b2)),
-            "partx --add --nr 2 /dev/sdd".into(),
+            "partx --update --nr 2 /dev/sdd".into(),
             "wipefs --all /dev/sde".into(),
             "sgdisk --zap-all /dev/sde".into(),
             format!("sgdisk {} {} /dev/sde", new_arg(1, MIB, b1), new_arg(2, b1, b2)),
