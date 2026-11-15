@@ -261,10 +261,50 @@ pub async fn same_disk<M: Machine>(m: &M, want: &DiskSummary) -> Result<(), Stri
     Ok(())
 }
 
+/// `name` is the disk `disk` or one of its partitions (`sdb3`, `nvme0n1p2`).
+fn on_disk(name: &str, disk: &str) -> bool {
+    let Some(tail) = name.strip_prefix(disk) else {
+        return false;
+    };
+    let num = if disk.ends_with(|c: char| c.is_ascii_digit()) {
+        tail.strip_prefix('p')
+    } else {
+        Some(tail)
+    };
+    tail.is_empty() || num.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The disks of the inventory a command writes to: named whole or by a partition
+/// (`/dev/sdb`, `--replicate=/dev/sdb`, `/dev/sdb3`). Taking a member out of an array
+/// (`mdadm --remove`, `--fail`) writes nothing on its disk, which may be gone: not counted.
+pub(crate) fn disks_written<'a>(argv: &[String], inv: &'a Inventory) -> Vec<&'a DiskSummary> {
+    if argv.first().is_some_and(|p| p == "mdadm")
+        && argv.iter().any(|a| a == "--remove" || a == "--fail")
+    {
+        return Vec::new();
+    }
+    let mut out: Vec<&DiskSummary> = Vec::new();
+    for a in argv {
+        let v = a.rsplit_once('=').map_or(a.as_str(), |(_, v)| v);
+        let Some(name) = v.strip_prefix("/dev/") else {
+            continue;
+        };
+        for d in inv.disks.iter().filter(|d| on_disk(name, &d.name)) {
+            if !out.iter().any(|x| x.name == d.name) {
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------------------------------- helpers
 
-fn timeout_for(argv: &[String]) -> Duration {
+pub(crate) fn timeout_for(argv: &[String]) -> Duration {
     const MIN: u64 = 60;
+    if critical(argv) {
+        return CRITICAL_TIMEOUT;
+    }
     let s = match (
         argv.first().map(String::as_str),
         argv.get(1).map(String::as_str),
@@ -272,10 +312,41 @@ fn timeout_for(argv: &[String]) -> Duration {
         (Some("btrfs"), Some("scrub")) => 14 * 24 * 3600,
         (Some("mkfs.btrfs"), _) => 30 * MIN,
         (Some("cryptsetup" | "systemd-cryptenroll"), _) => 10 * MIN,
-        (Some("mdadm" | "systemctl" | "wipefs" | "sgdisk"), _) => 5 * MIN,
+        (Some("mdadm" | "systemctl" | "wipefs"), _) => 5 * MIN,
         _ => 2 * MIN,
     };
     Duration::from_secs(s)
+}
+
+/// How long a [`critical`] command may take: it is never killed half way, so only a hung
+/// one ever reaches this.
+pub(crate) const CRITICAL_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
+
+/// Commands that leave the storage stack in a bad state when killed half way: an LVM
+/// command or `cryptsetup resize` with the device suspended (the volume's I/O hangs), an md
+/// change (the array frozen mid-reshape), a filesystem resize, a partition table half
+/// written. A cancel waits for them to end (it stops the plan between steps), and no short
+/// timeout kills them.
+pub(crate) fn critical(argv: &[String]) -> bool {
+    let arg = |i: usize| argv.get(i).map(String::as_str);
+    match (arg(0), arg(1)) {
+        (
+            Some(
+                "pvcreate" | "pvresize" | "pvremove" | "pvmove" | "vgcreate" | "vgextend"
+                | "vgreduce" | "vgchange" | "vgremove" | "lvcreate" | "lvextend" | "lvresize"
+                | "lvreduce" | "lvremove" | "lvchange",
+            ),
+            _,
+        ) => true,
+        // anything but reading the array
+        (Some("mdadm"), _) => !argv
+            .iter()
+            .any(|a| matches!(a.as_str(), "--detail" | "--examine" | "--query" | "-D" | "-E" | "-Q")),
+        (Some("cryptsetup"), Some("resize")) => true,
+        (Some("btrfs"), Some("filesystem")) => arg(2) == Some("resize"),
+        (Some("sgdisk" | "partx"), _) => true,
+        _ => false,
+    }
 }
 
 fn argv_of(step: &PlanStep) -> Option<(&[String], Option<&str>)> {
@@ -348,7 +419,8 @@ async fn run_cmd<M: Machine>(
     let mut o = RunOpts::new(timeout_for(&argv));
     o.stdin = stdin;
     o.quiet = quiet;
-    o.cancellable = cancellable;
+    // a cancel never kills a critical command: the plan stops after it
+    o.cancellable = cancellable && !critical(&argv);
     m.run(argv, o).await
 }
 
@@ -842,6 +914,10 @@ pub async fn create_volume<M: Machine>(
 
 // ------------------------------------------------------------------------------- other plans
 
+/// Polls (5 s apart) md must stay done with too many members missing before a wait says a
+/// disk failed.
+const DISK_LOST_POLLS: u32 = 6;
+
 /// Waits for `"<sysfs path> == <value>"` (md `sync_action == idle`), reporting the md
 /// progress. With `clean`, also waits for `degraded` to drop to 0 (rebuilds).
 async fn wait_idle<M: Machine>(
@@ -871,6 +947,8 @@ async fn wait_idle<M: Machine>(
     // md starts the resync/rebuild asynchronously: give it a moment
     m.sleep(Duration::from_secs(3)).await;
     let mut last_pct = None;
+    // polls in a row that found md done with more slots empty than the step leaves
+    let mut short = 0u32;
     loop {
         if m.is_cancelled() {
             return Err("cancelled while waiting: the md operation goes on in the kernel".into());
@@ -883,7 +961,19 @@ async fn wait_idle<M: Machine>(
         match now.as_deref() {
             None => return Err(format!("{path} is gone")),
             Some(v) if v == want && degraded <= max_degraded => return Ok(()),
+            // md is done but more members are missing than expected: a disk failed during
+            // the operation, and no rebuild will start by itself (a few polls in a row, so
+            // that a rebuild md is about to start is not taken for one)
+            Some(v) if v == want && max_degraded != u32::MAX => {
+                short += 1;
+                if short >= DISK_LOST_POLLS {
+                    return Err(format!(
+                        "a disk failed during the operation: {dir} misses {degraded} member(s), {max_degraded} expected; replace the failed disk"
+                    ));
+                }
+            }
             Some(v) => {
+                short = 0;
                 let pct = m.read_file(&format!("{dir}/sync_completed")).and_then(|s| {
                     let (a, b) = s.trim().split_once('/')?;
                     let (a, b) = (a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?);
@@ -974,6 +1064,9 @@ pub async fn run_plan_with<M: Machine>(
     let mut undo: Vec<Undo> = Vec::new();
     let mut touched_array = false;
     let mut sysfs_written: Vec<String> = Vec::new();
+    // a wait step ran: disks are checked again before a step writes to them
+    let mut waited = false;
+    let mut verified: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let mut failure: Option<(usize, String)> = None;
     for (i, step) in plan.steps.iter().enumerate() {
@@ -1004,6 +1097,8 @@ pub async fn run_plan_with<M: Machine>(
             }
             PlanAction::Wait { condition } => {
                 let r = wait_idle(m, condition, clean, i, total).await;
+                waited = true;
+                verified.clear();
                 if r.is_ok() && scrub {
                     let dir = condition.split(" == ").next().unwrap_or("");
                     if let Some((d, _)) = dir.rsplit_once('/')
@@ -1039,6 +1134,16 @@ pub async fn run_plan_with<M: Machine>(
                 for disk in step.destroys.iter().filter(|d| !new_disks.contains(d)) {
                     if let Some(want) = inv.disks.iter().find(|x| &x.name == disk) {
                         r = r.and(same_disk(m, want).await);
+                        verified.insert(want.name.clone());
+                    }
+                }
+                // after a wait (hours, maybe a reboot of the enclosure) a kernel name may now
+                // be another disk: every disk the step writes to is checked again, once per wait
+                if waited {
+                    for want in disks_written(argv, inv) {
+                        if r.is_ok() && verified.insert(want.name.clone()) {
+                            r = same_disk(m, want).await;
+                        }
                     }
                 }
                 let r = match r {

@@ -33,6 +33,9 @@ pub struct Cmd {
     clear_env: bool,
     stdin: Option<StdinData>,
     timeout: Duration,
+    /// `RuntimeMaxSec` of the transient unit the command runs in ([`Outside::cmd`]): systemd
+    /// stops the unit then, and the client exits with a plain failure code.
+    runtime_max: Option<Duration>,
 }
 
 /// Bytes for a child's standard input (passwords, keys): overwritten with zeros when dropped,
@@ -129,7 +132,16 @@ impl Cmd {
             clear_env: false,
             stdin: None,
             timeout: DEFAULT_TIMEOUT,
+            runtime_max: None,
         }
+    }
+
+    /// A failure after the unit's `RuntimeMaxSec` is systemd stopping it: a timeout, not
+    /// whatever exit code the client reported.
+    fn unit_timeout(&self, started: Instant, code: Option<i32>) -> Option<CmdError> {
+        self.runtime_max
+            .filter(|max| code != Some(0) && started.elapsed() >= *max)
+            .map(CmdError::Timeout)
     }
 
     pub fn arg(mut self, a: impl AsRef<OsStr>) -> Self {
@@ -213,6 +225,7 @@ impl Cmd {
         cancel: Option<&CancellationToken>,
         line: Option<&(dyn Fn(&str) + Sync)>,
     ) -> Result<CmdOutput, CmdError> {
+        let started = Instant::now();
         let mut child = tokio::process::Command::from(self.std_command())
             .kill_on_drop(true)
             .spawn()
@@ -261,6 +274,9 @@ impl Cmd {
             readers
         );
         let status = status?.map_err(CmdError::Spawn)?;
+        if let Some(e) = self.unit_timeout(started, status.code()) {
+            return Err(e);
+        }
         Ok(CmdOutput {
             code: status.code(),
             stdout,
@@ -298,6 +314,7 @@ impl Cmd {
     /// `SIGTERM` then `SIGKILL` to the group on timeout, output capped at 1 MiB per stream.
     pub fn output_blocking(&self) -> Result<CmdOutput, CmdError> {
         use std::io::Write;
+        let started = Instant::now();
         let mut child = self.std_command().spawn().map_err(CmdError::Spawn)?;
         let pgid = Pid::from_raw(child.id() as i32);
         if let (Some(data), Some(mut w)) = (self.stdin.clone(), child.stdin.take()) {
@@ -337,6 +354,9 @@ impl Cmd {
                 return Err(e);
             }
         };
+        if let Some(e) = self.unit_timeout(started, status.code()) {
+            return Err(e);
+        }
         Ok(CmdOutput {
             code: status.code(),
             stdout: t_out.join().unwrap_or_default(),
@@ -422,7 +442,9 @@ impl<'a> Outside<'a> {
             .arg(format!("--description={}", self.description));
         let mut timeout = self.timeout;
         if self.runtime_max {
-            c = c.arg(format!("--property=RuntimeMaxSec={}", self.timeout.as_secs().max(1)));
+            let max = self.timeout.as_secs().max(1);
+            c = c.arg(format!("--property=RuntimeMaxSec={max}"));
+            c.runtime_max = Some(Duration::from_secs(max));
             timeout += OUTSIDE_GRACE;
         }
         for p in self.properties {
@@ -691,6 +713,30 @@ mod tests {
         // a program argument that looks like a unit is not taken for one
         let d = super::Outside::new("x", "x", super::Duration::from_secs(1)).cmd(["echo", "--unit=rynas-apt-1"]);
         assert_eq!(super::transient_unit(&d, "rynas-apt"), None);
+    }
+
+    /// systemd stops a transient unit at its `RuntimeMaxSec` and the client exits non-zero:
+    /// that is reported as a timeout, not as "exit code 1".
+    #[tokio::test]
+    async fn a_unit_stopped_at_its_runtime_max_is_a_timeout() {
+        let c = super::Outside::new("rynas-luks", "rynas: test", super::Duration::from_secs(600))
+            .cmd(["true"]);
+        assert_eq!(c.runtime_max, Some(super::Duration::from_secs(600)));
+        assert_eq!(super::Outside::new("x", "y", super::Duration::from_secs(5)).keep_running().cmd(["true"]).runtime_max, None);
+        // the same check on a local command standing for the client
+        let mut c = Cmd::new("sh").args(["-c", "sleep 0.3; exit 1"]);
+        c.runtime_max = Some(super::Duration::from_millis(100));
+        let e = c.run_checked(None, None).await.unwrap_err();
+        assert!(matches!(e, CmdError::Timeout(_)), "{e}");
+        assert!(e.to_string().starts_with("timed out"), "{e}");
+        assert!(matches!(c.output_blocking(), Err(CmdError::Timeout(_))));
+        // a failure before the limit keeps its exit code, a success is a success
+        let mut c = Cmd::new("sh").args(["-c", "exit 2"]);
+        c.runtime_max = Some(super::Duration::from_secs(60));
+        assert!(matches!(c.run_checked(None, None).await, Err(CmdError::Failed(_))));
+        let mut c = Cmd::new("sh").args(["-c", "sleep 0.2"]);
+        c.runtime_max = Some(super::Duration::from_millis(50));
+        assert!(c.run_checked(None, None).await.is_ok());
     }
 
     #[test]

@@ -328,7 +328,9 @@ async fn cancel_rolls_back() {
     .unwrap_err();
     assert!(e.contains("failed: cancelled"), "{e}");
     let ran = m.ran();
-    // the create was killed: no array to stop, the partitions go
+    // a cancel never kills mdadm half way: the array was made, so it is stopped, then the
+    // partitions go
+    assert!(ran.iter().any(|l| l.starts_with("mdadm --stop")), "{ran:?}");
     assert_eq!(
         &ran[ran.len() - 2..],
         ["sgdisk --zap-all /dev/sdd", "wipefs --all /dev/sdd"]
@@ -744,6 +746,11 @@ async fn flexible_growth_commits_the_new_tier_before_pvcreate() {
         "mdadm --detail --export /dev/md/vol2_t3",
         "MD_UUID=33333333:33333333:33333333:33333333\n",
     );
+    // the new disks are checked again after each wait
+    for n in ["sdd", "sde"] {
+        let (line, out) = lsblk_identity(&inv, n, None);
+        m.output(&line, &out);
+    }
     {
         let mut f = m.files.lock().unwrap();
         for a in ["md126", "md127"] {
@@ -818,6 +825,9 @@ async fn flexible_replace_clears_the_old_disk_only_if_it_is_still_that_disk() {
         let mut m = FakeMachine::default();
         let (line, out) = lsblk_identity(&inv, "sdb", serial);
         m.output(&line, &out);
+        // the new disk is checked again after each wait
+        let (line, out) = lsblk_identity(&inv, "sdd", None);
+        m.output(&line, &out);
         {
             let mut f = m.files.lock().unwrap();
             for a in ["md126", "md127"] {
@@ -878,4 +888,144 @@ async fn a_wait_accepts_the_slots_the_plan_leaves_empty() {
         condition: "/sys/block/md9/md/sync_action == idle, degraded <= x".into(),
     };
     assert!(run_plan(&m, &inv, &bad, &[], &Secrets::default()).await.is_err());
+}
+
+fn plan_of(steps: Vec<rynas_api_types::storage::PlanStep>) -> rynas_api_types::storage::StoragePlan {
+    rynas_api_types::storage::StoragePlan {
+        operation: "complete_growth".into(),
+        valid: true,
+        steps,
+        ..Default::default()
+    }
+}
+
+fn wait_step(condition: &str) -> rynas_api_types::storage::PlanStep {
+    crate::plan::wait(crate::plan::d(rynas_api_types::storage::PlanStepKind::WaitRebuild), condition)
+}
+
+fn cmd_step(argv: &[&str]) -> rynas_api_types::storage::PlanStep {
+    crate::plan::cmd(crate::plan::d(rynas_api_types::storage::PlanStepKind::AddForRebuild), argv)
+}
+
+/// md is done but more members are missing than the step leaves: a disk failed during the
+/// operation. The wait ends with that error instead of polling forever.
+#[tokio::test]
+async fn a_wait_ends_when_a_disk_fails_during_the_operation() {
+    let inv = nas_inventory();
+    for (condition, degraded) in [
+        ("/sys/block/md9/md/sync_action == idle", "1"),
+        ("/sys/block/md9/md/sync_action == idle, degraded <= 1", "2"),
+    ] {
+        let m = FakeMachine::default();
+        {
+            let mut f = m.files.lock().unwrap();
+            f.insert("/sys/block/md9/md/sync_action".into(), "idle\n".into());
+            f.insert("/sys/block/md9/md/degraded".into(), format!("{degraded}\n"));
+        }
+        let e = run_plan(&m, &inv, &plan_of(vec![wait_step(condition)]), &[], &Secrets::default())
+            .await
+            .unwrap_err();
+        assert!(e.contains("a disk failed during the operation"), "{e}");
+        assert!(e.contains("replace the failed disk"), "{e}");
+    }
+    // a scrub's wait does not look at missing members
+    let m = FakeMachine::default();
+    {
+        let mut f = m.files.lock().unwrap();
+        f.insert("/sys/block/md9/md/sync_action".into(), "idle\n".into());
+        f.insert("/sys/block/md9/md/degraded".into(), "1\n".into());
+    }
+    let mut scrub = plan_of(vec![wait_step("/sys/block/md9/md/sync_action == idle")]);
+    scrub.operation = "scrub".into();
+    run_plan(&m, &inv, &scrub, &[], &Secrets::default()).await.unwrap();
+}
+
+/// LVM, md changes, LUKS and btrfs resizes and partition tables are never killed half way:
+/// a cancel stops the plan after them, and no short timeout applies.
+#[tokio::test]
+async fn critical_commands_finish_before_a_cancel_stops_the_plan() {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    for argv in [
+        &["lvextend", "-l", "+100%FREE", "rynas_vol2/data"][..],
+        &["pvresize", "/dev/md/vol2_t1"],
+        &["vgextend", "rynas_vol2", "/dev/md/vol2_t2"],
+        &["mdadm", "--grow", "/dev/md2", "--raid-devices=4"],
+        &["mdadm", "/dev/md2", "--add", "/dev/sdf1"],
+        &["mdadm", "--create", "/dev/md/vol2_t1", "--run"],
+        &["cryptsetup", "resize", "--key-file", "-", "rynas-vol1"],
+        &["btrfs", "filesystem", "resize", "max", "/vol1"],
+        &["sgdisk", "--new=1:0:-128M", "/dev/sdf"],
+        &["partx", "--update", "--nr", "3", "/dev/sdb"],
+    ] {
+        assert!(critical(&s(argv)), "{argv:?}");
+        assert_eq!(timeout_for(&s(argv)), CRITICAL_TIMEOUT, "{argv:?}");
+    }
+    for argv in [
+        &["mdadm", "--detail", "--export", "/dev/md2"][..],
+        &["cryptsetup", "luksFormat", "/dev/md2"],
+        &["btrfs", "scrub", "start", "/vol1"],
+        &["wipefs", "--all", "/dev/sdf"],
+        &["mkfs.btrfs", "/dev/md2"],
+    ] {
+        assert!(!critical(&s(argv)), "{argv:?}");
+    }
+    let inv = nas_inventory();
+    let m = FakeMachine {
+        cancel_at: Some("lvextend".into()),
+        ..Default::default()
+    };
+    let plan = plan_of(vec![
+        cmd_step(&["lvextend", "-l", "+100%FREE", "rynas_vol2/data"]),
+        cmd_step(&["btrfs", "filesystem", "resize", "max", "/vol2"]),
+    ]);
+    let e = run_plan(&m, &inv, &plan, &[], &Secrets::default()).await.unwrap_err();
+    assert!(e.contains("cancelled"), "{e}");
+    // lvextend ran to its end, the resize after it never started
+    assert_eq!(m.ran(), ["lvextend -l +100%FREE rynas_vol2/data"]);
+}
+
+/// After a wait, every disk a step writes to is checked again (serial, WWN, size): its
+/// kernel name may belong to another disk by then. Taking a member out is not a write.
+#[tokio::test]
+async fn disks_are_checked_again_after_a_wait() {
+    let mut inv = nas_inventory();
+    add_disk(&mut inv, "sdf");
+    let plan = plan_of(vec![
+        cmd_step(&["mdadm", "/dev/md2", "--add", "/dev/sdf1"]),
+        wait_step("/sys/block/md2/md/sync_action == idle"),
+        cmd_step(&["mdadm", "/dev/md2", "--remove", "/dev/sdb1"]),
+        cmd_step(&["mdadm", "/dev/md2", "--add", "/dev/sdf2"]),
+        cmd_step(&["sgdisk", "--new=3:0:0", "/dev/sdf"]),
+    ]);
+    let machine = |serial: Option<&str>| {
+        let mut m = FakeMachine::default();
+        let (line, out) = lsblk_identity(&inv, "sdf", serial);
+        m.output(&line, &out);
+        {
+            let mut f = m.files.lock().unwrap();
+            f.insert("/sys/block/md2/md/sync_action".into(), "idle\n".into());
+            f.insert("/sys/block/md2/md/degraded".into(), "0\n".into());
+        }
+        m
+    };
+    let m = machine(None);
+    run_plan(&m, &inv, &plan, &["sdf".into()], &Secrets::default()).await.unwrap();
+    let ran = m.ran();
+    let lsblk = |l: &String| l.starts_with("lsblk");
+    // none before the wait, none for the removal, one for sdf after it (once per wait)
+    assert_eq!(ran.iter().filter(|l| lsblk(l)).count(), 1, "{ran:?}");
+    let add = ran.iter().position(|l| l == "mdadm /dev/md2 --add /dev/sdf2").unwrap();
+    assert!(lsblk(&ran[add - 1]), "{ran:?}");
+    // another disk under sdf's name by then: the step is refused
+    let m = machine(Some("SOMEONE-ELSE"));
+    let e = run_plan(&m, &inv, &plan, &["sdf".into()], &Secrets::default()).await.unwrap_err();
+    assert!(e.contains("is not the disk the plan was made for"), "{e}");
+    assert!(!m.ran().contains(&"mdadm /dev/md2 --add /dev/sdf2".to_string()));
+    // which disks a command writes to
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let names = |argv: &[&str]| disks_written(&s(argv), &inv).iter().map(|d| d.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&["sgdisk", "--replicate=/dev/sdf", "/dev/sda"]), ["sdf", "sda"]);
+    assert_eq!(names(&["mdadm", "/dev/md2", "--add", "/dev/nvme0n1p2"]), ["nvme0n1"]);
+    assert!(names(&["mdadm", "/dev/md2", "--fail", "/dev/sdb1"]).is_empty());
+    assert!(names(&["mdadm", "--grow", "/dev/md2", "--raid-devices=4"]).is_empty());
 }
