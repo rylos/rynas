@@ -5930,7 +5930,7 @@ dict! { BLOB, LENS;
     "pca.ready.loader" => "The boot loader is unknown";
     "pca.ready.no_table" => "No partition table was read";
     "pca.ready.no_kit" => "The group has no recovery kit";
-    "pca.ready.manual" => "LVM or md: recreated by hand before restoring";
+    "pca.ready.manual" => "md, or LVM other than linear volumes: recreated by hand before restoring";
     "pca.last_error" => "Last error";
     "pca.changed" => "Files changed while read";
     "pca.changed_n" => "{n} files";

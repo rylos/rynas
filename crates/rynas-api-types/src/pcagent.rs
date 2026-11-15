@@ -414,7 +414,8 @@ pub enum ReadyReason {
     NoPartitionTable,
     /// The group has no recovery kit yet.
     NoRecoveryKit,
-    /// LVM or md: recreated by hand in this version of the restore.
+    /// md, or LVM the restore does not recreate (thin pools, snapshots, raid/mirror/striped
+    /// or cache volumes): recreated by hand. Linear LVM is recreated (agent 0.8.12).
     ManualLayout,
 }
 
@@ -1100,6 +1101,185 @@ pub struct Swap {
     pub source: FsSource,
 }
 
+/// The LVM layout of [`Manifest::lvm_report`], as the bare-metal restore reads it: LVM's
+/// JSON report with the `lv` rows of `lvs` (one per segment when segment fields were asked)
+/// and, from agent 0.8.12 on, the `vg` and `pv` rows of `vgs` and `pvs`. What an older agent
+/// did not record is empty or 0 (UUIDs, extent size, PV sizes, segment types).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LvmLayout {
+    pub vgs: Vec<LvmVg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LvmVg {
+    pub name: String,
+    pub uuid: String,
+    /// 0: not recorded.
+    pub extent_bytes: u64,
+    pub size_bytes: u64,
+    pub free_bytes: u64,
+    pub pvs: Vec<LvmPv>,
+    /// In the report's order.
+    pub lvs: Vec<LvmLv>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LvmPv {
+    /// `/dev/nvme0n1p2`, `/dev/mapper/luks-…`.
+    pub device: String,
+    pub uuid: String,
+    pub size_bytes: u64,
+    pub pe_start_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LvmLv {
+    pub name: String,
+    pub uuid: String,
+    pub size_bytes: u64,
+    /// `lv_attr` (`-wi-ao----`; the first letter is the volume type).
+    pub attr: String,
+    /// The segment types (`linear`, `striped`, `thin`, `raid1`…), when recorded.
+    pub segtypes: Vec<String>,
+    /// The PVs it sits on, without the extent ranges.
+    pub devices: Vec<String>,
+    pub pool: String,
+    pub origin: String,
+}
+
+/// A size of an LVM report taken with `--units b` (`49392123904B`; without the suffix too).
+fn lvm_bytes(s: &str) -> u64 {
+    s.trim().trim_end_matches(['B', 'b']).parse().unwrap_or(0)
+}
+
+impl LvmLayout {
+    pub fn parse(report: &str) -> Result<LvmLayout, String> {
+        let v: serde_json::Value = serde_json::from_str(report).map_err(|e| format!("the LVM report cannot be read: {e}"))?;
+        let reports = v.get("report").and_then(|r| r.as_array()).ok_or("the LVM report has no \"report\" list")?;
+        let rows = |key: &str| -> Vec<&serde_json::Map<String, serde_json::Value>> {
+            reports
+                .iter()
+                .filter_map(|r| r.get(key).and_then(|a| a.as_array()))
+                .flatten()
+                .filter_map(|x| x.as_object())
+                .collect()
+        };
+        let s = |row: &serde_json::Map<String, serde_json::Value>, k: &str| row.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let mut out = LvmLayout::default();
+        fn vg_of<'a>(out: &'a mut LvmLayout, name: &str) -> &'a mut LvmVg {
+            let i = match out.vgs.iter().position(|v| v.name == name) {
+                Some(i) => i,
+                None => {
+                    out.vgs.push(LvmVg { name: name.to_string(), ..Default::default() });
+                    out.vgs.len() - 1
+                }
+            };
+            &mut out.vgs[i]
+        }
+        for r in rows("vg") {
+            let name = s(r, "vg_name");
+            if name.is_empty() {
+                continue;
+            }
+            let vg = vg_of(&mut out, &name);
+            vg.uuid = s(r, "vg_uuid");
+            vg.extent_bytes = lvm_bytes(&s(r, "vg_extent_size"));
+            vg.size_bytes = lvm_bytes(&s(r, "vg_size"));
+            vg.free_bytes = lvm_bytes(&s(r, "vg_free"));
+        }
+        for r in rows("pv") {
+            let (name, device) = (s(r, "vg_name"), s(r, "pv_name"));
+            if name.is_empty() || device.is_empty() {
+                continue;
+            }
+            let vg = vg_of(&mut out, &name);
+            if !vg.pvs.iter().any(|p| p.device == device) {
+                vg.pvs.push(LvmPv { device, uuid: s(r, "pv_uuid"), size_bytes: lvm_bytes(&s(r, "pv_size")), pe_start_bytes: lvm_bytes(&s(r, "pe_start")) });
+            }
+        }
+        for r in rows("lv").into_iter().chain(rows("seg")) {
+            let (name, lv_name) = (s(r, "vg_name"), s(r, "lv_name"));
+            if name.is_empty() || lv_name.is_empty() {
+                continue;
+            }
+            let vg = vg_of(&mut out, &name);
+            if vg.extent_bytes == 0 {
+                vg.extent_bytes = lvm_bytes(&s(r, "vg_extent_size"));
+            }
+            let i = match vg.lvs.iter().position(|l| l.name == lv_name) {
+                Some(i) => i,
+                None => {
+                    vg.lvs.push(LvmLv { name: lv_name, ..Default::default() });
+                    vg.lvs.len() - 1
+                }
+            };
+            let lv = &mut vg.lvs[i];
+            for (field, key) in [(&mut lv.uuid, "lv_uuid"), (&mut lv.attr, "lv_attr"), (&mut lv.pool, "pool_lv"), (&mut lv.origin, "origin")] {
+                if field.is_empty() {
+                    *field = s(r, key);
+                }
+            }
+            if lv.size_bytes == 0 {
+                lv.size_bytes = lvm_bytes(&s(r, "lv_size"));
+            }
+            let seg = s(r, "segtype");
+            if !seg.is_empty() {
+                lv.segtypes.push(seg);
+            }
+            for d in s(r, "devices").split(',') {
+                let d = d.split('(').next().unwrap_or("").trim();
+                if !d.is_empty() && !lv.devices.iter().any(|x| x == d) {
+                    lv.devices.push(d.to_string());
+                }
+            }
+        }
+        // an older report has no PV rows: the devices the volumes sit on
+        for vg in &mut out.vgs {
+            if vg.pvs.is_empty() {
+                let devs: Vec<String> = vg.lvs.iter().flat_map(|l| l.devices.iter().cloned()).collect();
+                for d in devs {
+                    if !d.starts_with('[') && !vg.pvs.iter().any(|p| p.device == d) {
+                        vg.pvs.push(LvmPv { device: d, ..Default::default() });
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// What the restore does not recreate, one sentence per volume (`vg/lv: a thin pool`).
+    /// Linear volumes are recreated; an older report without segment types is trusted for a
+    /// volume on one device only (on several it could be striped).
+    pub fn unsupported(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for vg in &self.vgs {
+            for lv in &vg.lvs {
+                let kind = match lv.attr.chars().next() {
+                    None | Some('-') | Some('o') => None,
+                    Some('t') => Some("a thin pool".to_string()),
+                    Some('V') => Some("a thin volume".to_string()),
+                    Some('s') | Some('S') => Some("a snapshot".to_string()),
+                    Some('r') | Some('R') => Some("a raid volume".to_string()),
+                    Some('m') | Some('M') => Some("a mirror".to_string()),
+                    Some('C') => Some("a cache volume".to_string()),
+                    Some('d') | Some('D') => Some("a VDO volume".to_string()),
+                    Some(c) => Some(format!("a volume of type '{c}'")),
+                };
+                let kind = kind
+                    .or_else(|| lv.segtypes.iter().find(|t| t.as_str() != "linear").map(|t| format!("{t} segments")))
+                    .or_else(|| {
+                        (lv.segtypes.is_empty() && lv.devices.len() > 1)
+                            .then(|| "on several devices, and the backup's manifest does not say whether it is striped (a backup by a newer agent says)".to_string())
+                    });
+                if let Some(k) = kind {
+                    out.push(format!("{}/{}: {k}", vg.name, lv.name));
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Everything a bare-metal restore needs besides the files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Manifest {
@@ -1301,16 +1481,34 @@ impl Manifest {
         {
             r.push(ReadyReason::VolumeSkipped);
         }
-        if self.lvm_report.is_some()
-            || !self.md.is_empty()
+        if !self.md.is_empty()
             || self
                 .filesystems
                 .iter()
-                .any(|f| matches!(f.source, FsSource::Lvm { .. } | FsSource::Md { .. }))
+                .any(|f| matches!(f.source, FsSource::Md { .. }))
+            || !self.lvm_unsupported().is_empty()
         {
             r.push(ReadyReason::ManualLayout);
         }
         r
+    }
+
+    /// What of this PC's LVM the bare-metal restore does not recreate (thin pools,
+    /// snapshots, raid/mirror/striped/cache volumes, an unreadable report), one sentence each;
+    /// empty when the PC has no LVM or only linear volumes.
+    pub fn lvm_unsupported(&self) -> Vec<String> {
+        let used = self.lvm_report.is_some()
+            || self.filesystems.iter().any(|f| matches!(f.source, FsSource::Lvm { .. }))
+            || self.swap.iter().any(|s| matches!(s.source, FsSource::Lvm { .. }))
+            || self.luks.iter().any(|l| matches!(l.source, FsSource::Lvm { .. }));
+        if !used {
+            return Vec::new();
+        }
+        match self.lvm_report.as_deref().map(LvmLayout::parse) {
+            None => vec!["the backup's manifest has no LVM report".into()],
+            Some(Err(e)) => vec![e],
+            Some(Ok(l)) => l.unsupported(),
+        }
     }
 }
 
@@ -1525,5 +1723,74 @@ mod tests {
         assert_eq!(v["nested_in"], "@home");
         assert_eq!(v["inside"], "games");
         assert!(serde_json::to_value(&b.subvolumes[0]).unwrap().get("nested_in").is_none());
+    }
+
+    /// `lvs --reportformat json` as agents up to 0.8.11 recorded it.
+    pub const OLD_LVS: &str = r#"{
+      "report": [
+          {
+              "lv": [
+                  {"vg_name":"ArchinstallVg", "lv_name":"home", "lv_size":"449360953344B", "lv_attr":"-wi-ao----", "pool_lv":"", "devices":"/dev/nvme0n1p2(11776)"},
+                  {"vg_name":"ArchinstallVg", "lv_name":"root", "lv_size":"49392123904B", "lv_attr":"-wi-ao----", "pool_lv":"", "devices":"/dev/nvme0n1p2(0)"}
+              ]
+          }
+      ]
+      ,
+      "log": [
+      ]
+  }"#;
+
+    #[test]
+    fn lvm_reports_old_and_new() {
+        let l = LvmLayout::parse(OLD_LVS).unwrap();
+        assert_eq!(l.vgs.len(), 1);
+        let vg = &l.vgs[0];
+        assert_eq!((vg.name.as_str(), vg.extent_bytes, vg.uuid.as_str()), ("ArchinstallVg", 0, ""));
+        assert_eq!(vg.lvs.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["home", "root"]);
+        assert_eq!(vg.lvs[1].size_bytes, 46 << 30);
+        assert_eq!(vg.pvs.len(), 1);
+        assert_eq!(vg.pvs[0].device, "/dev/nvme0n1p2");
+        assert!(l.unsupported().is_empty());
+        // the newer report: vgs, pvs, and segment rows
+        let new = r#"{"report":[{"lv":[
+            {"vg_name":"vg0","lv_name":"root","lv_uuid":"aaaaaa-1111","lv_size":"1073741824B","lv_attr":"-wi-ao----","pool_lv":"","origin":"","segtype":"linear","devices":"/dev/sda2(0)"},
+            {"vg_name":"vg0","lv_name":"root","lv_uuid":"aaaaaa-1111","lv_size":"1073741824B","lv_attr":"-wi-ao----","pool_lv":"","origin":"","segtype":"linear","devices":"/dev/sdb1(0)"},
+            {"vg_name":"vg0","lv_name":"data","lv_uuid":"bbbbbb-2222","lv_size":"4194304B","lv_attr":"-wi-a-----","pool_lv":"","origin":"","segtype":"striped","devices":"/dev/sda2(256),/dev/sdb1(256)"}],
+          "vg":[{"vg_name":"vg0","vg_uuid":"vvvvvv-0000","vg_extent_size":"4194304B","vg_size":"10737418240B","vg_free":"268435456B"}],
+          "pv":[{"pv_name":"/dev/sda2","pv_uuid":"pppppp-1","pv_size":"5368709120B","pe_start":"1048576B","vg_name":"vg0"},{"pv_name":"/dev/sdb1","pv_uuid":"pppppp-2","pv_size":"5368709120B","pe_start":"1048576B","vg_name":"vg0"},{"pv_name":"/dev/sdc","pv_uuid":"x","pv_size":"1B","pe_start":"0B","vg_name":""}]}]}"#;
+        let l = LvmLayout::parse(new).unwrap();
+        let vg = &l.vgs[0];
+        assert_eq!((vg.uuid.as_str(), vg.extent_bytes, vg.free_bytes), ("vvvvvv-0000", 4 << 20, 256 << 20));
+        assert_eq!(vg.pvs.len(), 2, "a PV outside any VG is not part of the layout");
+        assert_eq!(vg.lvs[0].devices, ["/dev/sda2", "/dev/sdb1"]);
+        assert_eq!(vg.lvs[0].segtypes, ["linear", "linear"]);
+        assert_eq!(l.unsupported(), ["vg0/data: striped segments"]);
+        assert!(LvmLayout::parse("not json").is_err());
+    }
+
+    #[test]
+    fn lvm_kinds_the_restore_refuses() {
+        let row = |name: &str, attr: &str, extra: &str| format!(r#"{{"vg_name":"vg","lv_name":"{name}","lv_size":"1B","lv_attr":"{attr}","devices":"/dev/sda2(0)"{extra}}}"#);
+        let rows = [row("pool", "twi-aotz--", ""), row("thin", "Vwi-aotz--", r#","pool_lv":"pool""#), row("snap", "swi-a-s---", r#","origin":"root""#), row("root", "owi-aos---", ""), row("r1", "rwi-a-r---", r#","segtype":"raid1""#), row("c", "Cwi-a-C---", "")];
+        let l = LvmLayout::parse(&format!(r#"{{"report":[{{"lv":[{}]}}]}}"#, rows.join(","))).unwrap();
+        let u = l.unsupported();
+        assert_eq!(u, ["vg/pool: a thin pool", "vg/thin: a thin volume", "vg/snap: a snapshot", "vg/r1: a raid volume", "vg/c: a cache volume"]);
+        // an old report cannot tell striped from linear on several devices
+        let l = LvmLayout::parse(r#"{"report":[{"lv":[{"vg_name":"vg","lv_name":"x","lv_size":"1B","lv_attr":"-wi-a-----","devices":"/dev/sda2(0),/dev/sdb2(0)"}]}]}"#).unwrap();
+        assert!(l.unsupported()[0].contains("striped"), "{:?}", l.unsupported());
+    }
+
+    #[test]
+    fn linear_lvm_is_ready_md_and_thin_are_not() {
+        let mut m = Manifest { disks: vec![Disk { table: Some(PartTable::default()), ..Default::default() }], boot: BootInfo { loader: Loader::SystemdBoot, ..Default::default() }, ..Default::default() };
+        m.filesystems.push(Filesystem { source: FsSource::Lvm { vg: "ArchinstallVg".into(), lv: "root".into() }, ..Default::default() });
+        assert!(m.ready_reasons().contains(&ReadyReason::ManualLayout), "LVM without a report");
+        m.lvm_report = Some(OLD_LVS.into());
+        assert!(!m.ready_reasons().contains(&ReadyReason::ManualLayout), "{:?}", m.ready_reasons());
+        m.lvm_report = Some(OLD_LVS.replace("-wi-ao----", "Vwi-aotz--"));
+        assert!(m.ready_reasons().contains(&ReadyReason::ManualLayout));
+        m.lvm_report = Some(OLD_LVS.into());
+        m.md.push("MD_LEVEL=raid1".into());
+        assert!(m.ready_reasons().contains(&ReadyReason::ManualLayout));
     }
 }

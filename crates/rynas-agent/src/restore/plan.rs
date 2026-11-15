@@ -8,7 +8,9 @@
 //! - Filesystems keep their UUIDs and labels unless another attached disk has them (then new
 //!   ones, and the restore rewrites fstab, crypttab, the loader entries and the cmdline).
 //! - LUKS containers are made again with the same UUID and cipher (a new passphrase).
-//! - LVM and md are not recreated by this version (preflight says so).
+//! - LVM: linear volumes on PVs that are partitions or LUKS containers, with the same names,
+//!   extent size, sizes and UUIDs ([`super::lvm`]); LUKS inside a volume too.
+//! - md is not recreated by this version (the plan refuses it).
 
 use rynas_api_types::pcagent::*;
 
@@ -45,13 +47,15 @@ pub struct FsAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LuksAction {
     pub luks: usize,
-    /// The partition it is made on.
+    /// The partition it is made on (or `/dev/<vg>/<lv>` of a logical volume).
     pub partition: String,
     pub mapper: String,
     pub uuid: String,
     pub version: u32,
     pub cipher: String,
     pub key_bits: u32,
+    /// Inside a logical volume: made after the LVM step (the others before it).
+    pub on_lvm: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +77,8 @@ pub struct DiskPlan {
 pub struct Plan {
     pub disks: Vec<DiskPlan>,
     pub luks: Vec<LuksAction>,
+    /// LVM volume groups made again (after the LUKS containers on partitions).
+    pub lvm: Vec<super::lvm::VgAction>,
     pub filesystems: Vec<FsAction>,
     pub swap: Vec<SwapAction>,
     /// Old → new IDs (UUIDs and PARTUUIDs) for the text fixes.
@@ -102,17 +108,25 @@ fn random_fat_id() -> String {
 }
 
 /// Bytes a filesystem needs on a target: its used bytes plus room (10 %, at least 256 MiB).
-fn needed(used: u64) -> u64 {
+pub(crate) fn needed(used: u64) -> u64 {
     used + (used / 10).max(256 << 20)
 }
 
-/// Builds the plan. `in_use(uuid)` says whether another attached device has that ID.
+/// Builds the plan. `in_use(uuid)` says whether another attached device has that ID
+/// (`vg:<name>`: whether an LVM volume group of that name is on another attached disk).
 pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str) -> bool) -> Result<Plan, String> {
     let mut notes = Vec::new();
-    let reasons = m.ready_reasons();
-    if reasons.contains(&ReadyReason::ManualLayout) {
-        return Err("this PC used LVM or md: this version of the restore recreates GPT, LUKS and filesystems only; recreate the volumes by hand, then restore the files from the web interface".into());
+    if !m.md.is_empty() || m.filesystems.iter().any(|f| matches!(f.source, FsSource::Md { .. })) {
+        return Err("this PC used md (software RAID): this version of the restore recreates GPT, LUKS, LVM and filesystems, not md arrays; recreate them by hand, then restore the files from the web interface".into());
     }
+    let layout = match &m.lvm_report {
+        Some(r) => LvmLayout::parse(r)?,
+        // LVM in use without a report (it could not be read at backup time)
+        None if !m.lvm_unsupported().is_empty() => {
+            return Err(format!("this PC used LVM, but {}: recreate the volumes by hand, then restore the files from the web interface", m.lvm_unsupported().join("; ")));
+        }
+        None => LvmLayout::default(),
+    };
     let mut id_map: Vec<(String, String)> = Vec::new();
     let mut disks = Vec::new();
     for (src, t) in targets {
@@ -196,12 +210,10 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
     let target_part = |disk: usize, number: u32| -> Option<String> {
         disks.iter().find(|d| d.source == disk).map(|d| format!("/dev/{}", part_name(&d.target.name, number)))
     };
+    // LUKS on partitions, then the LVM groups (their PVs may be such containers), then LUKS
+    // inside logical volumes
     let mut luks = Vec::new();
-    for (i, l) in m.luks.iter().enumerate() {
-        let FsSource::Partition { disk, number } = l.source else {
-            return Err(format!("LUKS container {} is not on a partition", l.device));
-        };
-        let Some(part) = target_part(disk, number) else { continue };
+    let luks_action = |i: usize, l: &Luks, partition: String, on_lvm: bool, id_map: &mut Vec<(String, String)>, notes: &mut Vec<String>| {
         let mut uuid = l.uuid.clone();
         if in_use(&uuid.to_lowercase()) {
             let new = random_uuid();
@@ -209,16 +221,80 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
             notes.push(format!("LUKS {}: UUID in use on another disk, new {new}", l.uuid));
             uuid = new;
         }
-        luks.push(LuksAction {
+        notes.push("LUKS: TPM2/FIDO2 tokens are not restored; enroll them again after the first boot".into());
+        LuksAction {
             luks: i,
-            partition: part,
+            partition,
             mapper: if l.mapper.is_empty() { format!("rynas-luks{i}") } else { l.mapper.clone() },
             uuid,
             version: l.version.max(1),
             cipher: l.cipher.clone(),
             key_bits: l.key_bits,
-        });
-        notes.push("LUKS: TPM2/FIDO2 tokens are not restored; enroll them again after the first boot".into());
+            on_lvm,
+        }
+    };
+    for (i, l) in m.luks.iter().enumerate() {
+        match l.source {
+            FsSource::Partition { disk, number } => {
+                if let Some(part) = target_part(disk, number) {
+                    luks.push(luks_action(i, l, part, false, &mut id_map, &mut notes));
+                }
+            }
+            FsSource::Lvm { .. } => {}
+            _ => return Err(format!("LUKS container {} is not on a partition or a logical volume", l.device)),
+        }
+    }
+    let lvm = {
+        let part_bytes = |disk: usize, number: u32| -> Option<u64> {
+            let d = disks.iter().find(|d| d.source == disk)?;
+            let e = d.gpt.entries.get(number as usize - 1)?;
+            Some((e.last_lba - e.first_lba + 1) * d.gpt.sector)
+        };
+        let orig_bytes = |disk: usize, number: u32| -> u64 {
+            m.disks.get(disk).and_then(|d| d.table.as_ref().map(|t| (t, u64::from(d.logical_sector)))).and_then(|(t, s)| t.partitions.iter().find(|p| p.number == number).map(|p| p.size_lba * s)).unwrap_or(0)
+        };
+        let pv_target = |dev: &str| -> super::lvm::PvTarget {
+            use super::lvm::PvTarget;
+            for (di, d) in m.disks.iter().enumerate() {
+                if format!("/dev/{}", d.name) == dev {
+                    return PvTarget::Unsupported(format!("a physical volume on the whole disk {}, without a partition table: not recreated by this version", d.name));
+                }
+                let Some(t) = &d.table else { continue };
+                if let Some(p) = t.partitions.iter().find(|p| format!("/dev/{}", part_name(&d.name, p.number)) == dev) {
+                    return match (target_part(di, p.number), part_bytes(di, p.number)) {
+                        (Some(device), Some(bytes)) => PvTarget::On { device, bytes, orig_bytes: orig_bytes(di, p.number) },
+                        _ => PvTarget::NoTarget,
+                    };
+                }
+            }
+            if let Some((i, l)) = m.luks.iter().enumerate().find(|(_, l)| l.device == dev || (!l.mapper.is_empty() && format!("/dev/mapper/{}", l.mapper) == dev)) {
+                let FsSource::Partition { disk, number } = l.source else {
+                    return PvTarget::Unsupported("a physical volume in a LUKS container that is not on a partition".into());
+                };
+                return match (luks.iter().find(|a| a.luks == i), part_bytes(disk, number)) {
+                    (Some(a), Some(bytes)) => PvTarget::On {
+                        device: format!("/dev/mapper/{}", a.mapper),
+                        bytes: bytes.saturating_sub(super::lvm::LUKS_HEADER),
+                        orig_bytes: orig_bytes(disk, number).saturating_sub(super::lvm::LUKS_HEADER),
+                    },
+                    _ => PvTarget::NoTarget,
+                };
+            }
+            if dev.starts_with("/dev/md") {
+                return PvTarget::Unsupported("a physical volume on md: not recreated by this version".into());
+            }
+            PvTarget::Unsupported("not a partition or a LUKS container the manifest knows".into())
+        };
+        super::lvm::plan(m, &layout, &pv_target, in_use, &mut notes)?
+    };
+    let lv_device = |src: &FsSource| -> Option<String> {
+        let FsSource::Lvm { vg, lv } = src else { return None };
+        lvm.iter().find(|a| a.name == *vg).filter(|a| a.lvs.iter().any(|l| l.name == *lv)).map(|_| format!("/dev/{vg}/{lv}"))
+    };
+    for (i, l) in m.luks.iter().enumerate() {
+        if let Some(dev) = lv_device(&l.source) {
+            luks.push(luks_action(i, l, dev, true, &mut id_map, &mut notes));
+        }
     }
     let mut filesystems = Vec::new();
     for (i, f) in m.filesystems.iter().enumerate() {
@@ -229,6 +305,7 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
         let device = match &f.source {
             FsSource::Partition { disk, number } => target_part(*disk, *number),
             FsSource::Luks { luks: li } => luks.iter().find(|a| a.luks == *li).map(|a| format!("/dev/mapper/{}", a.mapper)),
+            s @ FsSource::Lvm { .. } => lv_device(s),
             _ => None,
         };
         let Some(device) = device else {
@@ -265,9 +342,12 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
     }
     let mut swap = Vec::new();
     for s in m.swap.iter().filter(|s| !s.file) {
-        if let FsSource::Partition { disk, number } = s.source
-            && let Some(dev) = target_part(disk, number)
-        {
+        let dev = match &s.source {
+            FsSource::Partition { disk, number } => target_part(*disk, *number),
+            src @ FsSource::Lvm { .. } => lv_device(src),
+            _ => None,
+        };
+        if let Some(dev) = dev {
             swap.push(SwapAction {
                 device: dev,
                 uuid: s.uuid.clone(),
@@ -283,6 +363,7 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
     Ok(Plan {
         disks,
         luks,
+        lvm,
         filesystems,
         swap,
         id_map,
@@ -372,6 +453,7 @@ pub fn package_of(tool: &str) -> &'static str {
         "mkfs.f2fs" => "f2fs-tools",
         "mkswap" | "mount" | "umount" | "wipefs" => "util-linux",
         "cryptsetup" => "cryptsetup",
+        "pvcreate" | "vgcreate" | "lvcreate" | "vgchange" | "vgs" | "vgcfgbackup" | "vgcfgrestore" => "lvm2",
         "udevadm" => "systemd / udev",
         _ => "the distribution's package",
     }
@@ -394,6 +476,7 @@ pub fn tools(p: &Plan) -> Vec<String> {
     if !p.swap.is_empty() {
         v.push("mkswap".into());
     }
+    v.extend(super::lvm::tools(&p.lvm).into_iter().map(String::from));
     v.sort();
     v.dedup();
     v
@@ -428,12 +511,17 @@ pub fn describe(m: &Manifest, p: &Plan, pool: bool) -> Vec<String> {
             ));
         }
     }
-    for l in &p.luks {
-        out.push(format!(
+    let luks_line = |l: &LuksAction| {
+        format!(
             "cryptsetup luksFormat --type luks{} --uuid {} --cipher {} --key-size {} {} && cryptsetup open {} {}",
             l.version, l.uuid, l.cipher, l.key_bits, l.partition, l.partition, l.mapper
-        ));
+        )
+    };
+    out.extend(p.luks.iter().filter(|l| !l.on_lvm).map(luks_line));
+    for vg in &p.lvm {
+        out.extend(super::lvm::describe(vg));
     }
+    out.extend(p.luks.iter().filter(|l| l.on_lvm).map(luks_line));
     for a in &p.filesystems {
         if let Ok(argv) = mkfs_argv(a) {
             out.push(argv.join(" "));
@@ -459,6 +547,9 @@ pub fn describe(m: &Manifest, p: &Plan, pool: bool) -> Vec<String> {
     }
     if !p.id_map.is_empty() {
         out.push(format!("rewrite {} changed IDs in fstab, crypttab, loader entries and the cmdline", p.id_map.len()));
+    }
+    if !p.lvm.is_empty() {
+        out.push(format!("LVM in the initramfs: lvm2 in the restored system{}", if m.boot.initramfs == InitramfsTool::Mkinitcpio { ", the lvm2 hook in mkinitcpio's HOOKS (added if missing)" } else { "" }));
     }
     out.push(format!("chroot: /etc/kernel/cmdline from the manifest, initramfs ({:?}), boot loader ({:?}), removable EFI fallback", m.boot.initramfs, m.boot.loader));
     for n in &p.notes {
@@ -749,10 +840,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn lvm_refused() {
+    fn unreadable_lvm_report_refused() {
         let mut m = sample();
         m.lvm_report = Some("{}".into());
-        assert!(build(&m, &[(0, target(8 << 30))], &|_| false).is_err());
+        assert!(build(&m, &[(0, target(8 << 30))], &|_| false).unwrap_err().contains("LVM report"));
+        // LVM in use and no report at all
+        m.lvm_report = None;
+        m.filesystems[0].source = FsSource::Lvm { vg: "vg".into(), lv: "root".into() };
+        assert!(build(&m, &[(0, target(8 << 30))], &|_| false).unwrap_err().contains("no LVM report"));
     }
 
 
@@ -837,5 +932,231 @@ pub(crate) mod tests {
         assert!(text.contains("+ UUID=0000-0"), "{text}");
         assert!(text.contains("--- /etc/kernel/cmdline"), "{text}");
         assert!(text.contains("/etc/default/grub: no change"), "{text}");
+    }
+
+    const LVM_TYPE: &str = "E6D6D379-F507-44C2-A23C-238F2A3DF928";
+    const GIB: u64 = 1 << 30;
+    const VG_UUID: &str = "Vg0AAA-1111-2222-3333-4444-5555-Vg0AAA";
+    const PV_UUID: &str = "Pv0AAA-1111-2222-3333-4444-5555-Pv0AAA";
+    const ROOT_UUID: &str = "Root00-1111-2222-3333-4444-5555-Root00";
+    const HOME_UUID: &str = "Home00-1111-2222-3333-4444-5555-Home00";
+
+    /// The LVM report of the PC below, as agent 0.8.12 records it.
+    fn lvm_report(root_attr: &str) -> String {
+        format!(
+            r#"{{"report":[{{"lv":[
+                {{"vg_name":"ArchinstallVg","lv_name":"root","lv_uuid":"{ROOT_UUID}","lv_size":"49392123904B","lv_attr":"{root_attr}","pool_lv":"","origin":"","segtype":"linear","devices":"/dev/nvme0n1p2(0)"}},
+                {{"vg_name":"ArchinstallVg","lv_name":"home","lv_uuid":"{HOME_UUID}","lv_size":"449360953344B","lv_attr":"-wi-ao----","pool_lv":"","origin":"","segtype":"linear","devices":"/dev/nvme0n1p2(11776)"}}],
+              "vg":[{{"vg_name":"ArchinstallVg","vg_uuid":"{VG_UUID}","vg_extent_size":"4194304B","vg_size":"499021512704B","vg_free":"268435456B"}}],
+              "pv":[{{"pv_name":"/dev/nvme0n1p2","pv_uuid":"{PV_UUID}","pv_size":"499031958528B","pe_start":"1048576B","vg_name":"ArchinstallVg"}}]}}]}}"#
+        )
+    }
+
+    /// The PC of the real case: Arch, UEFI, systemd-boot with a UKI, mkinitcpio; nvme0n1 (a
+    /// 500 GB disk) with a 1 GiB ESP at /boot and an LVM partition: ArchinstallVg with root
+    /// (46 GiB ext4) and home (418.5 GiB ext4), 256 MiB free; a second disk (NTFS) outside the
+    /// backup, listed first.
+    pub fn arch_lvm() -> Manifest {
+        let size = 500_107_862_016u64;
+        let last = size / 512 - 34;
+        let ntfs = Disk {
+            name: "sda".into(),
+            size_bytes: 1_000_204_886_016,
+            logical_sector: 512,
+            table: Some(PartTable {
+                kind: "gpt".into(),
+                disk_guid: "AAAAAAAA-0000-4000-8000-00000000000A".into(),
+                partitions: vec![Partition { number: 1, start_lba: 2048, size_lba: 1_000_000_000, type_guid: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7".into(), part_guid: "AAAAAAAA-0000-4000-8000-00000000000B".into(), ..Default::default() }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let nvme = Disk {
+            name: "nvme0n1".into(),
+            model: "Samsung".into(),
+            size_bytes: size,
+            logical_sector: 512,
+            table: Some(PartTable {
+                kind: "gpt".into(),
+                disk_guid: "BBBBBBBB-0000-4000-8000-00000000000A".into(),
+                partitions: vec![
+                    Partition { number: 1, start_lba: 2048, size_lba: 2_097_152, type_guid: ESP.into(), part_guid: "BBBBBBBB-0000-4000-8000-000000000001".into(), ..Default::default() },
+                    Partition { number: 2, start_lba: 2_099_200, size_lba: last - 2_099_200 + 1, type_guid: LVM_TYPE.into(), part_guid: "BBBBBBBB-0000-4000-8000-000000000002".into(), ..Default::default() },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let lv = |name: &str, uuid: &str, path: &str, used: u64| Filesystem {
+            device: format!("/dev/mapper/ArchinstallVg-{name}"),
+            source: FsSource::Lvm { vg: "ArchinstallVg".into(), lv: name.into() },
+            fstype: "ext4".into(),
+            uuid: uuid.into(),
+            mounts: vec![MountEntry { path: path.into(), ..Default::default() }],
+            used_bytes: used,
+            capture: Some(CaptureMethod::LvmSnapshot),
+            ..Default::default()
+        };
+        Manifest {
+            format: 1,
+            hostname: "arch".into(),
+            boot: BootInfo {
+                uefi: true,
+                loader: Loader::SystemdBoot,
+                initramfs: InitramfsTool::Mkinitcpio,
+                uki: true,
+                esp: Some("/boot".into()),
+                kernel_cmdline: Some("root=/dev/ArchinstallVg/root zswap.enabled=0 rw rootfstype=ext4".into()),
+                ..Default::default()
+            },
+            disks: vec![ntfs, nvme],
+            filesystems: vec![
+                Filesystem {
+                    device: "/dev/nvme0n1p1".into(),
+                    source: FsSource::Partition { disk: 1, number: 1 },
+                    fstype: "vfat".into(),
+                    uuid: "8A4B-1C2D".into(),
+                    mounts: vec![MountEntry { path: "/boot".into(), ..Default::default() }],
+                    used_bytes: 120 << 20,
+                    capture: Some(CaptureMethod::Files),
+                    ..Default::default()
+                },
+                lv("root", "6f1d1b46-6c52-4cf0-9a8e-2c3d4e5f6a7b", "/", 20 * GIB),
+                lv("home", "0e3c7a2b-1d4f-4e5a-8b9c-0d1e2f3a4b5c", "/home", 100 * GIB),
+            ],
+            lvm_report: Some(lvm_report("-wi-ao----")),
+            fstab: "UUID=6f1d1b46-6c52-4cf0-9a8e-2c3d4e5f6a7b / ext4 rw,relatime 0 1\nUUID=0e3c7a2b-1d4f-4e5a-8b9c-0d1e2f3a4b5c /home ext4 rw,relatime 0 2\nUUID=8A4B-1C2D /boot vfat rw,fmask=0022,dmask=0022 0 2\n".into(),
+            ..Default::default()
+        }
+    }
+
+    fn nvme(size: u64) -> TargetDisk {
+        TargetDisk { name: "nvme1n1".into(), size_bytes: size, logical_sector: 512, model: "new".into(), serial: "n".into() }
+    }
+
+    #[test]
+    fn lvm_real_case_same_size() {
+        let m = arch_lvm();
+        assert_eq!(super::super::source_disk(&m), Some(1), "the disk of the root's volume group, not the first one");
+        assert!(!m.ready_reasons().contains(&ReadyReason::ManualLayout));
+        let p = build(&m, &[(1, nvme(500_107_862_016))], &|_| false).unwrap();
+        assert_eq!(p.lvm.len(), 1);
+        let vg = &p.lvm[0];
+        assert_eq!((vg.name.as_str(), vg.uuid.as_deref(), vg.extent_bytes), ("ArchinstallVg", Some(VG_UUID), 4 << 20));
+        assert_eq!(vg.pvs, [super::super::lvm::PvAction { device: "/dev/nvme1n1p2".into(), uuid: Some(PV_UUID.into()) }]);
+        assert_eq!(vg.lvs.iter().map(|l| (l.name.as_str(), l.extents, l.uuid.as_deref())).collect::<Vec<_>>(), [("root", 11776, Some(ROOT_UUID)), ("home", 107136, Some(HOME_UUID))]);
+        assert_eq!(vg.orig_free, 64);
+        assert!(vg.free() >= 64, "{}", vg.free());
+        assert!(vg.available >= 11776 + 107136 + 64);
+        let devs: Vec<(&str, &str)> = p.filesystems.iter().map(|a| (a.device.as_str(), a.uuid.as_str())).collect();
+        assert_eq!(devs, [("/dev/nvme1n1p1", "8A4B-1C2D"), ("/dev/ArchinstallVg/root", "6f1d1b46-6c52-4cf0-9a8e-2c3d4e5f6a7b"), ("/dev/ArchinstallVg/home", "0e3c7a2b-1d4f-4e5a-8b9c-0d1e2f3a4b5c")]);
+        assert!(p.id_map.is_empty());
+        let t = tools(&p);
+        for x in ["pvcreate", "vgcreate", "lvcreate", "vgchange", "vgcfgbackup", "vgcfgrestore", "mkfs.ext4", "mkfs.vfat"] {
+            assert!(t.iter().any(|y| y == x), "{x} in {t:?}");
+        }
+        assert_eq!(package_of("vgcfgrestore"), "lvm2");
+        let text = describe(&m, &p, false).join("\n");
+        assert!(text.contains(&format!("pvcreate --uuid {PV_UUID} --norestorefile /dev/nvme1n1p2")), "{text}");
+        assert!(text.contains("vgcreate -s 4096k ArchinstallVg /dev/nvme1n1p2"), "{text}");
+        assert!(text.contains("lvcreate -l 11776 -n root ArchinstallVg"), "{text}");
+        assert!(text.contains("mkfs.ext4 -F -q -U 6f1d1b46-6c52-4cf0-9a8e-2c3d4e5f6a7b /dev/ArchinstallVg/root"), "{text}");
+        assert!(text.contains("lvm2 hook"), "{text}");
+        // the LVM step comes before the filesystems
+        assert!(text.find("vgcreate").unwrap() < text.find("mkfs.ext4").unwrap());
+        // the command line names the volume by its path: nothing to rewrite
+        assert_eq!(fix_cmdline(m.boot.kernel_cmdline.as_deref().unwrap(), &m, &p.id_map), "root=/dev/ArchinstallVg/root zswap.enabled=0 rw rootfstype=ext4");
+    }
+
+    #[test]
+    fn lvm_older_manifest_without_uuids() {
+        let mut m = arch_lvm();
+        m.lvm_report = Some(r#"{"report":[{"lv":[{"vg_name":"ArchinstallVg","lv_name":"root","lv_size":"49392123904B","lv_attr":"-wi-ao----","pool_lv":"","devices":"/dev/nvme0n1p2(0)"},{"vg_name":"ArchinstallVg","lv_name":"home","lv_size":"449360953344B","lv_attr":"-wi-ao----","pool_lv":"","devices":"/dev/nvme0n1p2(11776)"}]}]}"#.into());
+        let p = build(&m, &[(1, nvme(500_107_862_016))], &|_| false).unwrap();
+        let vg = &p.lvm[0];
+        assert_eq!((vg.uuid.as_deref(), vg.extent_bytes, vg.pvs[0].uuid.as_deref()), (None, 4 << 20, None));
+        assert_eq!(vg.lvs.iter().map(|l| l.extents).collect::<Vec<_>>(), [11776, 107136]);
+        assert!(!vg.sets_ids());
+        assert!(vg.orig_free > 0 && vg.free() == vg.orig_free, "free from the partition's size: {} {}", vg.orig_free, vg.free());
+        assert!(p.notes.iter().any(|n| n.contains("no LVM UUIDs")), "{:?}", p.notes);
+        assert!(!tools(&p).iter().any(|t| t == "vgcfgrestore"));
+    }
+
+    #[test]
+    fn lvm_smaller_disk_shrinks_what_has_room() {
+        let m = arch_lvm();
+        let p = build(&m, &[(1, nvme(256_060_514_304))], &|_| false).unwrap();
+        let vg = &p.lvm[0];
+        let (root, home) = (&vg.lvs[0], &vg.lvs[1]);
+        assert!(root.extents < root.orig_extents && home.extents < home.orig_extents, "{vg:?}");
+        assert!(root.extents >= root.min_extents && home.extents >= home.min_extents);
+        // the data plus room: 20 GiB + 2 GiB, 100 GiB + 10 GiB
+        assert_eq!((root.min_extents, home.min_extents), (22 * 256, 110 * 256));
+        assert_eq!(vg.free(), vg.orig_free.max(vg.free()));
+        assert!(vg.free() >= 64 && vg.lvs.iter().map(|l| l.extents).sum::<u64>() + vg.free() == vg.available);
+        assert!(p.notes.iter().any(|n| n.contains("ArchinstallVg/home") && n.contains("→")), "{:?}", p.notes);
+        // in proportion: home keeps about nine times root's size
+        assert!(home.extents / root.extents == 9, "{} {}", home.extents, root.extents);
+        // a disk the data does not fit
+        let e = build(&m, &[(1, nvme(128_035_676_160))], &|_| false).unwrap_err();
+        assert!(e.contains("too small for volume group ArchinstallVg"), "{e}");
+    }
+
+    #[test]
+    fn lvm_refusals() {
+        let m = arch_lvm();
+        let target = [(1, nvme(500_107_862_016))];
+        // a thin volume, a snapshot: named
+        let mut thin = m.clone();
+        thin.lvm_report = Some(lvm_report("Vwi-aotz--"));
+        let e = build(&thin, &target, &|_| false).unwrap_err();
+        assert!(e.contains("linear LVM volumes only") && e.contains("ArchinstallVg/root: a thin volume"), "{e}");
+        assert!(thin.ready_reasons().contains(&ReadyReason::ManualLayout));
+        let mut striped = m.clone();
+        striped.lvm_report = Some(lvm_report("-wi-ao----").replacen("\"linear\"", "\"striped\"", 1));
+        assert!(build(&striped, &target, &|_| false).unwrap_err().contains("striped segments"));
+        // md stays refused, and says LVM is fine
+        let mut md = m.clone();
+        md.md.push("MD_LEVEL=raid1\n".into());
+        let e = build(&md, &target, &|_| false).unwrap_err();
+        assert!(e.contains("md") && e.contains("LVM"), "{e}");
+        // another attached disk has a volume group of the same name: refused (names matter for boot)
+        let e = build(&m, &target, &|id| id == "vg:ArchinstallVg").unwrap_err();
+        assert!(e.contains("another attached disk") && e.contains("vgrename"), "{e}");
+        // a UUID in use: a new one, said so; the names stay
+        let p = build(&m, &target, &|id| id == PV_UUID || id == ROOT_UUID).unwrap();
+        assert_eq!((p.lvm[0].pvs[0].uuid.as_deref(), p.lvm[0].lvs[0].uuid.as_deref(), p.lvm[0].uuid.as_deref()), (None, None, Some(VG_UUID)));
+        assert!(p.notes.iter().any(|n| n.contains(PV_UUID) && n.contains("in use")), "{:?}", p.notes);
+        // a PV on a disk that gets no target
+        let mut span = m.clone();
+        span.lvm_report = Some(lvm_report("-wi-ao----").replace(r#""vg_name":"ArchinstallVg"}]}]}"#, r#""vg_name":"ArchinstallVg"},{"pv_name":"/dev/sda1","pv_uuid":"","pv_size":"1B","pe_start":"0B","vg_name":"ArchinstallVg"}]}]}"#));
+        let e = build(&span, &target, &|_| false).unwrap_err();
+        assert!(e.contains("no target") && e.contains("/dev/sda1"), "{e}");
+        // a PV on a whole disk
+        let mut whole = m.clone();
+        whole.lvm_report = Some(lvm_report("-wi-ao----").replace("/dev/nvme0n1p2", "/dev/nvme0n1"));
+        assert!(build(&whole, &target, &|_| false).unwrap_err().contains("whole disk"));
+    }
+
+    #[test]
+    fn lvm_with_luks_below_and_inside() {
+        let mut m = arch_lvm();
+        // the PV in a LUKS container on p2, and home in LUKS inside its volume
+        m.luks = vec![
+            Luks { device: "/dev/nvme0n1p2".into(), source: FsSource::Partition { disk: 1, number: 2 }, uuid: "11111111-2222-4333-8444-555555555555".into(), version: 2, cipher: "aes-xts-plain64".into(), key_bits: 512, mapper: "cryptlvm".into(), ..Default::default() },
+            Luks { device: "/dev/mapper/ArchinstallVg-home".into(), source: FsSource::Lvm { vg: "ArchinstallVg".into(), lv: "home".into() }, uuid: "66666666-2222-4333-8444-555555555555".into(), version: 2, mapper: "home".into(), ..Default::default() },
+        ];
+        m.lvm_report = Some(lvm_report("-wi-ao----").replace("\"/dev/nvme0n1p2", "\"/dev/mapper/cryptlvm"));
+        m.filesystems[2].source = FsSource::Luks { luks: 1 };
+        let p = build(&m, &[(1, nvme(500_107_862_016))], &|_| false).unwrap();
+        assert_eq!(p.luks.iter().map(|l| (l.partition.as_str(), l.on_lvm)).collect::<Vec<_>>(), [("/dev/nvme1n1p2", false), ("/dev/ArchinstallVg/home", true)]);
+        assert_eq!(p.lvm[0].pvs[0].device, "/dev/mapper/cryptlvm");
+        assert_eq!(p.filesystems[2].device, "/dev/mapper/home");
+        let text = describe(&m, &p, false).join("\n");
+        let (a, b, c) = (text.find("luksFormat --type luks2 --uuid 1111").unwrap(), text.find("vgcreate").unwrap(), text.find("luksFormat --type luks2 --uuid 6666").unwrap());
+        assert!(a < b && b < c, "{text}");
+        assert_eq!(super::super::source_disk(&m), Some(1));
+        // the LUKS header comes off what LVM gets
+        assert!(p.lvm[0].available < build(&arch_lvm(), &[(1, nvme(500_107_862_016))], &|_| false).unwrap().lvm[0].available);
     }
 }

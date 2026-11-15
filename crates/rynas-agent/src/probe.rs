@@ -239,14 +239,16 @@ pub fn block_at(sys: &Path) -> Option<Block> {
     })
 }
 
-/// Whole disks: `/sys/block/*` without loop, ram, zram, dm, md, sr devices.
+/// Whole disks: `/sys/block/*` without loop, ram, zram, dm, md, sr devices. Tests on
+/// throwaway loop disks set `RYNAS_TEST_LOOP_DISKS=1` to count loop devices as disks.
 pub fn disks() -> Vec<Block> {
+    let loops = std::env::var_os("RYNAS_TEST_LOOP_DISKS").is_some_and(|v| v == "1");
     let mut v: Vec<Block> = std::fs::read_dir("/sys/block")
         .map(|rd| {
             rd.flatten()
                 .filter_map(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
-                    let skip = ["loop", "ram", "zram", "dm-", "md", "sr", "fd", "nbd"].iter().any(|p| n.starts_with(p));
+                    let skip = ["loop", "ram", "zram", "dm-", "md", "sr", "fd", "nbd"].iter().any(|p| n.starts_with(p) && !(loops && *p == "loop"));
                     if skip {
                         return None;
                     }

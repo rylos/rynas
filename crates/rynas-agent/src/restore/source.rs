@@ -167,6 +167,49 @@ pub trait RestoreSource {
     }
 }
 
+/// A source for tests on throwaway disks (the scripted mode's hidden `--test-manifest` and
+/// `--test-tree`): a manifest file and a folder with the PC's files as a version holds them
+/// (every filesystem's files at their mount points), copied with `cp -a`.
+pub struct LocalSource {
+    pub manifest: Manifest,
+    pub tree: PathBuf,
+}
+
+impl RestoreSource for LocalSource {
+    fn kind(&self) -> &'static str {
+        "local folder (test)"
+    }
+
+    fn device(&self) -> &str {
+        "local"
+    }
+
+    fn versions(&mut self) -> Result<Vec<Version>, String> {
+        Ok(vec![Version { id: "local".into(), time_ms: 0, hostname: self.manifest.hostname.clone(), bytes: 0, files: 0 }])
+    }
+
+    fn manifest(&mut self, _v: &Version) -> Result<Manifest, String> {
+        Ok(self.manifest.clone())
+    }
+
+    fn fill(&self) -> Fill {
+        Fill::MountedTree
+    }
+
+    fn fill_tree(&mut self, _v: &Version, root: &Path, _p: Progress) -> Result<(), String> {
+        let from = format!("{}/.", self.tree.display());
+        let o = std::process::Command::new("cp").args(["-a", "--", &from]).arg(root).output().map_err(|e| format!("cp: {e}"))?;
+        if !o.status.success() {
+            return Err(format!("cp -a {from}: {}", String::from_utf8_lossy(&o.stderr).trim()));
+        }
+        Ok(())
+    }
+
+    fn report(&mut self, _v: &Version, ok: bool, message: &str, _log: &str) {
+        eprintln!("report: {} {message}", if ok { "ok" } else { "failed" });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

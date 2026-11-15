@@ -166,6 +166,55 @@ pub fn split_lvm_name(n: &str) -> (String, String) {
     (n.to_string(), String::new())
 }
 
+/// The LVM layout for a bare-metal restore, in LVM's JSON report format: the `lv` rows of
+/// `lvs` (one per segment, with its type and devices), the `vg` rows of `vgs` (UUID, extent
+/// size, free space) and the `pv` rows of `pvs` (UUID, size, data start), merged into one
+/// report (read by [`rynas_api_types::pcagent::LvmLayout::parse`]). `None` when `lvs` fails.
+fn lvm_layout_report() -> Option<String> {
+    let json = |prog: &str, fields: &str| -> Option<serde_json::Value> {
+        let o = std::process::Command::new(prog).args(["--reportformat", "json", "--units", "b", "-o", fields]).output().ok().filter(|o| o.status.success())?;
+        serde_json::from_slice(&o.stdout).ok()
+    };
+    let lvs = json("lvs", "vg_name,lv_name,lv_uuid,lv_size,lv_attr,pool_lv,origin,segtype,stripes,seg_size,devices")?;
+    let mut merged = serde_json::Map::new();
+    for v in [Some(lvs), json("vgs", "vg_name,vg_uuid,vg_extent_size,vg_size,vg_free"), json("pvs", "pv_name,pv_uuid,pv_size,pe_start,vg_name")].into_iter().flatten() {
+        for r in v.get("report").and_then(|r| r.as_array()).into_iter().flatten() {
+            for (k, rows) in r.as_object().into_iter().flatten() {
+                merged.insert(k.clone(), rows.clone());
+            }
+        }
+    }
+    without_own_snapshots(&mut merged);
+    Some(serde_json::json!({ "report": [merged] }).to_string())
+}
+
+/// The agent's own snapshots of a running backup (`*-rynas-snap`) are not part of the PC's
+/// layout: their rows go, and their extents count as the group's free space again.
+fn without_own_snapshots(report: &mut serde_json::Map<String, serde_json::Value>) {
+    let field = |r: &serde_json::Value, k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let bytes = |s: &str| s.trim().trim_end_matches(['B', 'b']).parse::<u64>().unwrap_or(0);
+    let mut freed: BTreeMap<String, u64> = BTreeMap::new();
+    if let Some(rows) = report.get_mut("lv").and_then(|v| v.as_array_mut()) {
+        rows.retain(|r| {
+            if !field(r, "lv_name").ends_with(crate::lvm::SUFFIX) {
+                return true;
+            }
+            *freed.entry(field(r, "vg_name")).or_default() += bytes(&field(r, "seg_size"));
+            false
+        });
+    }
+    if let Some(rows) = report.get_mut("vg").and_then(|v| v.as_array_mut()) {
+        for r in rows.iter_mut() {
+            if let Some(n) = freed.get(&field(r, "vg_name"))
+                && let Some(o) = r.as_object_mut()
+            {
+                let free = bytes(o.get("vg_free").and_then(|x| x.as_str()).unwrap_or("0")) + n;
+                o.insert("vg_free".into(), serde_json::Value::String(format!("{free}B")));
+            }
+        }
+    }
+}
+
 /// btrfs subvolumes below a mounted btrfs filesystem's top level, by walking for subvolume
 /// roots (inode 256) from each mount: the mounted ones and the nested ones found inside them.
 fn subvolumes(fs_mounts: &[&Mount]) -> Vec<Subvolume> {
@@ -319,15 +368,8 @@ pub fn collect(captures: &BTreeMap<String, CaptureMethod>) -> Manifest {
             source: src,
         });
     }
-    let lvm_report = (filesystems.iter().any(|f| matches!(f.source, FsSource::Lvm { .. })))
-        .then(|| {
-            std::process::Command::new("lvs")
-                .args(["--reportformat", "json", "-o", "vg_name,lv_name,lv_size,lv_attr,pool_lv,devices", "--units", "b"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        })
+    let lvm_report = (filesystems.iter().any(|f| matches!(f.source, FsSource::Lvm { .. })) || swap.iter().any(|s| matches!(s.source, FsSource::Lvm { .. })) || luks.iter().any(|l| matches!(l.source, FsSource::Lvm { .. })))
+        .then(lvm_layout_report)
         .flatten();
     let md: Vec<String> = std::fs::read_dir("/sys/block")
         .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("md")).collect::<Vec<_>>())
@@ -531,6 +573,22 @@ mod tests {
     fn lvm_names() {
         assert_eq!(split_lvm_name("vg0-root"), ("vg0".into(), "root".into()));
         assert_eq!(split_lvm_name("my--vg-lv--home"), ("my-vg".into(), "lv-home".into()));
+    }
+
+    #[test]
+    fn the_agents_snapshots_are_not_in_the_lvm_layout() {
+        let mut r = serde_json::json!({
+            "lv": [
+                {"vg_name": "vg", "lv_name": "root", "lv_attr": "owi-aos---", "seg_size": "1073741824B"},
+                {"vg_name": "vg", "lv_name": "root-rynas-snap", "lv_attr": "swi-a-s---", "seg_size": "268435456B"}
+            ],
+            "vg": [{"vg_name": "vg", "vg_free": "0B"}]
+        });
+        super::without_own_snapshots(r.as_object_mut().unwrap());
+        assert_eq!(r["lv"].as_array().unwrap().len(), 1);
+        assert_eq!(r["vg"][0]["vg_free"], "268435456B");
+        let l = rynas_api_types::pcagent::LvmLayout::parse(&serde_json::json!({"report": [r]}).to_string()).unwrap();
+        assert!(l.unsupported().is_empty(), "the origin alone is a plain volume");
     }
 
     #[test]

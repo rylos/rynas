@@ -1,7 +1,7 @@
 //! Carries out a [`Plan`]: shared by every restore source.
 //!
-//! GPT → LUKS → mkfs with the original IDs → btrfs subvolumes and the default one → the data
-//! (the source fills the mounted tree, or a btrfs pool before the tree is mounted) → ID fixes
+//! GPT → LUKS → LVM groups and volumes (then LUKS inside volumes) → mkfs with the original
+//! IDs → btrfs subvolumes and the default one → the data (the source fills the mounted tree, or a btrfs pool before the tree is mounted) → ID fixes
 //! → chroot: `/etc/kernel/cmdline` from the manifest **before** any boot tool (`kernel-install`
 //! in a chroot would read the live system's `/proc/cmdline`), the initramfs, the boot loader
 //! and the removable EFI fallback → unmount → report.
@@ -95,7 +95,7 @@ fn target_runs(log: &mut Log) -> Result<(), String> {
     chroot(log, &[t]).map(|_| ())
 }
 
-fn run(log: &mut Log, argv: &[&str]) -> Result<String, String> {
+pub(super) fn run(log: &mut Log, argv: &[&str]) -> Result<String, String> {
     run_env(log, argv, &[])
 }
 
@@ -240,7 +240,16 @@ pub fn disk_in_use(name: &str) -> Option<String> {
             return Some(format!("/dev/{d} is in use as swap"));
         }
         let holders = PathBuf::from("/sys/class/block").join(d).join("holders");
-        if std::fs::read_dir(&holders).map(|mut r| r.next().is_some()).unwrap_or(false) {
+        let held: Vec<String> = std::fs::read_dir(&holders).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        if let Some(h) = held.first() {
+            // an LVM group of the old system, often activated by the live system on its own
+            let dm = PathBuf::from("/sys/class/block").join(h).join("dm");
+            let uuid = std::fs::read_to_string(dm.join("uuid")).unwrap_or_default();
+            let name = std::fs::read_to_string(dm.join("name")).unwrap_or_default();
+            if uuid.starts_with("LVM-") {
+                let (vg, _) = crate::manifest::split_lvm_name(name.trim());
+                return Some(format!("/dev/{d} is used by the active LVM volume group {vg}: deactivate it first (vgchange -an {vg})"));
+            }
             return Some(format!("/dev/{d} is held by a device mapping (LUKS, LVM, md)"));
         }
     }
@@ -465,11 +474,35 @@ pub fn execute(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &Pl
     let r = execute_inner(src, v, m, plan, opts, log);
     if r.is_err() {
         umount_all(log);
-        for l in &plan.luks {
-            let _ = run(log, &["cryptsetup", "close", &l.mapper]);
-        }
+        close_all(log, plan);
     }
     r
+}
+
+/// Closes what the restore opened, from the top down: LUKS inside logical volumes, the
+/// volume groups, LUKS on partitions.
+fn close_all(log: &mut Log, plan: &Plan) {
+    for l in plan.luks.iter().filter(|l| l.on_lvm) {
+        let _ = run(log, &["cryptsetup", "close", &l.mapper]);
+    }
+    for vg in &plan.lvm {
+        super::lvm::deactivate(log, &vg.name);
+    }
+    for l in plan.luks.iter().filter(|l| !l.on_lvm) {
+        let _ = run(log, &["cryptsetup", "close", &l.mapper]);
+    }
+}
+
+/// The signatures of the partitions the disk has now (filesystems, LVM, LUKS, md), wiped
+/// before its new table is written: the new partitions often start where the old ones did,
+/// and an old LVM label there would be auto-activated by udev before the restore wipes it.
+fn wipe_old_partitions(log: &mut Log, disk: &str) {
+    let Ok(rd) = std::fs::read_dir(PathBuf::from("/sys/block").join(disk)) else { return };
+    let mut parts: Vec<String> = rd.flatten().filter(|e| e.path().join("partition").exists()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    parts.sort();
+    for p in parts {
+        let _ = run(log, &["wipefs", "-a", "-q", &format!("/dev/{p}")]);
+    }
 }
 
 fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &Plan, opts: &Options, log: &mut Log) -> Result<(), String> {
@@ -483,6 +516,7 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
         if let Some(why) = disk_in_use(&d.target.name) {
             return Err(format!("{dev}: {why}"));
         }
+        wipe_old_partitions(log, &d.target.name);
         run(log, &["wipefs", "-a", "-q", &dev])?;
         let f = std::fs::OpenOptions::new().read(true).write(true).open(&dev).map_err(|e| format!("{dev}: {e}"))?;
         d.gpt.write(&f, d.target.size_bytes, true).map_err(|e| format!("writing the GPT of {dev}: {e}"))?;
@@ -514,8 +548,8 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
             let _ = run(log, &["wipefs", "-a", "-q", &p.to_string_lossy()]);
         }
     }
-    // 2. LUKS
-    for l in &plan.luks {
+    // 2. LUKS on partitions, the LVM groups, LUKS inside logical volumes
+    let luks = |log: &mut Log, l: &super::plan::LuksAction| -> Result<(), String> {
         let pass = opts.passphrase.ok_or("a LUKS container needs a passphrase")?;
         let mut argv = vec!["cryptsetup", "luksFormat", "--batch-mode", "--key-file", "-"];
         let ty = format!("luks{}", l.version);
@@ -529,7 +563,16 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
         }
         argv.push(&l.partition);
         run_input(log, &argv, pass.as_bytes())?;
-        run_input(log, &["cryptsetup", "open", "--key-file", "-", &l.partition, &l.mapper], pass.as_bytes())?;
+        run_input(log, &["cryptsetup", "open", "--key-file", "-", &l.partition, &l.mapper], pass.as_bytes())
+    };
+    for l in plan.luks.iter().filter(|l| !l.on_lvm) {
+        luks(log, l)?;
+    }
+    for vg in &plan.lvm {
+        super::lvm::create(log, vg)?;
+    }
+    for l in plan.luks.iter().filter(|l| l.on_lvm) {
+        luks(log, l)?;
     }
     // 3. filesystems and swap
     for a in &plan.filesystems {
@@ -656,6 +699,7 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
         let _ = std::fs::write(in_target("/.autorelabel"), b"");
         log.line("SELinux enforcing: /.autorelabel set");
     }
+    lvm_initramfs(log, m, plan);
     // 8. boot
     boot(m, plan, log, boot_files, opts.nvram)?;
     // 9. log into the target, unmount
@@ -664,9 +708,7 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
     let _ = std::fs::write(in_target(&format!("/var/log/rynas-restore-{ts}.log")), log.text());
     let _ = run(log, &["sync"]);
     umount_all(log);
-    for l in &plan.luks {
-        let _ = run(log, &["cryptsetup", "close", &l.mapper]);
-    }
+    close_all(log, plan);
     log.line("restore finished");
     Ok(())
 }
@@ -763,6 +805,64 @@ fn fix_texts(log: &mut Log, m: &Manifest, plan: &Plan, skipped: &[String]) {
     let checked: Vec<(String, String)> = cmdlines.iter().filter_map(|f| std::fs::read_to_string(in_target(f)).ok().map(|t| (f.clone(), t))).collect();
     for p in super::plan::sanity(&fstab, &root_ids, &checked, map) {
         log.problem(p);
+    }
+}
+
+/// A restored system on LVM needs LVM in its initramfs: the lvm2 package in the system
+/// (dracut and initramfs-tools take their LVM module or hook from it) and, for mkinitcpio, the
+/// `lvm2` hook in `HOOKS`, added when missing in the file that sets `HOOKS` last
+/// (`/etc/mkinitcpio.conf`, or a drop-in of `/etc/mkinitcpio.conf.d`). Text only: it holds
+/// also when the restored system's programs cannot run here.
+fn lvm_initramfs(log: &mut Log, m: &Manifest, plan: &Plan) {
+    if plan.lvm.is_empty() {
+        return;
+    }
+    let names = plan.lvm.iter().map(|v| v.name.as_str()).collect::<Vec<_>>().join(", ");
+    if !chroot_has("lvm") {
+        log.problem(format!("the restored system has no lvm2 (no lvm program): it cannot activate {names} at boot; install lvm2 in it (chroot) and rebuild the initramfs before rebooting"));
+    }
+    if detect_boot(m).0 != InitramfsTool::Mkinitcpio {
+        return;
+    }
+    let mut files = vec!["/etc/mkinitcpio.conf".to_string()];
+    if let Ok(rd) = std::fs::read_dir(in_target("/etc/mkinitcpio.conf.d")) {
+        let mut d: Vec<String> = rd.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| n.ends_with(".conf")).map(|n| format!("/etc/mkinitcpio.conf.d/{n}")).collect();
+        d.sort();
+        files.extend(d);
+    }
+    let sets_hooks = |f: &String| std::fs::read_to_string(in_target(f)).is_ok_and(|t| t.lines().any(|l| l.trim_start().starts_with("HOOKS=(")));
+    let Some(f) = files.iter().rev().find(|f| sets_hooks(f)) else {
+        log.problem("mkinitcpio: no HOOKS=(…) found in the restored system: add the lvm2 hook by hand and rebuild the initramfs".to_string());
+        return;
+    };
+    let text = std::fs::read_to_string(in_target(f)).unwrap_or_default();
+    match super::lvm::add_lvm_hook(&text) {
+        Some(t) => match std::fs::write(in_target(f), t) {
+            Ok(()) => log.line(format!("{f}: the lvm2 hook added to HOOKS (the volumes are on LVM)")),
+            Err(e) => log.problem(format!("{f}: could not add the lvm2 hook: {e}")),
+        },
+        None => log.line(format!("{f}: HOOKS has the lvm2 hook")),
+    }
+}
+
+/// LVM's devices file (`/etc/lvm/devices/system.devices`, the default on newer Fedora and
+/// RHEL) lists the PC's disks by their IDs, so LVM would ignore the new disk: it is set aside
+/// (`system.devices.rynas-old`) and made again for the restored groups with
+/// `vgimportdevices` in the chroot. Without a devices file LVM looks at every disk.
+fn lvm_devices_file(log: &mut Log, plan: &Plan) {
+    let f = in_target("/etc/lvm/devices/system.devices");
+    if plan.lvm.is_empty() || !f.is_file() {
+        return;
+    }
+    if let Err(e) = std::fs::rename(&f, f.with_file_name("system.devices.rynas-old")) {
+        log.problem(format!("/etc/lvm/devices/system.devices: {e}: LVM may ignore the new disk; run vgimportdevices --all after the first boot"));
+        return;
+    }
+    log.line("/etc/lvm/devices/system.devices: the PC's kept as system.devices.rynas-old");
+    for vg in &plan.lvm {
+        if let Err(e) = chroot(log, &["vgimportdevices", &vg.name]) {
+            log.line(format!("warning: vgimportdevices {}: {e}; without a devices file LVM looks at every disk", vg.name));
+        }
     }
 }
 
@@ -913,7 +1013,8 @@ fn boot(m: &Manifest, plan: &Plan, log: &mut Log, boot_files: bool, nvram: Nvram
         std::fs::write(in_target("/etc/kernel/cmdline"), format!("{cmdline_mapped}\n")).map_err(|e| format!("/etc/kernel/cmdline: {e}"))?;
         log.line(format!("/etc/kernel/cmdline: {cmdline_mapped}"));
     }
-    // the initramfs (also covers new hardware)
+    lvm_devices_file(log, plan);
+    // the initramfs (also covers new hardware; a UKI is made again by mkinitcpio -P)
     let initramfs = match m.boot.initramfs {
         InitramfsTool::UpdateInitramfs => chroot(log, &["update-initramfs", "-u", "-k", "all"]),
         InitramfsTool::Mkinitcpio => chroot(log, &["mkinitcpio", "-P"]),

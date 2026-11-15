@@ -177,7 +177,7 @@ fn ready_text(r: rynas_api_types::pcagent::ReadyReason) -> &'static str {
         LoaderUnknown => "the boot loader is unknown: the boot step may need a hand",
         NoPartitionTable => "no partition table could be read",
         NoRecoveryKit => "the backup group has no recovery kit yet",
-        ManualLayout => "LVM or md: recreate them by hand, this restore does not",
+        ManualLayout => "md, or LVM other than linear volumes (thin pools, snapshots, raid, cache): recreate them by hand, this restore does not",
     }
 }
 

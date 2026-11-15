@@ -23,6 +23,7 @@ pub mod btrfs;
 pub mod exec;
 pub mod fstab;
 pub mod legacy;
+pub mod lvm;
 pub mod paths;
 pub mod plan;
 pub mod restic;
@@ -132,8 +133,9 @@ fn in_use_except(targets: &[String]) -> impl Fn(&str) -> bool + '_ {
         .filter_map(|b| crate::gpt::disk_guid_of(&probe::dev_path(&b.name), u64::from(b.logical_sector)))
         .map(|g| g.to_lowercase())
         .collect();
+    let lvm_ids = lvm_ids_outside(targets);
     move |id: &str| {
-        if disk_guids.iter().any(|g| g.eq_ignore_ascii_case(id)) {
+        if disk_guids.iter().any(|g| g.eq_ignore_ascii_case(id)) || lvm_ids.iter().any(|g| g.eq_ignore_ascii_case(id)) {
             return true;
         }
         for dir in ["/dev/disk/by-uuid", "/dev/disk/by-partuuid"] {
@@ -153,16 +155,76 @@ fn in_use_except(targets: &[String]) -> impl Fn(&str) -> bool + '_ {
     }
 }
 
+/// The whole disks a block device sits on (`sda2` → `sda`; `dm-3` → the disks below it).
+fn base_disks(name: &str) -> Vec<String> {
+    let sys = Path::new("/sys/class/block").join(name);
+    if sys.join("partition").exists() {
+        return std::fs::canonicalize(&sys).ok().and_then(|p| p.parent().and_then(|d| d.file_name()).map(|n| vec![n.to_string_lossy().into_owned()])).unwrap_or_default();
+    }
+    let slaves: Vec<String> = std::fs::read_dir(sys.join("slaves")).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+    if slaves.is_empty() {
+        return vec![name.to_string()];
+    }
+    slaves.iter().flat_map(|s| base_disks(s)).collect()
+}
+
+/// The live system's LVM outside the target disks, as IDs for the plan's `in_use`: `vg:<name>`
+/// of every volume group with a PV elsewhere, the UUIDs of such groups, their PVs and
+/// volumes, and of lone PVs elsewhere. Nothing when LVM is not installed.
+fn lvm_ids_outside(targets: &[String]) -> Vec<String> {
+    if !exec::has("pvs") {
+        return Vec::new();
+    }
+    let rows = |prog: &str, fields: &str, key: &str| -> Vec<serde_json::Map<String, serde_json::Value>> {
+        let Some(o) = std::process::Command::new(prog).args(["--reportformat", "json", "-o", fields]).output().ok().filter(|o| o.status.success()) else {
+            return Vec::new();
+        };
+        let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap_or_default();
+        v.get("report").and_then(|r| r.as_array()).into_iter().flatten().filter_map(|r| r.get(key).and_then(|a| a.as_array())).flatten().filter_map(|x| x.as_object().cloned()).collect()
+    };
+    let s = |r: &serde_json::Map<String, serde_json::Value>, k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let mut ids = Vec::new();
+    let mut groups: Vec<String> = Vec::new();
+    for r in rows("pvs", "pv_name,pv_uuid,vg_name,vg_uuid", "pv") {
+        let name = std::fs::canonicalize(s(&r, "pv_name")).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
+        let disks = if name.is_empty() { Vec::new() } else { base_disks(&name) };
+        if !disks.is_empty() && disks.iter().all(|d| targets.contains(d)) {
+            continue;
+        }
+        ids.push(s(&r, "pv_uuid"));
+        let vg = s(&r, "vg_name");
+        if !vg.is_empty() {
+            ids.extend([format!("vg:{vg}"), s(&r, "vg_uuid")]);
+            groups.push(vg);
+        }
+    }
+    for r in rows("lvs", "vg_name,lv_uuid", "lv") {
+        if groups.contains(&s(&r, "vg_name")) {
+            ids.push(s(&r, "lv_uuid"));
+        }
+    }
+    ids.retain(|i| !i.is_empty());
+    ids
+}
+
 /// The PC's disk this version restores: the first with a partition table that holds the root
-/// filesystem (directly or in LUKS), else the first with a table.
+/// filesystem (directly, in LUKS, or in an LVM group: the disk of the group's first PV), else
+/// the first with a table.
 pub fn source_disk(m: &rynas_api_types::pcagent::Manifest) -> Option<usize> {
-    use rynas_api_types::pcagent::FsSource;
+    use rynas_api_types::pcagent::{FsSource, LvmLayout};
+    let on_lvm = |vg: &str| {
+        let layout = m.lvm_report.as_deref().and_then(|r| LvmLayout::parse(r).ok())?;
+        let g = layout.vgs.into_iter().find(|g| g.name == vg)?;
+        g.pvs.iter().find_map(|p| lvm::pv_disk(m, &p.device))
+    };
     let disk_of = |s: &FsSource| match s {
         FsSource::Partition { disk, .. } => Some(*disk),
-        FsSource::Luks { luks } => m.luks.get(*luks).and_then(|l| match l.source {
-            FsSource::Partition { disk, .. } => Some(disk),
+        FsSource::Luks { luks } => m.luks.get(*luks).and_then(|l| match &l.source {
+            FsSource::Partition { disk, .. } => Some(*disk),
+            FsSource::Lvm { vg, .. } => on_lvm(vg),
             _ => None,
         }),
+        FsSource::Lvm { vg, .. } => on_lvm(vg),
         _ => None,
     };
     m.root()
@@ -206,6 +268,9 @@ fn private_namespace() -> Result<(), String> {
 
 pub fn main(args: &[String]) -> Result<(), String> {
     private_namespace()?;
+    if let Some(mf) = opt(args, "--test-manifest") {
+        return local_test(args, &mf);
+    }
     let scripted = opt(args, "--code").is_some() && (opt(args, "--disk").is_some() || opt(args, "--add-to").is_some());
     if !scripted {
         return tui::run(args);
@@ -240,19 +305,37 @@ pub fn main(args: &[String]) -> Result<(), String> {
     let v = source::pick_version(&versions, &opt(args, "--version").unwrap_or_else(|| "latest".into()), true).ok_or("no such version")?;
     eprintln!("PC {}: version {} ({} files)", src.device(), v.short_id(), v.files);
     let m = src.manifest(&v)?;
+    scripted_tree(args, &mut src, &v, &m)
+}
+
+/// `--test-manifest FILE --test-tree DIR` (hidden, for tests on throwaway disks): the
+/// scripted restore of a tree source with a manifest file and a folder of files in place of
+/// a NAS version ([`source::LocalSource`]); everything after the source is the same.
+fn local_test(args: &[String], manifest: &str) -> Result<(), String> {
+    let tree = opt(args, "--test-tree").ok_or("--test-tree DIR is needed with --test-manifest")?;
+    let b = std::fs::read(manifest).map_err(|e| format!("{manifest}: {e}"))?;
+    let m = source::parse_manifest(&b, manifest)?;
+    let mut src = source::LocalSource { manifest: m.clone(), tree: tree.into() };
+    let v = src.versions()?.remove(0);
+    scripted_tree(args, &mut src, &v, &m)
+}
+
+/// The scripted restore of a source that fills the mounted tree, once the version and its
+/// manifest are known: plan, preflight, dry run or the work.
+fn scripted_tree(args: &[String], src: &mut dyn RestoreSource, v: &source::Version, m: &rynas_api_types::pcagent::Manifest) -> Result<(), String> {
     let t = scripted_target(args)?;
-    let src_disk = source_disk(&m).ok_or("the manifest has no disk with a partition table")?;
+    let src_disk = source_disk(m).ok_or("the manifest has no disk with a partition table")?;
     let names = vec![t.name.clone()];
-    let p = plan::build(&m, &[(src_disk, t.clone())], &in_use_except(&names))?;
-    for l in plan::describe(&m, &p, false) {
+    let p = plan::build(m, &[(src_disk, t.clone())], &in_use_except(&names))?;
+    for l in plan::describe(m, &p, false) {
         println!("{l}");
     }
-    let problems = preflight(&m, &p);
+    let problems = preflight(m, &p);
     if !problems.is_empty() {
         return Err(problems.join("\n"));
     }
     if flag(args, "--dry-run") {
-        for l in plan::dry_run_rewrites(&m, &[]) {
+        for l in plan::dry_run_rewrites(m, &[]) {
             println!("{l}");
         }
         if !p.luks.is_empty() && opt(args, "--passphrase-file").is_none() {
@@ -261,7 +344,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
         println!("dry run: nothing written");
         return Ok(());
     }
-    run_execute(args, &mut src, &v, &m, &p, &t)
+    run_execute(args, src, v, m, &p, &t)
 }
 
 /// The target disk of the scripted mode (`--disk`), checked to be free.

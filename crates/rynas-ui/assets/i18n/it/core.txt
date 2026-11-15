@@ -5248,7 +5248,7 @@ pca.ready.skipped	Un filesystem montato non è nel backup
 pca.ready.loader	Il boot loader è sconosciuto
 pca.ready.no_table	Nessuna tabella delle partizioni letta
 pca.ready.no_kit	Il gruppo non ha un kit di ripristino
-pca.ready.manual	LVM o md: da ricreare a mano prima del ripristino
+pca.ready.manual	md, o LVM diverso da volumi lineari: da ricreare a mano prima del ripristino
 pca.last_error	Ultimo errore
 pca.changed	File cambiati durante la lettura
 pca.changed_n	{n} file
