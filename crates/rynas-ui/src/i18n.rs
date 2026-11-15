@@ -3696,6 +3696,7 @@ dict! { BLOB, LENS;
     "net.no_token" => "Confirm from the browser where the change was applied, or roll it back here.";
     "net.confirmed" => "Network settings kept: revision #{rev} is the last known good";
     "net.confirm_conflict" => "The confirmation must come over the new network: open the NAS at one of the new addresses below and confirm there.";
+    "net.confirm_late" => "The time to confirm is over: the previous settings are being restored.";
     "net.confirm_token" => "This confirmation link is not valid for the running test.";
     "net.kept" => "The new network settings are kept.";
     "net.applied" => "Network settings applied";

@@ -1995,7 +1995,9 @@ impl Engine {
         Ok(())
     }
 
-    fn arm_timer(&self, seconds: u32, reason: &str) -> Result<()> {
+    /// `trial`: the marker's `started_ms`, passed on the timer's command line so that the timer
+    /// knows the trial it was armed for, whatever the wall clock says when it fires.
+    fn arm_timer(&self, seconds: u32, reason: &str, trial: u64) -> Result<()> {
         let unit = format!("--unit={ROLLBACK_UNIT}");
         let timer = format!("{ROLLBACK_UNIT}.timer");
         let service = format!("{ROLLBACK_UNIT}.service");
@@ -2004,6 +2006,7 @@ impl Engine {
             .os
             .run(&["systemctl", "reset-failed", &timer, &service], QUICK);
         let on = format!("--on-active={seconds}s");
+        let trial = trial.to_string();
         self.os
             .run_ok(
                 &[
@@ -2018,6 +2021,8 @@ impl Engine {
                     "rollback",
                     "--reason",
                     reason,
+                    "--trial",
+                    &trial,
                 ],
                 QUICK,
             )
@@ -2100,7 +2105,7 @@ impl Engine {
                 task_id: task_id.map(str::to_string),
             })?;
             // never change the network without the safety net
-            if let Err(e) = self.arm_timer(plan.timeout_s, reason::TIMEOUT) {
+            if let Err(e) = self.arm_timer(plan.timeout_s, reason::TIMEOUT, now) {
                 self.store.clear_marker()?;
                 return Err(e);
             }
@@ -2201,7 +2206,10 @@ impl Engine {
         if m.kind != TrialKind::AdoptAtBoot && sha256_hex(token.as_bytes()) != m.token_sha256 {
             return Err(NetError::Invalid("wrong confirmation token".into()));
         }
-        if self.os.now_ms() > m.deadline_ms {
+        // past its deadline the timer would keep a migration done at boot anyway when the network
+        // works: an administrator who confirms it may keep it (and clear a trial whose timer
+        // misfired)
+        if m.kind != TrialKind::AdoptAtBoot && self.os.now_ms() > m.deadline_ms {
             return Err(NetError::Conflict(
                 "too late: the change is being rolled back".into(),
             ));
@@ -2325,6 +2333,20 @@ impl Engine {
     /// answers, when networkd learned any); asked by an administrator
     /// (`reason::MANUAL`) it is always rolled back. `Ok(None)`: nothing to roll back.
     pub fn rollback(&self, why: &str, log: &dyn Fn(&str)) -> Result<Option<NetRollbackReport>> {
+        self.rollback_trial(why, None, log)
+    }
+
+    /// [`Self::rollback`] from the timer, which names its trial (`--trial`, the marker's
+    /// `started_ms`): a timer of the current trial goes on even when the wall clock says the
+    /// deadline is still ahead (a clock step at boot makes the monotonic timer fire early), a
+    /// timer of another trial does nothing. Without a trial (a timer armed by an older version)
+    /// the deadline decides, with 5 s of tolerance.
+    pub fn rollback_trial(
+        &self,
+        why: &str,
+        trial: Option<u64>,
+        log: &dyn Fn(&str),
+    ) -> Result<Option<NetRollbackReport>> {
         let _lock = self.store.lock()?;
         let Some(m) = self.store.marker()? else {
             if why == reason::MANUAL && self.store.boot_adopt()?.is_some() {
@@ -2335,10 +2357,19 @@ impl Engine {
             return Ok(None);
         };
         let now = self.os.now_ms();
-        if (why == reason::TIMEOUT || why == reason::BOOT_CHECK) && now + 5_000 < m.deadline_ms {
-            // a timer left over from an older trial
-            log("the trial's deadline is not reached yet: nothing to do");
-            return Ok(None);
+        if why == reason::TIMEOUT || why == reason::BOOT_CHECK {
+            match trial {
+                Some(t) if t != m.started_ms => {
+                    log("a timer left over from an older trial: nothing to do");
+                    return Ok(None);
+                }
+                Some(_) => {}
+                None if now + 5_000 < m.deadline_ms => {
+                    log("the trial's deadline is not reached yet: nothing to do");
+                    return Ok(None);
+                }
+                None => {}
+            }
         }
         let target = self.store.revision(m.revision)?.unwrap_or_default();
         // only the timer keeps a migration done at boot; an administrator who asks for the
@@ -2485,7 +2516,7 @@ impl Engine {
                 author: b.author,
                 task_id: None,
             })?;
-            if let Err(e) = self.arm_timer(BOOT_CHECK_S, reason::BOOT_CHECK) {
+            if let Err(e) = self.arm_timer(BOOT_CHECK_S, reason::BOOT_CHECK, now) {
                 // without the timer the watchdog (5 min after boot) is the safety net
                 log(&format!("warning: {e}"));
             }
@@ -2867,8 +2898,26 @@ impl Engine {
 
     /// The post-boot watchdog (`rynas-net-watchdog.timer`, 5 minutes after boot).
     pub fn watchdog(&self, log: &dyn Fn(&str)) -> Result<String> {
-        if self.store.marker()?.is_some() {
-            return Ok("a change is being tested: its rollback timer is in charge".into());
+        if let Some(m) = self.store.marker()? {
+            let timer = format!("{ROLLBACK_UNIT}.timer");
+            let service = format!("{ROLLBACK_UNIT}.service");
+            let running = self
+                .os
+                .run(&["systemctl", "is-active", &timer, &service], QUICK)
+                .is_ok_and(|o| o.stdout.lines().any(|l| l.trim() == "active"));
+            if running {
+                return Ok("a change is being tested: its rollback timer is in charge".into());
+            }
+            // No timer: arming it failed, or it fired and quit (an older version, clock step at
+            // boot). The watchdog runs 5 minutes after boot, past the 3 minutes of the boot
+            // check whatever the wall clock says: it does the timer's job now.
+            let why = if m.kind == TrialKind::AdoptAtBoot {
+                reason::BOOT_CHECK
+            } else {
+                reason::TIMEOUT
+            };
+            self.rollback_trial(why, Some(m.started_ms), log)?;
+            return Ok("a change under test had no rollback timer: the watchdog did its job".into());
         }
         match verdict(&self.port_health()?) {
             Verdict::Healthy => {

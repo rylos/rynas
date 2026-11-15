@@ -3116,6 +3116,7 @@ rollback_now	Torna alla versione precedente
 net.no_token	Conferma dal browser in cui è stata applicata la modifica, oppure annullala da qui.
 net.confirmed	Impostazioni di rete mantenute: la revisione #{rev} è l'ultima funzionante
 net.confirm_conflict	La conferma deve arrivare dalla nuova rete: apri il NAS su uno dei nuovi indirizzi qui sotto e conferma da lì.
+net.confirm_late	Il tempo per confermare è scaduto: le impostazioni precedenti vengono ripristinate.
 net.confirm_token	Questo link di conferma non vale per la prova in corso.
 net.kept	Le nuove impostazioni di rete sono state mantenute.
 net.applied	Impostazioni di rete applicate
