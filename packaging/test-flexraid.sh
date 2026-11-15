@@ -209,7 +209,9 @@ printf '[[user]]\nname = "admin1"\nhash = "%s"\ngroups = ["rynas-admin"]\n' "$HA
 start_rynasd() {
     rm -f /run/rynas/rynasd.sock
     # no memory limits on rynasd's cgroup leaves (rynasd::cgroup): with the unit's 256M
-    # cap on daemon/, cryptsetup's Argon2 (256 MiB, locked) never finishes
+    # cap on daemon/, cryptsetup's Argon2 (256 MiB, locked) never finishes. On a real install
+    # rynasd runs LUKS key derivations in transient units outside its cgroup
+    # (rynas_tasks::crypt_cmd); this container has no systemd as PID 1, so they run inside
     RYNAS_CGROUP_DAEMON=max:max RYNAS_CGROUP_WORKERS=max:max /usr/libexec/rynas/rynasd --socket /run/rynas/rynasd.sock --state-dir /var/lib/rynas \
         --storage-loop-disks --storage-min-tier-mib 64 >>/var/log/rynasd.log 2>&1 &
     echo $! >/run/rynas-test/rynasd.pid

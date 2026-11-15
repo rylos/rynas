@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use rynas_tasks::cmd::{Cmd, CmdError};
+use rynas_tasks::cmd::CmdError;
 
 /// What a command printed and how it ended.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -93,8 +93,9 @@ impl Host for SystemHost {
         stdin: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<Output, String> {
-        let (prog, args) = argv.split_first().ok_or("empty command")?;
-        let mut c = Cmd::new(prog).args(args).env_clear().timeout(timeout);
+        let prog = argv.first().ok_or("empty command")?;
+        // a LUKS key derivation runs outside rynasd's cgroup (rynas_tasks::crypt_cmd)
+        let mut c = rynas_tasks::crypt_cmd(argv, timeout, self.systemd());
         if let Some(s) = stdin {
             c = c.stdin(s.to_vec());
         }

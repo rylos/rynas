@@ -472,6 +472,57 @@ pub fn transient_unit(cmd: &Cmd, unit: &str) -> Option<String> {
         .map(|a| format!("{}.service", &a["--unit=".len()..]))
 }
 
+/// Unit prefix of the transient units made by [`crypt_cmd`].
+pub const CRYPT_UNIT: &str = "rynas-luks";
+
+/// `cryptsetup` actions that derive a key from a passphrase (Argon2: hundreds of MiB).
+const KDF_ACTIONS: [&str; 11] = [
+    "luksFormat",
+    "open",
+    "luksOpen",
+    "luksAddKey",
+    "luksChangeKey",
+    "luksConvertKey",
+    "luksRemoveKey",
+    "luksKillSlot",
+    "luksResume",
+    "resize",
+    "reencrypt",
+];
+
+/// `argv` runs a LUKS key derivation: `cryptsetup` with one of [`KDF_ACTIONS`], or
+/// `systemd-cryptenroll` (it unlocks a key slot with the passphrase before enrolling).
+pub fn kdf_heavy<S: AsRef<str>>(argv: &[S]) -> bool {
+    match argv.first().map(AsRef::as_ref) {
+        Some("systemd-cryptenroll") => true,
+        Some("cryptsetup") => argv[1..].iter().any(|a| KDF_ACTIONS.contains(&a.as_ref())),
+        _ => false,
+    }
+}
+
+/// `argv` (program first, never a shell) as a [`Cmd`] with the environment cleared and
+/// `timeout`. A LUKS key derivation ([`kdf_heavy`]) runs in a transient unit
+/// (`rynas-luks-*`, [`Outside`]) when `systemd` is PID 1: Argon2 with `--pbkdf-memory 262144`
+/// (or a disk formatted elsewhere, up to 1 GiB and more) needs more memory than rynasd's
+/// `daemon/` cgroup allows (`memory.high` 96M) and would stall there forever in memory
+/// reclaim. `--pipe` hands the unit the client's standard input, so a key on stdin
+/// (`--key-file -`, `--unlock-key-file=/dev/stdin`) reaches it, and the client exits with the
+/// unit's exit code (cryptsetup's 2 = wrong passphrase stays visible). Without systemd
+/// (containers, recovery shells) the command runs directly. Find the unit to stop on a cancel
+/// with [`transient_unit`] and [`CRYPT_UNIT`].
+pub fn crypt_cmd<S: AsRef<str>>(argv: &[S], timeout: Duration, systemd: bool) -> Cmd {
+    let args = argv.iter().map(AsRef::as_ref);
+    if systemd && kdf_heavy(argv) {
+        Outside::new(CRYPT_UNIT, "rynas: LUKS key derivation", timeout).cmd(args)
+    } else {
+        let mut it = args;
+        Cmd::new(it.next().unwrap_or_default())
+            .args(it)
+            .env_clear()
+            .timeout(timeout)
+    }
+}
+
 /// A pipe reader: tiny stack, it only copies bytes.
 fn small_thread<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
@@ -573,6 +624,44 @@ mod tests {
         );
         assert_eq!(super::transient_unit(&c, "rynas-apt"), None);
         assert_eq!(super::transient_unit(&super::Cmd::new("mount"), "rynas-rollback"), None);
+    }
+
+    #[test]
+    fn luks_key_derivations_leave_the_cgroup_only_under_systemd() {
+        let s = |v: &super::Cmd| -> Vec<String> { v.argv.iter().map(|a| a.to_string_lossy().into_owned()).collect() };
+        let t = super::Duration::from_secs(600);
+        for heavy in [
+            &["cryptsetup", "luksFormat", "--pbkdf-memory", "262144", "--key-file", "-", "/dev/md/vol1"][..],
+            &["cryptsetup", "open", "--key-file", "-", "/dev/md/vol1", "rynas-vol1"],
+            &["cryptsetup", "resize", "--key-file", "-", "rynas-vol1"],
+            &["cryptsetup", "luksAddKey", "--batch-mode", "--key-file", "-", "/dev/sdb1"],
+            &["systemd-cryptenroll", "--recovery-key", "--unlock-key-file=/dev/stdin", "/dev/md/vol1"],
+        ] {
+            assert!(super::kdf_heavy(heavy), "{heavy:?}");
+            let c = super::crypt_cmd(heavy, t, true);
+            let argv = s(&c);
+            assert_eq!(argv[..3], ["systemd-run", "--wait", "--pipe"]);
+            assert!(super::transient_unit(&c, super::CRYPT_UNIT).is_some());
+            let tail = &argv[argv.iter().position(|a| a == "--").unwrap() + 1..];
+            assert_eq!(tail, heavy);
+            assert!(argv.contains(&"--property=RuntimeMaxSec=600".to_string()));
+            assert!(c.clear_env);
+            // no systemd: the plain command
+            let p = super::crypt_cmd(heavy, t, false);
+            assert_eq!(s(&p), heavy);
+            assert_eq!(p.timeout, t);
+            assert!(p.clear_env);
+        }
+        for light in [
+            &["cryptsetup", "close", "rynas-vol1"][..],
+            &["cryptsetup", "luksUUID", "/dev/md/vol1"],
+            &["cryptsetup", "luksHeaderBackup", "/dev/md/vol1", "--header-backup-file", "/run/x.img"],
+            &["cryptsetup", "status", "rynas-vol1"],
+            &["mdadm", "--detail", "open"],
+        ] {
+            assert!(!super::kdf_heavy(light), "{light:?}");
+            assert_eq!(s(&super::crypt_cmd(light, t, true)), light);
+        }
     }
 
     #[tokio::test]

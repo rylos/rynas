@@ -235,11 +235,11 @@ impl Machine for TaskMachine {
     ) -> impl std::future::Future<Output = Result<Output, String>> + Send {
         let ctx = self.ctx.clone();
         let dry = self.ops.dry;
+        // a LUKS key derivation runs outside rynasd's cgroup (rynas_tasks::crypt_cmd)
+        let systemd = !dry && self.systemd();
         async move {
-            let mut cmd = Cmd::new(&argv[0])
-                .args(&argv[1..])
-                .env_clear()
-                .timeout(opts.timeout);
+            let mut cmd = rynas_tasks::crypt_cmd(&argv, opts.timeout, systemd);
+            let unit = rynas_tasks::transient_unit(&cmd, rynas_tasks::CRYPT_UNIT);
             if let Some(s) = opts.stdin {
                 cmd = cmd.stdin(s);
             }
@@ -264,6 +264,19 @@ impl Machine for TaskMachine {
                     if opts.quiet { None } else { Some(&sink) },
                 )
                 .await;
+            if let Some(unit) = unit.filter(|_| r.is_err() && token.is_cancelled()) {
+                // the client was killed, the unit is not: an undo must not race a luksFormat
+                let stop = Cmd::new("systemctl")
+                    .args(["stop", "--"])
+                    .arg(&unit)
+                    .env_clear()
+                    .timeout(Duration::from_secs(60))
+                    .run(None, None)
+                    .await;
+                if let Err(e) = stop {
+                    ctx.log(&format!("stopping {unit}: {e}"));
+                }
+            }
             r.map(|o| Output {
                 stdout: o.stdout,
                 stderr: o.stderr,
