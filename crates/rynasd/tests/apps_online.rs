@@ -84,11 +84,16 @@ fn publish(files: &Files, work: &Path, serial: u64, key: &TestKey, broken: bool,
     fs::create_dir_all(&src).unwrap();
     fs::write(src.join("catalog.toml"), format!("serial = {serial}\n")).unwrap();
     copy_dir(&apps.join("uptime-kuma"), &src.join("uptime-kuma"));
-    let mut listed = vec![IndexApp { id: "uptime-kuma".into(), version: Version::new(1, 0, 0), min_rynas: Version::new(0, 1, 0) }];
+    // the index lists each package at its real version (Renovate bumps it)
+    let version_of = |id: &str| -> Version {
+        let t = fs::read_to_string(apps.join(id).join("app.toml")).unwrap();
+        t.lines().find_map(|l| l.strip_prefix("version = \"")).and_then(|v| v.strip_suffix('"')).expect("version line").parse().unwrap()
+    };
+    let mut listed = vec![IndexApp { id: "uptime-kuma".into(), version: version_of("uptime-kuma"), min_rynas: Version::new(0, 1, 0) }];
     if broken {
         copy_dir(&apps.join("mosquitto"), &src.join("mosquitto"));
         fs::write(src.join("mosquitto/compose.yaml"), "services: 3\n").unwrap();
-        listed.push(IndexApp { id: "mosquitto".into(), version: Version::new(1, 0, 0), min_rynas: Version::new(0, 1, 0) });
+        listed.push(IndexApp { id: "mosquitto".into(), version: version_of("mosquitto"), min_rynas: Version::new(0, 1, 0) });
     }
     let all = files_of(&src, "");
     let refs: Vec<(&str, &[u8])> = all.iter().map(|(p, d)| (p.as_str(), d.as_slice())).collect();

@@ -790,10 +790,19 @@ mod tests {
         fs::write(root.join("catalog.toml"), format!("serial = {serial}\n")).unwrap();
         copy_dir(&apps.join("uptime-kuma"), &root.join("uptime-kuma"));
         let p = root.join("uptime-kuma/app.toml");
-        let t = fs::read_to_string(&p)
+        // whatever the package's real version is (Renovate bumps it)
+        let t: Vec<String> = fs::read_to_string(&p)
             .unwrap()
-            .replace("version = \"1.0.0\"", &format!("version = \"{version}\""));
-        fs::write(p, t).unwrap();
+            .lines()
+            .map(|l| {
+                if l.starts_with("version = ") {
+                    format!("version = \"{version}\"")
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect();
+        fs::write(p, t.join("\n") + "\n").unwrap();
         root.to_owned()
     }
 

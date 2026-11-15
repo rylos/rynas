@@ -315,14 +315,23 @@ async fn downloaded_catalogue_is_merged() {
     std::fs::write(dl.join("catalog.toml"), "serial = 7\n").unwrap();
     copy_dir(&catalogue().join("uptime-kuma"), &dl.join("uptime-kuma"));
     let app_toml = dl.join("uptime-kuma/app.toml");
-    let t = std::fs::read_to_string(&app_toml)
+    // a version above any the shipped package will reach (Renovate bumps it)
+    let t: Vec<String> = std::fs::read_to_string(&app_toml)
         .unwrap()
-        .replace("version = \"1.0.0\"", "version = \"1.0.1\"");
-    std::fs::write(&app_toml, t).unwrap();
+        .lines()
+        .map(|l| {
+            if l.starts_with("version = ") {
+                "version = \"99.0.0\"".to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    std::fs::write(&app_toml, t.join("\n") + "\n").unwrap();
     let index = json!({
         "schema": 1, "serial": 7, "published": "2026-11-10T00:00:00Z", "expires": "2099-01-01T00:00:00Z",
         "archive": {"url": "apps-7.tar.zst", "sha256": "0".repeat(64), "size": 1},
-        "apps": [{"id": "uptime-kuma", "version": "1.0.1", "min_rynas": "0.1.0"}]
+        "apps": [{"id": "uptime-kuma", "version": "99.0.0", "min_rynas": "0.1.0"}]
     });
     std::fs::write(dl.join("index.json"), index.to_string()).unwrap();
     std::os::unix::fs::symlink("7", dir.join("current")).unwrap();
@@ -337,7 +346,7 @@ async fn downloaded_catalogue_is_merged() {
     assert!(c.issues.is_empty(), "{:?}", c.issues);
     assert_eq!(c.apps.len(), 27);
     let uk = c.apps.iter().find(|a| a.id == "uptime-kuma").unwrap();
-    assert_eq!(uk.version, "1.0.1");
+    assert_eq!(uk.version, "99.0.0");
     let (s, b) = call(&e, "GET", "/v1/apps/catalog-source", None).await;
     let src: CatalogSourceState = json_of(s, &b);
     assert!(src.online_enabled);
