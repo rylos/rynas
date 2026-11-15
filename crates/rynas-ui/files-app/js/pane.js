@@ -2,7 +2,7 @@
 // selection, filter and search. A tab holds one pane, or two side by side.
 
 import { api } from "./api.js";
-import { prefs } from "./prefs.js";
+import { prefs, save } from "./prefs.js";
 import { t, count, LOCALE } from "./i18n.js";
 import { esc, size, sizeParts, ezaDate, relative, dateTime, duration, modeString, collator, joinPath, parentOf, baseName, int, isDirLike } from "./format.js";
 import { svg, iconHTML, glyph, colorClass, kindLabel, previewKind, shareGlyph, isProtectedFolder } from "./icons.js";
@@ -666,8 +666,24 @@ export class Pane {
     if (this.search) cols.push({ key: "dir", label: "files.common.folder", width: "minmax(100px, .6fr)", cls: "" });
     // a PC's snapshots on a narrow screen: the room goes to their names, not to permissions
     const narrowPc = isPcFolder(this.path) && this.el.clientWidth > 0 && this.el.clientWidth < 600;
-    for (const [key, c] of Object.entries(COLS)) if (prefs.columns[key] && !(narrowPc && key === "mode")) cols.push({ key, ...c });
+    for (const [key, c] of Object.entries(COLS)) {
+      if (!prefs.columns[key] || (narrowPc && key === "mode")) continue;
+      const w = prefs.colWidths?.[key];
+      cols.push({ key, ...c, width: w ? `${Math.min(w, this.colMax())}px` : c.width, resizable: true });
+    }
     return cols;
+  }
+
+  /**
+   * The widest a resizable column may be: saved widths follow the user to every screen, and on a
+   * phone they must not squeeze the Name column below its minimum (160 px) when all four
+   * columns are at their widest.
+   */
+  colMax() {
+    const w = this.el.clientWidth;
+    if (!w) return 480;
+    // 34 px: the header's padding; 12 px: a gap
+    return Math.max(48, Math.min(480, Math.floor((w - 34 - 160) / Object.keys(COLS).length) - 12));
   }
 
   renderHead() {
@@ -681,13 +697,82 @@ export class Pane {
     this.headEl.innerHTML = cols
       .map((c) => {
         const arrow = this.sort.key === c.key ? `<span class="arrow">${this.sort.dir > 0 ? "▲" : "▼"}</span>` : "";
-        return `<div data-k="${c.key}" class="${c.key === "size" ? "r" : ""}">${t(c.label)}${arrow}</div>`;
+        const grip = c.resizable
+          ? `<span class="col-grip" data-r="${c.key}" role="separator" aria-orientation="vertical" tabindex="0" aria-valuemin="48" aria-label="${esc(t("files.pane.resize_column", { column: t(c.label) }))}"></span>`
+          : "";
+        return `<div data-k="${c.key}" class="${c.key === "size" ? "r" : ""}">${grip}<span class="lbl">${t(c.label)}</span>${arrow}</div>`;
       })
       .join("");
     this.headEl.querySelectorAll("div").forEach((d) => (d.onclick = () => this.setSort(d.dataset.k)));
+    this.headEl.querySelectorAll(".col-grip").forEach((g) => this.gripColumn(g, cols));
     this.headEl.oncontextmenu = (e) => {
       e.preventDefault();
       this.app.columnsMenu(e.clientX, e.clientY);
+    };
+  }
+
+  /**
+   * A column's left edge in the list header: dragging it sets the column's width (the name
+   * column takes what is left), double-clicking it goes back to the default width.
+   */
+  gripColumn(grip, cols) {
+    const key = grip.dataset.r;
+    const max = this.colMax();
+    let w = Math.round(grip.parentElement.getBoundingClientRect().width);
+    grip.setAttribute("aria-valuemax", max);
+    grip.setAttribute("aria-valuenow", w);
+    const resize = (nw) => {
+      w = Math.round(Math.min(max, Math.max(48, nw)));
+      grip.setAttribute("aria-valuenow", w);
+      this.template = cols.map((c) => (c.key === key ? `${w}px` : c.width)).join(" ");
+      this.headEl.style.gridTemplateColumns = this.template;
+      this.el.querySelectorAll(".row").forEach((r) => (r.style.gridTemplateColumns = this.template));
+    };
+    const store = () => {
+      if (w !== prefs.colWidths?.[key]) save({ colWidths: { ...prefs.colWidths, [key]: w } });
+    };
+    grip.onclick = (e) => e.stopPropagation();
+    grip.ondblclick = (e) => {
+      e.stopPropagation();
+      const { [key]: _, ...rest } = prefs.colWidths || {};
+      save({ colWidths: rest });
+    };
+    // the separator is the column's left edge: Left moves it left and widens the column
+    let timer = 0;
+    grip.onkeydown = (e) => {
+      const step = e.shiftKey ? 32 : 8;
+      if (e.key === "ArrowLeft") resize(w + step);
+      else if (e.key === "ArrowRight") resize(w - step);
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+      clearTimeout(timer);
+      // saving repaints the header: keep the focus on this separator
+      timer = setTimeout(() => {
+        store();
+        this.headEl.querySelector(`.col-grip[data-r="${key}"]`)?.focus();
+      }, 600);
+    };
+    grip.onblur = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = 0;
+        store();
+      }
+    };
+    grip.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      grip.setPointerCapture(e.pointerId);
+      const x0 = e.clientX;
+      const w0 = w;
+      // the columns are right of the name: dragging the left edge to the left widens it
+      grip.onpointermove = (ev) => resize(w0 + x0 - ev.clientX);
+      grip.onpointerup = grip.onpointercancel = () => {
+        grip.onpointermove = grip.onpointerup = grip.onpointercancel = null;
+        if (w !== w0) store();
+      };
     };
   }
 

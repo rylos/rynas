@@ -111,6 +111,7 @@ files.fmt.unit.pb	PB
 files.fmt.unit.eb	EB
 files.fmt.rate	{size}/s
 files.pane.fps	{n} fps
+files.pane.resize_column	Ridimensiona la colonna {column}
 files.pane.khz	{n} kHz
 files.pane.kbps	{n} kb/s
 files.common.folder	Cartella
@@ -154,6 +155,7 @@ files.common.size	Dimensione
 files.common.modified	Modificato
 files.common.type	Tipo
 files.common.columns	Colonne
+files.common.reset_widths	Ripristina larghezza colonne
 files.pane.no_results	Nessun risultato
 files.pane.nothing_matches_filter	Nessun elemento corrisponde al filtro
 files.pane.empty_folder	Cartella vuota

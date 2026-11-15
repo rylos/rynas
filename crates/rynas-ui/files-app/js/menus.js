@@ -150,6 +150,8 @@ export const menuMethods = {
       { label: (c.size ? "✓ " : "") + t("files.common.size"), action: () => toggle("size") },
       { label: (c.mtime ? "✓ " : "") + t("files.common.modified"), action: () => toggle("mtime") },
       { label: (c.kind ? "✓ " : "") + t("files.common.type"), action: () => toggle("kind") },
+      "-",
+      { label: t("files.common.reset_widths"), disabled: !Object.keys(prefs.colWidths || {}).length, action: () => save({ colWidths: {} }) },
     ]);
   },
 };
