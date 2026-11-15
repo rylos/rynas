@@ -27,6 +27,7 @@ pub mod md;
 pub mod mounts;
 pub mod overview;
 pub mod plan;
+pub mod recover;
 pub mod service;
 pub mod smart;
 pub mod subvol;

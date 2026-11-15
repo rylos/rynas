@@ -391,3 +391,96 @@ pub fn spawn_storage_watch(
         }
     });
 }
+
+/// How often the arrays left inactive after boot are looked for (a glance at /proc/mdstat;
+/// the inventory is read only when an array is inactive).
+const DEGRADED_START_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Starts the arrays of rynas volumes that stayed inactive because a drive is missing, once
+/// the boot has settled, then the volume group and the mount of the volume; tells the
+/// administrators. The decisions and the reasons are in [`rynas_storage::recover`]. Never
+/// under `--dry-system`, never while a storage task runs (it may stop arrays on purpose).
+pub fn spawn_degraded_start(st: crate::server::DaemonState, notifier: Arc<dyn Notifier>) {
+    use rynas_storage::host::SystemHost;
+    use rynas_storage::recover::{self, Recovery};
+    tokio::spawn(async move {
+        let mut seen = Recovery::default();
+        let mut tick = tokio::time::interval(DEGRADED_START_INTERVAL);
+        loop {
+            tick.tick().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let uptime = recover::uptime_s(&SystemHost);
+            let mdstat = tokio::fs::read_to_string("/proc/mdstat").await.unwrap_or_default();
+            if !mdstat.lines().any(|l| l.contains(" : inactive ")) {
+                seen.due(Vec::new(), now, uptime);
+                continue;
+            }
+            let busy = st.ops.as_ref().is_some_and(|o| {
+                o.tasks.list(64).iter().any(|t| {
+                    t.kind.starts_with("storage.") && matches!(t.status, rynas_api_types::TaskStatus::Running | rynas_api_types::TaskStatus::Queued)
+                })
+            });
+            if busy {
+                continue;
+            }
+            let inv = match crate::server::inventory(&st).await {
+                Ok(i) => i,
+                Err(e) => {
+                    tracing::warn!("degraded start: {}", e.2);
+                    continue;
+                }
+            };
+            // without the records nothing is known to be rynas's
+            let Some(records) = inv.records.clone() else { continue };
+            for v in seen.due(recover::startable(&inv, &records), now, uptime) {
+                seen.forget(&v);
+                let names: Vec<String> = v.arrays.iter().map(|a| format!("{} ({}, {} of {} drives)", a.array, a.level, a.present, a.raid_disks)).collect();
+                tracing::warn!("volume {}: starting {} without the missing drives", v.label, names.join(", "));
+                let job = v.clone();
+                let r = tokio::task::spawn_blocking(move || recover::start(&SystemHost, &job))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                st.storage.invalidate();
+                notifier.emit(degraded_start_event(&v.label, &names.join(", "), r));
+            }
+        }
+    });
+}
+
+fn degraded_start_event(volume: &str, arrays: &str, r: Result<bool, String>) -> rynas_api_types::notify::NewEvent {
+    use rynas_api_types::notify::{NotifyCategory, NotifySeverity};
+    use rynas_notify::event::{code, field, oneshot};
+    let key = format!("storage:degraded-start:{volume}");
+    let ev = match r {
+        Ok(_) => {
+            tracing::warn!("volume {volume} started degraded");
+            let mut ev = oneshot(
+                NotifyCategory::Storage,
+                NotifySeverity::Warning,
+                "storage",
+                key,
+                format!("Volume {volume} started with a drive missing"),
+            );
+            ev.body = format!(
+                "{arrays} stayed inactive after boot because a drive is missing; they were started without it so that the volume is available. Reconnect or replace the missing drive to restore redundancy."
+            );
+            code(ev, "storage.volume_started_degraded")
+        }
+        Err(e) => {
+            tracing::error!("volume {volume}: degraded start failed: {e}");
+            let mut ev = oneshot(
+                NotifyCategory::Storage,
+                NotifySeverity::Error,
+                "storage",
+                key,
+                format!("Volume {volume} could not be started"),
+            );
+            ev.body = format!("{arrays} stayed inactive after boot because a drive is missing, and starting them without it failed: {e}");
+            field(code(ev, "storage.volume_start_failed"), "error", e)
+        }
+    };
+    field(field(ev, "volume", volume), "arrays", arrays)
+}

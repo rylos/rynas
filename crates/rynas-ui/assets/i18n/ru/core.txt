@@ -87,6 +87,10 @@ nev.storage.raid_failed.body	{array} ({level}) отказал: отсутств�
 nev.storage.raid_failed.body_2	{array} ({level}) отказал: отсутствует участников — {degraded} из {raid_disks}, состояние «{state}».
 nev.storage.raid_inactive.title	RAID {array} неактивен
 nev.storage.raid_inactive.body	{array} ({level}) не работает, состояние «{state}».
+nev.storage.volume_started_degraded.title	Том {volume} запущен без одного диска
+nev.storage.volume_started_degraded.body	{arrays} остались неактивными после загрузки, потому что отсутствует диск; они запущены без него, чтобы том был доступен. Подключите снова или замените отсутствующий диск, чтобы восстановить избыточность.
+nev.storage.volume_start_failed.title	Не удалось запустить том {volume}
+nev.storage.volume_start_failed.body	{arrays} остались неактивными после загрузки, потому что отсутствует диск, и запустить их без него не удалось: {error}
 nev.storage.raid_ok.title	RAID {array} снова исправен
 nev.storage.flex_degraded.title	Гибкий RAID {array} деградирован
 nev.storage.flex_failed.title	Отказ гибкого RAID {array}

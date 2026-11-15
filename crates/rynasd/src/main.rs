@@ -1342,6 +1342,10 @@ fn main() -> std::io::Result<()> {
             state.web_access = Some(web);
         }
         state.ops = Some(ops);
+        // arrays of rynas volumes left inactive after boot by a missing drive
+        if !args.dry_system {
+            rynasd::notifications::spawn_degraded_start(state.clone(), notifier.clone());
+        }
         if args.storage_check_interval > 0 {
             rynasd::notifications::spawn_storage_watch(
                 state.clone(),

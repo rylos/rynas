@@ -87,6 +87,10 @@ nev.storage.raid_failed.body	{array} ({level}) è guasto: mancano {degraded} mem
 nev.storage.raid_failed.body_2	{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato «{state}».
 nev.storage.raid_inactive.title	RAID {array} inattivo
 nev.storage.raid_inactive.body	{array} ({level}) non è in funzione, stato «{state}».
+nev.storage.volume_started_degraded.title	Volume {volume} avviato senza un disco
+nev.storage.volume_started_degraded.body	{arrays} sono rimasti inattivi dopo l'avvio perché manca un disco; sono stati avviati senza, così il volume è disponibile. Ricollega o sostituisci il disco mancante per ripristinare la ridondanza.
+nev.storage.volume_start_failed.title	Impossibile avviare il volume {volume}
+nev.storage.volume_start_failed.body	{arrays} sono rimasti inattivi dopo l'avvio perché manca un disco, e l'avvio senza di esso non è riuscito: {error}
 nev.storage.raid_ok.title	RAID {array} di nuovo integro
 nev.storage.flex_degraded.title	RAID flessibile {array} degradato
 nev.storage.flex_failed.title	RAID flessibile {array} guasto
