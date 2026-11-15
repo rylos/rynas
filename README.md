@@ -26,6 +26,23 @@ yours, with or without rynas.
 > hardware, but there can still be rough edges and small changes before 1.0. Keep backups, as
 > with any storage system, and report what you find.
 
+## Who it is for
+
+rynas is a professional tool for people who run their own servers: administrators, homelab
+operators and small businesses who know what an md array, a LUKS header, a btrfs subvolume or a
+systemd unit is, and want them driven well, not hidden. It is deliberately technical and
+powerful, and it is not made for beginners.
+
+- **It shows its work.** Every storage change is planned before it runs. You see each step with
+  its real command (mdadm, sgdisk, LVM, cryptsetup, btrfs), the disks it will erase, by model and
+  serial, and how it resumes if power fails halfway.
+- **It exposes the real system**, not a simplified copy: arrays and their members, LVM volumes,
+  subvolumes, mount options, systemd units, cgroups and logs, as they are on disk.
+- **You stay in charge.** Guided flows exist, but none of them acts behind your back. There is
+  no cloud account, no telemetry and no "easy mode" that trades control for convenience.
+- **It does not replace knowledge.** rynas makes replacing a disk, growing an array or restoring
+  a backup faster and safer. It does not make understanding them optional.
+
 ## Why rynas
 
 - **Fast on modest hardware.** A small privileged daemon, a Rust HTTP server and a WebAssembly
@@ -47,7 +64,7 @@ yours, with or without rynas.
 | | |
 |---|---|
 | **Dashboard** | live CPU, memory, network, disk I/O and temperatures; customizable widgets |
-| **Storage** | RAID arrays and volumes (mdadm, btrfs, ext4, LUKS2 encryption), a drive view of the chassis, SMART, spin-down, zram |
+| **Storage** | RAID arrays and volumes (mdadm, btrfs, ext4, LUKS2 encryption), flexible RAID that uses the full space of drives of different sizes and grows one drive at a time, a capacity calculator, a drive view of the chassis, SMART, spin-down, zram |
 | **Files** | a full web file manager: upload, preview, text editor, space analysis |
 | **Shared folders and services** | SMB (with Time Machine), NFS, per-user and per-group permissions, quotas, recycle bin |
 | **Snapshots** | scheduled btrfs snapshots with retention, file restore, rollback, system restore points, replication to another volume or NAS |
