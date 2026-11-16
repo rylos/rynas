@@ -280,13 +280,47 @@ impl ZoneRow {
     }
 }
 
+/// One zone of the combobox list. `aria-selected` marks the zone in force (`current`); the
+/// keyboard and pointer highlight is the field's `aria-activedescendant` and the `is-active`
+/// class. `grouped`: under its region's heading, which names the region already.
+fn zone_option(
+    lid: &str,
+    i: usize,
+    z: &ZoneRow,
+    grouped: bool,
+    current: bool,
+    active: RwSignal<usize>,
+    choose: impl Fn(usize) + Copy + Send + Sync + 'static,
+) -> AnyView {
+    let city = match z.alias {
+        Some(a) => format!("{} · {a}", z.city),
+        None => z.city.clone(),
+    };
+    let region = (!grouped || z.region.contains(" / ")).then(|| z.region.clone());
+    view! {
+        <li
+            id=format!("{lid}-{i}")
+            class=move || if active.get() == i { "tz-opt is-active" } else { "tz-opt" }
+            role="option"
+            aria-selected=current.to_string()
+            on:mousemove=move |_| if active.get_untracked() != i { active.set(i) }
+            on:click=move |_| choose(i)
+        >
+            <span class="tz-city">{city}</span>
+            {region.map(|r| view! { <span class="tz-region">{r}</span> })}
+            <span class="tz-off tnum">{utc(z.offset_s)}</span>
+        </li>
+    }
+    .into_any()
+}
+
 fn zone_field(d: RwSignal<Form>, zones: Remote<Vec<ZoneInfo>>) -> AnyView {
     let q = RwSignal::new(String::new());
     let open = RwSignal::new(false);
     let active = RwSignal::new(0usize);
     let id = fid();
     let lid = format!("{id}-list");
-    let list = NodeRef::<leptos::html::Ul>::new();
+    let list = NodeRef::<leptos::html::Div>::new();
     // what the list shows: every zone for an empty search (grouped by region), else the best
     // matches, and how many more matched
     let rows = Memo::new(move |_| {
@@ -353,10 +387,12 @@ fn zone_field(d: RwSignal<Form>, zones: Remote<Vec<ZoneInfo>>) -> AnyView {
     let on_key = move |ev: web_sys::KeyboardEvent| {
         let n = count();
         match ev.key().as_str() {
-            "ArrowDown" | "ArrowUp" if !open.get_untracked() => {
+            // the list opens on typing, a click or the down arrow (never on focus alone)
+            "ArrowDown" if !open.get_untracked() => {
                 ev.prevent_default();
                 show();
             }
+            "ArrowUp" if !open.get_untracked() => {}
             "ArrowDown" => {
                 ev.prevent_default();
                 active.update(|a| *a = (*a + 1).min(n.saturating_sub(1)));
@@ -396,42 +432,41 @@ fn zone_field(d: RwSignal<Form>, zones: Remote<Vec<ZoneInfo>>) -> AnyView {
             rows.with(|(r, more)| {
                 if r.is_empty() {
                     let key = if zones.data.with(Option::is_none) { "loading" } else { "time.zone_none" };
-                    return view! { <li class="tz-empty" role="presentation">{t(key)}</li> }.into_any();
+                    return view! { <div class="tz-empty" role="presentation">{t(key)}</div> }.into_any();
                 }
-                let mut last: Option<&str> = None;
-                let items = r
-                    .iter()
-                    .enumerate()
-                    .map(|(i, z)| {
+                let opt = |i: usize| zone_option(&lid, i, &r[i], grouped, r[i].name == cur, active, choose);
+                let body = if grouped {
+                    // the regions as option groups, named by their heading
+                    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+                    for (i, z) in r.iter().enumerate() {
                         let top = z.name.split('/').next().unwrap_or("");
-                        let head = (grouped && last != Some(top)).then(|| {
-                            last = Some(top);
-                            view! { <li class="tz-group" role="presentation">{top.replace('_', " ")}</li> }
-                        });
-                        let city = match z.alias {
-                            Some(a) => format!("{} · {a}", z.city),
-                            None => z.city.clone(),
-                        };
-                        let region = (!grouped || z.region.contains(" / ")).then(|| z.region.clone());
-                        view! {
-                            {head}
-                            <li
-                                id=format!("{lid}-{i}")
-                                class=if z.name == cur { "tz-opt is-current" } else { "tz-opt" }
-                                role="option"
-                                aria-selected=move || (active.get() == i).to_string()
-                                on:mousemove=move |_| if active.get_untracked() != i { active.set(i) }
-                                on:click=move |_| choose(i)
-                            >
-                                <span class="tz-city">{city}</span>
-                                {region.map(|r| view! { <span class="tz-region">{r}</span> })}
-                                <span class="tz-off tnum">{utc(z.offset_s)}</span>
-                            </li>
+                        match groups.last_mut() {
+                            Some((g, v)) if g == top => v.push(i),
+                            _ => groups.push((top.to_string(), vec![i])),
                         }
-                    })
-                    .collect_view();
-                let more = (*more > 0).then(|| view! { <li class="tz-more" role="presentation">{tf("time.zone_more", &[("n", &more.to_string())])}</li> });
-                view! { {items}{more} }.into_any()
+                    }
+                    groups
+                        .into_iter()
+                        .enumerate()
+                        .map(|(gi, (g, idx))| {
+                            let gid = format!("{lid}-g{gi}");
+                            let head_id = gid.clone();
+                            let items = idx.into_iter().map(opt).collect_view();
+                            view! {
+                                <ul class="tz-grp" role="group" aria-labelledby=gid>
+                                    <li id=head_id class="tz-group" role="presentation">{g.replace('_', " ")}</li>
+                                    {items}
+                                </ul>
+                            }
+                        })
+                        .collect_view()
+                        .into_any()
+                } else {
+                    let items = (0..r.len()).map(opt).collect_view();
+                    view! { <ul class="tz-grp" role="presentation">{items}</ul> }.into_any()
+                };
+                let more = (*more > 0).then(|| view! { <div class="tz-more" role="presentation">{tf("time.zone_more", &[("n", &more.to_string())])}</div> });
+                view! { {body}{more} }.into_any()
             })
         }
     };
@@ -453,7 +488,6 @@ fn zone_field(d: RwSignal<Form>, zones: Remote<Vec<ZoneInfo>>) -> AnyView {
                     aria-activedescendant=move || (open.get() && count() > 0).then(|| format!("{lid3}-{}", active.get()))
                     placeholder=move || if open.get() { selected() } else { t("time.zone_search").to_string() }
                     prop:value=move || if open.get() { q.get() } else { selected() }
-                    on:focus=move |_| show()
                     on:click=move |_| if !open.get_untracked() { show() }
                     on:blur=move |_| hide()
                     on:input=move |ev| {
@@ -465,9 +499,9 @@ fn zone_field(d: RwSignal<Form>, zones: Remote<Vec<ZoneInfo>>) -> AnyView {
                 />
                 <Show when=move || open.get()>
                     // a press inside the list keeps the focus in the field (no blur before the click)
-                    <ul id=lid.clone() node_ref=list class="tz-list" role="listbox" aria-label=tr("ps.time_zone") on:mousedown=|ev| ev.prevent_default()>
+                    <div id=lid.clone() node_ref=list class="tz-list" role="listbox" aria-label=tr("ps.time_zone") on:mousedown=|ev| ev.prevent_default()>
                         {options.clone()}
-                    </ul>
+                    </div>
                 </Show>
             </div>
             <span class="field-help">{tr("time.zone_help")}</span>

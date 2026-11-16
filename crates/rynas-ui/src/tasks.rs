@@ -134,9 +134,18 @@ impl Tasks {
 /// Wait until task `id` ends and return its final state. Events update the store; without a
 /// live stream (or as a safety net every 10 s) the task is asked for directly.
 pub async fn follow(id: &str) -> Result<TaskInfo, ApiErr> {
+    follow_or_lost(id, None).await
+}
+
+/// [`follow`], giving up with [`ApiErr::Network`] once the server has not answered for
+/// `lost_ms` (no live stream, every request failing without an answer): the task may well
+/// have ended, e.g. a rename that moved the page's address away.
+pub async fn follow_or_lost(id: &str, lost_ms: Option<u32>) -> Result<TaskInfo, ApiErr> {
     let s = tasks();
     let url = format!("/api/v1/tasks/{}", api::encode(id));
     let mut waited = 0u32;
+    // the last time the server was known to answer
+    let mut heard = 0u32;
     loop {
         if let Some(t) = s.find(id)
             && t.status.is_finished()
@@ -146,16 +155,28 @@ pub async fn follow(id: &str) -> Result<TaskInfo, ApiErr> {
         if !auth().is_ready() {
             return Err(ApiErr::Http { status: 401, code: rynas_api_types::error_codes::UNAUTHENTICATED.into(), retry_after: None, message: String::new(), field: None });
         }
-        if waited == 0 || waited.is_multiple_of(10_000) || (!s.stream_live.get_untracked() && waited.is_multiple_of(2_000)) {
+        let live = s.stream_live.get_untracked();
+        if live {
+            heard = waited;
+        }
+        if waited == 0 || waited.is_multiple_of(10_000) || (!live && waited.is_multiple_of(2_000)) {
             match api::get::<TaskInfo>(&url).await {
                 Ok(t) if t.status.is_finished() => {
                     s.upsert(t.clone());
                     return Ok(t);
                 }
-                Ok(t) => s.upsert(t),
+                Ok(t) => {
+                    heard = waited;
+                    s.upsert(t);
+                }
                 Err(e) if e.status() == 404 => return Err(e),
+                // an answer, even an error: the server is there
+                Err(e) if e.status() != 0 => heard = waited,
                 Err(_) => {}
             }
+        }
+        if lost_ms.is_some_and(|l| waited.saturating_sub(heard) >= l) {
+            return Err(ApiErr::Network);
         }
         api::sleep(500).await;
         waited += 500;

@@ -204,7 +204,14 @@ struct Renamed {
     url: String,
     /// The address in the browser was the old name: it stops working.
     moves: bool,
+    /// The page lost the server while the rename applied: it most likely worked (the old
+    /// address went away with the old name), but this page cannot know.
+    lost: bool,
 }
+
+/// How long the rename dialog waits without an answer from the server before it takes the
+/// rename as done and the page as moved (the old `.local` name goes away with Avahi's restart).
+const RENAME_LOST_MS: u32 = 20_000;
 
 /// The host name as typed, in its stored form (the server trims and lowercases the same way).
 fn host_input(s: &str) -> String {
@@ -230,11 +237,17 @@ fn moved_url(proto: &str, host: &str, port: &str, path: &str, old: &str, new: &s
 
 /// The success note above the summary: the new name, and a link to this page at it.
 fn renamed_note(r: Renamed) -> AnyView {
-    let text = tf(if r.moves { "net.hn.done_moves" } else { "net.hn.done" }, &[("name", &r.name)]);
+    let key = match (r.lost, r.moves) {
+        (true, _) => "net.hn.lost",
+        (false, true) => "net.hn.done_moves",
+        (false, false) => "net.hn.done",
+    };
+    let text = tf(key, &[("name", &r.name)]);
     let url = r.url.clone();
+    let (tone, icon) = if r.lost { (Tone::Warn, icons::TRIANGLE_ALERT) } else { (Tone::Ok, icons::CIRCLE_CHECK) };
     ui::note(
-        Tone::Ok,
-        icons::CIRCLE_CHECK,
+        tone,
+        icon,
         view! {
             <span>{text}" "<a class="wrap-anywhere" href=url.clone()>{tf("net.hn.open", &[("url", &url)])}</a></span>
         }
@@ -293,10 +306,16 @@ fn hostname_dialog(current: String, net: Net, renamed: RwSignal<Option<Renamed>>
             let body = HostnameConfig { hostname: h.clone() };
             match api::put::<_, HostnameState>("/api/v1/system/hostname", &body).await {
                 Ok(_) => {
-                    if crate::config::apply_now(&[crate::config::keys::HOSTNAME], error).await {
+                    use crate::config::Applied;
+                    // the page may lose its own address with the old name: no answer for a
+                    // while means the rename most likely went through
+                    let r = crate::config::apply_now_or_lost(&[crate::config::keys::HOSTNAME], error, Some(RENAME_LOST_MS)).await;
+                    if r != Applied::No {
                         let (url, moves) = target(&h);
-                        renamed.set(Some(Renamed { name: h, url, moves }));
-                        net.reload();
+                        renamed.set(Some(Renamed { name: h, url, moves, lost: r == Applied::Lost }));
+                        if r == Applied::Yes {
+                            net.reload();
+                        }
                         close.run(());
                     }
                 }
@@ -978,7 +997,9 @@ mod tests {
         for ok in ["nas", "a", "nas-01", "0nas", &"a".repeat(63)] {
             assert!(hostname(ok), "{ok}");
         }
-        for bad in ["", "-nas", "nas-", "my nas", "nas.example", "na_s", "Nas", "città", &"a".repeat(64)] {
+        // the UI refuses what the server refuses: digits only (an IPv4 address to a
+        // browser), reserved names
+        for bad in ["", "-nas", "nas-", "my nas", "nas.example", "na_s", "Nas", "città", &"a".repeat(64), "1234", "0x1f", "localhost"] {
             assert!(!hostname(bad), "{bad}");
         }
         // opened by the old name: the page moves with it, port and path kept

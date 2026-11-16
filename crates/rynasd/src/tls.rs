@@ -22,6 +22,7 @@
 //! The future certificate store of the web-access module (W1/W2: ACME wildcard, Caddy) adds
 //! sources here and publishes through the same files.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
@@ -56,6 +57,21 @@ const SKIPPED_IFACES: &[&str] = &[
     "docker", "br-", "veth", "virbr", "lxcbr", "lxdbr", "cni", "podman", "flannel", "cali", "vnet",
     "kube",
 ];
+
+/// How long the local certificate keeps the names of the previous host name after a rename
+/// (the next issue after that leaves them out).
+pub const FORMER_NAMES_MS: i64 = 86_400_000;
+
+/// `<store>/host`: the host name the local certificate was last issued for, and the one
+/// before it while its names are kept ([`FORMER_NAMES_MS`]).
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct HostRecord {
+    host: String,
+    #[serde(default)]
+    former: String,
+    #[serde(default)]
+    former_until_ms: i64,
+}
 
 /// The names probe: host name and interface addresses.
 pub type Probe = Box<dyn Fn() -> (String, Vec<IpAddr>) + Send + Sync>;
@@ -117,6 +133,35 @@ impl TlsSvc {
     fn names(&self) -> Names {
         let (host, addrs) = (self.probe)();
         rynas_tls::names(&host, &addrs)
+    }
+
+    /// The DNS names of the previous host name for [`FORMER_NAMES_MS`] after a rename, kept
+    /// in the local certificate: the page opened at the old name (still cached by browsers
+    /// and resolvers, still in the address bar) keeps a valid certificate while it moves to
+    /// the new name. The host the names were last issued for is kept in `<store>/host`.
+    fn former_names(&self, host: &str, now: i64) -> io::Result<BTreeSet<String>> {
+        let p = self.path("host");
+        let mut rec: HostRecord = std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        if rec.host != host {
+            if !rec.host.is_empty() {
+                rec.former = std::mem::take(&mut rec.host);
+                rec.former_until_ms = now + FORMER_NAMES_MS;
+            }
+            rec.host = host.to_string();
+            let json = serde_json::to_vec(&rec).map_err(io::Error::other)?;
+            write_atomic(&p, &json, 0o600, None)?;
+        }
+        if rec.former.is_empty() || rec.former == host || rec.former_until_ms <= now {
+            return Ok(BTreeSet::new());
+        }
+        Ok(rynas_tls::names(&rec.former, &[])
+            .dns
+            .into_iter()
+            .filter(|d| d != "localhost")
+            .collect())
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -207,7 +252,11 @@ impl TlsSvc {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         self.dirs()?;
         let now = rynas_tls::now();
-        let names = self.names();
+        let (probed, addrs) = (self.probe)();
+        let names = rynas_tls::names(&probed, &addrs);
+        // what the local leaf covers: these names, and the previous host's for a while
+        let mut want = names.clone();
+        want.dns.extend(self.former_names(&probed, now)?);
         let host = names
             .dns
             .iter()
@@ -244,15 +293,15 @@ impl TlsSvc {
                             rynas_tls::inspect(&ca.chain)
                                 .is_ok_and(|ci| ci[0].fingerprint_sha256 == c.fingerprint_sha256)
                         })
-                        && !rynas_tls::needs_reissue(&info[0], &names, now)
+                        && !rynas_tls::needs_reissue(&info[0], &want, now)
                 });
                 match current {
                     Some(p) if !reissue && !new_ca => p,
                     _ => {
                         let leaf =
-                            rynas_tls::issue_leaf(&ca, &names, now).map_err(io::Error::other)?;
+                            rynas_tls::issue_leaf(&ca, &want, now).map_err(io::Error::other)?;
                         self.write_pair("local", &leaf)?;
-                        tracing::info!("tls: new certificate for {}", names.all().join(", "));
+                        tracing::info!("tls: new certificate for {}", want.all().join(", "));
                         leaf
                     }
                 }
@@ -612,6 +661,32 @@ mod tests {
             std::fs::read(d.path().join("etc/rynas/tls/ca.crt")).unwrap(),
             ca_before
         );
+    }
+
+    #[test]
+    fn a_renamed_host_keeps_its_old_name_in_the_leaf_for_a_while() {
+        let d = tempfile::tempdir().unwrap();
+        svc_in(d.path(), "nas", vec![]).ensure(false, false).unwrap();
+        let s = svc_in(d.path(), "store", vec![]);
+        assert!(s.ensure(false, false).unwrap());
+        let st = s.status().unwrap();
+        let dns = &st.certificate.dns_names;
+        for n in ["store", "store.local", "nas", "nas.local"] {
+            assert!(dns.contains(&n.to_string()), "{n} missing from {dns:?}");
+        }
+        assert!(st.missing_names.is_empty());
+        // nothing more to do while the old names are kept
+        assert!(!s.ensure(false, false).unwrap());
+        // the transition is over: the next issue leaves the old name out
+        let rec = d.path().join("state/tls/host");
+        let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&rec).unwrap()).unwrap();
+        assert_eq!((v["host"].as_str(), v["former"].as_str()), (Some("store"), Some("nas")));
+        v["former_until_ms"] = serde_json::json!(1);
+        std::fs::write(&rec, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(!s.ensure(false, false).unwrap(), "an extra name alone is no reason to reissue");
+        assert!(s.ensure(false, true).unwrap());
+        let dns = s.status().unwrap().certificate.dns_names;
+        assert!(dns.contains(&"store.local".to_string()) && !dns.iter().any(|d| d.starts_with("nas")), "{dns:?}");
     }
 
     #[test]

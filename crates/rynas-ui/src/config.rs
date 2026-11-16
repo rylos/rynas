@@ -278,6 +278,23 @@ pub mod keys {
 /// otherwise `error` holds the task's failure and the note that the previous settings are
 /// back in place while the change stays pending, and the caller keeps the dialog open.
 pub async fn apply_now(keys: &[&str], error: RwSignal<Option<String>>) -> bool {
+    apply_now_or_lost(keys, error, None).await == Applied::Yes
+}
+
+/// How an [`apply_now_or_lost`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    Yes,
+    /// Failed: `error` says why.
+    No,
+    /// The server stopped answering while the task ran (`lost_ms` without an answer): the
+    /// result is unknown, `error` is left alone.
+    Lost,
+}
+
+/// [`apply_now`] for a change that may move the page's own address (a rename): after
+/// `lost_ms` without an answer from the server it stops waiting with [`Applied::Lost`].
+pub async fn apply_now_or_lost(keys: &[&str], error: RwSignal<Option<String>>, lost_ms: Option<u32>) -> Applied {
     let c = config();
     let req = ApplyRequest { comment: String::new(), keys: keys.iter().map(|k| k.to_string()).collect() };
     let started = api::start_task("/api/v1/config/apply", serde_json::to_string(&req).ok()).await;
@@ -286,17 +303,17 @@ pub async fn apply_now(keys: &[&str], error: RwSignal<Option<String>>) -> bool {
         Err(e) => {
             changed();
             let _ = error.try_set(Some(e.text()));
-            return false;
+            return Applied::No;
         }
     };
     c.applying.set(Some(id.clone()));
     c.inline.set(Some((id.clone(), error)));
-    let res = tasks::follow(&id).await;
+    let res = tasks::follow_or_lost(&id, lost_ms).await;
     c.applying.set(None);
     c.inline.set(None);
     changed();
     let fail = match res {
-        Ok(task) if task.status == TaskStatus::Ok => return true,
+        Ok(task) if task.status == TaskStatus::Ok => return Applied::Yes,
         Ok(task) => {
             // the explanation goes with the translated text, before the technical detail
             let e = task_error(&task);
@@ -304,10 +321,11 @@ pub async fn apply_now(keys: &[&str], error: RwSignal<Option<String>>) -> bool {
             let detail = detail.map(|d| format!("{}{d}", crate::api::DETAIL_SEP)).unwrap_or_default();
             format!("{main} {}{detail}", t("cfg.apply_kept"))
         }
+        Err(crate::api::ApiErr::Network) if lost_ms.is_some() => return Applied::Lost,
         Err(e) => e.text(),
     };
     let _ = error.try_set(Some(fail));
-    false
+    Applied::No
 }
 
 /// Progress of the [`apply_now`] in flight, shown by the form error box of the form that

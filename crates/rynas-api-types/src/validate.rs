@@ -14,7 +14,7 @@ pub fn disk_name(n: &str) -> bool {
 }
 
 /// Host name: an RFC 1123 label, lowercase, 1–63 of `a-z 0-9 -`, not starting or ending
-/// with `-`.
+/// with `-`, not all digits (nor `0x` and hex digits), not a [`RESERVED_HOSTNAMES`] name.
 pub fn hostname(h: &str) -> bool {
     !h.is_empty()
         && h.len() <= 63
@@ -22,7 +22,22 @@ pub fn hostname(h: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         && !h.starts_with('-')
         && !h.ends_with('-')
+        // browsers read `https://1234/` and `https://0x1f/` as IPv4 addresses
+        && !h.bytes().all(|b| b.is_ascii_digit())
+        && !h.strip_prefix("0x").is_some_and(|x| x.bytes().all(|b| b.is_ascii_hexdigit()))
+        && !RESERVED_HOSTNAMES.contains(&h)
 }
+
+/// Host names that already mean something else on every machine or network: the loopback
+/// names of `/etc/hosts`, the mDNS domain, the broadcast entry of some systems.
+pub const RESERVED_HOSTNAMES: &[&str] = &[
+    "localhost",
+    "localdomain",
+    "local",
+    "ip6-localhost",
+    "ip6-loopback",
+    "broadcasthost",
+];
 
 /// Linux user or group name: `[a-z_][a-z0-9_-]{0,31}`.
 pub fn account_name(s: &str) -> bool {
@@ -159,6 +174,11 @@ mod tests {
     fn names() {
         assert!(disk_name("nvme0n1") && !disk_name("sda/../x") && !disk_name(""));
         assert!(hostname("nas-1") && !hostname("-nas") && !hostname("Nas"));
+        // names a browser or the system reads as something else
+        for bad in ["localhost", "local", "localdomain", "ip6-localhost", "1234", "0", "0x1f", "0x"] {
+            assert!(!hostname(bad), "{bad}");
+        }
+        assert!(hostname("nas2") && hostname("2nas") && hostname("0xnas") && hostname("localhost2"));
         assert!(account_name("_svc") && account_name("alice-2") && !account_name("Alice"));
         assert!(share_name("Media.2026") && !share_name("homes") && !share_name(".x"));
         assert!(workgroup(" workgroup ") && !workgroup("WORK GROUP") && !workgroup(""));
