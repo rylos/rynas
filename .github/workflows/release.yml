@@ -4,7 +4,7 @@ name: Release
 # package (Debian 13, amd64) and the PC agent (static musl binaries, .deb and .rpm, x86_64
 # and aarch64), with SHA-256 sums. It becomes the "latest" release, which the agent commands
 # in the UI download from (releases/latest/download/rynas-agent-<arch>); the NUT backport
-# keeps its own fixed tag.
+# and the deduplication engine package (rynas-oans) keep their own fixed tags.
 #
 # Run by hand (workflow_dispatch) on a branch or commit, it only builds: the packages stay as
 # the run's artifacts (`gh run download`), for a test install with `dpkg -i` (which reinstalls

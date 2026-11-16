@@ -1311,17 +1311,37 @@ async fn install_post(State(st): State<DedupState>, h: HeaderMap) -> Res<Respons
     let Some(source) = source else {
         return Err(conflict(
             error_codes::CONFLICT,
-            format!("{ENGINE_PACKAGE} is in no apt source and not in {}", host::LOCAL_PACKAGES),
+            format!(
+                "{ENGINE_PACKAGE} is in no apt source and not in {}, and the rynas release has it only for {} (this NAS: {})",
+                host::LOCAL_PACKAGES,
+                host::RELEASE_ARCH,
+                std::env::consts::ARCH
+            ),
         ));
     };
     audit(&who, &format!("install of {ENGINE_PACKAGE} from {source}"));
     let s3 = s.clone();
     let id = s.prot.ops.tasks.spawn("dedup.install", &who, move |ctx| async move {
         if s3.host.simulated() {
+            if source == host::SOURCE_RELEASE {
+                ctx.log(&format!("dry system, not downloaded: {}/…", host::RELEASE_BASE));
+            }
             ctx.log(&format!("dry system, not run: apt-get install {ENGINE_PACKAGE}"));
             tokio::time::sleep(Duration::from_millis(600)).await;
             s3.host.mark_installed();
         } else {
+            let source = if source == host::SOURCE_RELEASE {
+                // the newest pinned file only, checked against its SHA-256 before it is kept
+                let newest = &host::PINNED_DEBS[host::PINNED_DEBS.len().saturating_sub(1)..];
+                let log = |l: &str| ctx.log(l);
+                let files = crate::ups_update::fetch_release(std::path::Path::new(host::LOCAL_PACKAGES), newest, host::RELEASE_BASE, &log)
+                    .await
+                    .map_err(|e| format!("{ENGINE_DOWNLOAD_FAILED}{e}"))?;
+                let file = files.into_iter().next().ok_or("no pinned package")?;
+                file.to_string_lossy().into_owned()
+            } else {
+                source
+            };
             let target = if source == "apt" { ENGINE_PACKAGE.to_string() } else { source };
             ctx.log(&format!("installing {target}"));
             let cmd = crate::updates::apt(&["install", "--", &target], Duration::from_secs(1800));

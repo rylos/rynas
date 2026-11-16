@@ -73,10 +73,10 @@ Same pattern as `packaging/caddy/` (D-PROXY):
   deduplication" offers the install (apt through `rynas_tasks::Outside`, task
   `apt.install`). `GET /storage/dedup` reports `engine: {installed, version, supported}`;
   rynas refuses a version outside the range it was tested with (`engine_unsupported`).
-- Until the apt repository exists: the same `.deb` is attached to rynas releases and
-  installed from a local path with its SHA-256 compiled into rynas. Downloading upstream's
-  tarball at run time is not done (no signature; the checksum comes from the same release
-  page).
+- Until the apt repository exists: the same `.deb` is attached to a fixed GitHub release
+  of its own and installed from a local path with its SHA-256 compiled into rynas (§6.3).
+  Downloading upstream's tarball at run time is not done (no signature; the checksum comes
+  from the same release page).
 
 ## 2. Impact on every rynas feature
 
@@ -330,8 +330,8 @@ The owner approved the design and the proposed answer to every question:
    their own names (§3.3).
 5. **"Only if the disks are already awake" on by default.**
 6. **Default window: every night 01:00–06:00.**
-7. **The `rynas-oans` package is attached to rynas releases** until there is an apt
-   repository (§6.3).
+7. **The `rynas-oans` package is attached to a fixed rynas release** (`oans-<version>-<rev>`)
+   until there is an apt repository; rynasd downloads it from there (§6.3).
 8. **duperemove fallback removed** (a second `DedupEngine` may come once Debian ships 0.15).
 9. **XFS folders and the system volume included from the start.**
 10. **D-DEDUP row updated** in `../phase0/05-decisions.md`.
@@ -391,14 +391,45 @@ documentation of `rynas_api_types::dedup`.
 
 `packaging/oans/build.sh` builds `target/oans/rynas-oans_1.14.1-1_amd64.deb` reproducibly
 in the pinned `debian:trixie` image (verified tarball, `-O2 -march=x86-64-v2`, stripped,
-`SOURCE_DATE_EPOCH` of the last commit of `packaging/oans`). "Install" in the card runs
-`apt-get install rynas-oans` when an apt source has it, otherwise the pinned `.deb` from
-`/var/lib/rynas/packages/` when its SHA-256 is one compiled into rynasd
-(`dedup::host::PINNED_DEBS`, updated with each package release). The build packages come
-from snapshot.debian.org at a pinned timestamp and the tarball must be GitHub's archive of
-the pinned tag commit (`git get-tar-commit-id`), so the package is the same file on every
-machine. The release publishes the
-`.deb`, its checksum and the upstream tarball (corresponding source).
+`SOURCE_DATE_EPOCH` of the last commit of `packaging/oans`). The build packages come from
+snapshot.debian.org at a pinned timestamp and the tarball must be GitHub's archive of the
+pinned tag commit (`git get-tar-commit-id`), so the package is the same file on every
+machine.
+
+**Package attached to a fixed release.** Like the NUT backport, the package is built once
+and attached to its own GitHub release, not to every rynas release: tag
+`oans-<OANS_VERSION>-<PKG_REVISION>` (now `oans-1.14.1-1`, published 2026-11-16 with
+`--latest=false`), assets `rynas-oans_1.14.1-1_amd64.deb`, the upstream source tarball
+(corresponding source, GPL-2.0 §3(a)) and `SHA256SUMS`:
+
+    gh release create oans-1.14.1-1 --repo rylos/rynas --latest=false \
+        target/oans/rynas-oans_1.14.1-1_amd64.deb target/oans/oans-1.14.1.tar.gz SHA256SUMS
+
+A new build (new oans version or packaging fix) gets a new tag, a new entry in
+`dedup::host::PINNED_DEBS` and new `RELEASE_TAG`/`RELEASE_BASE` there. The tag is not
+written into `packaging/oans/`: any change to that folder moves `SOURCE_DATE_EPOCH` and so
+the package's checksum.
+
+**Install.** "Install" in the card (`POST /v1/storage/dedup/install`, task
+`dedup.install`) takes the package, in this order, from:
+
+1. an apt source that has `rynas-oans` (`apt-get install rynas-oans`);
+2. the pinned `.deb` in `/var/lib/rynas/packages/` when its SHA-256 is one compiled into
+   rynasd (`dedup::host::PINNED_DEBS`);
+3. on x86-64 only, the download of the newest pinned file from
+   `https://github.com/rylos/rynas/releases/download/oans-1.14.1-1/` (`dedup::host::RELEASE_BASE`,
+   with `ups_update::fetch_release`, the NUT backport's code: HTTPS only, the proxy of the
+   environment, at most 16 MiB, written as `.part` with `O_NOFOLLOW` and kept in
+   `/var/lib/rynas/packages/` only with the pinned SHA-256), then installed from there with
+   `apt-get install` in the rynas-apt unit.
+
+`engine.installable` is true in all three cases, so on x86-64 the button always shows. A
+failed download (offline NAS, proxy, HTTP error, wrong checksum) fails the task with an
+error starting `ENGINE_DOWNLOAD_FAILED`: only then the card says the file can be fetched on
+another computer and put in `/var/lib/rynas/packages/` (`dd.download_failed`, the NAS's
+message with the URL as the detail). On other architectures with no apt source the card
+says the package is published for x86-64 only (`dd.engine_unavailable`) and the install is
+refused with 409. `--dry-system` downloads nothing.
 
 ### 6.4 Verified with `packaging/test-dedup.sh` (2026-11-11, kernel 7.3, Debian 13 userland)
 

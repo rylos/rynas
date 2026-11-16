@@ -288,8 +288,10 @@ pub fn keep_if_pinned(part: &Path, dest: &Path, sum: &str) -> Result<(), String>
     std::fs::rename(part, dest).map_err(|e| format!("{}: {e}", dest.display()))
 }
 
-/// Downloads the files of `pinned` missing (or wrong) in `dir` from `base`, each checked
-/// against its SHA-256 before it is kept; returns all of them.
+/// Downloads the files of `pinned` missing (or wrong) in `dir` from `base` (a fixed
+/// release's download folder, `…/releases/download/<tag>`), each checked against its
+/// SHA-256 before it is kept; returns all of them. Also used for the deduplication engine
+/// ([`crate::dedup::host::RELEASE_BASE`]).
 pub async fn fetch_release(
     dir: &Path,
     pinned: &[(&str, &str)],
@@ -309,6 +311,7 @@ pub async fn fetch_release(
         .user_agent(concat!("rynas/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
+    let tag = base.rsplit('/').next().unwrap_or(base);
     let mut out = Vec::new();
     for (name, sum) in pinned {
         let dest = dir.join(name);
@@ -320,7 +323,7 @@ pub async fn fetch_release(
         log(&format!("downloading {url}"));
         let fail = |m: String| {
             format!(
-                "cannot download {url}: {m} (no network? copy the packages of the release {RELEASE_TAG} to {})",
+                "cannot download {url}: {m} (no network? copy the packages of the release {tag} to {})",
                 dir.display()
             )
         };

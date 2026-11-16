@@ -68,7 +68,8 @@ pub trait DedupHost: Send + Sync {
     fn qgroups(&self, mountpoint: &str) -> bool;
     /// The engine's `--version` output (`None`: not installed).
     fn engine_version(&self, argv: &[String]) -> Option<String>;
-    /// The package can be installed: `Some(source)` (`apt` or a local `.deb` path).
+    /// The package can be installed: `Some(source)` (`apt`, a local `.deb` path, or
+    /// [`SOURCE_RELEASE`]: downloaded from [`RELEASE_BASE`] first).
     fn package_source(&self) -> Option<String>;
     /// Marks a simulated install done.
     fn mark_installed(&self) {}
@@ -90,15 +91,40 @@ pub trait DedupHost: Send + Sync {
 // ------------------------------------------------------------------------------------------
 
 /// Where `.deb` files of rynas packages are put until there is an apt repository.
-pub const LOCAL_PACKAGES: &str = "/var/lib/rynas/packages";
+pub const LOCAL_PACKAGES: &str = rynas_api_types::dedup::LOCAL_PACKAGES_DIR;
 
 /// The `rynas-oans` packages rynas accepts from [`LOCAL_PACKAGES`]: `(file name, SHA-256)`,
-/// the ones attached to rynas releases (`packaging/oans/build.sh`, reproducible: the same
-/// commit of `packaging/oans` gives the same file).
+/// the ones attached to the fixed release [`RELEASE_TAG`] (`packaging/oans/build.sh`,
+/// reproducible: the same commit of `packaging/oans` gives the same file). The last one is
+/// the one downloaded.
 pub const PINNED_DEBS: &[(&str, &str)] = &[(
     "rynas-oans_1.14.1-1_amd64.deb",
     "961a10eb427a68cfa0ccad574915f1405090aab01732204c1f915f1c53bebbbc",
 )];
+
+/// The fixed GitHub release the package is attached to, `oans-<OANS_VERSION>-<PKG_REVISION>`
+/// of `packaging/oans/versions.env`: a new package build gets a new tag, together with
+/// [`PINNED_DEBS`].
+pub const RELEASE_TAG: &str = "oans-1.14.1-1";
+/// Where it is downloaded from when no apt source has it and it is not in
+/// [`LOCAL_PACKAGES`]: `<RELEASE_BASE>/<file>` ([`crate::ups_update::fetch_release`]).
+pub const RELEASE_BASE: &str = "https://github.com/rylos/rynas/releases/download/oans-1.14.1-1";
+/// The architecture the package is built for (only amd64 is published).
+pub const RELEASE_ARCH: &str = "x86_64";
+/// [`DedupHost::package_source`] when the package comes from the release download.
+pub const SOURCE_RELEASE: &str = "release";
+
+/// Where the install takes the package from: `apt`, the pinned `.deb` already in the local
+/// folder, else the release download on the architecture it is published for.
+pub fn pick_source(apt: bool, local: Option<PathBuf>, arch: &str) -> Option<String> {
+    if apt {
+        return Some("apt".into());
+    }
+    if let Some(p) = local {
+        return Some(p.to_string_lossy().into_owned());
+    }
+    (arch == RELEASE_ARCH && !PINNED_DEBS.is_empty()).then(|| SOURCE_RELEASE.into())
+}
 
 const UNIT_PREFIX: &str = "rynas-dedup";
 /// A stop is asked again this often until the run has ended.
@@ -312,9 +338,9 @@ impl DedupHost for HostDedup {
             return v.clone();
         }
         let v = if apt_candidate() {
-            Some("apt".into())
+            pick_source(true, None, std::env::consts::ARCH)
         } else {
-            local_package(Path::new(LOCAL_PACKAGES)).map(|p| p.to_string_lossy().into_owned())
+            pick_source(false, local_package(Path::new(LOCAL_PACKAGES)), std::env::consts::ARCH)
         };
         self.cache.lock().unwrap().package = Some((key, v.clone()));
         v
@@ -668,5 +694,33 @@ mod tests {
         let (name, _) = PINNED_DEBS[0];
         std::fs::write(d.path().join(name), b"not the package").unwrap();
         assert_eq!(local_package(d.path()), None);
+    }
+
+    #[test]
+    fn source_is_apt_then_the_local_file_then_the_release_on_amd64_only() {
+        let p = PathBuf::from("/var/lib/rynas/packages/rynas-oans_1.14.1-1_amd64.deb");
+        assert_eq!(pick_source(true, Some(p.clone()), "x86_64").as_deref(), Some("apt"));
+        assert_eq!(pick_source(false, Some(p.clone()), "aarch64").as_deref(), p.to_str());
+        assert_eq!(pick_source(false, None, "x86_64").as_deref(), Some(SOURCE_RELEASE));
+        assert_eq!(pick_source(false, None, "aarch64"), None, "only amd64 is published");
+        assert_eq!(pick_source(true, None, "aarch64").as_deref(), Some("apt"));
+    }
+
+    #[test]
+    fn release_download_is_pinned() {
+        assert!(
+            RELEASE_BASE.ends_with(&format!("/{RELEASE_TAG}"))
+                && RELEASE_BASE.starts_with("https://github.com/rylos/rynas/releases/download/")
+        );
+        // the tag is `oans-<version>-<revision>` of the build (not written into versions.env:
+        // a change of packaging/oans changes SOURCE_DATE_EPOCH, so the package's checksum)
+        let env = include_str!("../../../../packaging/oans/versions.env");
+        let get = |k: &str| env.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).unwrap();
+        let (name, sum) = PINNED_DEBS[PINNED_DEBS.len() - 1];
+        assert_eq!(name, format!("rynas-oans_{}-{}_amd64.deb", get("OANS_VERSION"), get("PKG_REVISION")));
+        assert_eq!(RELEASE_TAG, format!("oans-{}-{}", get("OANS_VERSION"), get("PKG_REVISION")));
+        assert!(sum.len() == 64 && sum.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        // the asset keeps the file name (no `~` or `+` for GitHub to change)
+        assert_eq!(crate::ups_update::asset_name(name), name);
     }
 }

@@ -91,6 +91,19 @@ fn warning_key(w: DedupWarning) -> &'static str {
     }
 }
 
+/// The failed install task's message: a failed download (offline NAS) says where the file
+/// can be put by hand, with the NAS's own message as the detail.
+fn install_error(task: &rynas_api_types::TaskInfo) -> String {
+    match task.error.as_deref().and_then(|e| e.strip_prefix(rynas_api_types::dedup::ENGINE_DOWNLOAD_FAILED)) {
+        Some(detail) if task.status != TaskStatus::Cancelled => format!(
+            "{}{}{detail}",
+            tf("dd.download_failed", &[("dir", rynas_api_types::dedup::LOCAL_PACKAGES_DIR)]),
+            api::DETAIL_SEP
+        ),
+        _ => crate::tasks::task_error(task),
+    }
+}
+
 fn progress_text(p: &DedupProgress) -> String {
     let phase = t(match p.phase.as_str() {
         "scanning" => "dd.ph.scanning",
@@ -215,7 +228,7 @@ fn card(
             match r {
                 Ok(task) if task.status == TaskStatus::Ok => ov.reload(),
                 Ok(task) => {
-                    let _ = error.try_set(Some(crate::tasks::task_error(&task)));
+                    let _ = error.try_set(Some(install_error(&task)));
                 }
                 Err(e) => {
                     let _ = error.try_set(Some(e.text()));

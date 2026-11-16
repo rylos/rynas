@@ -44,6 +44,11 @@ pub const ENGINE_PACKAGE: &str = "rynas-oans";
 /// Where the package puts the engine (not in `PATH`: no clash with another oans or with
 /// Debian's duperemove).
 pub const ENGINE_PATH: &str = "/usr/lib/rynas/oans/oans";
+/// Start of the `dedup.install` task error when the package could not be downloaded from
+/// the rynas release (offline NAS): the UI then tells where to put the file by hand.
+pub const ENGINE_DOWNLOAD_FAILED: &str = "engine download failed: ";
+/// Where the admin puts the package file when the NAS cannot download it.
+pub const LOCAL_PACKAGES_DIR: &str = "/var/lib/rynas/packages";
 
 fn yes() -> bool {
     true
@@ -466,7 +471,9 @@ pub struct DedupEngineInfo {
     /// Tested range, e.g. `1.14.1` and `1.14.x`.
     pub min_version: String,
     pub max_version: String,
-    /// The package can be installed from here (an apt source has it, or rynas carries it).
+    /// The package can be installed from here: an apt source has it, its file is in
+    /// [`LOCAL_PACKAGES_DIR`], or rynasd downloads it from the rynas release (published for
+    /// x86-64 only: `false` on other architectures without an apt source).
     pub installable: bool,
 }
 

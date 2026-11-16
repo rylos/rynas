@@ -30,9 +30,12 @@ Deduplication engine (rynas-oans)
 ---------------------------------
 Deduplication of shared folders uses oans, packaged as rynas-oans (binary in
 /usr/lib/rynas/oans, outside PATH). Storage > volume > Deduplication offers
-to install it: from an apt source that has it, otherwise from the .deb
-attached to the rynas release, copied to /var/lib/rynas/packages/ (rynasd
-installs it only when its SHA-256 is one rynas knows). btrfs-compsize is
+to install it: from an apt source that has it, otherwise from the .deb in
+/var/lib/rynas/packages/, otherwise rynasd downloads the .deb from its fixed
+rynas release (https://github.com/rylos/rynas/releases/tag/oans-1.14.1-1,
+amd64 only). rynasd installs a .deb only when its SHA-256 is one rynas knows.
+A NAS without internet access: copy rynas-oans_1.14.1-1_amd64.deb from that
+release to /var/lib/rynas/packages/ and install again. btrfs-compsize is
 recommended with it.
 
 NUT newer than Debian's (rynas NUT packages)

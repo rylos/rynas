@@ -2617,7 +2617,8 @@ dd.st.running	In esecuzione
 dd.st.estimating	Stima in corso
 dd.st.waiting	In attesa
 dd.engine_missing	Il motore di deduplicazione (oans) non è installato.
-dd.engine_unavailable	Il motore di deduplicazione (pacchetto rynas-oans) non è installato e nessuna sorgente dei pacchetti lo offre: metti il pacchetto della release di rynas in /var/lib/rynas/packages.
+dd.engine_unavailable	Il motore di deduplicazione (pacchetto rynas-oans) non è installato. Nessuna sorgente dei pacchetti di questo NAS lo offre e rynas lo pubblica solo per processori x86-64.
+dd.download_failed	Non è stato possibile scaricare il motore di deduplicazione. Se questo NAS non ha accesso a internet, scarica da un altro computer il file all'indirizzo qui sotto, mettilo in {dir} e seleziona di nuovo Installa.
 dd.engine_unsupported	oans {version} è fuori dalle versioni provate con rynas (da {min} a {max}): le esecuzioni sono rifiutate.
 dd.install	Installa
 dd.waiting_for	In attesa che finisca {task}
