@@ -195,7 +195,7 @@ systemctl show -P CapabilityBoundingSet rynas-task-scrubnone.service | grep -q c
 panel=0
 for _ in $(seq 20); do
     api GET '/tasks?limit=50'
-    panel=$(echo "$BODY" | jq '[.[] | select(.kind == "btrfs.scrub" and .user == "scheduler" and .status == "error")] | length')
+    panel=$(echo "$BODY" | jq '[.[] | select(.type == "btrfs.scrub" and .user == "scheduler" and .status == "error")] | length')
     [ "$panel" -ge 1 ] && break
     sleep 0.5
 done
