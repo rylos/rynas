@@ -1,4 +1,4 @@
-# Managed by rynas — do not edit (sha256:f858e4c23f69de5a53a7c4c8b6e907be253e7234c678c6dbc10c622bd685f9c4)
+# Managed by rynas — do not edit (sha256:95fc46c0b860f0d37548d99b3a8298d4b77b09d69661c557994b054515030354)
 [Unit]
 Description=rynas task report: report
 Documentation=https://github.com/rylos/rynas
@@ -6,6 +6,7 @@ After=local-fs.target network-online.target
 
 [Service]
 Type=exec
+ExecCondition=+/usr/libexec/rynas/rynasctl gate report
 StandardInput=file:/var/lib/rynas/tasks/report/run
 ExecStart=/usr/bin/env python3 -
 StandardOutput=journal

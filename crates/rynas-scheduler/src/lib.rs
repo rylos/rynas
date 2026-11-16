@@ -6,7 +6,9 @@
 //! - [`units`]: the unit files;
 //! - [`calendar`]: `OnCalendar=` checks, cron conversion, `systemd-analyze` output;
 //! - [`probe`]: read-only systemd questions (timers, journal) behind a trait;
-//! - [`history`]: the run history (SQLite) fed by `rynasctl task-finished`;
+//! - [`gate`]: the scheduling gate (`ExecCondition=`): pauses, catch-up deadline, overlap,
+//!   retries;
+//! - [`history`]: the run history (SQLite) fed by `rynasctl task-finished` and the gate;
 //! - [`live`]: the live output of a running task (journal entries, event data);
 //! - [`preview`]: a schedule as the NAS will run it (next runs, DST notes), without systemd;
 //! - [`cron`]: read-only listing of crontab entries.
@@ -16,6 +18,7 @@
 pub mod calendar;
 pub mod cron;
 pub mod domain;
+pub mod gate;
 pub mod history;
 pub mod live;
 pub mod preview;

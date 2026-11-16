@@ -1,4 +1,4 @@
-# Managed by rynas — do not edit (sha256:2b10a55b27729848e19d4b576eb88ef3cf5d3a84b1819e9bd88409fd2bdbc1b3)
+# Managed by rynas — do not edit (sha256:dda7f16ea67b41a5e272a632720f4269c711301f7ea8c6485c165e6a2c4f3986)
 [Unit]
 Description=rynas task rsync-photos: rsync photos (100%% of them)
 Documentation=https://github.com/rylos/rynas
@@ -6,6 +6,7 @@ After=local-fs.target network-online.target
 
 [Service]
 Type=exec
+ExecCondition=+/usr/libexec/rynas/rynasctl gate rsync-photos
 User=alice
 StandardInput=file:/var/lib/rynas/tasks/rsync-photos/run
 ExecStart=/bin/sh -

@@ -24,6 +24,7 @@ pub mod docker_auto;
 pub mod error;
 pub mod files;
 pub mod fslock;
+pub mod gate;
 pub mod groups;
 pub mod hardware;
 pub mod jobs;

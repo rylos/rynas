@@ -1,6 +1,8 @@
-//! Internal actions of scheduler tasks, run as rynasd tasks (UPID, log, cancel; visible in
-//! the task panel). Started by `rynasctl job run <id>` from the task's unit, which follows
-//! the task to its end so that the unit's result is the task's.
+//! Internal actions of scheduler tasks. Started by `rynasctl job run <id>` from the task's
+//! unit: an action that is one command (scrub, SMART self-test, a snapshot job without
+//! targets that follow it) is handed to the unit as a [`JobPlan`] and runs there, outside
+//! rynasd; the others run as rynasd tasks (UPID, log, cancel; visible in the task panel),
+//! which the unit follows to their end so that the unit's result is the task's.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,6 +12,7 @@ use rynas_api_types::snapshots::SnapshotsConfig;
 use rynas_btrfs::SNAPSHOTS_KEY;
 use rynas_btrfs::btrbk::parse_report;
 use rynas_tasks::Cmd;
+use serde::{Deserialize, Serialize};
 
 use crate::ops::{Error, Res};
 use crate::protection::{Protection, invalid, not_found};
@@ -68,6 +71,101 @@ fn spawn_cmd(p: &Arc<Protection>, kind: &str, user: &str, cmd: Cmd) -> Res<Strin
     Ok(p.ops.tasks.spawn(kind, user, move |ctx| async move {
         ctx.run(&cmd).await.map(|_| ()).map_err(|e| e.to_string())
     })?)
+}
+
+/// A command the task unit runs itself (`rynasctl job run`), outside rynasd: a restart of
+/// rynasd (a package upgrade) no longer ends a running scrub or snapshot (I-11 of
+/// `docs/research/scheduling.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobPlan {
+    /// Program (looked up in `PATH`) and arguments.
+    pub argv: Vec<String>,
+    /// The whole environment of the command (`PATH` added when missing).
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// The command is stopped after this long.
+    pub timeout_s: u64,
+    #[serde(default)]
+    pub report: PlanReport,
+}
+
+/// What the unit prints of the command's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReport {
+    /// As it comes.
+    #[default]
+    Plain,
+    /// `btrbk --format=raw` on standard output: a summary of what it created and deleted.
+    Btrbk,
+}
+
+/// The command an internal action is, when it is one command, prepared for the unit to run:
+/// a scrub (its filesystem lock taken now, held by the run's lease until it ends: a
+/// deduplication there gives way first), a SMART self-test, a snapshot job without targets
+/// that follow it. `None`: the action runs as a rynasd task ([`spawn`]).
+pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>> {
+    match &t.action {
+        TaskAction::Scrub { filesystem } => {
+            let guard = crate::fslock::FsLocks::global()
+                .heavy_paths(&[filesystem], "btrfs.scrub")
+                .await;
+            p.gate.attach_guard(&t.id, guard);
+            Ok(Some(JobPlan {
+                argv: ["btrfs", "scrub", "start", "-B", "-d"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .chain([filesystem.clone()])
+                    .collect(),
+                env: Vec::new(),
+                timeout_s: SCRUB_TIMEOUT.as_secs(),
+                report: PlanReport::Plain,
+            }))
+        }
+        TaskAction::SmartTest { disk, test } => {
+            let kind = match test {
+                SmartTestKind::Short => "short",
+                SmartTestKind::Long => "long",
+            };
+            Ok(Some(JobPlan {
+                argv: vec!["smartctl".into(), "-t".into(), kind.into(), format!("/dev/{disk}")],
+                env: Vec::new(),
+                timeout_s: SMART_TIMEOUT.as_secs(),
+                report: PlanReport::Plain,
+            }))
+        }
+        TaskAction::Snapshot { job } => {
+            let p2 = p.clone();
+            let doc: SnapshotsConfig = tokio::task::spawn_blocking(move || {
+                crate::services::from_value(p2.ops.config.applied(SNAPSHOTS_KEY)?)
+            })
+            .await
+            .map_err(Error::internal)??;
+            let j = doc
+                .jobs
+                .into_iter()
+                .find(|j| j.name == *job)
+                .ok_or_else(|| not_found(format!("applied snapshot job {job}")))?;
+            // targets that follow the snapshots transfer inside rynasd
+            if j.replicas.iter().any(|r| r.enabled && r.after_snapshots) {
+                return Ok(None);
+            }
+            let dir = j.snapshot_dir.clone();
+            let host = p.snapshots.clone();
+            tokio::task::spawn_blocking(move || host.host().ensure_dir(&dir))
+                .await
+                .map_err(Error::internal)?
+                .map_err(Error::internal)?;
+            let cmd = rynas_btrfs::replication::snapshot_cmd(&j, SNAPSHOT_TIMEOUT);
+            Ok(Some(JobPlan {
+                argv: cmd.argv_lossy(),
+                env: cmd.env_lossy(),
+                timeout_s: SNAPSHOT_TIMEOUT.as_secs(),
+                report: PlanReport::Btrbk,
+            }))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Task `snapshot.run`: `btrbk -c /etc/rynas/btrbk/<job>.conf run --format=raw`, with a

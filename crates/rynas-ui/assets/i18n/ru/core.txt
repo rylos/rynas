@@ -120,6 +120,8 @@ nev.sched.task_ok.title	Задача «{name}» выполнена
 nev.sched.task_ok.body	Результат: {result}. Вывод — в истории задачи.
 nev.sched.task_finished.title	Задача «{name}» завершена
 nev.sched.task_finished.body	Результат: {result}. Вывод — в истории задачи.
+nev.sched.task_missed.title	Задача «{name}»: пропущенный запуск не наверстан
+nev.sched.task_missed.body	NAS был выключен в назначенное время и включился после срока наверстывания.
 nev.snapshot.job_failed.title	Ошибка задания снимков «{name}»
 nev.snapshot.job_failed.body	Результат: {result}. Вывод — в истории задачи.
 nev.snapshot.job_ok.title	Задание снимков «{name}» выполнено
@@ -2456,6 +2458,37 @@ sch.run.failed	Ошибка
 sch.run.timeout	Превышено время
 sch.run.exit	Ошибка (код {code})
 sch.run.signal	Прервано ({sig})
+sch.skip.paused_all	Пропущено: все на паузе
+sch.skip.paused	Пропущено: на паузе
+sch.skip.missed	Пропущено: опоздание
+sch.skip.missed_detail	Не наверстано: опоздание больше {deadline}
+sch.skip.overlap	Пропущено: предыдущий запуск ещё шёл
+sch.skip.running	Пропущено: уже выполняется
+sch.trigger.catch_up	Наверстывание после простоя
+sch.trigger.boot	При запуске системы
+sch.trigger.manual	Запуск вручную
+sch.trigger.retry	Повтор {n}
+sch.trigger.queued	После предыдущего запуска
+sch.trigger.other	Запущено вне rynas
+sch.ungated	rynas не отвечал: запущено без проверок расписания
+sch.paused	На паузе
+sch.pause	Приостановить
+sch.resume	Возобновить
+sch.pause_all	Приостановить все
+sch.resume_all	Возобновить все
+sch.resumed	Задачи по расписанию возобновлены
+sch.paused_banner	Задачи по расписанию приостановлены.
+sch.paused_text	Запуски по расписанию пропускаются и записываются в историю каждой задачи. Запуск вручную по-прежнему работает.
+sch.paused_since	С {when}, {user}
+sch.paused_until	возобновится {when}
+sch.pause_title	Приостановить задачи по расписанию
+sch.pause_task_title	Приостановить «{name}»
+sch.pause_task_text	Её запуски по расписанию пропускаются и записываются в её историю. Запуск вручную по-прежнему работает.
+sch.pause_reason	Причина (необязательно)
+sch.pause_for	Возобновить
+sch.pause_for.never	Вручную
+sch.pause_for.d7	Через 7 дней
+sch.retry_at	Повтор {n} из {of}: {when}
 sch.delete_title	Удалить задачу {name}?
 sch.delete_text	Её расписание будет удалено при применении изменений. История запусков сохранится.
 sch.delete_job_task	Эта задача относится к заданию снимков, репликации или резервного копирования либо к расписанию питания: измените или удалите её там.

@@ -535,6 +535,8 @@ impl Demo {
                     result: "success".into(),
                     exit_code: Some(0),
                     signal: None,
+                    trigger: Some(rynas_api_types::scheduler::RunTrigger::Manual),
+                    ..NewRun::default()
                 };
                 match p2.history.record(&new) {
                     Ok(n) => {

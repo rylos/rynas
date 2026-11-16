@@ -47,12 +47,23 @@ fn documents_of_older_releases_render_the_same_units() {
         "recycle",
         "hello",
     ] {
-        for ext in ["service", "timer"] {
-            golden(
-                &format!("compat/{id}.{ext}"),
-                &read(&e.root, &format!("{units}/rynas-task-{id}.{ext}")),
-            );
-        }
+        // timers: byte for byte (an upgrade restarts none of them and keeps their stamps)
+        golden(
+            &format!("compat/{id}.timer"),
+            &read(&e.root, &format!("{units}/rynas-task-{id}.timer")),
+        );
+        // services: the same but for the scheduling gate added by S2 (the header carries
+        // the hash of the whole file, so it is left out too)
+        let service = read(&e.root, &format!("{units}/rynas-task-{id}.service"));
+        let gate = format!("ExecCondition=+/usr/libexec/rynas/rynasctl gate {id}\n");
+        assert!(service.contains(&gate), "{service}");
+        let body = |s: &str| s.lines().skip(1).map(|l| format!("{l}\n")).collect::<String>();
+        let want = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("src/golden/compat/{id}.service")),
+        )
+        .unwrap();
+        assert_eq!(body(&service.replace(&gate, "")), body(&want), "{id}.service");
     }
     golden(
         "compat/rynas-tasks.conf",

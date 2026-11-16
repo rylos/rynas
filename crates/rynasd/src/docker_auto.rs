@@ -370,6 +370,10 @@ pub fn maintenance(s: &DockerSvc) -> Option<String> {
     if let Some(t) = busy {
         return Some(format!("task {} is running", t.kind));
     }
+    // a scheduled scrub runs in its own unit, not as a rynasd task
+    if let Some(id) = crate::gate::heavy_runs_now().first() {
+        return Some(format!("scheduled task {id} is running"));
+    }
     if !s.dry
         && let Ok(md) = std::fs::read_to_string("/proc/mdstat")
         && let Some(l) = md

@@ -46,6 +46,8 @@ pub struct Protection {
     runtime_flight: tokio::sync::Mutex<()>,
     /// Live output streams of running tasks ([`crate::scheduler_live`]).
     pub live: Arc<crate::scheduler_live::Live>,
+    /// The scheduling gate: pauses, leases, requested starts ([`crate::gate`]).
+    pub gate: Arc<crate::gate::Gate>,
 }
 
 /// What systemd says about the task units now.
@@ -102,6 +104,7 @@ impl Protection {
         state_dir: PathBuf,
     ) -> Self {
         Self {
+            gate: Arc::new(crate::gate::Gate::new(state_dir.clone())),
             ops,
             scheduler,
             snapshots,

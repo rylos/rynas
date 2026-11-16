@@ -962,6 +962,9 @@ fn main() -> std::io::Result<()> {
         );
         let protection = Arc::new(protection);
         state.protection = Some(protection.clone());
+        // the scheduling gate: leases of the task units running now, then retries and the
+        // overlap policy `replace` every few seconds
+        tokio::spawn(rynasd::gate::watch(protection.clone()));
         // backups (D-BACKUP): the worker in a transient unit of its own; --dry-system or
         // RYNAS_BACKUP_WORKER (development, the UI audit) start it as a plain child
         {

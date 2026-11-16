@@ -183,6 +183,21 @@ impl Cmd {
         &self.argv[0]
     }
 
+    /// Program and arguments, for running the same command elsewhere (a task unit runs
+    /// what rynasd planned: `rynasctl job run`).
+    pub fn argv_lossy(&self) -> Vec<String> {
+        self.argv.iter().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    /// The variables set with [`Cmd::env`] (the caller decides whether they may leave the
+    /// process: they can carry secrets).
+    pub fn env_lossy(&self) -> Vec<(String, String)> {
+        self.env
+            .iter()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+            .collect()
+    }
+
     /// The bytes given with [`Cmd::stdin`] (simulations read them; never log them: they can
     /// carry secrets).
     pub fn stdin_data(&self) -> Option<&[u8]> {

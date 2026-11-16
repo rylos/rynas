@@ -120,6 +120,8 @@ nev.sched.task_ok.title	Attività {name} riuscita
 nev.sched.task_ok.body	Esito: {result}. L'output è nella cronologia dell'attività.
 nev.sched.task_finished.title	Attività {name} completata
 nev.sched.task_finished.body	Esito: {result}. L'output è nella cronologia dell'attività.
+nev.sched.task_missed.title	Attività {name}: esecuzione persa non recuperata
+nev.sched.task_missed.body	Il NAS era spento all'ora pianificata ed è tornato dopo la scadenza del recupero.
 nev.snapshot.job_failed.title	Job di snapshot {name} non riuscito
 nev.snapshot.job_failed.body	Esito: {result}. L'output è nella cronologia dell'attività.
 nev.snapshot.job_ok.title	Job di snapshot {name} riuscito
@@ -2436,6 +2438,37 @@ sch.run.failed	Non riuscita
 sch.run.timeout	Tempo scaduto
 sch.run.exit	Non riuscita (uscita {code})
 sch.run.signal	Interrotta ({sig})
+sch.skip.paused_all	Saltata: tutte in pausa
+sch.skip.paused	Saltata: in pausa
+sch.skip.missed	Saltata: persa
+sch.skip.missed_detail	Non recuperata: oltre {deadline} di ritardo
+sch.skip.overlap	Saltata: l'esecuzione precedente era in corso
+sch.skip.running	Saltata: già in esecuzione
+sch.trigger.catch_up	Recupero dopo lo spegnimento
+sch.trigger.boot	All'avvio
+sch.trigger.manual	Esegui ora
+sch.trigger.retry	Nuovo tentativo {n}
+sch.trigger.queued	Dopo l'esecuzione precedente
+sch.trigger.other	Avviata fuori da rynas
+sch.ungated	rynas non rispondeva: eseguita senza i controlli di pianificazione
+sch.paused	In pausa
+sch.pause	Metti in pausa
+sch.resume	Riprendi
+sch.pause_all	Metti tutto in pausa
+sch.resume_all	Riprendi tutte
+sch.resumed	Attività pianificate riprese
+sch.paused_banner	Le attività pianificate sono in pausa.
+sch.paused_text	Gli avvii pianificati vengono saltati e registrati nella cronologia di ogni attività. «Esegui ora» funziona comunque.
+sch.paused_since	Dal {when}, da {user}
+sch.paused_until	riprende il {when}
+sch.pause_title	Metti in pausa le attività pianificate
+sch.pause_task_title	Metti in pausa {name}
+sch.pause_task_text	I suoi avvii pianificati vengono saltati e registrati nella sua cronologia. «Esegui ora» funziona comunque.
+sch.pause_reason	Motivo (facoltativo)
+sch.pause_for	Riprendi
+sch.pause_for.never	Quando le riprendo io
+sch.pause_for.d7	Dopo 7 giorni
+sch.retry_at	Tentativo {n} di {of}: {when}
 sch.delete_title	Eliminare l'attività {name}?
 sch.delete_text	La sua pianificazione viene rimossa all'applicazione delle modifiche. La cronologia resta.
 sch.delete_job_task	Questa attività appartiene a un job di snapshot, replica o backup, o alla pianificazione di alimentazione: modificala o eliminala lì.

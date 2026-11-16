@@ -4,8 +4,10 @@
 //! Writes stage the `scheduler` key of the session user (`POST /v1/config/apply` applies:
 //! units, scripts, `daemon-reload`, timers); "run now" starts the applied unit. Two routes
 //! are internal only (rynas-web never forwards them): `finished`, called by
-//! `rynasctl task-finished` from `ExecStopPost=` of every task unit, and `execute`, called by
-//! `rynasctl job run` from the units of internal tasks.
+//! `rynasctl task-finished` from `ExecStopPost=` of every task unit, `gate`, called by
+//! `rynasctl gate` from `ExecCondition=` of every task unit ([`crate::gate`]), and `execute`,
+//! called by `rynasctl job run` from the units of internal tasks. Pauses (`/pause`,
+//! `/resume`, per task too) take effect at once, without an apply.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,10 +20,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rynas_api_types::scheduler::{
-    CalendarPreview, CalendarPreviewRequest, CalendarSyntax, CronEntry, NotifyPolicy,
-    SchedulePreview, SchedulePreviewRequest, ScheduledTask, SchedulerConfig, SystemTimer,
-    TaskAction, TaskRun, TaskStatus, TaskView,
+    CalendarPreview, CalendarPreviewRequest, CalendarSyntax, CronEntry, NotifyPolicy, PauseInfo,
+    PauseRequest, RunTrigger, SchedulePreview, SchedulePreviewRequest, ScheduledTask,
+    SchedulerConfig, SchedulerPause, SystemTimer, TaskAction, TaskRun, TaskStatus, TaskView,
 };
+use rynas_scheduler::gate::{GateAnswer, GateRequest};
 use rynas_api_types::snapshots::SnapshotsConfig;
 use rynas_api_types::{StagedChanges, TaskStarted, error_codes};
 use rynas_btrfs::SNAPSHOTS_KEY;
@@ -75,6 +78,10 @@ pub fn router(st: ProtState) -> Router {
         .route("/v1/scheduler/tasks/{id}/history", get(history))
         .route("/v1/scheduler/tasks/{id}/history/{n}", get(history_one))
         .route("/v1/scheduler/tasks/{id}/live", get(live))
+        .route("/v1/scheduler/tasks/{id}/pause", post(pause_task))
+        .route("/v1/scheduler/tasks/{id}/resume", post(resume_task))
+        .route("/v1/scheduler/pause", get(pause_state).post(pause_all))
+        .route("/v1/scheduler/resume", post(resume_all))
         .route("/v1/scheduler/system-timers", get(system_timers))
         .route("/v1/scheduler/cron-entries", get(cron_entries))
         .merge(root_routes())
@@ -87,6 +94,7 @@ fn root_routes() -> Router<ProtState> {
     Router::new()
         .route("/v1/scheduler/tasks/{id}/finished", post(finished))
         .route("/v1/scheduler/tasks/{id}/execute", post(execute))
+        .route("/v1/scheduler/tasks/{id}/gate", post(gate))
         .route_layer(axum::middleware::from_fn(crate::server::require_root_peer))
 }
 
@@ -141,6 +149,9 @@ fn status_of(
         },
         last_run: latest.get(&t.id).cloned(),
         unit,
+        // filled in by task_views
+        paused: None,
+        retry: None,
     }
 }
 
@@ -182,6 +193,15 @@ pub(crate) fn task_views(p: &Protection, owner: &str, rt: &Runtime) -> Res<Vec<T
             status: status_of(t, is_applied(&t.id), pending_op(None, Some(t)), rt, &latest),
             task: migrated(t),
         });
+    }
+    let pause = p.gate.pause();
+    let retries = p.history.retries().unwrap_or_default();
+    for v in &mut out {
+        v.status.paused = pause.tasks.get(&v.task.id).cloned();
+        v.status.retry = retries
+            .iter()
+            .find(|(id, _)| *id == v.task.id)
+            .map(|(_, a)| a.retry);
     }
     Ok(out)
 }
@@ -486,6 +506,8 @@ async fn run_now(
             ));
         };
         guard_root_task(p, &who, &t)?;
+        // the gate records it as run now, and lets it run while paused
+        p.gate.request(&id, RunTrigger::Manual, 0);
         p.ops
             .config
             .system()
@@ -688,31 +710,17 @@ async fn finished(
     {
         return Err(Error::bad_request("invalid invocation id"));
     }
-    let (exit_code, signal) = match f.exit_code.as_str() {
-        "exited" => (f.exit_status.parse().ok(), None),
-        "killed" | "dumped" => (None, Some(f.exit_status.clone()).filter(|s| !s.is_empty())),
-        _ => (None, None),
-    };
     let tid = id.clone();
-    let run_id = blocking(&p, move |p| {
-        let run = NewRun {
-            start_ms: p.probe.start_ms(&service_name(&tid)),
-            end_ms: rynas_tasks::now_ms(),
-            task_id: tid,
-            invocation_id: f.invocation_id.clone(),
-            result: if f.result.is_empty() {
-                "unknown".into()
-            } else {
-                f.result.chars().take(32).collect()
-            },
-            exit_code,
-            signal,
-        };
-        let id = p.history.record(&run).map_err(Error::internal)?;
-        Ok((id, run))
+    let recorded = blocking(&p, move |p| {
+        crate::gate::import_spool(p);
+        let start = p.probe.start_ms(&service_name(&tid));
+        record_end(p, &tid, &f, start, rynas_tasks::now_ms())
     })
     .await?;
     p.invalidate();
+    let Some(run_id) = recorded else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
     let p2 = p.clone();
     tokio::spawn(async move {
         // journald may still be processing the last lines of the stream
@@ -722,7 +730,57 @@ async fn finished(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn collect_output(p: &Protection, task_id: &str, (run_id, run): (u64, NewRun)) {
+/// Records the end of run `f.invocation_id` of task `id` (from `task-finished`, or from the
+/// spool when rynasd was away), drops its lease and arms or clears its retry. `None` for a
+/// start the gate skipped (recorded already: nothing ran).
+pub(crate) fn record_end(
+    p: &Protection,
+    id: &str,
+    f: &TaskFinished,
+    start_ms: Option<u64>,
+    end_ms: u64,
+) -> Res<Option<(u64, NewRun)>> {
+    let skipped = p
+        .history
+        .by_invocation(&f.invocation_id)
+        .map_err(Error::internal)?
+        .is_some_and(|r| r.skipped.is_some());
+    if skipped || f.result == "exec-condition" {
+        p.gate.release(id, &f.invocation_id);
+        return Ok(None);
+    }
+    let (exit_code, signal) = match f.exit_code.as_str() {
+        "exited" => (f.exit_status.parse().ok(), None),
+        "killed" | "dumped" => (None, Some(f.exit_status.clone()).filter(|s| !s.is_empty())),
+        _ => (None, None),
+    };
+    let note = p.history.gate_note(&f.invocation_id).ok().flatten();
+    let run = NewRun {
+        start_ms: start_ms.or(note.as_ref().map(|n| n.at_ms)),
+        end_ms,
+        task_id: id.to_string(),
+        invocation_id: f.invocation_id.clone(),
+        result: if f.result.is_empty() {
+            "unknown".into()
+        } else {
+            f.result.chars().take(32).collect()
+        },
+        exit_code,
+        signal,
+        trigger: note.as_ref().and_then(|n| n.trigger),
+        attempt: note.as_ref().map_or(0, |n| n.attempt),
+        ungated: note.as_ref().is_some_and(|n| n.ungated),
+        ..NewRun::default()
+    };
+    let run_id = p.history.record(&run).map_err(Error::internal)?;
+    p.gate.release(id, &run.invocation_id);
+    if let Some(task) = applied_task(p, id)? {
+        crate::gate::after_run(p, &task, &run);
+    }
+    Ok(Some((run_id, run)))
+}
+
+pub(crate) fn collect_output(p: &Protection, task_id: &str, (run_id, run): (u64, NewRun)) {
     p.probe.sync_journal();
     let out = match p.probe.journal(&run.invocation_id, OUTPUT_MAX) {
         Ok(o) => o,
@@ -737,6 +795,10 @@ fn collect_output(p: &Protection, task_id: &str, (run_id, run): (u64, NewRun)) {
     let Ok(Some(task)) = applied_task(p, task_id) else {
         return;
     };
+    // a failure that will be tried again notifies only if the last attempt fails too
+    if !run.ok() && crate::gate::retry_pending(p, task_id) {
+        return;
+    }
     let failed_before = p
         .history
         .list(task_id, 2, None)
@@ -860,9 +922,18 @@ fn tail(s: &str, max: usize) -> String {
     format!("[…]\n{cut}")
 }
 
-/// `rynasctl job run <id>`: starts the rynasd task of an applied internal task (as user
-/// [`SCHEDULER_USER`]).
-async fn execute(State(st): State<ProtState>, Path(id): Path<String>) -> Res<Response> {
+/// `rynasctl job run <id>`: an applied internal task. The actions that are one command
+/// (scrub, SMART self-test, a snapshot job without targets that follow it) are answered 200
+/// with the command ([`crate::jobs::JobPlan`]): the unit runs it itself, so a restart of
+/// rynasd no longer ends it; the others start their rynasd task (as user
+/// [`SCHEDULER_USER`]), answered 202 with its UPID.
+async fn execute(
+    State(st): State<ProtState>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Res<Response> {
+    // an empty body (a unit written by an older release): no plan
+    let req: ExecuteRequest = serde_json::from_slice(&body).unwrap_or_default();
     let p = prot(&st)?;
     check_id(&id)?;
     let i = id.clone();
@@ -872,8 +943,124 @@ async fn execute(State(st): State<ProtState>, Path(id): Path<String>) -> Res<Res
     if !task.action.is_internal() {
         return Err(invalid(format!("task {id} is not an internal task")));
     }
+    if req.plan && let Some(plan) = crate::jobs::plan(&p, &task).await? {
+        return Ok((StatusCode::OK, Json(plan)).into_response());
+    }
     let upid = crate::jobs::spawn(&p, &task, SCHEDULER_USER).await?;
+    p.gate.attach_upid(&id, &upid);
     Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: upid })).into_response())
+}
+
+/// Body of the internal `POST /v1/scheduler/tasks/{id}/execute`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExecuteRequest {
+    /// The unit can run a planned command itself (rynasctl of this release).
+    #[serde(default)]
+    pub plan: bool,
+}
+
+/// `rynasctl gate <id>`: the scheduling gate's answer for a start ([`crate::gate::answer`]).
+async fn gate(
+    State(st): State<ProtState>,
+    Path(id): Path<String>,
+    body: Result<Json<GateRequest>, JsonRejection>,
+) -> Res<Json<GateAnswer>> {
+    let p = prot(&st)?;
+    check_id(&id)?;
+    let req = json_body(body)?;
+    if req.invocation_id.is_empty()
+        || req.invocation_id.len() > 64
+        || !req.invocation_id.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(Error::bad_request("invalid invocation id"));
+    }
+    Ok(Json(
+        blocking(&p, move |p| crate::gate::answer(p, &id, &req)).await?,
+    ))
+}
+
+/// A pause request checked: end in the future, reason of at most 200 characters.
+fn pause_info(who: &str, r: PauseRequest) -> Res<PauseInfo> {
+    let now = rynas_tasks::now_ms();
+    if r.until_ms.is_some_and(|u| u <= now) {
+        return Err(invalid("the end of the pause is in the past"));
+    }
+    let reason = r.reason.trim().to_string();
+    if reason.chars().count() > 200 || reason.chars().any(char::is_control) {
+        return Err(invalid("the reason is one line of at most 200 characters"));
+    }
+    Ok(PauseInfo {
+        since_ms: now,
+        until_ms: r.until_ms,
+        reason,
+        by: who.to_string(),
+    })
+}
+
+/// `GET /v1/scheduler/pause`.
+async fn pause_state(State(st): State<ProtState>) -> Res<Json<SchedulerPause>> {
+    Ok(Json(prot(&st)?.gate.pause()))
+}
+
+/// `POST /v1/scheduler/pause`: every scheduled start is skipped (recorded as `paused_all`)
+/// until `/resume` or `until_ms`. Run now still runs.
+async fn pause_all(
+    State(st): State<ProtState>,
+    h: HeaderMap,
+    body: Result<Json<PauseRequest>, JsonRejection>,
+) -> Res<Json<SchedulerPause>> {
+    let (p, who) = (prot(&st)?, user(&h)?);
+    let info = pause_info(&who, json_body(body)?)?;
+    tracing::info!("scheduler: every task paused by {who}");
+    let out = p.gate.set_pause_all(Some(info))?;
+    p.invalidate();
+    Ok(Json(out))
+}
+
+/// `POST /v1/scheduler/resume`.
+async fn resume_all(State(st): State<ProtState>, h: HeaderMap) -> Res<Json<SchedulerPause>> {
+    let (p, who) = (prot(&st)?, user(&h)?);
+    tracing::info!("scheduler: tasks resumed by {who}");
+    let out = p.gate.set_pause_all(None)?;
+    p.invalidate();
+    Ok(Json(out))
+}
+
+/// `POST /v1/scheduler/tasks/{id}/pause`: the task's scheduled starts are skipped (recorded
+/// as `paused`). The task must exist (staged or applied).
+async fn pause_task(
+    State(st): State<ProtState>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<PauseRequest>, JsonRejection>,
+) -> Res<Json<SchedulerPause>> {
+    let (p, who) = (prot(&st)?, user(&h)?);
+    check_id(&id)?;
+    let info = pause_info(&who, json_body(body)?)?;
+    let (i, w) = (id.clone(), who.clone());
+    let exists = blocking(&p, move |p| {
+        let rt = Runtime::default();
+        Ok(task_views(p, &w, &rt)?.iter().any(|v| v.task.id == i))
+    })
+    .await?;
+    if !exists {
+        return Err(not_found(format!("task {id}")));
+    }
+    let out = p.gate.set_pause_task(&id, Some(info))?;
+    p.invalidate();
+    Ok(Json(out))
+}
+
+/// `POST /v1/scheduler/tasks/{id}/resume`.
+async fn resume_task(
+    State(st): State<ProtState>,
+    Path(id): Path<String>,
+) -> Res<Json<SchedulerPause>> {
+    let p = prot(&st)?;
+    check_id(&id)?;
+    let out = p.gate.set_pause_task(&id, None)?;
+    p.invalidate();
+    Ok(Json(out))
 }
 
 #[cfg(test)]

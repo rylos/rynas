@@ -415,6 +415,113 @@ async fn tasks_are_staged_previewed_run_and_recorded() {
     assert_eq!(s, StatusCode::OK);
 }
 
+/// The scheduling gate (S2): pauses, skipped starts in the history, run now while paused,
+/// a retry armed after a failed scheduled run, a planned command for the unit.
+#[tokio::test]
+async fn the_gate_skips_paused_starts_and_arms_retries() {
+    use rynas_api_types::scheduler::{RunTrigger, SchedulerPause, SkipReason};
+    use rynas_scheduler::gate::GateAnswer;
+    let e = env();
+    let t = json!({"id": "nightly", "name": "Nightly", "action": {"kind": "command", "command": "false"},
+        "trigger": {"kind": "calendar", "on_calendar": "minutely"},
+        "policy": {"retry": {"attempts": 2, "delay_s": 60, "backoff": false}}});
+    let (s, b) = call(&e, "POST", "/v1/scheduler/tasks", Some(t)).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let smart = json!({"id": "smart-sda", "action": {"kind": "smart_test", "disk": "sda"}, "trigger": {"kind": "manual"}});
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks", Some(smart)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    apply(&e);
+    let gate = |inv: &str, timer: bool| {
+        json!({"invocation_id": inv, "trigger_unit": if timer { "rynas-task-nightly.timer" } else { "" }})
+    };
+    let ask = async |inv: &str, timer: bool| -> GateAnswer {
+        let (s, b) = call_peer(&e, Some(0), "POST", "/v1/scheduler/tasks/nightly/gate", Some(gate(inv, timer))).await;
+        assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        serde_json::from_slice(&b).unwrap()
+    };
+    // root only, like the other internal routes
+    let (s, _) = call_peer(&e, Some(1000), "POST", "/v1/scheduler/tasks/nightly/gate", Some(gate("aa", true))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // pause every task: a timer start is skipped and recorded, its end report adds nothing
+    let (s, b) = call(&e, "POST", "/v1/scheduler/pause", Some(json!({"reason": "disk swap"}))).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let (_, b) = call(&e, "GET", "/v1/scheduler/pause", None).await;
+    let p: SchedulerPause = serde_json::from_slice(&b).unwrap();
+    assert_eq!(p.all.as_ref().map(|a| (a.reason.as_str(), a.by.as_str())), Some(("disk swap", "admin")));
+    let a = ask("aa01", true).await;
+    assert_eq!((a.run, a.skipped, a.trigger), (false, Some(SkipReason::PausedAll), RunTrigger::Timer));
+    assert!(a.message.contains("paused"), "{}", a.message);
+    let done = |inv: &str, result: &str| json!({"invocation_id": inv, "result": result, "exit_code": "exited", "exit_status": "1"});
+    let (s, _) = call_peer(&e, Some(0), "POST", "/v1/scheduler/tasks/nightly/finished", Some(done("aa01", "exec-condition"))).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, b) = call(&e, "GET", "/v1/scheduler/tasks/nightly/history", None).await;
+    let runs: Vec<TaskRun> = serde_json::from_slice(&b).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!((runs[0].skipped, runs[0].result.as_str(), runs[0].ok), (Some(SkipReason::PausedAll), "skipped", false));
+    assert_eq!(runs[0].detail.as_deref(), Some("disk swap"));
+
+    // run now goes ahead while paused
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/nightly/run", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let a = ask("aa02", false).await;
+    assert_eq!((a.run, a.trigger), (true, RunTrigger::Manual));
+    let (s, _) = call(&e, "POST", "/v1/scheduler/resume", None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // the task's own pause, shown in its status
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/nightly/pause", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/nope/pause", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, b) = call(&e, "POST", "/v1/scheduler/pause", Some(json!({"until_ms": 5}))).await;
+    assert_eq!((s, code(&b).as_str()), (StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE));
+    let (_, b) = call(&e, "GET", "/v1/scheduler/tasks", None).await;
+    let list: Vec<TaskView> = serde_json::from_slice(&b).unwrap();
+    assert!(list.iter().find(|v| v.task.id == "nightly").unwrap().status.paused.is_some());
+    assert_eq!(ask("aa03", true).await.skipped, Some(SkipReason::Paused));
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/nightly/resume", None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // a scheduled run that fails arms its retry, and its failure waits for the last attempt
+    let a = ask("aa04", true).await;
+    assert_eq!((a.run, a.trigger), (true, RunTrigger::Timer));
+    e.notifier.take();
+    let (s, _) = call_peer(&e, Some(0), "POST", "/v1/scheduler/tasks/nightly/finished", Some(done("aa04", "exit-code"))).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, b) = call(&e, "GET", "/v1/scheduler/tasks", None).await;
+    let list: Vec<TaskView> = serde_json::from_slice(&b).unwrap();
+    let st = &list.iter().find(|v| v.task.id == "nightly").unwrap().status;
+    let retry = st.retry.expect("retry armed");
+    assert_eq!((retry.attempt, retry.attempts), (1, 2));
+    assert_eq!(st.last_run.as_ref().and_then(|r| r.trigger), Some(RunTrigger::Timer));
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert!(e.notifier.take().is_empty(), "no notification while a retry is armed");
+
+    // rynasd was away: rynasctl spooled a start without the gate and its end; the next call
+    // of the gate brings them into the history (and a success drops the armed retry)
+    let state = e._dir.path().join("state");
+    let spool = |entry: Value| rynas_scheduler::gate::spool_append(&state, &serde_json::from_value(entry).unwrap()).unwrap();
+    spool(json!({"task_id": "nightly", "invocation_id": "bb01", "at_ms": 1_000, "by_timer": true}));
+    spool(json!({"task_id": "nightly", "invocation_id": "bb01", "at_ms": 2_000, "by_timer": false,
+        "finished": {"result": "success", "exit_code": "exited", "exit_status": "0"}}));
+    ask("aa05", true).await;
+    let (_, b) = call(&e, "GET", "/v1/scheduler/tasks/nightly/history", None).await;
+    let runs: Vec<TaskRun> = serde_json::from_slice(&b).unwrap();
+    let away = runs.iter().find(|r| r.invocation_id == "bb01").expect("spooled run recorded");
+    assert!(away.ok && away.ungated, "{away:?}");
+    assert_eq!((away.start_ms, away.end_ms, away.trigger), (Some(1_000), 2_000, Some(RunTrigger::Timer)));
+    let (_, b) = call(&e, "GET", "/v1/scheduler/tasks", None).await;
+    let list: Vec<TaskView> = serde_json::from_slice(&b).unwrap();
+    assert_eq!(list.iter().find(|v| v.task.id == "nightly").unwrap().status.retry, None);
+
+    // a one-command internal action is planned for the unit to run itself
+    let (s, b) = call_peer(&e, Some(0), "POST", "/v1/scheduler/tasks/smart-sda/execute", Some(json!({"plan": true}))).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let plan: rynasd::jobs::JobPlan = serde_json::from_slice(&b).unwrap();
+    assert_eq!(plan.argv, ["smartctl", "-t", "short", "/dev/sda"]);
+}
+
 #[tokio::test]
 async fn snapshot_jobs_stage_their_task() {
     let e = env();

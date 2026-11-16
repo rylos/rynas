@@ -38,6 +38,7 @@ const INTERNAL: &[(&str, &str)] = &[
     ("/v1/power/schedule/rules/{rule}/shutdown", "rynasctl from the power timers, root only"),
     ("/v1/scheduler/tasks/{id}/finished", "rynasctl from the task units, root only"),
     ("/v1/scheduler/tasks/{id}/execute", "rynasctl from the task units, root only"),
+    ("/v1/scheduler/tasks/{id}/gate", "rynasctl gate (ExecCondition of the task units), root only"),
     ("/v1/crypt/auto-unlock", "rynas-crypt-unlock.service (rynasctl), root only"),
     ("/v1/ups/safe-mode", "rynasctl from the UPS hooks, root only"),
 ];

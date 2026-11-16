@@ -1,8 +1,12 @@
 //! The systemd units of a task.
 //!
 //! - `rynas-task-<id>.service`: `Type=exec` (so that `RuntimeMaxSec=` applies), the task's
-//!   user, `Nice=`/`IOWeight=`, `NoNewPrivileges=`, `PrivateTmp=`, and
+//!   user, `Nice=`/`IOWeight=`, `NoNewPrivileges=`, `PrivateTmp=`,
+//!   `ExecCondition=+rynasctl gate <id>` (the scheduling gate, [`crate::gate`]) and
 //!   `ExecStopPost=+rynasctl task-finished <id>` (as root, whatever `User=`) recording the run.
+//!   Adding the gate changed the services only: the timers are byte-identical, so an upgrade
+//!   rewrites the services, reloads systemd once and restarts no timer (their `Persistent=`
+//!   stamps stay).
 //!   User actions read their script on standard input (`StandardInput=file:`): the file stays
 //!   root:root 0700, the service manager opens it before dropping privileges, the user never
 //!   gets a path to it. Internal actions run `rynasctl job run <id>`, which starts the rynasd
@@ -107,6 +111,8 @@ pub fn render_service(t: &ScheduledTask, p: &Paths) -> Result<String, String> {
     s.push_str("\n[Service]\n");
     s.push_str("Type=exec\n");
     let ctl = p.rynasctl.display();
+    // the scheduling gate: as root whatever `User=`; exit 1 skips the start (not a failure)
+    s.push_str(&format!("ExecCondition=+{ctl} gate {}\n", t.id));
     let internal = t.action.is_internal();
     match &t.action {
         TaskAction::Command { user, .. } | TaskAction::Script { user, .. } => {

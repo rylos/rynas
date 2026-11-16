@@ -11,7 +11,10 @@ use std::time::Duration;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::PendingOp;
-use rynas_api_types::scheduler::{CronEntry, LiveRun, NotifyPolicy, ScheduledTask, SmartTestKind, SystemTimer, TaskAction, TaskRun, TaskTrigger, TaskView};
+use rynas_api_types::scheduler::{
+    CronEntry, LiveRun, NotifyPolicy, PauseRequest, RunTrigger, ScheduledTask, SchedulerPause, SkipReason, SmartTestKind, SystemTimer, TaskAction, TaskRun, TaskTrigger,
+    TaskView,
+};
 
 use rynas_schedule::describe::{all_day, day_span};
 use rynas_schedule::{Description, MonthDay, Nth, Recurrence, TimeOfDay, Weekdays, describe};
@@ -276,8 +279,19 @@ pub async fn follow_run(id: &str, before: Option<u64>) -> Option<TaskRun> {
     None
 }
 
-/// Outcome of a run: tone and text ("Succeeded", "Failed (exit 2)", "Timed out").
+/// Outcome of a run: tone and text ("Succeeded", "Failed (exit 2)", "Timed out"), or why
+/// its start was skipped ("Skipped: paused").
 pub fn run_status(r: &TaskRun) -> (Tone, String) {
+    if let Some(s) = r.skipped {
+        let (tone, key) = match s {
+            SkipReason::PausedAll => (Tone::Unknown, "sch.skip.paused_all"),
+            SkipReason::Paused => (Tone::Unknown, "sch.skip.paused"),
+            SkipReason::Missed => (Tone::Warn, "sch.skip.missed"),
+            SkipReason::Overlap => (Tone::Unknown, "sch.skip.overlap"),
+            SkipReason::Running => (Tone::Unknown, "sch.skip.running"),
+        };
+        return (tone, t(key).to_string());
+    }
     if r.ok {
         return (Tone::Ok, t("sch.run.ok").to_string());
     }
@@ -292,22 +306,56 @@ pub fn run_status(r: &TaskRun) -> (Tone, String) {
     (Tone::Err, text)
 }
 
+/// How a recorded start came about, when it was not simply its schedule ("Catch-up",
+/// "Retry 2", "Run now"), with the detail of its outcome.
+pub fn run_origin(r: &TaskRun) -> Option<String> {
+    let how = match r.trigger? {
+        RunTrigger::Timer => None,
+        RunTrigger::CatchUp => Some(t("sch.trigger.catch_up").to_string()),
+        RunTrigger::Boot => Some(t("sch.trigger.boot").to_string()),
+        RunTrigger::Manual => Some(t("sch.trigger.manual").to_string()),
+        RunTrigger::Retry => Some(tf("sch.trigger.retry", &[("n", &r.attempt.to_string())])),
+        RunTrigger::Queued => Some(t("sch.trigger.queued").to_string()),
+        RunTrigger::Other => Some(t("sch.trigger.other").to_string()),
+    };
+    let detail = match (r.skipped, r.detail.as_deref()) {
+        (Some(SkipReason::Missed), Some(d)) => Some(tf("sch.skip.missed_detail", &[("deadline", d)])),
+        (_, Some(d)) if !d.is_empty() => Some(d.to_string()),
+        _ => None,
+    };
+    let ungated = r.ungated.then(|| t("sch.ungated").to_string());
+    let parts: Vec<String> = [how, detail, ungated].into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 // ------------------------------------------------------------------ page
 
 #[component]
 pub fn Scheduler() -> impl IntoView {
     let tab = RwSignal::new(0usize);
     let tasks = Remote::<Vec<TaskView>>::with_config("/api/v1/scheduler/tasks");
+    let pause = Remote::<SchedulerPause>::new("/api/v1/scheduler/pause");
     // next runs and running state move by themselves: read again every 15 s while visible
-    crate::live::poll(Duration::from_secs(15), move || tasks.reload());
+    crate::live::poll(Duration::from_secs(15), move || {
+        tasks.reload();
+        pause.reload();
+    });
     let edit = RwSignal::new(None::<(ScheduledTask, bool)>);
+    let pausing = RwSignal::new(false);
+    let paused = Memo::new(move |_| pause.data.with(|p| p.as_ref().is_some_and(|p| p.all.is_some())));
     view! {
         <div class="page">
             <PageHeader icon=icons::CALENDAR_CLOCK title="sch.title" subtitle="sch.subtitle">
+                <Show when=move || !paused.get()>
+                    <button class="btn ghost" on:click=move |_| pausing.set(true)>
+                        <Icon icon=icons::PAUSE size=16 /><span class="btn-label">{tr("sch.pause_all")}</span>
+                    </button>
+                </Show>
                 <button class="btn primary" on:click=move |_| edit.set(Some((new_task(), true)))>
                     <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("sch.create")}</span>
                 </button>
             </PageHeader>
+            {pause_banner(pause, tasks)}
             <section class="card widget w-12">
                 {tabs("sch", &["sch.tab.tasks", "sch.tab.timers", "sch.tab.cron"], tab, "sch.title")}
                 <div role="tabpanel" id="sch-p0" aria-labelledby="sch-t0" hidden=move || tab.get() != 0>{tasks_panel(tasks, edit)}</div>
@@ -319,7 +367,113 @@ pub fn Scheduler() -> impl IntoView {
                 </div>
             </section>
             {move || edit.get().map(|(task, is_new)| task_editor(task, is_new, Callback::new(move |_| edit.set(None))))}
+            {move || pausing.get().then(|| pause_dialog(None, Callback::new(move |_| { pause.reload(); tasks.reload(); }), Callback::new(move |_| pausing.set(false))))}
         </div>
+    }
+}
+
+/// "Resume" choices of the pause dialog: seconds from now (0: until resumed).
+const PAUSE_FOR: &[(&str, &str)] = &[
+    ("0", "sch.pause_for.never"),
+    ("3600", "dd.h1"),
+    ("28800", "dd.h8"),
+    ("86400", "dd.h24"),
+    ("604800", "sch.pause_for.d7"),
+];
+
+/// Pauses every task (`task` `None`) or one task (id, name).
+fn pause_dialog(task: Option<(String, String)>, done: Callback<()>, close: Callback<()>) -> AnyView {
+    let reason = RwSignal::new(String::new());
+    let dur = RwSignal::new("0".to_string());
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let url = match &task {
+        Some((id, _)) => format!("/api/v1/scheduler/tasks/{}/pause", api::encode(id)),
+        None => "/api/v1/scheduler/pause".to_string(),
+    };
+    let title = match &task {
+        Some((_, n)) => tf("sch.pause_task_title", &[("name", n)]),
+        None => t("sch.pause_title").to_string(),
+    };
+    let text = t(if task.is_some() { "sch.pause_task_text" } else { "sch.paused_text" }).to_string();
+    let extra = view! {
+        {text_field("sch.pause_reason", Signal::derive(move || reason.get()), Callback::new(move |v| reason.set(v)), Signal::stored(None), In::default())}
+        {select_field("sch.pause_for", None, PAUSE_FOR, Signal::derive(move || dur.get()), Callback::new(move |v| dur.set(v)))}
+    }
+    .into_any();
+    confirm(Confirm {
+        title,
+        text,
+        action: "sch.pause",
+        danger: false,
+        extra: Some(extra),
+        typed: Signal::stored(None),
+        busy,
+        error,
+        on_confirm: Callback::new(move |_| {
+            busy.set(true);
+            let secs: u64 = dur.get_untracked().parse().unwrap_or(0);
+            let body = PauseRequest {
+                until_ms: (secs > 0).then(|| js_sys::Date::now() as u64 + secs * 1000),
+                reason: reason.get_untracked(),
+            };
+            let url = url.clone();
+            spawn_local(async move {
+                let r = api::post::<_, SchedulerPause>(&url, Some(&body)).await;
+                busy.set(false);
+                match r {
+                    Ok(_) => {
+                        done.run(());
+                        close.run(());
+                    }
+                    Err(e) => error.set(Some(e.text())),
+                }
+            });
+        }),
+        on_cancel: close,
+    })
+}
+
+/// While every task is paused: what it means, since when, and Resume.
+fn pause_banner(pause: Remote<SchedulerPause>, tasks: Remote<Vec<TaskView>>) -> impl IntoView {
+    let busy = RwSignal::new(false);
+    let resume = move |_| {
+        busy.set(true);
+        spawn_local(async move {
+            let r = api::post::<(), SchedulerPause>("/api/v1/scheduler/resume", None).await;
+            busy.set(false);
+            match r {
+                Ok(_) => toast(Tone::Ok, t("sch.resumed").to_string()),
+                Err(e) => toast(Tone::Err, e.text()),
+            }
+            pause.reload();
+            tasks.reload();
+        });
+    };
+    move || {
+        pause.data.get().and_then(|p| p.all).map(|a| {
+            let mut when = tf("sch.paused_since", &[("when", &i18n::datetime(a.since_ms)), ("user", &a.by)]);
+            if let Some(u) = a.until_ms {
+                when.push_str(" · ");
+                when.push_str(&tf("sch.paused_until", &[("when", &i18n::datetime(u))]));
+            }
+            let reason = (!a.reason.is_empty()).then(|| a.reason.clone());
+            view! {
+                <section class="card widget w-12" aria-labelledby="sch-paused-h">
+                    {ui::note(Tone::Warn, icons::PAUSE, view! {
+                        <strong id="sch-paused-h">{tr("sch.paused_banner")}</strong>" "{tr("sch.paused_text")}
+                        {reason.map(|r| view! { " "<strong>{r}</strong> })}
+                        " "<span class="muted">{when}</span>
+                    }
+                    .into_any())}
+                    <div class="card-actions">
+                        <button class="btn primary" disabled=move || busy.get() on:click=resume>
+                            {crate::form::spinner(busy)}<Icon icon=icons::PLAY size=16 />{tr("sch.resume_all")}
+                        </button>
+                    </div>
+                </section>
+            }
+        })
     }
 }
 
@@ -345,6 +499,7 @@ fn tasks_panel(tasks: Remote<Vec<TaskView>>, edit: RwSignal<Option<(ScheduledTas
     let q = RwSignal::new(String::new());
     let history = RwSignal::new(None::<ScheduledTask>);
     let del = RwSignal::new(None::<(String, String)>);
+    let pausing = RwSignal::new(None::<(String, String)>);
     let table = move || {
         if let Some(v) = tasks.gate(5) {
             return v;
@@ -369,7 +524,7 @@ fn tasks_panel(tasks: Remote<Vec<TaskView>>, edit: RwSignal<Option<(ScheduledTas
             };
         }
         view! {
-            {ui::table("", &["sch.col.enabled", "sch.col.task", "sch.col.action", "sch.col.schedule", "sch.col.last", ""], rows.into_iter().map(|v| task_row(v, tasks, edit, history, del)).collect::<Vec<_>>())}
+            {ui::table("", &["sch.col.enabled", "sch.col.task", "sch.col.action", "sch.col.schedule", "sch.col.last", ""], rows.into_iter().map(|v| task_row(v, tasks, edit, history, del, pausing)).collect::<Vec<_>>())}
         }
         .into_any()
     };
@@ -413,6 +568,7 @@ fn tasks_panel(tasks: Remote<Vec<TaskView>>, edit: RwSignal<Option<(ScheduledTas
         {table}
         {move || history.get().map(|t| history_drawer(t, tasks, Callback::new(move |_| history.set(None))))}
         {deleter}
+        {move || pausing.get().map(|target| pause_dialog(Some(target), Callback::new(move |_| tasks.reload()), Callback::new(move |_| pausing.set(None))))}
     }
     .into_any()
 }
@@ -423,6 +579,7 @@ fn task_row(
     edit: RwSignal<Option<(ScheduledTask, bool)>>,
     history: RwSignal<Option<ScheduledTask>>,
     del: RwSignal<Option<(String, String)>>,
+    pausing: RwSignal<Option<(String, String)>>,
 ) -> AnyView {
     let task = v.task.clone();
     let st = v.status.clone();
@@ -498,7 +655,7 @@ fn task_row(
     });
     let next = st.next_run_ms.map(|m| tf("sch.next", &[("when", &i18n::short_when(m))]));
     let (t_edit, t_hist, t_live) = (task.clone(), task.clone(), task.clone());
-    let (n1, n2, n3, n4, n5, n6) = (name.clone(), name.clone(), name.clone(), name.clone(), name.clone(), name.clone());
+    let (n1, n2, n3, n4, n5, n6, n7) = (name.clone(), name.clone(), name.clone(), name.clone(), name.clone(), name.clone(), name.clone());
     let id_d = id.clone();
     ui::row_class(
         vec![
@@ -536,6 +693,8 @@ fn task_row(
             .into_any()),
             ui::cell("sch.col.last", "", view! {
                 <div class="chips">
+                    {st.paused.is_some().then(|| ui::status(Tone::Warn, t("sch.paused").to_string()))}
+                    {st.retry.map(|r| ui::status(Tone::Info, tf("sch.retry_at", &[("n", &r.attempt.to_string()), ("of", &r.attempts.to_string()), ("when", &i18n::short_when(r.due_ms))])))}
                     {st.running.then(|| ui::status(Tone::Info, t("sch.running").to_string()))}
                     {if st.running { None } else { last.map(|l| l.into_any()) }}
                     {ui::pending_status(st.pending)}
@@ -565,6 +724,32 @@ fn task_row(
                     }
                     .into_any()
                 }}
+                // pause: the task's scheduled starts are skipped (run now still works)
+                {
+                    let (id_p, name_p) = (id.clone(), n7.clone());
+                    let is_paused = st.paused.is_some();
+                    let toggle_pause = move |_| {
+                        if !is_paused {
+                            pausing.set(Some((id_p.clone(), name_p.clone())));
+                            return;
+                        }
+                        let id = id_p.clone();
+                        spawn_local(async move {
+                            let r = api::post::<(), SchedulerPause>(&format!("/api/v1/scheduler/tasks/{}/resume", api::encode(&id)), None).await;
+                            if let Err(e) = r {
+                                toast(Tone::Err, e.text());
+                            }
+                            tasks.reload();
+                        });
+                    };
+                    let key = if is_paused { "sch.resume" } else { "sch.pause" };
+                    view! {
+                        <button class="icon-btn sm" title=tr(key) aria-label=ui::verb_name(key, &n7) aria-pressed=is_paused.to_string()
+                            disabled=deleting || !st.applied on:click=toggle_pause>
+                            <Icon icon=icons::PAUSE size=16 />
+                        </button>
+                    }
+                }
                 <button class="icon-btn sm" title=tr("edit") aria-label=format!("{} {}", t("edit"), n4) disabled=deleting || is_managed on:click=move |_| edit.set(Some((task.clone(), false)))>
                     <Icon icon=icons::PENCIL size=16 />
                 </button>
@@ -905,11 +1090,23 @@ fn history_drawer(task: ScheduledTask, tasks: Remote<Vec<TaskView>>, close: Call
             let rid = r.id;
             let (tone, text) = run_status(&r);
             let started = r.start_ms.unwrap_or(r.end_ms);
-            let dur = r.start_ms.map(|s| i18n::elapsed(r.end_ms.saturating_sub(s) / 1000)).unwrap_or_default();
+            // a skipped start ran for no time at all
+            let dur = match (r.skipped, r.start_ms) {
+                (Some(_), _) => ui::DASH.to_string(),
+                (None, Some(s)) => i18n::elapsed(r.end_ms.saturating_sub(s) / 1000),
+                (None, None) => String::new(),
+            };
             let label = format!("{}: {}", t("sch.show_output"), i18n::datetime(started));
+            let origin = run_origin(&r);
             ui::row_flag(
                 vec![
-                    ui::cell("sch.col.started", "tnum", view! { {i18n::datetime(started)} }.into_any()),
+                    ui::cell("sch.col.started", "tnum", view! {
+                        <div class="cell-main">
+                            <span>{i18n::datetime(started)}</span>
+                            {origin.map(|o| view! { <span class="cell-sub">{o}</span> })}
+                        </div>
+                    }
+                    .into_any()),
                     ui::cell("sch.col.duration", "num tnum", view! { {dur} }.into_any()),
                     ui::cell("sch.col.result", "", view! { {ui::status(tone, text)} }.into_any()),
                     ui::actions(view! {

@@ -3,9 +3,15 @@
 //! - `rynasctl task-finished <id>`: from `ExecStopPost=+` of every task unit; sends systemd's
 //!   `$SERVICE_RESULT`, `$EXIT_CODE`, `$EXIT_STATUS` and `$INVOCATION_ID` to rynasd, which
 //!   records the run and its output. Always exits 0: bookkeeping never fails the unit.
-//! - `rynasctl job run <id>`: `ExecStart=` of internal tasks; asks rynasd to start the task,
-//!   prints its log as it grows and exits with its result. SIGTERM (stop, timeout) cancels
-//!   the rynasd task.
+//! - `rynasctl gate <id>`: `ExecCondition=` of every task unit, the scheduling gate
+//!   (`rynas_scheduler::gate`): asks rynasd whether this start runs (exit 0) or is skipped
+//!   (exit 1: paused, a missed run past its deadline, overlap). Without an answer within
+//!   20 s it runs the start, as before the gate (only a pause in the pause file still skips
+//!   a timer's start), and spools the outcome for rynasd.
+//! - `rynasctl job run <id>`: `ExecStart=` of internal tasks; asks rynasd for the action:
+//!   a command it then runs itself (scrub, SMART test, snapshots), or a rynasd task whose log
+//!   it prints as it grows; exits with the result. SIGTERM (stop, timeout) cancels the
+//!   rynasd task.
 //! - `rynasctl snapshot system --reason apt ...`: a system restore point (apt hook); works
 //!   without rynasd.
 //! - `rynasctl power scheduled-shutdown <rule>`: `ExecStart=` of the task of a shutdown rule;
@@ -45,7 +51,11 @@ use clap::{Parser, Subcommand};
 use rynas_api_types::{TaskInfo, TaskStarted, TaskStatus};
 use rynas_auth::ipc::{DEFAULT_SOCKET, USER_HEADER};
 use rynas_btrfs::system::{self, SystemSnapshot, Taken};
-use rynasd::scheduler::TaskFinished;
+use rynas_scheduler::gate::{
+    GATE_TIMEOUT, GateAnswer, GateRequest, SpoolEntry, SpoolFinished, load_pause, spool_append,
+};
+use rynasd::jobs::{JobPlan, PlanReport};
+use rynasd::scheduler::{ExecuteRequest, TaskFinished};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -63,7 +73,20 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Record the end of a scheduler task run (ExecStopPost of rynas-task-<id>.service).
-    TaskFinished { id: String },
+    TaskFinished {
+        id: String,
+        /// rynasd's state directory (the spool, when rynasd cannot be reached).
+        #[arg(long, default_value = "/var/lib/rynas")]
+        state_dir: PathBuf,
+    },
+    /// The scheduling gate (ExecCondition of rynas-task-<id>.service): exit 0 runs the
+    /// start, 1 skips it.
+    Gate {
+        id: String,
+        /// rynasd's state directory (the pause file, the spool of outcomes).
+        #[arg(long, default_value = "/var/lib/rynas")]
+        state_dir: PathBuf,
+    },
     /// Internal scheduler tasks.
     Job {
         #[command(subcommand)]
@@ -336,7 +359,7 @@ fn dechunk(mut b: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-fn task_finished(socket: &PathBuf, id: &str) -> ExitCode {
+fn task_finished(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
     let env = |k: &str| std::env::var(k).unwrap_or_default();
     let body = TaskFinished {
         invocation_id: env("INVOCATION_ID"),
@@ -353,7 +376,27 @@ fn task_finished(socket: &PathBuf, id: &str) -> ExitCode {
     ) {
         Ok(a) if a.status / 100 == 2 => {}
         Ok(a) => eprintln!("rynasctl: recording the run of {id}: {}", a.error()),
-        Err(e) => eprintln!("rynasctl: recording the run of {id}: {e}"),
+        Err(e) => {
+            // rynasd is away: it records the run from the spool when it is back
+            eprintln!("rynasctl: recording the run of {id}: {e}; kept for rynasd");
+            let entry = SpoolEntry {
+                task_id: id.to_string(),
+                invocation_id: body.invocation_id.clone(),
+                at_ms: rynas_tasks::now_ms(),
+                by_timer: false,
+                skipped: None,
+                finished: Some(SpoolFinished {
+                    result: body.result,
+                    exit_code: body.exit_code,
+                    exit_status: body.exit_status,
+                }),
+            };
+            if !entry.invocation_id.is_empty()
+                && let Err(err) = spool_append(state, &entry)
+            {
+                eprintln!("rynasctl: spooling the run of {id}: {err}");
+            }
+        }
     }
     ExitCode::SUCCESS
 }
@@ -364,8 +407,192 @@ extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
 }
 
+fn on_stop_signals() {
+    // SAFETY: the handler only stores into an atomic
+    unsafe {
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+    }
+}
+
+/// `rynasctl gate <id>` ([`rynas_scheduler::gate`]).
+fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
+    let env = |k: &str| std::env::var(k).unwrap_or_default();
+    let req = GateRequest {
+        invocation_id: env("INVOCATION_ID"),
+        trigger_unit: env("TRIGGER_UNIT"),
+    };
+    let body = serde_json::to_vec(&req).unwrap_or_default();
+    let answer = request_waiting(
+        socket,
+        "POST",
+        &format!("/v1/scheduler/tasks/{id}/gate"),
+        Some(&body),
+        GATE_TIMEOUT,
+    )
+    .and_then(|a| match a.status {
+        200 => serde_json::from_slice::<GateAnswer>(&a.body).map_err(|e| e.to_string()),
+        _ => Err(a.error()),
+    });
+    let say = |m: &str| {
+        println!("{m}");
+        let _ = std::io::stdout().flush();
+    };
+    match answer {
+        Ok(a) => {
+            if !a.message.is_empty() {
+                say(&a.message);
+            }
+            if a.run { ExitCode::SUCCESS } else { ExitCode::from(1) }
+        }
+        Err(e) => {
+            // as before the gate, but a pause the user set still holds for timer starts
+            let by_timer = req.trigger_unit == rynas_scheduler::units::timer_name(id);
+            let now = rynas_tasks::now_ms();
+            let skipped = if by_timer { load_pause(state).blocks(id, now) } else { None };
+            let entry = SpoolEntry {
+                task_id: id.to_string(),
+                invocation_id: req.invocation_id.clone(),
+                at_ms: now,
+                by_timer,
+                skipped,
+                finished: None,
+            };
+            if !req.invocation_id.is_empty()
+                && let Err(err) = spool_append(state, &entry)
+            {
+                eprintln!("rynasctl: spooling the gate outcome: {err}");
+            }
+            if skipped.is_some() {
+                say(&format!("rynas: no answer from the scheduling gate ({e}); the task is paused: start skipped"));
+                ExitCode::from(1)
+            } else {
+                say(&format!("rynas: no answer from the scheduling gate ({e}); running the start as before the gate"));
+                ExitCode::SUCCESS
+            }
+        }
+    }
+}
+
 fn job_run(socket: &PathBuf, id: &str) -> ExitCode {
-    follow(socket, id, &format!("/v1/scheduler/tasks/{id}/execute"))
+    on_stop_signals();
+    let body = serde_json::to_vec(&ExecuteRequest { plan: true }).unwrap_or_default();
+    // a scrub first waits for a deduplication run to save its work (up to 5.5 minutes)
+    let started = request_waiting(
+        socket,
+        "POST",
+        &format!("/v1/scheduler/tasks/{id}/execute"),
+        Some(&body),
+        Duration::from_secs(8 * 60),
+    );
+    match started {
+        Ok(a) if a.status == 200 => match serde_json::from_slice::<JobPlan>(&a.body) {
+            Ok(plan) => run_plan(&plan),
+            Err(e) => {
+                eprintln!("rynasctl: task {id}: unreadable plan: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(a) if a.status == 202 => match serde_json::from_slice::<TaskStarted>(&a.body) {
+            Ok(s) => follow_task(socket, &s.task_id),
+            Err(e) => {
+                eprintln!("rynasctl: starting task {id}: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(a) => {
+            eprintln!("rynasctl: starting task {id}: {}", a.error());
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("rynasctl: starting task {id}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Runs a command planned by rynasd in this unit and exits with its status.
+fn run_plan(plan: &JobPlan) -> ExitCode {
+    use std::process::{Command as Proc, Stdio};
+    let Some((prog, args)) = plan.argv.split_first() else {
+        eprintln!("rynasctl: empty plan");
+        return ExitCode::FAILURE;
+    };
+    let mut c = Proc::new(prog);
+    c.args(args).env_clear().stdin(Stdio::null());
+    for (k, v) in &plan.env {
+        c.env(k, v);
+    }
+    if !plan.env.iter().any(|(k, _)| k == "PATH") {
+        c.env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    }
+    let btrbk = plan.report == PlanReport::Btrbk;
+    if btrbk {
+        c.stdout(Stdio::piped());
+    }
+    println!("$ {}", plan.argv.join(" "));
+    let _ = std::io::stdout().flush();
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(e) => {
+            eprintln!("rynasctl: {prog}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let reader = child.stdout.take().map(|mut o| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = o.read_to_string(&mut s);
+            s
+        })
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(plan.timeout_s.max(1));
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("rynasctl: waiting for {prog}: {e}");
+                break None;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            eprintln!("rynasctl: {prog} did not end within {} s: stopping it", plan.timeout_s);
+            let _ = child.kill();
+            let _ = child.wait();
+            return ExitCode::FAILURE;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let out = reader.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+    let code = status.and_then(|s| s.code());
+    if btrbk {
+        let r = rynas_btrfs::btrbk::parse_report(&out);
+        for n in &r.created {
+            println!("created {n}");
+        }
+        for n in &r.deleted {
+            println!("deleted {n} (retention)");
+        }
+        if !r.errors.is_empty() {
+            eprintln!("btrbk: {}", r.errors.join("; "));
+            return ExitCode::FAILURE;
+        }
+        if code == Some(0) {
+            println!("{} created, {} deleted", r.created.len(), r.deleted.len());
+        }
+    }
+    match code {
+        Some(0) => ExitCode::SUCCESS,
+        Some(c) => {
+            eprintln!("rynasctl: {prog} exited with code {c}");
+            ExitCode::from(c.clamp(1, 255) as u8)
+        }
+        None => {
+            eprintln!("rynasctl: {prog} was killed by a signal");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn follow(socket: &PathBuf, id: &str, start: &str) -> ExitCode {
@@ -375,11 +602,7 @@ fn follow(socket: &PathBuf, id: &str, start: &str) -> ExitCode {
 /// Starts a rynasd task with `POST start` (and `body`), prints its log as it grows and exits
 /// with its result; SIGTERM cancels it.
 fn follow_with(socket: &PathBuf, id: &str, start: &str, body: Option<&[u8]>) -> ExitCode {
-    // SAFETY: the handler only stores into an atomic
-    unsafe {
-        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
-    }
+    on_stop_signals();
     let started = match request(socket, "POST", start, body) {
         Ok(a) if a.status == 202 => {
             serde_json::from_slice::<TaskStarted>(&a.body).map_err(|e| e.to_string())
@@ -387,13 +610,19 @@ fn follow_with(socket: &PathBuf, id: &str, start: &str, body: Option<&[u8]>) -> 
         Ok(a) => Err(a.error()),
         Err(e) => Err(e),
     };
-    let upid = match started {
-        Ok(s) => s.task_id,
+    match started {
+        Ok(s) => follow_task(socket, &s.task_id),
         Err(e) => {
             eprintln!("rynasctl: starting task {id}: {e}");
-            return ExitCode::FAILURE;
+            ExitCode::FAILURE
         }
-    };
+    }
+}
+
+/// Prints the log of rynasd task `upid` as it grows and exits with its result; SIGTERM
+/// cancels it. A task rynasd no longer knows (it restarted meanwhile) ends the follow.
+fn follow_task(socket: &PathBuf, upid: &str) -> ExitCode {
+    let upid = upid.to_string();
     println!("rynas task {upid}");
     let _ = std::io::stdout().flush();
     let mut offset: u64 = 0;
@@ -405,12 +634,20 @@ fn follow_with(socket: &PathBuf, id: &str, start: &str, body: Option<&[u8]>) -> 
             let _ = request(socket, "POST", &format!("/v1/tasks/{upid}/cancel"), None);
         }
         let mut complete = false;
-        if let Ok(a) = request(
+        let log = request(
             socket,
             "GET",
             &format!("/v1/tasks/{upid}/log?offset={offset}"),
             None,
-        ) && a.status == 200
+        );
+        if let Ok(a) = &log
+            && a.status == 404
+        {
+            eprintln!("rynasctl: rynasd no longer knows task {upid} (it restarted): the run is lost");
+            return ExitCode::FAILURE;
+        }
+        if let Ok(a) = log
+            && a.status == 200
         {
             let _ = std::io::stdout().write_all(&a.body);
             let _ = std::io::stdout().flush();
@@ -690,7 +927,8 @@ fn net(socket: &PathBuf, state_dir: &std::path::Path, flush: bool, action: NetAc
 fn main() -> ExitCode {
     let args = Args::parse();
     match args.command {
-        Command::TaskFinished { id } => task_finished(&args.socket, &id),
+        Command::TaskFinished { id, state_dir } => task_finished(&args.socket, &state_dir, &id),
+        Command::Gate { id, state_dir } => gate(&args.socket, &state_dir, &id),
         Command::Job {
             action: JobAction::Run { id },
         } => job_run(&args.socket, &id),

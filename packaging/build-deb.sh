@@ -49,6 +49,7 @@ if [ "$DOCKER" = 1 ]; then
     # reused as download cache
     exec docker run --rm --user "$(id -u):$(id -g)" \
         -e HOME=/tmp -e CARGO_HOME=/tmp/cargo -e PATH=/usr/local/cargo/bin:/usr/bin:/bin \
+        ${CARGO_BUILD_JOBS:+-e CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS"} \
         -v "$HOME/.cargo/registry:/tmp/cargo/registry" \
         -v "$ROOT:/src" -w /src \
         "$IMAGE" packaging/build-deb.sh --inside

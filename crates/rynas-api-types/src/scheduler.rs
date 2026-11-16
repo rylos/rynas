@@ -206,9 +206,10 @@ impl TaskOwner {
 /// How a task runs beyond its trigger. Every field is optional: absent = the default of the
 /// task's kind, which is what rynas did before run policies.
 ///
-/// Enforced today: `missed` (`Persistent=`) and `jitter_s` (`RandomizedDelaySec=`). The
-/// catch-up deadline, `overlap` other than `skip`, `retry` and the notification rules are
-/// stored and shown, and applied by the scheduling gate of a later release.
+/// `missed` and `jitter_s` are the timer's `Persistent=` and `RandomizedDelaySec=`; the
+/// scheduling gate (`ExecCondition=` of every task unit) enforces the catch-up deadline, the
+/// pauses and `overlap`; rynasd arms `retry` after a failed scheduled run. The notification
+/// rules other than `on_missed` are stored for a later release.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RunPolicy {
     /// A run missed while the NAS was off.
@@ -258,12 +259,15 @@ impl MissedPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Overlap {
-    /// The new start is dropped (what systemd does with an active service).
+    /// The new start is dropped and recorded as `overlap`. (A timer whose time comes while
+    /// its service runs starts it once more right after the run ends: the gate skips that
+    /// start.)
     #[default]
     Skip,
-    /// The new run waits for the running one.
+    /// The new run waits for the running one and starts when it ends (once, however many
+    /// times came meanwhile).
     Queue,
-    /// The running one is stopped, the new one starts.
+    /// The running one is stopped, the new one starts (checked every few seconds).
     Replace,
 }
 
@@ -555,6 +559,128 @@ pub struct TaskStatus {
     /// Latest recorded run.
     #[serde(default)]
     pub last_run: Option<TaskRun>,
+    /// The task is paused on its own (its starts are skipped until it is resumed); a pause of
+    /// every task is in [`SchedulerPause::all`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<PauseInfo>,
+    /// A failed run will be tried again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<PendingRetry>,
+}
+
+/// A pause of the scheduled starts (`POST /api/v1/scheduler/pause`, or
+/// `.../tasks/{id}/pause`): the scheduling gate skips them, recorded with reason `paused`.
+/// "Run now" still runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PauseInfo {
+    pub since_ms: u64,
+    /// Resumes by itself then; `None`: until resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    /// Who paused.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
+}
+
+impl PauseInfo {
+    /// Still in force at `now_ms`.
+    pub fn active(&self, now_ms: u64) -> bool {
+        self.until_ms.is_none_or(|u| now_ms < u)
+    }
+}
+
+/// `GET /api/v1/scheduler/pause`: the pauses in force.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SchedulerPause {
+    /// Every task is paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<PauseInfo>,
+    /// Tasks paused one by one.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tasks: std::collections::BTreeMap<String, PauseInfo>,
+}
+
+impl SchedulerPause {
+    /// Drops the pauses that ended before `now_ms`; `true` when something changed.
+    pub fn expire(&mut self, now_ms: u64) -> bool {
+        let before = (self.all.is_some(), self.tasks.len());
+        if self.all.as_ref().is_some_and(|p| !p.active(now_ms)) {
+            self.all = None;
+        }
+        self.tasks.retain(|_, p| p.active(now_ms));
+        before != (self.all.is_some(), self.tasks.len())
+    }
+
+    /// Why a scheduled start of `task` is skipped at `now_ms`, if it is.
+    pub fn blocks(&self, task: &str, now_ms: u64) -> Option<SkipReason> {
+        if self.all.as_ref().is_some_and(|p| p.active(now_ms)) {
+            return Some(SkipReason::PausedAll);
+        }
+        self.tasks
+            .get(task)
+            .filter(|p| p.active(now_ms))
+            .map(|_| SkipReason::Paused)
+    }
+}
+
+/// Body of `POST /api/v1/scheduler/pause` and `.../tasks/{id}/pause`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PauseRequest {
+    /// Resume by itself then (ms since the epoch, in the future); absent: until resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_ms: Option<u64>,
+    /// Shown with the pause (at most 200 characters).
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// A retry armed after a failed run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PendingRetry {
+    /// The retry that comes next (1 = first).
+    pub attempt: u8,
+    /// Retries the policy allows.
+    pub attempts: u8,
+    pub due_ms: u64,
+}
+
+/// How a recorded start came about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunTrigger {
+    /// Its timer, on schedule.
+    Timer,
+    /// Its timer, catching up a run missed while the NAS was off.
+    CatchUp,
+    /// Its timer after boot (boot trigger).
+    Boot,
+    /// Run now.
+    Manual,
+    /// A retry after a failed run.
+    Retry,
+    /// Its timer fired while the previous run was still going: started when it ended
+    /// (overlap policy `queue`).
+    Queued,
+    /// Started outside rynas (`systemctl start`).
+    Other,
+}
+
+/// Why a start was skipped (a recorded outcome, not a run).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// Every task was paused.
+    PausedAll,
+    /// This task was paused.
+    Paused,
+    /// A run missed while the NAS was off, past the catch-up deadline.
+    Missed,
+    /// Its time came while the previous run was still going (overlap policy `skip`).
+    Overlap,
+    /// The previous run of the task is still going in rynas.
+    Running,
 }
 
 /// One recorded run (from the `ExecStopPost` hook).
@@ -584,6 +710,26 @@ pub struct TaskRun {
     /// The output itself: only in `GET .../history/{n}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// How it started (absent in runs recorded before the scheduling gate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<RunTrigger>,
+    /// The start did not run: why. Then `ok` is false and `result` is `skipped`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<SkipReason>,
+    /// Retry number of this run (1 = the first retry); 0 for a normal run.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub attempt: u8,
+    /// A detail of the outcome (the reason of a pause, the deadline of a missed run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// rynas could not be asked when it started: it ran as it would have before the
+    /// scheduling gate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ungated: bool,
+}
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
 }
 
 /// Live output of the running invocation (`GET /api/v1/scheduler/tasks/{id}/live`, SSE):

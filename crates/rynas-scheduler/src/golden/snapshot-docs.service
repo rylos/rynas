@@ -1,4 +1,4 @@
-# Managed by rynas — do not edit (sha256:4b462e678a8ff52f9c65f96b889ec129b150c5512e14574625425b4097a4e9f6)
+# Managed by rynas — do not edit (sha256:d17e0d2a8fc0e2d6e6949b7b4b46f690731ec1ddcc225b4b59a937a2cd727556)
 [Unit]
 Description=rynas task snapshot-docs: snapshot-docs
 Documentation=https://github.com/rylos/rynas
@@ -6,6 +6,7 @@ After=local-fs.target network-online.target
 
 [Service]
 Type=exec
+ExecCondition=+/usr/libexec/rynas/rynasctl gate snapshot-docs
 ExecStart=/usr/libexec/rynas/rynasctl job run snapshot-docs
 StandardOutput=journal
 StandardError=journal
