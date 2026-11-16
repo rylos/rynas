@@ -29,7 +29,9 @@ use crate::networkd::{self, NetworkFile};
 use crate::os::{NetOs, QUICK, SLOW};
 use crate::rescue::{self, Press};
 use crate::resolv;
-use crate::store::{BootAdopt, FileState, Marker, Observed, RevKind, Revision, Services, Store};
+use crate::store::{
+    BootAdopt, FileState, HealthySeen, Marker, Observed, RevKind, Revision, Services, Store,
+};
 use crate::validate::{self, OtherPort};
 use crate::{
     BOOT_CHECK_S, INTERFACES, INTERFACES_BACKUP, NETWORKD_DIR, NetPaths, ROLLBACK_UNIT, RYNASCTL,
@@ -171,6 +173,22 @@ pub fn verdict(ports: &[PortHealth]) -> Verdict {
     }
 }
 
+/// How often the post-boot watchdog looks at the ports while it waits.
+pub const WATCHDOG_EVERY: Duration = Duration::from_secs(30);
+/// How long the watchdog waits for the network with settings that worked before: after a
+/// power cut the NAS often boots faster than the router and the switches.
+pub const KNOWN_GOOD_WAIT: Duration = Duration::from_secs(30 * 60);
+/// How long it watches settings that were never confirmed healthy before it gives up.
+pub const UNCONFIRMED_WAIT: Duration = Duration::from_secs(10 * 60);
+/// Consecutive unhealthy checks (some port with a cable) before settings never confirmed
+/// healthy are replaced: 6 checks 30 s apart, on top of the 5 minutes since boot.
+pub const RESCUE_STREAK: u32 = 6;
+/// The signal shown by the machine since the watchdog or the reset button (in the run
+/// folder: gone at reboot, like the signal itself).
+const SIGNAL_MARK: &str = "net-signal";
+/// ifupdown's folder of extra stanzas.
+const INTERFACES_D: &str = "/etc/network/interfaces.d";
+
 /// What a revision expects of one interface.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Expect {
@@ -221,6 +239,35 @@ fn event(
             .collect(),
         ..Default::default()
     }
+}
+
+/// The watchdog keeps settings that worked before while the network is unreachable (firing
+/// until [`reachable_event`]).
+fn unreachable_event(why: &str) -> NewEvent {
+    let mut e = event(
+        NotifySeverity::Warning,
+        "unreachable",
+        ("net.unreachable", &[]),
+        "Network unreachable after boot; settings unchanged".into(),
+        format!(
+            "No connected port has a routable address with a reachable gateway. The settings are {why}: they worked before and are kept, so the router or the switch is probably not back yet (after a power cut, for example). rynas checks again every 30 seconds."
+        ),
+    );
+    e.state = EventState::Firing;
+    e
+}
+
+/// The network works again after [`unreachable_event`].
+fn reachable_event() -> NewEvent {
+    let mut e = event(
+        NotifySeverity::Warning,
+        "unreachable",
+        ("net.reachable", &[]),
+        "Network reachable again".into(),
+        "A connected port has a routable address with a reachable gateway again; the settings were not changed.".into(),
+    );
+    e.state = EventState::Resolved;
+    e
 }
 
 /// The settings rendered as a rynas file (with the managed header).
@@ -2897,6 +2944,15 @@ impl Engine {
     }
 
     /// The post-boot watchdog (`rynas-net-watchdog.timer`, 5 minutes after boot).
+    ///
+    /// Like `commit confirmed` on routers, `netplan try` or NetworkManager's checkpoints, only
+    /// settings never confirmed are ever undone automatically: settings that worked before
+    /// this boot (the last known good revision, or files the watchdog found healthy at an
+    /// earlier boot) are kept whatever happens, since a missing gateway after a power cut is
+    /// the LAN's doing (router and switches boot slower than the NAS); the watchdog then warns
+    /// and waits up to [`KNOWN_GOOD_WAIT`]. Settings never confirmed are replaced only after
+    /// [`RESCUE_STREAK`] consecutive unhealthy checks within [`UNCONFIRMED_WAIT`]. No cable on
+    /// any port is never a reason to change anything.
     pub fn watchdog(&self, log: &dyn Fn(&str)) -> Result<String> {
         // marker and timer read under the lock: `begin` writes the trial and arms its timer
         // while holding it, so a trial being started is never taken for one with no timer.
@@ -2932,44 +2988,78 @@ impl Engine {
             self.rollback_trial(why, Some(m.started_ms), log)?;
             return Ok("a change under test had no rollback timer: the watchdog did its job".into());
         }
-        match verdict(&self.port_health()?) {
-            Verdict::Healthy => {
-                return Ok("healthy: a connected port has a routable address".into());
-            }
-            Verdict::NoCarrier => return Ok("no port has a cable: nothing to check".into()),
-            Verdict::Unhealthy => {
-                log("no connected port has a routable address with a reachable gateway")
-            }
+        if verdict(&self.port_health()?) == Verdict::Healthy {
+            self.note_healthy();
+            self.clear_signal();
+            return Ok("healthy: a connected port has a routable address".into());
         }
-        // 1. the last known good revision, when the files differ from it
+        if let Some(why) = self.known_good()? {
+            return self.watch_known_good(why, log);
+        }
+        // settings never confirmed healthy: undone only when the network stays down
         let lkg_id = self.store.state()?.lkg;
-        if let Some(lkg) = lkg_id.and_then(|id| self.store.revision(id).ok().flatten()) {
-            let differs = lkg
-                .files
-                .iter()
-                .any(|f| self.os.read_config(&f.path) != f.content);
-            if differs {
-                let _lock = self.store.lock()?;
-                let inv = self.inventory_fresh()?;
-                let now = self
-                    .store
-                    .add_revision(self.snapshot(&lkg, &inv, "watchdog"))?;
-                self.activate(&lkg, &now, Mode::Live, log)?;
-                let _ = self.settle(&lkg, &now, true, log);
-                drop(_lock);
-                for _ in 0..6 {
-                    if verdict(&self.port_health()?) == Verdict::Healthy {
-                        self.emit(event(
-                            NotifySeverity::Warning,
-                            "watchdog",
-                            ("net.watchdog_restored", &[("revision", lkg.id.to_string())]),
-                            format!("Network restored to the last known good revision {}", lkg.id),
-                            "After boot no port had a routable address; the last known good settings fixed it.".into(),
-                        ));
-                        return Ok(format!("last known good revision {} restored", lkg.id));
-                    }
-                    self.os.sleep(Duration::from_secs(5));
+        let start = self.os.now_ms();
+        let (mut bad, mut carrier) = (0u32, false);
+        loop {
+            if self.changed_since(lkg_id)? {
+                return Ok("the network settings changed meanwhile: the watchdog stops".into());
+            }
+            match verdict(&self.port_health()?) {
+                Verdict::Healthy => {
+                    self.note_healthy();
+                    self.clear_signal();
+                    return Ok(format!(
+                        "healthy after {} s: nothing to undo",
+                        self.os.now_ms().saturating_sub(start) / 1000
+                    ));
                 }
+                // a switch still off or a cable out: nothing to judge
+                Verdict::NoCarrier => bad = 0,
+                Verdict::Unhealthy => {
+                    bad += 1;
+                    carrier = true;
+                }
+            }
+            if bad >= RESCUE_STREAK {
+                break;
+            }
+            if self.os.now_ms().saturating_sub(start) >= UNCONFIRMED_WAIT.as_millis() as u64 {
+                return Ok(if carrier {
+                    "the network came and went without staying down: settings left as they are"
+                        .into()
+                } else {
+                    "no port has a cable: nothing to check".into()
+                });
+            }
+            self.os.sleep(WATCHDOG_EVERY);
+        }
+        log(&format!(
+            "no connected port has a routable address with a reachable gateway ({bad} checks in a row) and these settings never worked"
+        ));
+        // 1. the last known good revision, when the files differ from it
+        if let Some(lkg) = lkg_id.and_then(|id| self.store.revision(id).ok().flatten())
+            && self.differs_from(&lkg)
+        {
+            let _lock = self.store.lock()?;
+            let inv = self.inventory_fresh()?;
+            let now = self
+                .store
+                .add_revision(self.snapshot(&lkg, &inv, "watchdog"))?;
+            self.activate(&lkg, &now, Mode::Live, log)?;
+            let _ = self.settle(&lkg, &now, true, log);
+            drop(_lock);
+            for _ in 0..6 {
+                if verdict(&self.port_health()?) == Verdict::Healthy {
+                    self.emit(event(
+                        NotifySeverity::Warning,
+                        "watchdog",
+                        ("net.watchdog_restored", &[("revision", lkg.id.to_string())]),
+                        format!("Network restored to the last known good revision {}", lkg.id),
+                        "After boot no port had a routable address; the last known good settings fixed it.".into(),
+                    ));
+                    return Ok(format!("last known good revision {} restored", lkg.id));
+                }
+                self.os.sleep(Duration::from_secs(5));
             }
         }
         // 2. the rescue configuration
@@ -2979,7 +3069,7 @@ impl Engine {
             "rescue configuration: no routable address after boot",
             log,
         )?;
-        self.feedback.signal(rescue::Signal::RescueApplied);
+        self.raise(rescue::Signal::RescueApplied);
         self.emit(event(
             NotifySeverity::Critical,
             "watchdog",
@@ -2992,6 +3082,174 @@ impl Engine {
         Ok(format!(
             "rescue configuration applied (revision {target}); previous settings kept as revision {before}"
         ))
+    }
+
+    /// The watchdog with settings that worked before: never changed; a warning while the
+    /// network is unreachable, resolved when it works again.
+    fn watch_known_good(&self, why: &str, log: &dyn Fn(&str)) -> Result<String> {
+        let lkg_id = self.store.state()?.lkg;
+        let start = self.os.now_ms();
+        let mut warned = false;
+        loop {
+            if self.changed_since(lkg_id)? {
+                return Ok("the network settings changed meanwhile: the watchdog stops".into());
+            }
+            match verdict(&self.port_health()?) {
+                Verdict::Healthy => {
+                    self.note_healthy();
+                    if warned {
+                        self.emit(reachable_event());
+                    }
+                    self.clear_signal();
+                    return Ok(format!(
+                        "healthy after {} s: settings unchanged ({why})",
+                        self.os.now_ms().saturating_sub(start) / 1000
+                    ));
+                }
+                Verdict::Unhealthy if !warned => {
+                    log(&format!(
+                        "no connected port has a routable address with a reachable gateway; the settings are {why}, they worked before: kept, waiting for the network"
+                    ));
+                    self.emit(unreachable_event(why));
+                    self.raise(rescue::Signal::Unreachable);
+                    warned = true;
+                }
+                _ => {}
+            }
+            if self.os.now_ms().saturating_sub(start) >= KNOWN_GOOD_WAIT.as_millis() as u64 {
+                break;
+            }
+            self.os.sleep(WATCHDOG_EVERY);
+        }
+        Ok(if warned {
+            format!(
+                "still unreachable after {} minutes: settings unchanged ({why}); the warning goes away when the network works",
+                KNOWN_GOOD_WAIT.as_secs() / 60
+            )
+        } else {
+            "no port has a cable: nothing to check".into()
+        })
+    }
+
+    /// An administrator changed the network since the watchdog started waiting: a change
+    /// under test, or a new last known good revision.
+    fn changed_since(&self, lkg: Option<u64>) -> Result<bool> {
+        Ok(self.store.marker()?.is_some() || self.store.state()?.lkg != lkg)
+    }
+
+    /// The files on disk are not those of `r`.
+    fn differs_from(&self, r: &Revision) -> bool {
+        r.files
+            .iter()
+            .any(|f| self.os.read_config(&f.path) != f.content)
+    }
+
+    /// Why the network files on disk worked before this boot (`None`: never confirmed).
+    fn known_good(&self) -> Result<Option<&'static str>> {
+        if let Some(lkg) = self
+            .store
+            .state()?
+            .lkg
+            .and_then(|id| self.store.revision(id).ok().flatten())
+            && !lkg.files.is_empty()
+            && !self.differs_from(&lkg)
+        {
+            return Ok(Some("the last known good revision"));
+        }
+        if self
+            .store
+            .healthy()?
+            .is_some_and(|h| h.digest == self.network_digest())
+        {
+            return Ok(Some("those found healthy at an earlier boot"));
+        }
+        Ok(None)
+    }
+
+    /// A digest of every network file (networkd's folder, ifupdown's files), to recognise
+    /// files that worked before.
+    fn network_digest(&self) -> String {
+        let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
+        for dir in [NETWORKD_DIR, INTERFACES_D] {
+            if let Ok(rd) = std::fs::read_dir(self.os.path(Path::new(dir))) {
+                for e in rd.flatten() {
+                    paths.insert(Path::new(dir).join(e.file_name()));
+                }
+            }
+        }
+        paths.insert(PathBuf::from(INTERFACES));
+        let mut text = String::new();
+        for p in paths {
+            if let Some(c) = self.os.read_config(&p) {
+                text.push_str(&p.to_string_lossy());
+                text.push('\0');
+                text.push_str(&c);
+                text.push('\0');
+            }
+        }
+        sha256_hex(text.as_bytes())
+    }
+
+    /// Remembers the network files on disk as healthy.
+    fn note_healthy(&self) {
+        let h = HealthySeen {
+            digest: self.network_digest(),
+            ts_ms: self.os.now_ms(),
+        };
+        if let Err(e) = self.store.set_healthy(&h) {
+            tracing::warn!("network: healthy files not recorded: {e}");
+        }
+    }
+
+    fn signal_mark(&self) -> PathBuf {
+        self.paths.run.join(SIGNAL_MARK)
+    }
+
+    /// Shows `s` and remembers it, so that the machine's usual state comes back later
+    /// ([`Self::clear_signal`]).
+    fn raise(&self, s: rescue::Signal) {
+        self.feedback.signal(s);
+        let _ = std::fs::create_dir_all(&self.paths.run);
+        let mark = format!("{} {}\n", s.name(), self.os.now_ms());
+        if let Err(e) = write_synced(&self.signal_mark(), mark.as_bytes(), 0o600) {
+            tracing::warn!("network: signal not recorded: {e}");
+        }
+    }
+
+    /// The signal shown since the watchdog or the reset button, and since when.
+    pub fn raised_signal(&self) -> Option<(String, u64)> {
+        let text = std::fs::read_to_string(self.signal_mark()).ok()?;
+        let (name, at) = text.trim().split_once(' ')?;
+        Some((name.to_string(), at.parse().unwrap_or(0)))
+    }
+
+    /// Puts the machine back to its usual state after a signal of the rescue paths (network
+    /// healthy again, notification acknowledged). Returns whether a signal was shown.
+    pub fn clear_signal(&self) -> bool {
+        if self.raised_signal().is_none() {
+            return false;
+        }
+        let _ = std::fs::remove_file(self.signal_mark());
+        self.feedback.signal(rescue::Signal::Clear);
+        true
+    }
+
+    /// rynasd, every minute: once the network is healthy again, the signal shown since the
+    /// watchdog or the reset button goes away and the "unreachable" warning is resolved.
+    /// The first press of the reset button keeps its signal for the gesture's window.
+    pub fn watch_signal(&self) {
+        let Some((name, at)) = self.raised_signal() else {
+            return;
+        };
+        if self.os.now_ms().saturating_sub(at) <= rescue::GESTURE_WINDOW_MS {
+            return;
+        }
+        if matches!(self.port_health().map(|p| verdict(&p)), Ok(Verdict::Healthy)) {
+            if name == rescue::Signal::Unreachable.name() {
+                self.emit(reachable_event());
+            }
+            self.clear_signal();
+        }
     }
 
     /// `rynasctl net reset-button`: one press of the reset button (a hardware module wires
@@ -3008,7 +3266,7 @@ impl Engine {
             Press::First => {
                 std::fs::create_dir_all(&self.paths.run)?;
                 write_synced(&state, now.to_string().as_bytes(), 0o600)?;
-                self.feedback.signal(rescue::Signal::PressAgain);
+                self.raise(rescue::Signal::PressAgain);
                 log("reset button: press again within 10 s to restore the factory network");
             }
             Press::Second => {

@@ -599,10 +599,87 @@ pub fn spawn_event_flush(n: Arc<Network>) {
                 n2.engine.sync_resolv(&|l| tracing::info!("network: {l}"));
                 // members that lost their link, a new active member, a lost LACP partner
                 n2.engine.watch_bonds();
+                // the machine's signal of the rescue paths goes away once the network works
+                n2.engine.watch_signal();
                 n2.flush_events()
             })
             .await;
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
+}
+
+/// Notification keys of the rescue paths whose acknowledgement ends the machine's signal
+/// (status LED): the watchdog's rescue, its "unreachable" warning, the reset button.
+pub const SIGNAL_KEYS: &[&str] = &["network:watchdog", "network:unreachable", "network:reset"];
+
+/// Whether a change of the notification engine (its broadcast JSON) acknowledges one of
+/// [`SIGNAL_KEYS`] (or everything).
+pub fn acks_signal(json: &str) -> bool {
+    use rynas_api_types::notify::{NotificationChangeKind, NotificationEvent};
+    let Ok(ev) = serde_json::from_str::<NotificationEvent>(json) else {
+        return false;
+    };
+    match ev.kind {
+        NotificationChangeKind::AckedAll => true,
+        NotificationChangeKind::Updated => ev
+            .notification
+            .is_some_and(|n| n.acked_ms.is_some() && SIGNAL_KEYS.contains(&n.key.as_str())),
+        _ => false,
+    }
+}
+
+/// An administrator who acknowledges the notification of the rescue paths also puts the
+/// machine's signal (status LED) back to normal.
+pub fn spawn_ack_watch(n: Arc<Network>, mut changes: tokio::sync::broadcast::Receiver<Arc<str>>) {
+    use tokio::sync::broadcast::error::RecvError;
+    tokio::spawn(async move {
+        loop {
+            match changes.recv().await {
+                Ok(j) if acks_signal(&j) => {
+                    let n2 = n.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if n2.engine.clear_signal() {
+                            tracing::info!("network: signal cleared (notification acknowledged)");
+                        }
+                    })
+                    .await;
+                }
+                Ok(_) | Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rynas_api_types::notify::{Notification, NotificationChangeKind, NotificationEvent};
+
+    fn change(kind: NotificationChangeKind, key: &str, acked: bool) -> String {
+        let n = Notification {
+            key: key.into(),
+            acked_ms: acked.then_some(1),
+            ..Default::default()
+        };
+        serde_json::to_string(&NotificationEvent {
+            kind,
+            notification: Some(n),
+            unacked: 0,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn acknowledgements_that_end_the_signal() {
+        use NotificationChangeKind::*;
+        assert!(acks_signal(&change(Updated, "network:unreachable", true)));
+        assert!(acks_signal(&change(Updated, "network:watchdog", true)));
+        assert!(!acks_signal(&change(Updated, "network:watchdog", false)));
+        assert!(!acks_signal(&change(Updated, "storage:x", true)));
+        assert!(!acks_signal(&change(Created, "network:watchdog", true)));
+        assert!(acks_signal(&change(AckedAll, "storage:x", true)));
+        assert!(!acks_signal("not json"));
+    }
 }

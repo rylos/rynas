@@ -1084,6 +1084,7 @@ fn main() -> std::io::Result<()> {
                 .with_modules(opened.modules.clone()),
         );
         rynasd::network::spawn_event_flush(network.clone());
+        rynasd::network::spawn_ack_watch(network.clone(), engine.subscribe());
         state.network = Some(network);
         // the hardware modules' routes (/v1/modules/<id>/...)
         state.modules = opened.modules.router(&rynas_module::http::Ctx {

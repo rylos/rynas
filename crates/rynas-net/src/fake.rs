@@ -54,6 +54,8 @@ pub struct FakeState {
     pub taken: Vec<String>,
     /// Hosts that answer pings.
     pub reachable: Vec<String>,
+    /// Hosts that answer pings from a time on (`now_ms`): a router back after a power cut.
+    pub reachable_at: Vec<(String, u64)>,
     /// DNS servers that answer queries.
     pub dns_up: Vec<String>,
     /// DNS servers of the DHCP leases: iface → servers.
@@ -556,7 +558,11 @@ impl NetOs for FakeOs {
             ["ping", rest @ ..] => {
                 let host = rest.last().copied().unwrap_or("");
                 Ok(out(
-                    if s.reachable.iter().any(|t| t == host) {
+                    if s.reachable.iter().any(|t| t == host)
+                        || s.reachable_at
+                            .iter()
+                            .any(|(t, at)| t == host && s.now_ms >= *at)
+                    {
                         0
                     } else {
                         1

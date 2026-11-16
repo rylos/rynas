@@ -31,22 +31,51 @@ pub const UPS_HOOK_LINK: &str = "/etc/synodeb/ups-pre-safemode.d/50-rynas";
 
 /// The rescue signals through synohwd's command FIFO: `2` short beep, `3` long beep, `;`
 /// status LED orange blinking. A stopped synohwd is not an error.
+///
+/// synohwd sends a status LED code only when its own choice changes, so the orange set here
+/// would stay until synohwd restarts: [`Signal::Clear`] sends back the code synohwd shows
+/// (`status_led` of its status file: orange blinking when it has a problem of its own),
+/// green when the file does not say.
 pub struct Beeps {
     pub fifo: PathBuf,
+    /// synohwd's status file.
+    pub status: PathBuf,
+}
+
+impl Beeps {
+    /// The status LED code synohwd itself shows.
+    fn usual_led(&self) -> String {
+        std::fs::read_to_string(&self.status)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("status_led")?.as_str().map(str::to_string))
+            .filter(|c| crate::status::led_word(c).is_some())
+            .unwrap_or_else(|| GREEN.into())
+    }
 }
 
 impl Feedback for Beeps {
     fn signal(&self, s: Signal) {
+        let usual;
         let cmds: &[&str] = match s {
             Signal::PressAgain => &[crate::cmd::BEEP_SHORT, ORANGE_BLINK],
             Signal::Restoring => &[crate::cmd::BEEP_LONG],
             Signal::RescueApplied => &[crate::cmd::BEEP_LONG, ORANGE_BLINK],
+            // quiet: the NAS is fine, the network around it is not back yet
+            Signal::Unreachable => &[ORANGE_BLINK],
+            Signal::Clear => {
+                usual = self.usual_led();
+                &[usual.as_str()]
+            }
         };
         for c in cmds {
             let _ = crate::cmd::send(&self.fifo, c);
         }
     }
 }
+
+/// Status LED green (synohwd's normal state).
+const GREEN: &str = "8";
 
 /// Status LED orange, blinking.
 const ORANGE_BLINK: &str = ";";
@@ -197,6 +226,7 @@ impl Module for SynologyModule {
         self.hardware.as_ref().map(|_| {
             Arc::new(Beeps {
                 fifo: rynas_hw::under(&self.hw_root, crate::cmd::FIFO),
+                status: rynas_hw::under(&self.hw_root, crate::status::STATUS),
             }) as Arc<dyn Feedback>
         })
     }
@@ -326,5 +356,41 @@ mod tests {
         assert_eq!((b.configured, b.pending), (false, Some(true)));
         let b = m.reset_button(&cfg, "other").unwrap().unwrap();
         assert_eq!(b.pending, None, "another user's changeset");
+    }
+
+    #[test]
+    fn rescue_signals_and_the_led_handed_back() {
+        use std::io::Read;
+        let d = tempfile::tempdir().unwrap();
+        let fifo = d.path().join("cmd");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: plain mkfifo on a path we own
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let mut r = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo)
+            .unwrap();
+        let b = Beeps {
+            fifo,
+            status: d.path().join("status.json"),
+        };
+        let mut read = || {
+            let mut buf = [0u8; 64];
+            let n = r.read(&mut buf).unwrap();
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        };
+        b.signal(Signal::Unreachable);
+        assert_eq!(read(), ";\n", "orange blinking, no beep");
+        // no status file: green
+        b.signal(Signal::Clear);
+        assert_eq!(read(), "8\n");
+        // synohwd's own choice (a degraded array of its own: orange blinking)
+        std::fs::write(&b.status, r#"{"status_led": ";"}"#).unwrap();
+        b.signal(Signal::Clear);
+        assert_eq!(read(), ";\n");
+        std::fs::write(&b.status, r#"{"status_led": "1"}"#).unwrap();
+        b.signal(Signal::Clear);
+        assert_eq!(read(), "8\n", "never anything but a status LED code");
     }
 }

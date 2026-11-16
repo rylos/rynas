@@ -20,9 +20,10 @@
 //!    restores the last known good revision and verifies it again.
 //!
 //! Around it: the boot guard (`rynas-net-guard.service`, before networkd) restores the last
-//! known good files when a trial was interrupted by a reboot; the post-boot watchdog falls back
-//! to the last known good revision and then to the rescue configuration (DHCP and link-local on
-//! every port) when no connected port has a routable address; the rescue paths ([`rescue`]):
+//! known good files when a trial was interrupted by a reboot; the post-boot watchdog keeps
+//! settings that worked before (it warns and waits for the LAN) and, for settings never
+//! confirmed that stay unhealthy, falls back to the last known good revision and then to the
+//! rescue configuration (DHCP and link-local on every port); the rescue paths ([`rescue`]):
 //! deterministic IPv4 link-local addresses, the Avahi service file, the Synology reset button
 //! double press; the read-only parser of ifupdown and its guided migration ([`ifupdown`]);
 //! bonds (link aggregation, [`bond`]); diagnostics ([`diag`]).

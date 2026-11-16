@@ -1007,6 +1007,7 @@ schema 2 added the `code` and `body_format` columns.
 | `net.boot_dns_failed` | `revision` (ifupdown's, restored) | Network migration at boot undone: names did not resolve (`../research/network.md` §4.1) |
 | `net.dns_repaired` | `detail` (English, not translated) | Name resolution repaired: `/etc/resolv.conf` had no server while networkd ran the network |
 | `net.watchdog_restored` / `net.rescue` / `net.reset` | `revision` | Network restored to the last known good revision / rescue configuration / factory network |
+| `net.unreachable` / `net.reachable` | — | Network unreachable after boot; settings unchanged (warning, firing on key `network:unreachable`, settings that worked before are kept) / reachable again (resolves it) |
 | `net.bond_member_down` | `bond`, `member`, `failures` | {member} of {bond} lost its link (warning; also a flap between two looks: the failure counter grew) |
 | `net.bond_active_changed` | `bond`, `from`, `to` | {to} carries the traffic of {bond} now (info) |
 | `net.bond_lacp_lost` | `bond` | The LACP group of {bond} with the switch is broken: no partner, or members in different aggregators (warning) |
@@ -1522,14 +1523,25 @@ Safety net (units in `packaging/systemd/`, enabled by the package, not started a
   networking.service`, only when `net/trial.json` or `net/boot-adopt.json` exists): an
   interrupted trial is undone **before networkd starts** (files and unit enablement only,
   report `boot_guard`); a migration planned for this boot is carried out (see below).
-- `rynas-net-watchdog.timer` (5 min after boot) → `rynasctl net watchdog`: when ports have a
-  cable but none has a routable IPv4 address with a gateway that answers ping (or no default
-  route at all), the last known good revision is restored if the files differ from it (30 s to
-  come up), then the **rescue configuration** (DHCP + link-local on every port, foreign
-  `.netdev` suspended, ifupdown put aside); notification `network:watchdog` critical, long
-  signal of the hardware module (`rynas_net::rescue::Feedback`, `Module::rescue_feedback`: on a
-  Synology a long beep + orange LED through synohwd's FIFO; silent elsewhere). No cable:
-  nothing.
+- `rynas-net-watchdog.timer` (5 min after boot) → `rynasctl net watchdog`
+  (`TimeoutStartSec=45min`): healthy = a port with a cable has a routable IPv4 address with a
+  gateway that answers ping (or no default route at all). Only settings never confirmed are
+  undone. **Settings that worked before this boot** (files of the last known good revision,
+  or the digest of the files found healthy at an earlier boot, `net/healthy.json`) are never
+  changed: warning `net.unreachable` (firing, key `network:unreachable`), quiet signal
+  `Signal::Unreachable` (orange LED, no beep), a check every 30 s for up to 30 min, resolved
+  (`net.reachable`) at the first healthy check. **Settings never confirmed healthy**: after 6
+  unhealthy checks in a row (30 s apart, within 10 min; a healthy check cancels) the last
+  known good revision is restored if the files differ from it (30 s to come up), then the
+  **rescue configuration** (DHCP + link-local on every port, foreign `.netdev` suspended,
+  ifupdown put aside); notification `network:watchdog` critical, long signal of the hardware
+  module (`rynas_net::rescue::Feedback`, `Module::rescue_feedback`: on a Synology a long beep +
+  orange LED through synohwd's FIFO; silent elsewhere). No cable on any port: never a change.
+  A trial or a new last known good revision during the wait stops it. The signal (marker
+  `/run/rynas/net-signal`) ends with `Signal::Clear` when the network is healthy again
+  (watchdog, or rynasd every minute) or when an administrator acknowledges a notification of
+  `network:watchdog|unreachable|reset` (rynasd watches the notification engine's changes); on
+  a Synology the status LED gets back the code synohwd shows (`status.json`).
 - Reset button (Synology): **one owner**. `/etc/synohwd.toml` has a single writer, the
   `synology.hw` key (`PUT /api/v1/modules/synology/settings`, `reset_button:
   network_rescue` = `reset_button = "command:/usr/libexec/rynas/rynasctl net reset-button"`);

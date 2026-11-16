@@ -66,12 +66,14 @@ rynasd:
 
 **Boot guard.** `rynas-net-guard.service` runs with `DefaultDependencies=no` and `Before=systemd-networkd.service`. If it finds the `trial` marker, meaning an unconfirmed trial interrupted by a reboot, it restores the last known good configuration before networkd starts.
 
-**Post-boot check.** `rynas-net-watchdog.timer` fires 5 minutes after boot. If no port **with carrier** has a routable address and a reachable gateway:
-1. restore the last known good configuration;
-2. if that is not enough, switch to the rescue configuration (DHCP everywhere + link-local);
-3. notify with a beep and orange LED via the synology plugin.
+**Post-boot check.** `rynas-net-watchdog.timer` fires 5 minutes after boot. Like Junos `commit confirmed`, `netplan try` and NetworkManager checkpoints, only a change that was **never confirmed** is ever undone automatically: a missing gateway after boot with settings that already worked is the LAN's fault (after a power cut the router and the switches often come back after the NAS), and switching a healthy NAS with static addresses to DHCP would make things worse.
 
-With no cable plugged in it does nothing, to avoid false triggers.
+- **Settings that worked before this boot** (the files are those of the last known good revision, or those the watchdog found healthy at an earlier boot, kept as a digest in `healthy.json`): never changed. If no port **with carrier** has a routable address and a reachable gateway, a Warning `net.unreachable` (firing, key `network:unreachable`) and the module's quiet signal (status LED orange blinking, no beep); then a check every 30 s for up to 30 minutes, ending at the first healthy check (`net.reachable` resolves the warning, LED back to normal).
+- **Settings never confirmed healthy**: only after 6 unhealthy checks in a row (30 s apart, within 10 minutes; a healthy check cancels): 1. restore the last known good configuration; 2. if that is not enough, the rescue configuration (DHCP everywhere + link-local); 3. Critical notification, long beep and orange LED.
+- **No cable on any port**: nothing to judge, never a reason to change anything (it only resets the count).
+- The wait stops when an administrator changes the network meanwhile (a trial, a new last known good revision).
+
+The module's signal (status LED) goes back to normal when the network is healthy again (the watchdog, or rynasd's check every minute) or when the administrator acknowledges the notification (`Signal::Clear`; on Synology the LED code synohwd itself shows, since synohwd only sends a code when its own choice changes). The boot guard and the migration at boot act only on unconfirmed changes (a trial interrupted by a reboot, a migration planned for the next boot) and put back settings that worked, never the rescue configuration.
 
 ### 3.2 Protecting the management interface
 - `rynas-web` reads the local address of the session socket (`getsockname`), so it knows which address and interface the user is coming in on.

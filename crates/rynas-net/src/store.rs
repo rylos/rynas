@@ -9,6 +9,8 @@
 //! - `trial.json`: the [`Marker`] of an unconfirmed change (its presence is what the boot
 //!   guard and the timer act on);
 //! - `boot-adopt.json`: an ifupdown migration waiting for the next boot;
+//! - `healthy.json`: a digest of the network files the watchdog last found healthy
+//!   ([`HealthySeen`]);
 //! - `staged.json`: changes staged per user;
 //! - `last-rollback.json`, `outbox.json`: the last rollback report and events waiting to be
 //!   handed to the notification engine;
@@ -175,6 +177,15 @@ impl Marker {
 pub struct BootAdopt {
     pub revision: u64,
     pub author: String,
+    pub ts_ms: u64,
+}
+
+/// The network files as they were the last time the post-boot watchdog found the network
+/// healthy (a digest of their contents, never the contents): files that worked before are
+/// never replaced by the rescue configuration just because the LAN is slow to come back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HealthySeen {
+    pub digest: String,
     pub ts_ms: u64,
 }
 
@@ -390,6 +401,15 @@ impl Store {
             self.remove("outbox.json")?;
         }
         Ok(v)
+    }
+
+    /// The files the watchdog last found healthy.
+    pub fn healthy(&self) -> std::io::Result<Option<HealthySeen>> {
+        self.read_json("healthy.json")
+    }
+
+    pub fn set_healthy(&self, h: &HealthySeen) -> std::io::Result<()> {
+        self.write_json("healthy.json", h)
     }
 }
 

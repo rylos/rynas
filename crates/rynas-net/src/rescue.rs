@@ -55,6 +55,26 @@ pub enum Signal {
     Restoring,
     /// The watchdog applied the rescue configuration (no routable address after boot).
     RescueApplied,
+    /// After boot the network is unreachable with settings that worked before: they are kept
+    /// and the watchdog waits for the LAN (router, switch) to come back.
+    Unreachable,
+    /// Back to normal: the network is healthy again or the administrator acknowledged the
+    /// notification. The machine shows its usual state again (the status LED goes back to
+    /// whatever the hardware daemon shows).
+    Clear,
+}
+
+impl Signal {
+    /// Its name, as the engine's signal marker stores it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::PressAgain => "press-again",
+            Self::Restoring => "restoring",
+            Self::RescueApplied => "rescue-applied",
+            Self::Unreachable => "unreachable",
+            Self::Clear => "clear",
+        }
+    }
 }
 
 /// How the machine signals [`Signal`]s (a hardware module's beeps and LEDs). Fire and

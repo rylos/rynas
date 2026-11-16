@@ -465,15 +465,29 @@ fn watchdog_decisions() {
 fn watchdog_healthy_then_rescue() {
     let t = networkd_box();
     assert!(t.e.watchdog(&log).unwrap().starts_with("healthy"));
-    // the gateway is gone and lan2 lost its lease
+    // settings edited by hand and never confirmed, then the gateway is gone and lan2 lost
+    // its lease
+    t.os.write_config(
+        "/etc/systemd/network/05-rynas-lan1.network",
+        &render_file(
+            "lan1",
+            &st("192.0.2.11/24", Some("192.0.2.1")),
+            Some("00:11:32:ab:cd:01"),
+        ),
+    );
     {
         let mut s = t.os.state.lock().unwrap();
         s.reachable.clear();
         s.leases.clear();
         s.links.get_mut("lan2").unwrap().addrs.clear();
     }
+    let start = t.os.now_ms();
     let msg = t.e.watchdog(&log).unwrap();
     assert!(msg.contains("rescue configuration"), "{msg}");
+    assert!(
+        t.os.now_ms() - start >= (RESCUE_STREAK as u64 - 1) * WATCHDOG_EVERY.as_millis() as u64,
+        "several checks in a row before the rescue"
+    );
     let lan1 =
         t.os.read_config(Path::new("/etc/systemd/network/05-rynas-lan1.network"))
             .unwrap();
@@ -482,6 +496,10 @@ fn watchdog_healthy_then_rescue() {
         "{lan1}"
     );
     assert_eq!(signals(&t.e), "RescueApplied\n");
+    assert_eq!(
+        t.e.raised_signal().map(|(n, _)| n).as_deref(),
+        Some("rescue-applied")
+    );
     let revs = t.e.revisions().unwrap();
     assert_eq!(revs[0].kind, "rescue");
     assert!(revs[0].lkg);
@@ -494,11 +512,129 @@ fn watchdog_healthy_then_rescue() {
             .iter()
             .any(|e| e.severity == NotifySeverity::Critical)
     );
+    // the administrator acknowledges the notification: the LED goes back to normal
+    assert!(t.e.clear_signal());
+    assert_eq!(signals(&t.e), "RescueApplied\nClear\n");
+    assert!(!t.e.clear_signal(), "only once");
     // no cable: nothing to judge
     for l in t.os.state.lock().unwrap().links.values_mut() {
         l.carrier = false;
     }
     assert!(t.e.watchdog(&log).unwrap().starts_with("no port"));
+}
+
+/// The incident of a power cut: the NAS is back before the router. Settings that worked
+/// before are never replaced; a warning while waiting, the LED back to normal at the end.
+#[test]
+fn watchdog_blackout_keeps_known_good_settings() {
+    let t = networkd_box();
+    // confirmed settings: the last known good revision
+    t.e.stage("admin", "lan1", &st("192.0.2.50/24", Some("192.0.2.1")))
+        .unwrap();
+    let plan =
+        t.e.plan_apply("admin", "admin", "", ip("198.51.100.20"), None, true)
+            .unwrap();
+    t.e.begin(&plan, None, None, &log).unwrap();
+    let path = Path::new("/etc/systemd/network/05-rynas-lan1.network");
+    let before = t.os.read_config(path).unwrap();
+    let revisions = t.e.revisions().unwrap().len();
+    t.e.take_events();
+    // after the reboot: links up, no lease, the gateway answers 10 minutes later
+    {
+        let mut s = t.os.state.lock().unwrap();
+        s.reachable.clear();
+        s.leases.clear();
+        s.links.get_mut("lan2").unwrap().addrs.clear();
+        let back = s.now_ms + 10 * 60_000;
+        s.reachable_at = vec![("192.0.2.1".into(), back)];
+    }
+    let start = t.os.now_ms();
+    let msg = t.e.watchdog(&log).unwrap();
+    assert!(msg.starts_with("healthy after") && msg.contains("settings unchanged"), "{msg}");
+    assert!(t.os.now_ms() - start >= 10 * 60_000);
+    assert_eq!(t.os.read_config(path).unwrap(), before, "settings untouched");
+    assert_eq!(t.e.revisions().unwrap().len(), revisions, "no new revision");
+    assert_eq!(signals(&t.e), "Unreachable\nClear\n");
+    assert!(t.e.raised_signal().is_none());
+    let ev = t.e.take_events();
+    assert!(ev.iter().all(|e| e.severity != NotifySeverity::Critical));
+    let warn = ev.iter().find(|e| e.code == "net.unreachable").unwrap();
+    assert_eq!(
+        (warn.severity, warn.state, warn.key.as_deref()),
+        (NotifySeverity::Warning, EventState::Firing, Some("network:unreachable"))
+    );
+    let ok = ev.iter().find(|e| e.code == "net.reachable").unwrap();
+    assert_eq!(
+        (ok.state, ok.key.as_deref()),
+        (EventState::Resolved, Some("network:unreachable"))
+    );
+}
+
+/// A LAN that stays down for the whole wait: still nothing changed; rynasd clears the LED
+/// and resolves the warning once the network works.
+#[test]
+fn watchdog_known_good_waits_then_rynasd_clears() {
+    let t = networkd_box();
+    // files found healthy at an earlier boot (no last known good revision)
+    assert!(t.e.watchdog(&log).unwrap().starts_with("healthy"));
+    assert!(t.e.store.state().unwrap().lkg.is_none());
+    {
+        let mut s = t.os.state.lock().unwrap();
+        s.reachable.clear();
+        s.leases.clear();
+        s.links.get_mut("lan2").unwrap().addrs.clear();
+    }
+    let msg = t.e.watchdog(&log).unwrap();
+    assert!(msg.starts_with("still unreachable after 30 minutes"), "{msg}");
+    assert!(t.e.revisions().unwrap().is_empty(), "nothing applied");
+    assert_eq!(signals(&t.e), "Unreachable\n");
+    // still down: rynasd's minute check leaves it
+    t.e.watch_signal();
+    assert_eq!(signals(&t.e), "Unreachable\n");
+    t.os.state.lock().unwrap().reachable.push("192.0.2.1".into());
+    t.e.take_events();
+    t.e.watch_signal();
+    assert_eq!(signals(&t.e), "Unreachable\nClear\n");
+    assert!(t.e.raised_signal().is_none());
+    assert!(
+        t.e.take_events()
+            .iter()
+            .any(|e| e.code == "net.reachable" && e.state == EventState::Resolved)
+    );
+}
+
+#[test]
+fn watchdog_never_rescues_without_a_cable() {
+    // settings never confirmed healthy, every link down
+    let t = networkd_box();
+    for l in t.os.state.lock().unwrap().links.values_mut() {
+        l.carrier = false;
+    }
+    let msg = t.e.watchdog(&log).unwrap();
+    assert!(msg.starts_with("no port has a cable"), "{msg}");
+    assert!(t.e.revisions().unwrap().is_empty());
+    assert_eq!(signals(&t.e), "");
+    assert!(t.e.take_events().is_empty());
+}
+
+#[test]
+fn watchdog_unconfirmed_settings_healthy_midway_are_kept() {
+    // settings never confirmed healthy; the gateway answers after a minute
+    let t = networkd_box();
+    {
+        let mut s = t.os.state.lock().unwrap();
+        s.reachable.clear();
+        s.leases.clear();
+        s.links.get_mut("lan2").unwrap().addrs.clear();
+        let back = s.now_ms + 60_000;
+        s.reachable_at = vec![("192.0.2.1".into(), back)];
+    }
+    let msg = t.e.watchdog(&log).unwrap();
+    assert!(msg.starts_with("healthy after"), "{msg}");
+    assert!(t.e.revisions().unwrap().is_empty(), "no rescue");
+    assert_eq!(signals(&t.e), "");
+    // and they count as healthy from now on
+    assert!(t.e.store.healthy().unwrap().is_some());
 }
 
 #[test]
