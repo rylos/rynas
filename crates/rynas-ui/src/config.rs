@@ -267,6 +267,7 @@ pub mod keys {
     pub const REMOVABLE: &str = "removable";
     pub const DOCKER: &str = "docker";
     pub const WEB_ACCESS: &str = "web_access";
+    pub const HOSTNAME: &str = "system.hostname";
 }
 
 /// The Save of a dialog or a single-object editor (guidelines A19b). Call it once the form's

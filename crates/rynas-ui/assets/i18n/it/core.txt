@@ -217,8 +217,10 @@ time.title	Data e ora
 time.subtitle	Fuso orario e sincronizzazione dell'orologio
 time.open_text	Fuso orario, server dell'ora e stato dell'orologio.
 time.settings	Impostazioni
-time.zone_search	Cerca una città o regione
+time.zone_search	Cerca una città, una regione o una differenza da UTC
 time.zone_help	Le app in esecuzione mantengono il fuso precedente fino al riavvio.
+time.zone_none	Nessun fuso orario corrisponde
+time.zone_more	Altri {n}: scrivi altre lettere per restringere l'elenco
 time.sync	Sincronizza automaticamente
 time.sync_help	Certificati, codici a due fattori e pianificazioni richiedono l'ora esatta.
 time.servers	Server dell'ora
@@ -1503,6 +1505,7 @@ v.client	Un nome host, indirizzo IP, sottorete (192.0.2.0/24), carattere jolly (
 v.workgroup	1–15 caratteri, senza spazi né \ / : * ? " < > | ,
 v.threads	Tra 1 e 256.
 v.port	Una porta tra 1 e 65535.
+v.hostname	Da 1 a 63 tra lettere minuscole, cifre e -, senza - all'inizio o alla fine.
 users.subtitle	Account locali per la condivisione di file e l'accesso
 users.tab_users	Utenti
 users.tab_groups	Gruppi
@@ -3076,6 +3079,21 @@ net.tab_tools	Diagnostica
 net.summary	Riepilogo
 net.services	Servizi di rete
 net.hostname	Nome host
+net.hn.change	Cambia
+net.hn.title	Cambia il nome host
+net.hn.help	Lettere minuscole, cifre e trattini, fino a 63 caratteri.
+net.hn.address	Nuovo indirizzo di questa pagina
+net.hn.keeps	Hai aperto questa pagina da {addr}: quell'indirizzo continua a funzionare.
+net.hn.warn_title	Prima di rinominare
+net.hn.w_browser	Questa pagina passa al nuovo indirizzo: dopo il cambio riaprila da lì.
+net.hn.w_devices	Computer, telefoni e unità di rete che raggiungono il NAS con il vecchio nome dovranno usare quello nuovo.
+net.hn.w_agents	I PC con l'agente di backup controllano il certificato del NAS, che cambia insieme al nome: per ciascuno usa «Abbina di nuovo» (backup e impostazioni restano). I PC che inviano snapshot btrfs e gli altri NAS che fanno backup o repliche verso questo per nome vanno aggiornati con il nuovo nome.
+net.hn.w_apps	Le app installate prima mantengono il vecchio nome nelle loro impostazioni.
+net.hn.auto	Si aggiornano da soli: il certificato HTTPS, i nomi web locali (.local), il nome nella rete Windows e le notifiche.
+net.hn.save	Rinomina
+net.hn.done	Il nome host ora è {name}.
+net.hn.done_moves	Il nome host ora è {name}. Il vecchio indirizzo non funziona più: continua da quello nuovo.
+net.hn.open	Apri {url}
 net.mgmt	Questa sessione arriva da
 net.mgmt_unknown	Sconosciuta (connessione locale o tramite proxy)
 net.gateway	Gateway predefinito

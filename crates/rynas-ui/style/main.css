@@ -1393,6 +1393,24 @@ kbd {
 /* NOCOW folders: state and action on one line; what the files give up, as bullets */
 .nocow-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
 .nocow-costs { margin: var(--s-1) 0 0; padding-left: var(--s-4); list-style: disc; }
+.note-list { margin: var(--s-1) 0 0; padding-left: var(--s-4); list-style: disc; display: flex; flex-direction: column; gap: var(--s-1); }
+.hn-preview { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
+/* time zone combobox: the list opens under the field, scrolls only vertically */
+.tz-combo { position: relative; }
+.tz-list {
+  position: absolute; left: 0; right: 0; top: calc(100% + var(--s-1)); z-index: 41;
+  max-height: min(320px, 50vh); overflow-x: hidden; overflow-y: auto; margin: 0; padding: var(--s-1);
+  list-style: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-pop);
+}
+.tz-group { padding: var(--s-2) var(--s-2) var(--s-1); font-size: var(--fs-12); font-weight: 600; color: var(--text-subtle); text-transform: uppercase; letter-spacing: .04em; }
+.tz-opt { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--s-2); padding: var(--s-2) var(--s-3); border-radius: var(--r-md); cursor: pointer; color: var(--text-muted); min-width: 0; }
+.tz-opt[aria-selected="true"] { background: color-mix(in oklch, var(--accent) 13%, var(--surface)); }
+.tz-city { color: var(--text); font-weight: 500; overflow-wrap: anywhere; min-width: 0; }
+.tz-opt.is-current .tz-city { color: var(--accent); }
+.tz-region { font-size: var(--fs-12); color: var(--text-subtle); overflow-wrap: anywhere; min-width: 0; }
+.tz-off { margin-left: auto; font-size: var(--fs-13); white-space: nowrap; }
+.tz-empty, .tz-more { padding: var(--s-2) var(--s-3); font-size: var(--fs-13); color: var(--text-subtle); }
 .crypt-dir { overflow-wrap: anywhere; }
 .table td.actions { text-align: right; width: 1%; white-space: nowrap; }
 .table td.actions .icon-btn { display: inline-grid; }

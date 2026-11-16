@@ -82,47 +82,394 @@ fn task(url: &'static str, body: Option<String>, ok: &'static str, busy: RwSigna
     });
 }
 
-/// Zone picker: a filter and the zones grouped by region with their offset now.
-fn zone_field(d: RwSignal<Form>, zones: Remote<Vec<ZoneInfo>>) -> AnyView {
-    let q = RwSignal::new(String::new());
-    let id = fid();
-    let groups = move || {
-        let needle = q.get().trim().to_lowercase().replace(' ', "_");
-        let cur = d.with(|f| f.tz.clone());
-        let mut out: Vec<(String, Vec<(String, String)>)> = Vec::new();
-        zones.data.with(|z| {
-            let fallback = [ZoneInfo { name: cur.clone(), offset_s: 0 }];
-            let list = z.as_deref().unwrap_or(&fallback);
-            for z in list.iter().filter(|z| z.name == cur || z.name.to_lowercase().contains(&needle)) {
-                let (region, city) = z.name.split_once('/').unwrap_or(("", &z.name));
-                let label = format!("{} · {}", city.replace('_', " "), utc(z.offset_s));
-                match out.last_mut() {
-                    Some((r, v)) if r == region => v.push((z.name.clone(), label)),
-                    _ => out.push((region.to_string(), vec![(z.name.clone(), label)])),
+/// Most zones a search lists (the rest is counted: typing more narrows them).
+const MAX_ZONE_HITS: usize = 50;
+
+/// Names of zone cities as people write them in the UI's other languages, and their zone.
+/// Only cities that name a zone (Milan is not one); a zone this system does not list is
+/// skipped. Matched folded ([`fold`]), shown as written here.
+const ZONE_ALIASES: &[(&str, &str)] = &[
+    ("Roma", "Europe/Rome"),
+    ("Londra", "Europe/London"),
+    ("Parigi", "Europe/Paris"),
+    ("Berlino", "Europe/Berlin"),
+    ("Atene", "Europe/Athens"),
+    ("Lisbona", "Europe/Lisbon"),
+    ("Varsavia", "Europe/Warsaw"),
+    ("Bruxelles", "Europe/Brussels"),
+    ("Zurigo", "Europe/Zurich"),
+    ("Mosca", "Europe/Moscow"),
+    ("Praga", "Europe/Prague"),
+    ("Copenaghen", "Europe/Copenhagen"),
+    ("Stoccolma", "Europe/Stockholm"),
+    ("Lussemburgo", "Europe/Luxembourg"),
+    ("Bucarest", "Europe/Bucharest"),
+    ("Belgrado", "Europe/Belgrade"),
+    ("Pechino", "Asia/Shanghai"),
+    ("Gerusalemme", "Asia/Jerusalem"),
+    ("Il Cairo", "Africa/Cairo"),
+    ("Città del Messico", "America/Mexico_City"),
+    ("San Paolo", "America/Sao_Paulo"),
+    ("Москва", "Europe/Moscow"),
+    ("Калининград", "Europe/Kaliningrad"),
+    ("Самара", "Europe/Samara"),
+    ("Екатеринбург", "Asia/Yekaterinburg"),
+    ("Омск", "Asia/Omsk"),
+    ("Новосибирск", "Asia/Novosibirsk"),
+    ("Красноярск", "Asia/Krasnoyarsk"),
+    ("Иркутск", "Asia/Irkutsk"),
+    ("Якутск", "Asia/Yakutsk"),
+    ("Владивосток", "Asia/Vladivostok"),
+    ("Магадан", "Asia/Magadan"),
+    ("Камчатка", "Asia/Kamchatka"),
+    ("Минск", "Europe/Minsk"),
+    ("Киев", "Europe/Kyiv"),
+    ("Киев", "Europe/Kiev"),
+    ("Лондон", "Europe/London"),
+    ("Париж", "Europe/Paris"),
+    ("Берлин", "Europe/Berlin"),
+    ("Рим", "Europe/Rome"),
+    ("Стамбул", "Europe/Istanbul"),
+    ("Токио", "Asia/Tokyo"),
+    ("Пекин", "Asia/Shanghai"),
+    ("Нью-Йорк", "America/New_York"),
+    ("Ташкент", "Asia/Tashkent"),
+    ("Алматы", "Asia/Almaty"),
+    ("Ереван", "Asia/Yerevan"),
+    ("Тбилиси", "Asia/Tbilisi"),
+    ("Баку", "Asia/Baku"),
+];
+
+/// Text as matching compares it: lowercase, accents off, `_` `-` `/` `,` as spaces, spaces
+/// collapsed ("São_Paulo" and "sao paulo" are the same).
+fn fold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars().flat_map(char::to_lowercase) {
+        let base = match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+            'ç' | 'ć' | 'č' => "c",
+            'ď' | 'đ' => "d",
+            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ė' | 'ę' | 'ě' => "e",
+            'ğ' => "g",
+            'ì' | 'í' | 'î' | 'ï' | 'ī' | 'į' | 'ı' => "i",
+            'ł' | 'ľ' | 'ĺ' => "l",
+            'ñ' | 'ń' | 'ň' => "n",
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ő' => "o",
+            'ř' | 'ŕ' => "r",
+            'ś' | 'š' | 'ş' | 'ș' => "s",
+            'ß' => "ss",
+            'ť' | 'ţ' | 'ț' => "t",
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ů' | 'ű' | 'ų' => "u",
+            'ý' | 'ÿ' => "y",
+            'ź' | 'ž' | 'ż' => "z",
+            'æ' => "ae",
+            'œ' => "oe",
+            'ё' => "е",
+            '_' | '-' | '/' | ',' | '.' => " ",
+            _ => {
+                if c.is_whitespace() {
+                    " "
+                } else {
+                    out.push(c);
+                    continue;
                 }
             }
+        };
+        out.push_str(base);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// An offset typed as a search, in seconds: "+01", "+1", "utc+1", "GMT-5", "-05:30", "+0545",
+/// "UTC −3". `None` for anything else.
+fn offset_query(q: &str) -> Option<i32> {
+    let s: String = q.trim().to_lowercase().replace('−', "-").chars().filter(|c| !c.is_whitespace()).collect();
+    let s = s.strip_prefix("utc").or_else(|| s.strip_prefix("gmt")).unwrap_or(&s);
+    let (sign, rest) = match s.as_bytes().first()? {
+        b'+' => (1, &s[1..]),
+        b'-' => (-1, &s[1..]),
+        _ => return None,
+    };
+    let (h, m) = match rest.split_once(':') {
+        Some((h, m)) => (h, m),
+        None if rest.len() == 4 => rest.split_at(2),
+        None => (rest, "0"),
+    };
+    let ok = |x: &str, max: usize| !x.is_empty() && x.len() <= max && x.bytes().all(|b| b.is_ascii_digit());
+    if !ok(h, 2) || !ok(m, 2) {
+        return None;
+    }
+    let (h, m): (i32, i32) = (h.parse().ok()?, m.parse().ok()?);
+    (h <= 14 && m < 60).then_some(sign * (h * 3600 + m * 60))
+}
+
+/// A zone found by a search: its index in the list and the alias it matched by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Hit {
+    i: usize,
+    alias: Option<&'static str>,
+}
+
+/// The zones of `list` that match `q`, best first: the city (or one of its
+/// [`ZONE_ALIASES`]) starting with it, then containing it, then every word in the region or
+/// the full name; an offset ([`offset_query`]) lists the zones at that offset now. Case,
+/// accents, spaces and `_` do not count. Empty `q`: none.
+fn zone_matches(list: &[ZoneInfo], q: &str) -> Vec<Hit> {
+    if let Some(off) = offset_query(q) {
+        return list.iter().enumerate().filter(|(_, z)| z.offset_s == off).map(|(i, _)| Hit { i, alias: None }).collect();
+    }
+    let qf = fold(q);
+    if qf.is_empty() {
+        return Vec::new();
+    }
+    let words: Vec<&str> = qf.split(' ').collect();
+    let squeezed = qf.replace(' ', "");
+    let mut hits: Vec<(u8, usize, Hit)> = Vec::new();
+    for (i, z) in list.iter().enumerate() {
+        let full = fold(&z.name);
+        let city = fold(z.name.rsplit('/').next().unwrap_or(&z.name));
+        let alias = ZONE_ALIASES
+            .iter()
+            .filter(|(_, zone)| *zone == z.name)
+            .map(|(a, _)| (*a, fold(a)))
+            .filter(|(_, f)| f.contains(&qf))
+            .min_by_key(|(_, f)| !f.starts_with(&qf));
+        let starts = alias.as_ref().is_some_and(|(_, f)| f.starts_with(&qf));
+        let alias = alias.map(|(a, _)| a);
+        let score = if city.starts_with(&qf) {
+            0
+        } else if starts {
+            1
+        } else if city.contains(&qf) || alias.is_some() {
+            2
+        } else if words.iter().all(|w| full.contains(w)) || full.replace(' ', "").contains(&squeezed) {
+            3
+        } else {
+            continue;
+        };
+        let alias = alias.filter(|_| score == 1 || (score == 2 && !city.contains(&qf)));
+        hits.push((score, i, Hit { i, alias }));
+    }
+    hits.sort_by_key(|(s, i, _)| (*s, *i));
+    hits.into_iter().map(|(_, _, h)| h).collect()
+}
+
+/// One option of the zone list.
+#[derive(Clone, PartialEq)]
+struct ZoneRow {
+    name: String,
+    /// The last part of the name ("Buenos Aires").
+    city: String,
+    /// The parts before it ("America / Argentina"), empty for "UTC".
+    region: String,
+    offset_s: i32,
+    /// The alias the search matched by ("Roma").
+    alias: Option<&'static str>,
+}
+
+impl ZoneRow {
+    fn of(z: &ZoneInfo, alias: Option<&'static str>) -> Self {
+        let (region, city) = z.name.rsplit_once('/').unwrap_or(("", &z.name));
+        ZoneRow {
+            name: z.name.clone(),
+            city: city.replace('_', " "),
+            region: region.replace('_', " ").replace('/', " / "),
+            offset_s: z.offset_s,
+            alias,
+        }
+    }
+}
+
+fn zone_field(d: RwSignal<Form>, zones: Remote<Vec<ZoneInfo>>) -> AnyView {
+    let q = RwSignal::new(String::new());
+    let open = RwSignal::new(false);
+    let active = RwSignal::new(0usize);
+    let id = fid();
+    let lid = format!("{id}-list");
+    let list = NodeRef::<leptos::html::Ul>::new();
+    // what the list shows: every zone for an empty search (grouped by region), else the best
+    // matches, and how many more matched
+    let rows = Memo::new(move |_| {
+        let query = q.get();
+        zones.data.with(|z| {
+            let all = z.as_deref().unwrap_or(&[]);
+            if query.trim().is_empty() {
+                (all.iter().map(|z| ZoneRow::of(z, None)).collect::<Vec<_>>(), 0)
+            } else {
+                let hits = zone_matches(all, &query);
+                let more = hits.len().saturating_sub(MAX_ZONE_HITS);
+                (hits.into_iter().take(MAX_ZONE_HITS).map(|h| ZoneRow::of(&all[h.i], h.alias)).collect(), more)
+            }
+        })
+    });
+    let count = move || rows.with(|(r, _)| r.len());
+    let selected = move || {
+        let cur = d.with(|f| f.tz.clone());
+        let off = zones.data.with(|z| z.as_ref().and_then(|z| z.iter().find(|x| x.name == cur).map(|x| x.offset_s)));
+        let name = cur.replace('_', " ");
+        match off {
+            Some(o) => format!("{name} · {}", utc(o)),
+            None => name,
+        }
+    };
+    let show = move || {
+        q.set(String::new());
+        open.set(true);
+        // the list starts at the current zone
+        let cur = d.with_untracked(|f| f.tz.clone());
+        active.set(rows.with_untracked(|(r, _)| r.iter().position(|r| r.name == cur)).unwrap_or(0));
+    };
+    let hide = move || {
+        open.set(false);
+        q.set(String::new());
+    };
+    let choose = move |i: usize| {
+        if let Some(name) = rows.with_untracked(|(r, _)| r.get(i).map(|r| r.name.clone())) {
+            d.update(|f| f.tz = name);
+        }
+        hide();
+    };
+    // keeps the active option in sight inside the list (never scrolls the page)
+    let lid2 = lid.clone();
+    Effect::new(move || {
+        let a = active.get();
+        if !open.get() {
+            return;
+        }
+        let lid = lid2.clone();
+        request_animation_frame(move || {
+            use wasm_bindgen::JsCast;
+            let (Some(ul), Some(el)) = (list.get_untracked(), document().get_element_by_id(&format!("{lid}-{a}"))) else { return };
+            let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() else { return };
+            let (top, h) = (el.offset_top(), el.offset_height());
+            let (st, vh) = (ul.scroll_top(), ul.client_height());
+            if top < st {
+                ul.set_scroll_top(top);
+            } else if top + h > st + vh {
+                ul.set_scroll_top(top + h - vh);
+            }
         });
-        out.into_iter()
-            .map(|(region, v)| {
-                let opts = v
-                    .into_iter()
-                    .map(|(name, label)| {
-                        let sel = name == cur;
-                        view! { <option value=name selected=sel>{label}</option> }
+    });
+    let on_key = move |ev: web_sys::KeyboardEvent| {
+        let n = count();
+        match ev.key().as_str() {
+            "ArrowDown" | "ArrowUp" if !open.get_untracked() => {
+                ev.prevent_default();
+                show();
+            }
+            "ArrowDown" => {
+                ev.prevent_default();
+                active.update(|a| *a = (*a + 1).min(n.saturating_sub(1)));
+            }
+            "ArrowUp" => {
+                ev.prevent_default();
+                active.update(|a| *a = a.saturating_sub(1));
+            }
+            "PageDown" if open.get_untracked() => {
+                ev.prevent_default();
+                active.update(|a| *a = (*a + 10).min(n.saturating_sub(1)));
+            }
+            "PageUp" if open.get_untracked() => {
+                ev.prevent_default();
+                active.update(|a| *a = a.saturating_sub(10));
+            }
+            "Enter" if open.get_untracked() => {
+                ev.prevent_default();
+                if n > 0 {
+                    choose(active.get_untracked().min(n - 1));
+                }
+            }
+            "Escape" if open.get_untracked() => {
+                ev.prevent_default();
+                ev.stop_propagation();
+                hide();
+            }
+            "Tab" => hide(),
+            _ => {}
+        }
+    };
+    let options = {
+        let lid = lid.clone();
+        move || {
+            let cur = d.with(|f| f.tz.clone());
+            let grouped = q.with(|q| q.trim().is_empty());
+            rows.with(|(r, more)| {
+                if r.is_empty() {
+                    let key = if zones.data.with(Option::is_none) { "loading" } else { "time.zone_none" };
+                    return view! { <li class="tz-empty" role="presentation">{t(key)}</li> }.into_any();
+                }
+                let mut last: Option<&str> = None;
+                let items = r
+                    .iter()
+                    .enumerate()
+                    .map(|(i, z)| {
+                        let top = z.name.split('/').next().unwrap_or("");
+                        let head = (grouped && last != Some(top)).then(|| {
+                            last = Some(top);
+                            view! { <li class="tz-group" role="presentation">{top.replace('_', " ")}</li> }
+                        });
+                        let city = match z.alias {
+                            Some(a) => format!("{} · {a}", z.city),
+                            None => z.city.clone(),
+                        };
+                        let region = (!grouped || z.region.contains(" / ")).then(|| z.region.clone());
+                        view! {
+                            {head}
+                            <li
+                                id=format!("{lid}-{i}")
+                                class=if z.name == cur { "tz-opt is-current" } else { "tz-opt" }
+                                role="option"
+                                aria-selected=move || (active.get() == i).to_string()
+                                on:mousemove=move |_| if active.get_untracked() != i { active.set(i) }
+                                on:click=move |_| choose(i)
+                            >
+                                <span class="tz-city">{city}</span>
+                                {region.map(|r| view! { <span class="tz-region">{r}</span> })}
+                                <span class="tz-off tnum">{utc(z.offset_s)}</span>
+                            </li>
+                        }
                     })
                     .collect_view();
-                if region.is_empty() { opts.into_any() } else { view! { <optgroup label=region>{opts}</optgroup> }.into_any() }
+                let more = (*more > 0).then(|| view! { <li class="tz-more" role="presentation">{tf("time.zone_more", &[("n", &more.to_string())])}</li> });
+                view! { {items}{more} }.into_any()
             })
-            .collect_view()
+        }
     };
+    let lid3 = lid.clone();
     view! {
         <div class="field">
             <label class="field-label" for=id.clone()>{tr("ps.time_zone")}</label>
-            <input class="input" type="search" placeholder=tr("time.zone_search") aria-label=tr("time.zone_search") prop:value=move || q.get() on:input=move |ev| q.set(event_target_value(&ev)) />
-            <select id=id class="input" on:change=move |ev| {
-                let v = event_target_value(&ev);
-                d.update(|f| f.tz = v);
-            }>{groups}</select>
+            <div class="tz-combo">
+                <input
+                    id=id
+                    class="input"
+                    type="text"
+                    role="combobox"
+                    autocomplete="off"
+                    spellcheck="false"
+                    aria-autocomplete="list"
+                    aria-expanded=move || open.get().to_string()
+                    aria-controls=lid.clone()
+                    aria-activedescendant=move || (open.get() && count() > 0).then(|| format!("{lid3}-{}", active.get()))
+                    placeholder=move || if open.get() { selected() } else { t("time.zone_search").to_string() }
+                    prop:value=move || if open.get() { q.get() } else { selected() }
+                    on:focus=move |_| show()
+                    on:click=move |_| if !open.get_untracked() { show() }
+                    on:blur=move |_| hide()
+                    on:input=move |ev| {
+                        q.set(event_target_value(&ev));
+                        open.set(true);
+                        active.set(0);
+                    }
+                    on:keydown=on_key
+                />
+                <Show when=move || open.get()>
+                    // a press inside the list keeps the focus in the field (no blur before the click)
+                    <ul id=lid.clone() node_ref=list class="tz-list" role="listbox" aria-label=tr("ps.time_zone") on:mousedown=|ev| ev.prevent_default()>
+                        {options.clone()}
+                    </ul>
+                </Show>
+            </div>
             <span class="field-help">{tr("time.zone_help")}</span>
         </div>
     }
@@ -357,5 +704,96 @@ mod tests {
         assert_eq!(utc(-16200), "UTC-04:30");
         assert_eq!(utc(0), "UTC+00:00");
         assert_eq!(servers(" a.example\n\nb.example, c.example "), ["a.example", "b.example", "c.example"]);
+    }
+
+    fn zones() -> Vec<ZoneInfo> {
+        [
+            ("Africa/Cairo", 7200),
+            ("America/Argentina/Buenos_Aires", -10800),
+            ("America/New_York", -18000),
+            ("America/Sao_Paulo", -10800),
+            ("Asia/Kathmandu", 20700),
+            ("Asia/Kolkata", 19800),
+            ("Asia/Shanghai", 28800),
+            ("Europe/Kyiv", 7200),
+            ("Europe/Moscow", 10800),
+            ("Europe/Rome", 3600),
+            ("Europe/Zurich", 3600),
+            ("Pacific/Kiritimati", 50400),
+            ("UTC", 0),
+        ]
+        .into_iter()
+        .map(|(name, offset_s)| ZoneInfo { name: name.into(), offset_s })
+        .collect()
+    }
+
+    fn names(q: &str) -> Vec<String> {
+        let z = zones();
+        zone_matches(&z, q).into_iter().map(|h| z[h.i].name.clone()).collect()
+    }
+
+    #[test]
+    fn folding_and_offsets() {
+        assert_eq!(fold("  São_Paulo "), "sao paulo");
+        assert_eq!(fold("Città  del-Messico"), "citta del messico");
+        assert_eq!(fold("Нью-Йорк"), "нью йорк");
+        assert_eq!(fold("Ёлки"), "елки");
+        assert_eq!(offset_query("+01"), Some(3600));
+        assert_eq!(offset_query("+1"), Some(3600));
+        assert_eq!(offset_query("UTC+1"), Some(3600));
+        assert_eq!(offset_query("gmt -5"), Some(-18000));
+        assert_eq!(offset_query("utc−3"), Some(-10800));
+        assert_eq!(offset_query("+05:30"), Some(19800));
+        assert_eq!(offset_query("+0545"), Some(20700));
+        assert_eq!(offset_query("-05:30"), Some(-19800));
+        for no in ["", "utc", "rome", "+", "+1:2:3", "+15", "+01:60", "1", "+abc"] {
+            assert_eq!(offset_query(no), None, "{no}");
+        }
+    }
+
+    #[test]
+    fn zone_search() {
+        // case, accents, spaces for underscores, city before region
+        assert_eq!(names("rome"), ["Europe/Rome"]);
+        assert_eq!(names("ROME"), ["Europe/Rome"]);
+        assert_eq!(names("new york"), ["America/New_York"]);
+        assert_eq!(names("new_york"), ["America/New_York"]);
+        assert_eq!(names("newyork"), ["America/New_York"]);
+        assert_eq!(names("são paulo"), ["America/Sao_Paulo"]);
+        assert_eq!(names("buenos"), ["America/Argentina/Buenos_Aires"]);
+        assert_eq!(names("argentina"), ["America/Argentina/Buenos_Aires"]);
+        assert_eq!(names("europe rome"), ["Europe/Rome"]);
+        // the city first, then the region
+        assert_eq!(names("ka")[..2], ["Asia/Kathmandu".to_string(), "Asia/Kolkata".to_string()]);
+        assert_eq!(names("europe").len(), 4);
+        // names in Italian and Russian, with the alias shown
+        let z = zones();
+        let h = zone_matches(&z, "Roma");
+        assert_eq!((z[h[0].i].name.as_str(), h[0].alias), ("Europe/Rome", Some("Roma")));
+        assert_eq!(names("mosca"), ["Europe/Moscow"]);
+        assert_eq!(names("москва"), ["Europe/Moscow"]);
+        assert_eq!(names("Нью Йорк"), ["America/New_York"]);
+        assert_eq!(names("zurigo"), ["Europe/Zurich"]);
+        assert_eq!(names("pechino"), ["Asia/Shanghai"]);
+        assert_eq!(names("citta del messico"), Vec::<String>::new(), "a zone this list lacks is skipped");
+        assert_eq!(names("киев"), ["Europe/Kyiv"]);
+        // a match by the English name shows no alias
+        assert_eq!(zone_matches(&z, "rom")[0].alias, None);
+        // offsets
+        assert_eq!(names("+01"), ["Europe/Rome", "Europe/Zurich"]);
+        assert_eq!(names("utc-3"), ["America/Argentina/Buenos_Aires", "America/Sao_Paulo"]);
+        assert_eq!(names("+05:45"), ["Asia/Kathmandu"]);
+        assert_eq!(names("+14"), ["Pacific/Kiritimati"]);
+        assert_eq!(names("utc"), ["UTC"]);
+        assert!(names("   ").is_empty());
+        assert!(names("atlantis").is_empty());
+    }
+
+    #[test]
+    fn zone_rows() {
+        let r = ZoneRow::of(&ZoneInfo { name: "America/Argentina/Buenos_Aires".into(), offset_s: -10800 }, None);
+        assert_eq!((r.city.as_str(), r.region.as_str()), ("Buenos Aires", "America / Argentina"));
+        let r = ZoneRow::of(&ZoneInfo { name: "UTC".into(), offset_s: 0 }, None);
+        assert_eq!((r.city.as_str(), r.region.as_str()), ("UTC", ""));
     }
 }

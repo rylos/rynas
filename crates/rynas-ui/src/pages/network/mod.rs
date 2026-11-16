@@ -121,6 +121,8 @@ fn on_off(on: bool, key_on: &'static str, key_off: &'static str) -> AnyView {
 
 
 fn overview(net: Net) -> AnyView {
+    let editing = RwSignal::new(false);
+    let renamed = RwSignal::new(None::<Renamed>);
     let summary = move || {
         if let Some(v) = net.state.gate(5) {
             return v;
@@ -139,7 +141,10 @@ fn overview(net: Net) -> AnyView {
         let dash = || ui::DASH.to_string();
         view! {
             <dl class="kvs">
-                {ui::kv("net.hostname", view! { <span class="mono">{s.hostname.clone()}</span> }.into_any())}
+                {ui::kv("net.hostname", view! {
+                    <span class="mono">{s.hostname.clone()}</span>" "
+                    <button type="button" class="link-btn" data-opener="hostname" on:click=move |_| editing.set(true)>{tr("net.hn.change")}</button>
+                }.into_any())}
                 {ui::kv("net.mgmt", mgmt)}
                 {ui::kv("net.gateway", view! { <span class="mono">{if gateways.is_empty() { dash() } else { gateways.join(", ") }}</span> }.into_any())}
                 {ui::kv("net.dns", view! { <span class="mono">{if s.dns.servers.is_empty() { dash() } else { s.dns.servers.join(", ") }}</span> }.into_any())}
@@ -172,8 +177,15 @@ fn overview(net: Net) -> AnyView {
         <div class="grid">
             <section class="card widget w-8">
                 <WidgetHead icon=icons::NETWORK title="net.summary" />
+                {move || renamed.get().map(renamed_note)}
                 {summary}
             </section>
+            <Show when=move || editing.get()>
+                {move || {
+                    let current = net.state.data.with_untracked(|s| s.as_ref().map(|s| s.hostname.clone())).unwrap_or_default();
+                    hostname_dialog(current, net, renamed, Callback::new(move |_| editing.set(false)))
+                }}
+            </Show>
             <section class="card widget w-4">
                 <WidgetHead icon=icons::SERVER title="net.services" />
                 {services}
@@ -181,6 +193,151 @@ fn overview(net: Net) -> AnyView {
         </div>
     }
     .into_any()
+}
+
+// ------------------------------------------------------------------ host name
+
+/// A rename just applied: the new name and where this page is now.
+#[derive(Clone, PartialEq)]
+struct Renamed {
+    name: String,
+    url: String,
+    /// The address in the browser was the old name: it stops working.
+    moves: bool,
+}
+
+/// The host name as typed, in its stored form (the server trims and lowercases the same way).
+fn host_input(s: &str) -> String {
+    s.trim().to_ascii_lowercase()
+}
+
+/// This page's URL once the host `old` is called `new`, and whether the address in the
+/// browser (`proto//host:port path`) stops working: opened by `old` or `old.local` it moves
+/// to the new name; opened by an address or another name it keeps working, and the URL is
+/// the same page at `new.local`.
+fn moved_url(proto: &str, host: &str, port: &str, path: &str, old: &str, new: &str) -> (String, bool) {
+    let h = host.trim_end_matches('.').to_ascii_lowercase();
+    let (name, moves) = if !old.is_empty() && h == format!("{old}.local") {
+        (format!("{new}.local"), true)
+    } else if !old.is_empty() && h == old {
+        (new.to_string(), true)
+    } else {
+        (format!("{new}.local"), false)
+    };
+    let port = if port.is_empty() { String::new() } else { format!(":{port}") };
+    (format!("{proto}//{name}{port}{path}"), moves)
+}
+
+/// The success note above the summary: the new name, and a link to this page at it.
+fn renamed_note(r: Renamed) -> AnyView {
+    let text = tf(if r.moves { "net.hn.done_moves" } else { "net.hn.done" }, &[("name", &r.name)]);
+    let url = r.url.clone();
+    ui::note(
+        Tone::Ok,
+        icons::CIRCLE_CHECK,
+        view! {
+            <span>{text}" "<a class="wrap-anywhere" href=url.clone()>{tf("net.hn.open", &[("url", &url)])}</a></span>
+        }
+        .into_any(),
+    )
+}
+
+/// Editor of the host name (`PUT /system/hostname`, then the apply of that key alone), with
+/// what follows by itself and what must be updated by hand before the rename.
+fn hostname_dialog(current: String, net: Net, renamed: RwSignal<Option<Renamed>>, close: Callback<()>) -> AnyView {
+    use rynas_api_types::{HostnameConfig, HostnameState, validate};
+
+    let value = RwSignal::new(current.clone());
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let old = StoredValue::new(current);
+    let typed = Signal::derive(move || host_input(&value.get()));
+    let invalid = Signal::derive(move || {
+        let h = typed.get();
+        (!validate::hostname(&h)).then(|| t("v.hostname").to_string())
+    });
+    let can_save = Signal::derive(move || {
+        let h = typed.get();
+        validate::hostname(&h) && old.with_value(|o| *o != h)
+    });
+    let loc = window().location();
+    let page = StoredValue::new((
+        loc.protocol().unwrap_or_else(|_| "https:".into()),
+        loc.hostname().unwrap_or_default(),
+        loc.port().unwrap_or_default(),
+        loc.pathname().unwrap_or_default(),
+    ));
+    let target = move |new: &str| page.with_value(|(p, h, port, path)| old.with_value(|o| moved_url(p, h, port, path, o, new)));
+    let preview = move || {
+        let h = typed.get();
+        validate::hostname(&h).then(|| {
+            let (url, moves) = target(&h);
+            let browser = page.with_value(|(_, host, _, _)| host.clone());
+            view! {
+                <div class="hn-preview">
+                    <span class="field-label">{tr("net.hn.address")}</span>
+                    <span class="mono wrap-anywhere">{url}</span>
+                    {(!moves).then(|| view! { <span class="small muted">{tf("net.hn.keeps", &[("addr", &browser)])}</span> })}
+                </div>
+            }
+        })
+    };
+    let save = move |_| {
+        let h = typed.get_untracked();
+        if !can_save.get_untracked() {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let body = HostnameConfig { hostname: h.clone() };
+            match api::put::<_, HostnameState>("/api/v1/system/hostname", &body).await {
+                Ok(_) => {
+                    if crate::config::apply_now(&[crate::config::keys::HOSTNAME], error).await {
+                        let (url, moves) = target(&h);
+                        renamed.set(Some(Renamed { name: h, url, moves }));
+                        net.reload();
+                        close.run(());
+                    }
+                }
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
+                }
+            }
+            let _ = busy.try_set(false);
+        });
+    };
+    let body = view! {
+        <form class="form" on:submit=move |ev| { ev.prevent_default(); save(()); }>
+            {crate::form::text_field(
+                "net.hostname",
+                value.into(),
+                Callback::new(move |v: String| value.set(v)),
+                invalid,
+                crate::form::In { mono: true, maxlength: 63, help: Some("net.hn.help"), ..crate::form::In::default() },
+            )}
+            {preview}
+            {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
+                <div>
+                    <strong>{tr("net.hn.warn_title")}</strong>
+                    <ul class="note-list">
+                        <li>{tr("net.hn.w_browser")}</li>
+                        <li>{tr("net.hn.w_devices")}</li>
+                        <li>{tr("net.hn.w_agents")}</li>
+                        <li>{tr("net.hn.w_apps")}</li>
+                    </ul>
+                </div>
+            }.into_any())}
+            <p class="small muted">{tr("net.hn.auto")}</p>
+            {crate::form::form_error(error)}
+        </form>
+    }
+    .into_any();
+    let foot = crate::form::save_bar_with(crate::form::SaveBar {
+        can_save,
+        ..crate::form::SaveBar::new(busy, "net.hn.save", close, Callback::new(save))
+    });
+    dialog(DlgKind::Normal, Signal::derive(|| t("net.hn.title").to_string()), close, body, Some(foot))
 }
 
 /// The last automatic rollback, when its result could not be verified (critical) or it
@@ -812,6 +969,30 @@ mod tests {
             gateway: gw.map(str::to_string),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn host_names_and_the_page_after_a_rename() {
+        use rynas_api_types::validate::hostname;
+        assert_eq!(host_input("  Store-2 "), "store-2");
+        for ok in ["nas", "a", "nas-01", "0nas", &"a".repeat(63)] {
+            assert!(hostname(ok), "{ok}");
+        }
+        for bad in ["", "-nas", "nas-", "my nas", "nas.example", "na_s", "Nas", "città", &"a".repeat(64)] {
+            assert!(!hostname(bad), "{bad}");
+        }
+        // opened by the old name: the page moves with it, port and path kept
+        assert_eq!(
+            moved_url("https:", "NAS.local", "8443", "/network", "nas", "store"),
+            ("https://store.local:8443/network".to_string(), true)
+        );
+        assert_eq!(moved_url("https:", "NAS", "", "/network", "nas", "store"), ("https://store/network".to_string(), true));
+        // opened by an address: it keeps working, the new name is offered
+        assert_eq!(
+            moved_url("https:", "192.168.1.20", "8443", "/network", "nas", "store"),
+            ("https://store.local:8443/network".to_string(), false)
+        );
+        assert!(!moved_url("https:", "nas.example.com", "", "/", "nas", "store").1);
     }
 
     #[test]
