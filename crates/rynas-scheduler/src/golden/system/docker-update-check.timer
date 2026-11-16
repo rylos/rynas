@@ -1,0 +1,9 @@
+# Managed by rynas — do not edit (sha256:ce12aaefbbfe2a92efd04f371a72eac131b4b7daba2382d5b95cdbe35fdca236)
+[Unit]
+Description=Timer of rynas task docker-update-check
+
+[Timer]
+OnBootSec=300
+OnUnitInactiveSec=86400
+AccuracySec=1s
+Unit=rynas-task-docker-update-check.service

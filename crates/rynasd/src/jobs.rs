@@ -63,6 +63,20 @@ pub async fn spawn(p: &Arc<Protection>, t: &ScheduledTask, user: &str) -> Res<St
         )),
         TaskAction::Backup { job } => crate::restic_backup::spawn_run(user, job),
         TaskAction::Dedup { volume } => crate::dedup::spawn_scheduled(volume, user).await,
+        // the jobs rynasd ran in its own loops before S3
+        TaskAction::UpdatesCheck => crate::updates::spawn_scheduled_check(user),
+        TaskAction::DockerImageCheck => {
+            crate::docker_auto::spawn_image_check(p, t, user).map_err(Error::internal)
+        }
+        TaskAction::DockerAutoUpdate => {
+            crate::docker_auto::spawn_auto_window(p, t, user).map_err(Error::internal)
+        }
+        TaskAction::AppsCatalog => crate::apps::online::spawn_refresh(p, user).map_err(Error::internal),
+        TaskAction::PcMaintenance => crate::pc_agent::maint::spawn_nightly(p, user).map_err(Error::internal),
+        TaskAction::PcRetention => crate::pc_backup::spawn_retention(p, user).map_err(Error::internal),
+        TaskAction::SystemUpgrade => Err(invalid(
+            "the automatic system updates run on the system's own timer",
+        )),
         TaskAction::Command { .. } | TaskAction::Script { .. } => {
             Err(invalid("not an internal action"))
         }

@@ -1,0 +1,9 @@
+# Managed by rynas — do not edit (sha256:76a57702408ac5c515b16ab567751dfbdf4bddbe4cd7aee46139c78a2c3a42fd)
+[Unit]
+Description=Timer of rynas task pcbackup-retention
+
+[Timer]
+OnBootSec=120
+OnUnitInactiveSec=3600
+AccuracySec=1s
+Unit=rynas-task-pcbackup-retention.service

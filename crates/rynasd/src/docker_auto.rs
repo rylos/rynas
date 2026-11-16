@@ -1,10 +1,14 @@
 //! Automatic image updates (D-UPDATES channel C, `docs/phase2/docker-apps.md` §5.8).
 //!
-//! - **Daily check**: the first one 5 to 15 minutes after start (or 24 hours after the last
-//!   one, when that is later), then every 24 hours plus up to an hour at random. It is the
+//! Both are scheduler tasks owned by Docker (S3 of `docs/research/scheduling.md`; before,
+//! a loop of rynasd with the same times):
+//!
+//! - **Daily check** (`docker-update-check`): five minutes after boot at the earliest, then
+//!   24 hours after the last one plus up to an hour at random. It is the
 //!   `docker.update-check` task with the registry requests spread out; notifications only
 //!   change with the state ([`crate::docker::check_updates`]).
-//! - **Window**: once a day, inside `docker.auto_update` (hour, minute, length), the stacks
+//! - **Window** (`docker-auto-update`): once a day, inside `docker.auto_update` (start,
+//!   length; the start delayed at random within its first third), the stacks
 //!   that take automatic updates and whose update the policy allows are updated one at a
 //!   time, each as a task (`docker.auto-update`, or `apps.auto-update` for a catalogue app):
 //!   pull → (version label check for floating tags) → snapshot → `up -d` → health check
@@ -265,7 +269,11 @@ pub fn enrich(s: &DockerSvc, mut r: UpdateReport) -> UpdateReport {
     let a = s.auto.lock().unwrap().clone();
     r.stacks = stack_updates(&r, &set, &a.apps, &a.held, &|n| s.updatable_stack(n));
     r.auto = a.results.into_values().collect();
-    r.next_check_ms = s.next_check_ms.load(std::sync::atomic::Ordering::Relaxed);
+    // set by the scheduled check; before its first run since the start, a day after the last
+    r.next_check_ms = match s.next_check_ms.load(std::sync::atomic::Ordering::Relaxed) {
+        0 if r.checked_at_ms > 0 => r.checked_at_ms + DAY,
+        n => n,
+    };
     r.next_window_ms = if set.stacks.values().any(|x| x.enabled) {
         next_window_ms(&set, a.last_window.as_deref())
     } else {
@@ -288,27 +296,6 @@ pub fn in_window(now: u32, start: u32, len: u32) -> bool {
     minutes_into(now, start) < len
 }
 
-/// When the next check is due: after a start, 5 to 15 minutes later but not before 24 hours
-/// after the last check; after a check, 24 hours plus up to one hour. `r1`, `r2`: random
-/// fractions in ms (`0..10 min`, `0..60 min`).
-pub fn next_check(now_ms: u64, last_ms: u64, after_start: bool, r1: u64, r2: u64) -> u64 {
-    if after_start {
-        let soon = now_ms + 5 * MIN + r1 % (10 * MIN);
-        if last_ms == 0 {
-            soon
-        } else {
-            soon.max(last_ms + DAY + r2 % (60 * MIN))
-        }
-    } else {
-        now_ms + DAY + r2 % (60 * MIN)
-    }
-}
-
-/// The random delay of the start inside a window (at most a third of it, 20 minutes).
-pub fn window_delay_min(len: u32, r: u64) -> u32 {
-    let max = (len / 3).clamp(1, 20);
-    (r % u64::from(max)) as u32
-}
 
 fn local_now() -> jiff::Zoned {
     jiff::Zoned::now()
@@ -463,68 +450,120 @@ pub async fn scheduled_check(s: &Arc<DockerSvc>) -> bool {
     }
 }
 
-/// The daily check and the window.
-pub fn spawn(s: Arc<DockerSvc>) {
-    tokio::spawn(async move {
-        let last = s.report.lock().unwrap().checked_at_ms;
-        let now = rynas_tasks::now_ms();
-        let first = next_check(now, last, true, updates::random_below(10 * MIN), updates::random_below(60 * MIN));
-        s.next_check_ms.store(first, std::sync::atomic::Ordering::Relaxed);
-        // the window of today, once its random delay has passed
-        let mut armed: Option<(String, u64)> = None;
-        loop {
-            tokio::time::sleep(TICK).await;
-            let now = rynas_tasks::now_ms();
-            let due = s.next_check_ms.load(std::sync::atomic::Ordering::Relaxed);
-            if due > 0 && now >= due {
-                // nothing to check without an engine: try again later
-                let ok = scheduled_check(&s).await;
-                let next = if ok || s.engine().await.is_ok() {
-                    next_check(rynas_tasks::now_ms(), 0, false, 0, updates::random_below(60 * MIN))
-                } else {
-                    rynas_tasks::now_ms() + 60 * MIN
-                };
-                s.next_check_ms.store(next, std::sync::atomic::Ordering::Relaxed);
-                s.changed();
-            }
-            let set = s.settings().auto_update;
-            if !set.stacks.values().any(|x| x.enabled) {
-                continue;
-            }
-            let z = local_now();
-            let start = u32::from(set.hour) * 60 + u32::from(set.minute);
-            let len = u32::from(set.window_min);
-            if !in_window(minute_of(&z), start, len) {
-                armed = None;
-                continue;
-            }
-            let day = window_day(&z, start);
-            if s.auto.lock().unwrap().last_window.as_deref() == Some(day.as_str()) {
-                continue;
-            }
-            let at = match &armed {
-                Some((d, at)) if *d == day => *at,
-                _ => {
-                    let delay = window_delay_min(len, updates::random_below(1 << 20));
-                    let at = now + u64::from(delay) * MIN;
-                    armed = Some((day.clone(), at));
-                    at
+/// The Docker service of this rynasd, for the scheduled jobs.
+fn docker_of(p: &crate::protection::Protection) -> Result<Arc<DockerSvc>, String> {
+    p.ops
+        .docker
+        .get()
+        .cloned()
+        .ok_or_else(|| "Docker is not enabled in this rynasd".to_string())
+}
+
+/// The scheduled image check (scheduler task `docker-update-check`: five minutes after boot
+/// at the earliest, then every 24 hours plus up to an hour; before S3 a loop of rynasd): the
+/// task `docker.update-check` with the registry requests spread out. Without Docker there is
+/// nothing to check (a success); an engine that does not answer fails the run, which is
+/// tried again every hour (the task's retry).
+pub fn spawn_image_check(
+    p: &Arc<crate::protection::Protection>,
+    t: &rynas_api_types::scheduler::ScheduledTask,
+    who: &str,
+) -> Result<String, String> {
+    let s = docker_of(p)?;
+    let task = t.clone();
+    let s2 = s.clone();
+    s.ops
+        .tasks
+        .spawn("docker.update-check", who, move |ctx| async move {
+            if let Err(e) = s2.engine().await {
+                if e.1 == rynas_api_types::error_codes::DOCKER_NOT_INSTALLED {
+                    ctx.log("Docker is not installed: nothing to check");
+                    return Ok(());
                 }
+                return Err(format!("Docker does not answer: {}", e.2));
+            }
+            let r = crate::docker::check_updates(&s2, &ctx, true).await;
+            let next = rynas_scheduler::gate::interval_due_ms(&task, rynas_tasks::now_ms()).unwrap_or(0);
+            s2.next_check_ms.store(next, std::sync::atomic::Ordering::Relaxed);
+            s2.changed();
+            r
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// The scheduled window of automatic updates (scheduler task `docker-auto-update`, at the
+/// window's start plus a random delay in its first third; before S3 a loop of rynasd). The
+/// task `docker.auto-window` waits while rynas maintenance runs, then updates the allowed
+/// stacks one at a time (each its own task) until the window ends. A start after the window
+/// (a catch-up after boot) is skipped by the gate; one inside it runs what is left of it.
+pub fn spawn_auto_window(
+    p: &Arc<crate::protection::Protection>,
+    t: &rynas_api_types::scheduler::ScheduledTask,
+    who: &str,
+) -> Result<String, String> {
+    let s = docker_of(p)?;
+    let task = t.clone();
+    let s2 = s.clone();
+    s.ops
+        .tasks
+        .spawn("docker.auto-window", who, move |ctx| async move {
+            let set = s2.settings().auto_update;
+            if !set.stacks.values().any(|x| x.enabled) {
+                ctx.log("no stack takes automatic updates");
+                return Ok(());
+            }
+            let now = rynas_tasks::now_ms();
+            let Some(end) = window_end(&task, now) else {
+                ctx.log("outside the update window: nothing started");
+                return Ok(());
             };
-            if now < at {
-                continue;
+            let day = window_day(&local_now(), u32::from(set.hour) * 60 + u32::from(set.minute));
+            if s2.auto.lock().unwrap().last_window.as_deref() == Some(day.as_str()) {
+                ctx.log(&format!("the window of {day} already ran"));
+                return Ok(());
             }
-            if let Some(why) = maintenance(&s) {
-                tracing::info!("docker: automatic updates wait: {why}");
-                continue;
+            loop {
+                if ctx.is_cancelled() {
+                    return Err("cancelled".into());
+                }
+                match maintenance(&s2) {
+                    None => break,
+                    Some(why) => {
+                        if rynas_tasks::now_ms() >= end {
+                            ctx.log(&format!("the window ended while rynas maintenance ran ({why}): nothing started"));
+                            return Ok(());
+                        }
+                        ctx.log(&format!("automatic updates wait: {why}"));
+                        tokio::time::sleep(TICK).await;
+                    }
+                }
             }
-            s.auto_change(|a| a.last_window = Some(day.clone()));
-            let into = minutes_into(minute_of(&z), start);
-            let end = now + u64::from(len.saturating_sub(into)) * MIN;
-            run_window(&s, end).await;
-            s.changed();
-        }
-    });
+            s2.auto_change(|a| a.last_window = Some(day.clone()));
+            ctx.log(&format!(
+                "update window until {}",
+                jiff::Timestamp::from_millisecond(end as i64).map(|t| t.to_string()).unwrap_or_default()
+            ));
+            run_window(&s2, end).await;
+            s2.changed();
+            Ok(())
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// The end of the window the latest scheduled time of `t` opened, when `now_ms` is inside it.
+pub fn window_end(t: &rynas_api_types::scheduler::ScheduledTask, now_ms: u64) -> Option<u64> {
+    let min = u64::from(t.effective_policy().window_min);
+    let expr = t.trigger.on_calendar()?;
+    let tz = jiff::tz::TimeZone::system();
+    let spec = rynas_schedule::CalendarSpec::parse(&expr).ok()?;
+    let from = jiff::Timestamp::from_millisecond(now_ms.saturating_sub(min * MIN) as i64).ok()?;
+    let mut slot = spec.next_after(&tz, from)?;
+    let mut last = None;
+    while slot.as_millisecond() as u64 <= now_ms {
+        last = Some(slot.as_millisecond() as u64);
+        slot = spec.next_after(&tz, slot)?;
+    }
+    last.map(|s| s + min * MIN).filter(|e| *e > now_ms)
 }
 
 /// The window: the allowed updates of the stacks that take them, one at a time.
@@ -962,25 +1001,22 @@ mod tests {
         assert!(in_window(23 * 60 + 45, 23 * 60 + 30, 90) && in_window(30, 23 * 60 + 30, 90));
         assert!(!in_window(61, 23 * 60 + 30, 90));
         assert_eq!(minutes_into(10, 1430), 20);
-        assert!(window_delay_min(60, 12345) < 20 && window_delay_min(10, 99) < 3);
-        assert_eq!(window_delay_min(360, 19), 19);
     }
 
     #[test]
-    fn check_schedule() {
-        let now = 1_000 * DAY;
-        // first start: 5-15 minutes
-        let n = next_check(now, 0, true, 3 * MIN, 0);
-        assert_eq!(n, now + 8 * MIN);
-        // a check two hours ago: not before 24 hours after it
-        let n = next_check(now, now - 2 * 60 * MIN, true, 0, 30 * MIN);
-        assert_eq!(n, now - 2 * 60 * MIN + DAY + 30 * MIN);
-        // an old check: soon
-        assert_eq!(next_check(now, now - 3 * DAY, true, 0, 0), now + 5 * MIN);
-        // after a check: a day and up to an hour
-        let n = next_check(now, 0, false, 0, 59 * MIN);
-        assert!(n >= now + DAY && n < now + DAY + 60 * MIN);
-        assert!(next_check(now, 0, true, 999 * MIN, 0) < now + 15 * MIN);
+    fn window_of_the_scheduled_task() {
+        let set = AutoUpdateSettings { hour: 4, minute: 30, window_min: 90, ..Default::default() };
+        let t = rynas_api_types::scheduler::system::docker_auto_update(&set);
+        let at = |h: i8, m: i8| {
+            let z = jiff::Zoned::now().date().at(h, m, 0, 0).to_zoned(jiff::tz::TimeZone::system()).unwrap();
+            z.timestamp().as_millisecond() as u64
+        };
+        // inside: the window opened at 04:30 ends at 06:00
+        assert_eq!(window_end(&t, at(4, 50)), Some(at(6, 0)));
+        assert_eq!(window_end(&t, at(5, 59)), Some(at(6, 0)));
+        // before and after it
+        assert_eq!(window_end(&t, at(4, 29)), None);
+        assert_eq!(window_end(&t, at(6, 0)), None);
     }
 
     #[test]

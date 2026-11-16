@@ -1,0 +1,9 @@
+# Managed by rynas — do not edit (sha256:3d3731ea9052d69b4774fc0a1500c33319def547949eacb21104bbf1e157b0ad)
+[Unit]
+Description=Timer of rynas task apps-catalog-refresh
+
+[Timer]
+OnBootSec=120
+OnUnitInactiveSec=86400
+AccuracySec=1s
+Unit=rynas-task-apps-catalog-refresh.service

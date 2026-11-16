@@ -301,7 +301,7 @@ async fn tasks_are_staged_previewed_run_and_recorded() {
         &e,
         "POST",
         "/v1/scheduler/tasks",
-        Some(json!({"id": "every-day", "action": {"kind": "command", "command": "true"}, "trigger": {"kind": "interval", "hours": 24}})),
+        Some(json!({"id": "after-hello", "action": {"kind": "command", "command": "true"}, "trigger": {"kind": "after", "task": "hello"}})),
     )
     .await;
     assert_eq!((s, code(&b).as_str()), (StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE));

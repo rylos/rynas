@@ -149,6 +149,9 @@ pub fn check_policy(p: &RunPolicy) -> Result<(), String> {
     {
         return Err("retry: at most 10 attempts, one day before the first, 7 days between two".into());
     }
+    if p.window_min.is_some_and(|m| !(1..=1440).contains(&m)) {
+        return Err("the start window is 1 to 1440 minutes".into());
+    }
     if !(1..=100).contains(&p.notify.after_failures) {
         return Err("notify after 1 to 100 failed runs in a row".into());
     }
@@ -328,11 +331,41 @@ pub fn normalize_task(mut t: ScheduledTask) -> Result<ScheduledTask, String> {
                 return Err(format!("task {id}: invalid power rule {rule:?}"));
             }
         }
+        // Debian's timer runs it: listed by the Task Scheduler, never stored
+        TaskAction::SystemUpgrade => {
+            return Err(format!(
+                "task {id}: the automatic system updates run on the system's own timer: set them in Updates"
+            ));
+        }
+        TaskAction::UpdatesCheck
+        | TaskAction::DockerImageCheck
+        | TaskAction::DockerAutoUpdate
+        | TaskAction::AppsCatalog
+        | TaskAction::PcMaintenance
+        | TaskAction::PcRetention => {}
     }
-    if !t.trigger.runnable() {
-        return Err(format!(
-            "task {id}: interval, window and after-task schedules are not supported by the Task Scheduler yet"
-        ));
+    match &t.trigger {
+        TaskTrigger::After { .. } => {
+            return Err(format!(
+                "task {id}: after-task schedules are not supported by the Task Scheduler yet"
+            ));
+        }
+        TaskTrigger::Interval {
+            hours,
+            after_boot_min,
+        } => {
+            if !(1..=8760).contains(hours) || *after_boot_min > 1440 {
+                return Err(format!(
+                    "task {id}: the interval is 1 to 8760 hours, the first run at most 1440 minutes after boot"
+                ));
+            }
+        }
+        TaskTrigger::Window { window, .. } if !rynas_api_types::dedup::window_valid(window) => {
+            return Err(format!(
+                "task {id}: a weekly window is 168 characters 0/1 with at least one 1"
+            ));
+        }
+        _ => {}
     }
     t.trigger = match t.trigger {
         // a preset is stored as its expression (catch-up and delay from the policy)
@@ -386,7 +419,7 @@ pub fn normalize_task(mut t: ScheduledTask) -> Result<ScheduledTask, String> {
     // the owner comes from the action, never from the client
     t.migrate();
     check_policy(&t.policy).map_err(|e| format!("task {id}: {e}"))?;
-    if t.owner.locked().contains(&LockedField::Missed)
+    if matches!(t.action, TaskAction::PowerShutdown { .. } | TaskAction::Dedup { .. })
         && t.effective_policy().missed.catches_up()
     {
         return Err(format!(

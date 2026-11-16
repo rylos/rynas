@@ -1,0 +1,14 @@
+# Managed by rynas — do not edit (sha256:1fd229e83115c6d050a7d2ce0e1868d165d07430223062a2461d752854a40360)
+[Unit]
+Description=rynas task docker-update-check: Docker image check
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecCondition=+/usr/libexec/rynas/rynasctl gate docker-update-check
+ExecStart=/usr/libexec/rynas/rynasctl job run docker-update-check
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-docker-update-check
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished docker-update-check

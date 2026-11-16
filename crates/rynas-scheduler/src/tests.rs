@@ -18,6 +18,7 @@ use crate::domain::{
 use crate::units::Paths;
 
 mod compat;
+mod system;
 
 fn golden(name: &str, actual: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))

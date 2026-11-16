@@ -2747,27 +2747,34 @@ pub fn adopt_refusal(path: &str, shares: &[String], homes: &[String]) -> Option<
     None
 }
 
-/// Every hour (first after two minutes): the retention passes of the devices whose retention
-/// the NAS owns, then the alerts.
+/// At the start: what receives cut off by a stop of rynasd left in the staging folders. The
+/// hourly retention and alerts are the scheduler task `pcbackup-retention` ([`spawn_retention`]).
 pub fn spawn_watch(svc: Arc<PcBackup>) {
     tokio::spawn(async move {
-        // what receives cut off by a stop of rynasd left in the staging folders
-        {
-            let s = svc.clone();
-            let _ = tokio::task::spawn_blocking(move || s.clear_all_staging()).await;
-        }
-        tokio::time::sleep(Duration::from_secs(120)).await;
-        loop {
-            {
-                let _g = svc.change.lock().await;
-                let s = svc.clone();
-                let _ = tokio::task::spawn_blocking(move || s.prune_all()).await;
-            }
-            let s = svc.clone();
-            let _ = tokio::task::spawn_blocking(move || s.check_freshness()).await;
-            tokio::time::sleep(Duration::from_secs(3600)).await;
-        }
+        let _ = tokio::task::spawn_blocking(move || svc.clear_all_staging()).await;
     });
+}
+
+/// The scheduled retention (scheduler task `pcbackup-retention`: two minutes after boot, then
+/// every hour; before S3 a loop of rynasd): the task `pcbackup.retention` runs the retention
+/// passes of the devices whose retention the NAS owns, then the freshness alerts.
+pub fn spawn_retention(p: &crate::protection::Protection, who: &str) -> Result<String, String> {
+    let svc = p.ops.pc_backup.get().cloned().ok_or("PC backups are not enabled in this rynasd")?;
+    let s = svc.clone();
+    svc.ops
+        .tasks
+        .spawn("pcbackup.retention", who, move |ctx| async move {
+            {
+                let _g = s.change.lock().await;
+                let s2 = s.clone();
+                tokio::task::spawn_blocking(move || s2.prune_all()).await.map_err(|e| e.to_string())?;
+            }
+            let s2 = s.clone();
+            tokio::task::spawn_blocking(move || s2.check_freshness()).await.map_err(|e| e.to_string())?;
+            ctx.log("retention and freshness checked");
+            Ok(())
+        })
+        .map_err(|e| e.to_string())
 }
 
 // ------------------------------------------------------------------ routes

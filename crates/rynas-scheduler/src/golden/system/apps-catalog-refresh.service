@@ -1,0 +1,14 @@
+# Managed by rynas — do not edit (sha256:37b0f4d0cc53485be356016a291475aa2947fcc1a8399e6a85c9f45319c6af6d)
+[Unit]
+Description=rynas task apps-catalog-refresh: App catalog refresh
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecCondition=+/usr/libexec/rynas/rynasctl gate apps-catalog-refresh
+ExecStart=/usr/libexec/rynas/rynasctl job run apps-catalog-refresh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-apps-catalog-refresh
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished apps-catalog-refresh

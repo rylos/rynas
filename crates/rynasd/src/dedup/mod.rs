@@ -996,13 +996,10 @@ pub fn job_task(key: &str, s: &VolumeDedup) -> ScheduledTask {
         description: String::new(),
         enabled: s.enabled,
         action: TaskAction::Dedup { volume: key.to_string() },
-        trigger: TaskTrigger::Calendar {
-            on_calendar: window::on_calendar(&s.window),
-            cron: None,
-            // a run missed while the machine was off is not caught up outside the window
-            persistent: false,
-            randomized_delay_s: 0,
-        },
+        // the exact starts of the window's blocks (since S3; before, one calendar expression
+        // of every start day times every start hour), and a block's second hour when its
+        // start did not exist (spring-forward): the gate lets one start per block through
+        trigger: TaskTrigger::Window { window: s.window.clone(), stop_at_end: true },
         timeout_s: None,
         nice: None,
         io_weight: None,
@@ -1010,7 +1007,11 @@ pub fn job_task(key: &str, s: &VolumeDedup) -> ScheduledTask {
         notify: NotifyPolicy::Never,
         notify_output: false,
         owner: Default::default(),
-        policy: Default::default(),
+        // a run missed while the machine was off is not caught up outside the window
+        policy: rynas_api_types::scheduler::RunPolicy {
+            missed: Some(rynas_api_types::scheduler::MissedPolicy::Skip),
+            ..Default::default()
+        },
     }
 }
 

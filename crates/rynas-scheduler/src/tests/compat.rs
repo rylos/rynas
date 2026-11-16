@@ -3,7 +3,7 @@
 //! rynas 0.8.13 from the same document).
 
 use rynas_api_types::scheduler::{
-    LockedField, MissedPolicy, Overlap, OwnerFeature, Recurrence, Retry, ScheduledTask,
+    LockedField, MissedPolicy, Overlap, OwnerFeature, Recurrence, Retry, RunPolicy, ScheduledTask,
     SchedulerConfig, TaskAction, TaskOwner, TaskTrigger,
 };
 use rynas_schedule::{TimeOfDay, Weekdays};
@@ -167,14 +167,20 @@ fn run_policy_and_new_triggers() {
     let n = normalize_task(o).unwrap();
     assert_eq!((n.policy.missed, n.policy.jitter_s), (Some(MissedPolicy::Skip), Some(30)));
     // not run by the Task Scheduler yet
-    for trig in [
-        TaskTrigger::Interval { hours: 24, after_boot_min: 10 },
-        TaskTrigger::Window { window: "1".repeat(168), stop_at_end: true },
-        TaskTrigger::After { task: "snapshot-docs".into(), only_on_success: true },
+    let mut t = base.clone();
+    t.trigger = TaskTrigger::After { task: "snapshot-docs".into(), only_on_success: true };
+    assert!(normalize_task(t).unwrap_err().contains("not supported"));
+    // run since S3, within bounds
+    for (trig, ok) in [
+        (TaskTrigger::Interval { hours: 24, after_boot_min: 10 }, true),
+        (TaskTrigger::Interval { hours: 0, after_boot_min: 10 }, false),
+        (TaskTrigger::Window { window: "1".repeat(168), stop_at_end: true }, true),
+        (TaskTrigger::Window { window: "0".repeat(168), stop_at_end: true }, false),
     ] {
         let mut t = base.clone();
         t.trigger = trig;
-        assert!(normalize_task(t).unwrap_err().contains("not supported"));
+        t.policy = RunPolicy::default();
+        assert_eq!(normalize_task(t.clone()).is_ok(), ok, "{t:?}");
     }
     // bounds
     let mut t = base.clone();

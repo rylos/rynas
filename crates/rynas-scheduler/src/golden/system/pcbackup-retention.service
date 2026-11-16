@@ -1,0 +1,14 @@
+# Managed by rynas — do not edit (sha256:e8072993ca144462828ca55df88052bf35b5ec2ee4cb862dba781113cf96a731)
+[Unit]
+Description=rynas task pcbackup-retention: PC backup retention
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecCondition=+/usr/libexec/rynas/rynasctl gate pcbackup-retention
+ExecStart=/usr/libexec/rynas/rynasctl job run pcbackup-retention
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-pcbackup-retention
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished pcbackup-retention

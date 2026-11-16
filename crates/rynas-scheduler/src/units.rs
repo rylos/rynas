@@ -12,8 +12,10 @@
 //!   gets a path to it. Internal actions run `rynasctl job run <id>`, which starts the rynasd
 //!   task and follows it to the end, or runs the command rynasd plans for it (scrub, SMART
 //!   test, snapshots: [`runs_in_unit`], sandboxed with [`JOB_SANDBOX`]).
-//! - `rynas-task-<id>.timer`: `OnCalendar=` (+ `Persistent=`, `RandomizedDelaySec=`) or
-//!   `OnBootSec=`; no `[Install]` section.
+//! - `rynas-task-<id>.timer`: `OnCalendar=` (+ `Persistent=`, `RandomizedDelaySec=`),
+//!   `OnBootSec=`, `OnBootSec=` + `OnUnitInactiveSec=` (an interval: the gate and rynasd's
+//!   watch loop count it from the last run) or one `OnCalendar=` line per start hour of a
+//!   weekly window ([`crate::window`]); no `[Install]` section.
 //! - `timers.target.d/rynas-tasks.conf`: `Wants=` on the timers of the enabled tasks. Enabling
 //!   a task is a line in a managed file, not a symlink made by `systemctl enable`, so it is
 //!   covered by revisions, rollback and drift like every other file.
@@ -212,11 +214,25 @@ pub fn render_timer(t: &ScheduledTask) -> Option<String> {
             b
         }
         TaskTrigger::Boot { delay_s } => format!("OnBootSec={}\n", (*delay_s).max(1)),
+        // after boot, then the interval after each run's end; the gate skips a start whose
+        // interval (from the history, so across reboots) has not passed, and rynasd starts
+        // the task when it is due, random delay included
+        TaskTrigger::Interval {
+            hours,
+            after_boot_min,
+        } => format!(
+            "OnBootSec={}\nOnUnitInactiveSec={}\n",
+            (u64::from(*after_boot_min) * 60).max(1),
+            u64::from((*hours).max(1)) * 3600
+        ),
+        // the starts of the blocks (and their second hour, for the spring-forward night):
+        // the gate lets one start per block through
+        TaskTrigger::Window { window, .. } => crate::window::calendars(window)
+            .iter()
+            .map(|c| format!("OnCalendar={c}\n"))
+            .collect(),
         // no timer (manual), or not run by the Task Scheduler yet (refused when staged)
-        TaskTrigger::Manual
-        | TaskTrigger::Interval { .. }
-        | TaskTrigger::Window { .. }
-        | TaskTrigger::After { .. } => return None,
+        TaskTrigger::Manual | TaskTrigger::After { .. } => return None,
     };
     Some(format!(
         "[Unit]\nDescription=Timer of rynas task {id}\n\n[Timer]\n{body}AccuracySec=1s\nUnit={svc}\n",

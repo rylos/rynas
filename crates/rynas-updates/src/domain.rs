@@ -97,12 +97,27 @@ pub fn render_apt_conf(a: &AutoUpdates) -> String {
     s
 }
 
-/// The upgrade timer drop-in: the window.
+/// The upgrade timer drop-in: the window, rendered from the task the Task Scheduler lists
+/// for it ([`rynas_api_types::scheduler::system::system_upgrade`]); the same text as before
+/// the task existed.
 pub fn render_upgrade_dropin(a: &AutoUpdates) -> String {
-    format!(
-        "# rynas automatic updates (updates.auto): daily window\n[Timer]\nOnCalendar=\nOnCalendar=*-*-* {:02}:{:02}:00\nRandomizedDelaySec={}m\nPersistent=true\n",
-        a.hour, a.minute, a.window_min
-    )
+    let t = rynas_api_types::scheduler::system::system_upgrade(a);
+    let p = t.effective_policy();
+    let mut s = format!(
+        "# rynas automatic updates (updates.auto): daily window\n[Timer]\nOnCalendar=\nOnCalendar={}\n",
+        t.trigger.on_calendar().unwrap_or_default()
+    );
+    if p.jitter_s > 0 {
+        if p.jitter_s.is_multiple_of(60) {
+            s.push_str(&format!("RandomizedDelaySec={}m\n", p.jitter_s / 60));
+        } else {
+            s.push_str(&format!("RandomizedDelaySec={}\n", p.jitter_s));
+        }
+    }
+    if p.missed.catches_up() {
+        s.push_str("Persistent=true\n");
+    }
+    s
 }
 
 /// The lists timer drop-in: an hour before the window.
@@ -233,6 +248,24 @@ mod tests {
         let u = render_upgrade_dropin(&a);
         assert!(u.contains("OnCalendar=\nOnCalendar=*-*-* 00:30:00\nRandomizedDelaySec=90m\n"));
         assert!(render_lists_dropin(&a).contains("OnCalendar=*-*-* 23:30:00\n"));
+    }
+
+    /// The drop-in from the task is byte for byte the one rynas wrote before the task
+    /// existed (0.8.15's template), for every start and window length.
+    #[test]
+    fn upgrade_dropin_from_the_task_is_unchanged() {
+        let old = |a: &AutoUpdates| {
+            format!(
+                "# rynas automatic updates (updates.auto): daily window\n[Timer]\nOnCalendar=\nOnCalendar=*-*-* {:02}:{:02}:00\nRandomizedDelaySec={}m\nPersistent=true\n",
+                a.hour, a.minute, a.window_min
+            )
+        };
+        for (hour, minute, window_min) in [(3, 0, 60), (0, 30, 90), (23, 59, 10), (12, 5, 360)] {
+            for mode in [AutoMode::Off, AutoMode::Security, AutoMode::All] {
+                let a = AutoUpdates { mode, hour, minute, window_min, ..Default::default() };
+                assert_eq!(render_upgrade_dropin(&a), old(&a));
+            }
+        }
     }
 
     #[test]

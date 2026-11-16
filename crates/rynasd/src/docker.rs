@@ -1054,6 +1054,8 @@ async fn settings_put(
     audit(&owner, "settings", "stage");
     let r = tokio::task::spawn_blocking(move || {
         stage(&s.ops.config, &owner, DOCKER_KEY, &v)?;
+        // the update window and the catalog refresh are scheduler tasks: they go live with it
+        crate::system_tasks::stage_docker(&s.ops.config, &owner, &v)?;
         s.settings_state(&owner)
     })
     .await

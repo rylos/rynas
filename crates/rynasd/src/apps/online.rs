@@ -40,11 +40,6 @@ const PREVIOUS: &str = "previous";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const INDEX_TIMEOUT: Duration = Duration::from_secs(60);
 const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(300);
-/// Between two automatic checks, plus up to [`JITTER`].
-const INTERVAL: Duration = Duration::from_secs(24 * 3600);
-const JITTER: u64 = 3 * 3600;
-/// After a failed automatic check (network down), the next try.
-const RETRY: Duration = Duration::from_secs(3 * 3600);
 /// The signature and the index are two requests: while the site is being published they may
 /// not match, so a refused signature is tried once more after this.
 const SIGNATURE_RETRY: Duration = Duration::from_secs(30);
@@ -554,30 +549,52 @@ impl Online {
             ..Default::default()
         }
     }
-
-    /// When the next automatic check is due, from the last one.
-    fn next_due(&self) -> Duration {
-        let last = self.state.lock().unwrap().last_check;
-        let jitter = Duration::from_secs(random_below(JITTER));
-        match last {
-            // first check of this NAS: a few minutes after the start
-            None => Duration::from_secs(120 + random_below(1800)),
-            Some(t) => {
-                let since = Duration::from_secs(u64::try_from(unix_now() - t).unwrap_or(0));
-                (INTERVAL + jitter)
-                    .checked_sub(since)
-                    .unwrap_or(Duration::from_secs(60 + random_below(600)))
-            }
-        }
-    }
 }
 
-fn random_below(n: u64) -> u64 {
-    let mut b = [0u8; 8];
-    if getrandom::fill(&mut b).is_err() || n == 0 {
-        return 0;
-    }
-    u64::from_le_bytes(b) % n
+/// The scheduled refresh of the online catalog (scheduler task `apps-catalog-refresh`: a
+/// few minutes after boot at the earliest, then every 24 hours plus up to three; before S3
+/// a loop of rynasd): the task `apps.catalog-update` (the one "Check now" starts). A site that cannot be reached fails the run,
+/// tried again three hours later (the task's retry); a refused catalog is notified and kept
+/// out, as before.
+pub fn spawn_refresh(p: &crate::protection::Protection, who: &str) -> Result<String, String> {
+    let docker = p.ops.docker.get().cloned().ok_or("Docker is not enabled in this rynasd")?;
+    let apps = docker
+        .apps
+        .get()
+        .and_then(std::sync::Weak::upgrade)
+        .ok_or("the apps are not enabled in this rynasd")?;
+    let dry = docker.dry;
+    docker
+        .ops
+        .tasks
+        .spawn("apps.catalog-update", who, move |ctx| async move {
+            if dry {
+                ctx.log("dry system: the online catalog is not downloaded");
+                return Ok(());
+            }
+            let u = apps.online_use();
+            if u.online.is_none() {
+                ctx.log(&format!(
+                    "the online catalog is not used ({})",
+                    u.reason.unwrap_or("off")
+                ));
+                return Ok(());
+            }
+            let log = |l: &str| ctx.log(l);
+            match apps.check_catalog(&log).await {
+                Ok(r) => {
+                    ctx.log(&format!("online catalog check: {r:?}"));
+                    Ok(())
+                }
+                // the site was not reachable: sooner than tomorrow (the retry)
+                Err(OnlineError::Download(e)) => Err(format!("the catalog site could not be reached: {e}")),
+                Err(e) => {
+                    ctx.log(&format!("online catalog check: {e}"));
+                    Ok(())
+                }
+            }
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// Whether the online catalogue is used, and from where.
@@ -714,39 +731,14 @@ impl AppsSvc {
         r
     }
 
-    /// The daily check, with a random delay; logs once when the online catalogue is off.
-    pub fn spawn_catalog_updates(self: &Arc<Self>) {
-        let a = self.clone();
-        tokio::spawn(async move {
-            let Some(o) = a.online.get().cloned() else {
-                return;
-            };
-            if !o.has_key() {
-                tracing::info!(
-                    "apps: online catalog disabled: this build has no catalog signing key (rynas_apps::online::TRUSTED_KEYS)"
-                );
-                return;
-            }
-            let mut wait = o.next_due();
-            loop {
-                tokio::time::sleep(wait).await;
-                if a.online_use().online.is_none() {
-                    // turned off: look again later
-                    wait = RETRY;
-                    continue;
-                }
-                let log = |l: &str| tracing::debug!("apps: catalog: {l}");
-                wait = match a.check_catalog(&log).await {
-                    Ok(r) => {
-                        tracing::info!("apps: online catalog check: {r:?}");
-                        o.next_due()
-                    }
-                    // the site was not reachable: sooner than tomorrow
-                    Err(OnlineError::Download(_)) => RETRY,
-                    Err(_) => o.next_due(),
-                };
-            }
-        });
+    /// Logs once at the start when this build has no catalog signing key (the online catalog
+    /// is then off; its refresh is the scheduler task `apps-catalog-refresh`).
+    pub fn log_catalog_key(&self) {
+        if self.online.get().is_some_and(|o| !o.has_key()) {
+            tracing::info!(
+                "apps: online catalog disabled: this build has no catalog signing key (rynas_apps::online::TRUSTED_KEYS)"
+            );
+        }
     }
 }
 

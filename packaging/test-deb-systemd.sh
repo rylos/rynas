@@ -201,6 +201,35 @@ for _ in $(seq 20); do
 done
 [ "$panel" -ge 1 ] || fail "scrub not in the task panel (ended with its run): $BODY"
 echo "scheduling gate: OK"
+
+echo "=== the jobs of rynas are scheduler tasks (S3)"
+api GET /scheduler/tasks; expect 200 "tasks"
+for id in updates-check docker-update-check docker-auto-update apps-catalog-refresh pcbackup-retention; do
+    echo "$BODY" | jq -e --arg id "$id" 'any(.[]; .task.id == $id and .task.owner.kind == "feature")' >/dev/null \
+        || fail "no task $id owned by its feature: $BODY"
+done
+echo "$BODY" | jq -e 'any(.[]; .task.id == "apt-upgrade" and .status.system and .status.unit == "apt-daily-upgrade.service")' >/dev/null \
+    || fail "the automatic system updates are not listed: $BODY"
+echo "$BODY" | jq -e 'any(.[]; .task.id == "docker-auto-update" and (.task.enabled | not))' >/dev/null \
+    || fail "docker-auto-update on without a stack that takes updates"
+grep -qx 'ExecCondition=+/usr/libexec/rynas/rynasctl gate updates-check' $U/rynas-task-updates-check.service || fail "updates-check: no gate"
+grep -q $'^OnBootSec=600\nOnUnitInactiveSec=86400$' <(grep -E '^On' $U/rynas-task-updates-check.timer | head -2) \
+    || { cat $U/rynas-task-updates-check.timer; fail "updates-check: not the interval timer"; }
+systemctl is-active -q rynas-task-updates-check.timer || fail "updates-check: timer not active"
+echo "--- the updates check, never run, is due: started through the gate, its run recorded"
+wait_rows updates-check '.ok and .trigger == "timer"' 1 240
+wait_rows pcbackup-retention '.ok' 1 240
+journalctl -u rynas-task-updates-check.service --no-pager -o cat | grep -q 'package lists' \
+    || { journalctl -u rynas-task-updates-check.service --no-pager -o cat; fail "updates-check: the check did not run"; }
+echo "--- a second start of its timer before the interval is not due: skipped, no row"
+n=$(rows updates-check 'true')
+systemctl stop rynas-task-updates-check.timer
+# (OnBootSec has passed: a timer that never elapsed in this boot elapses at once)
+systemctl start rynas-task-updates-check.timer
+sleep 5
+[ "$(rows updates-check 'true')" = "$n" ] || fail "updates-check: a start that was not due left a row"
+[ "$(systemctl show -P Result rynas-task-updates-check.service)" != failed ] || fail "updates-check: unit failed"
+echo "rynas jobs as tasks: OK"
 systemd-analyze security --no-pager rynas-web.service rynasd.service | tail -2
 echo "=== upgrade (reinstall)"
 apt-get install -y -qq --reinstall /tmp/rynas.deb >/dev/null 2>&1; sleep 1; active

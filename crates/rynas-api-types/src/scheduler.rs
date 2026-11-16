@@ -128,6 +128,7 @@ impl ScheduledTask {
                 .unwrap_or_else(|| Retry::default_for(&self.action)),
             notify: self.notify,
             rules: self.policy.notify,
+            window_min: self.policy.window_min.unwrap_or(0),
         }
     }
 }
@@ -153,6 +154,14 @@ pub enum OwnerFeature {
     Backup,
     Power,
     Dedup,
+    /// System updates (the check, the automatic updates).
+    Updates,
+    /// Docker (the image check, the automatic updates).
+    Docker,
+    /// The app catalog.
+    Apps,
+    /// PC backups (the repositories' maintenance, the folders' retention).
+    PcBackup,
 }
 
 /// Parts of a task its owner decides: the Task Scheduler page shows them read-only.
@@ -181,17 +190,35 @@ impl TaskOwner {
             TaskAction::Backup { job } => (OwnerFeature::Backup, job.clone()),
             TaskAction::PowerShutdown { rule } => (OwnerFeature::Power, rule.clone()),
             TaskAction::Dedup { volume } => (OwnerFeature::Dedup, volume.clone()),
-            _ => return TaskOwner::User,
+            TaskAction::UpdatesCheck => (OwnerFeature::Updates, "check".into()),
+            TaskAction::SystemUpgrade => (OwnerFeature::Updates, "upgrade".into()),
+            TaskAction::DockerImageCheck => (OwnerFeature::Docker, "image-check".into()),
+            TaskAction::DockerAutoUpdate => (OwnerFeature::Docker, "auto-update".into()),
+            TaskAction::AppsCatalog => (OwnerFeature::Apps, "catalog".into()),
+            TaskAction::PcMaintenance => (OwnerFeature::PcBackup, "maintenance".into()),
+            TaskAction::PcRetention => (OwnerFeature::PcBackup, "retention".into()),
+            TaskAction::Command { .. }
+            | TaskAction::Script { .. }
+            | TaskAction::Scrub { .. }
+            | TaskAction::SmartTest { .. }
+            | TaskAction::RecycleCleanup { .. } => return TaskOwner::User,
         };
         TaskOwner::Feature { feature, key }
     }
 
-    /// What the owner decides.
+    /// What the owner decides. The system jobs moved out of rynasd's loops (updates,
+    /// Docker, apps, PC backups) keep their catch-up as it was, like a shutdown.
     pub fn locked(&self) -> &'static [LockedField] {
         match self {
             TaskOwner::User => &[],
             TaskOwner::Feature {
-                feature: OwnerFeature::Power | OwnerFeature::Dedup,
+                feature:
+                    OwnerFeature::Power
+                    | OwnerFeature::Dedup
+                    | OwnerFeature::Updates
+                    | OwnerFeature::Docker
+                    | OwnerFeature::Apps
+                    | OwnerFeature::PcBackup,
                 ..
             } => &[
                 LockedField::Action,
@@ -227,6 +254,13 @@ pub struct RunPolicy {
     /// When to notify, on top of the task's `notify` level.
     #[serde(default, skip_serializing_if = "NotifyRules::is_default")]
     pub notify: NotifyRules,
+    /// Start window, in minutes from each scheduled time: a start that comes later (a
+    /// catch-up after boot, a start queued behind a long run, a retry) is skipped
+    /// (`window`), and the job itself starts no new work after the window's end (Docker's
+    /// automatic updates). A window always means where starts are allowed; the random delay
+    /// stays inside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_min: Option<u32>,
 }
 
 impl RunPolicy {
@@ -302,10 +336,29 @@ impl Retry {
         max_delay_s: 3600,
     };
 
+    /// The online app catalog: a download that fails is tried again three hours later, as
+    /// the catalog loop did before it became a task (up to the next daily refresh).
+    pub const CATALOG: Retry = Retry {
+        attempts: 7,
+        delay_s: 3 * 3600,
+        backoff: false,
+        max_delay_s: 0,
+    };
+    /// The Docker image check: an engine that does not answer is asked again every hour, as
+    /// the check loop did before it became a task (up to the next daily check).
+    pub const IMAGE_CHECK: Retry = Retry {
+        attempts: 23,
+        delay_s: 3600,
+        backoff: false,
+        max_delay_s: 0,
+    };
+
     /// The default of a kind of task.
     pub fn default_for(a: &TaskAction) -> Retry {
         match a {
             TaskAction::Backup { .. } | TaskAction::Replicate { .. } => Retry::TRANSFER,
+            TaskAction::AppsCatalog => Retry::CATALOG,
+            TaskAction::DockerImageCheck => Retry::IMAGE_CHECK,
             _ => Retry::NONE,
         }
     }
@@ -354,6 +407,9 @@ pub struct EffectivePolicy {
     pub retry: Retry,
     pub notify: NotifyPolicy,
     pub rules: NotifyRules,
+    /// [`RunPolicy::window_min`]; 0: no start window.
+    #[serde(default)]
+    pub window_min: u32,
 }
 
 /// What a task runs. User actions (`command`, `script`) run as `user`; internal actions run
@@ -408,6 +464,27 @@ pub enum TaskAction {
     /// `uuid.<uuid>`): fires at the start of its window blocks, runs until the block ends;
     /// created, changed and removed with the job's settings.
     Dedup { volume: String },
+    /// The "updates available" check: refreshes the package lists when they are old and
+    /// notifies (`/api/v1/updates`).
+    UpdatesCheck,
+    /// Automatic system updates (unattended-upgrades). Run by Debian's own
+    /// `apt-daily-upgrade.timer`, whose rynas drop-in is generated from this task
+    /// ([`system::system_upgrade`]): listed by the Task Scheduler, never stored in its
+    /// configuration and without units of its own.
+    SystemUpgrade,
+    /// The check of the Docker stacks' images for updates (`/api/v1/docker/updates`).
+    DockerImageCheck,
+    /// The automatic updates of the Docker stacks and apps that take them, one at a time,
+    /// inside their window (`/api/v1/docker/settings`, `auto_update`).
+    DockerAutoUpdate,
+    /// The refresh of the signed online app catalog (`/api/v1/apps/catalog`).
+    AppsCatalog,
+    /// The nightly maintenance of the PC backup repositories (retention, prune, check) of
+    /// every backup group (`/api/v1/pcbackup/agent/settings`, `maintenance_hour`).
+    PcMaintenance,
+    /// The retention of the PC backup folders whose retention the NAS owns, and their
+    /// freshness alerts.
+    PcRetention,
 }
 
 fn default_root() -> String {
@@ -467,9 +544,11 @@ pub enum TaskTrigger {
     /// `Recurrence::from_calendar` recognizes again: the stored text is always the one
     /// systemd uses.
     Recurrence { recurrence: Recurrence },
-    /// Every `hours` hours counted from the last successful run (anacron-like), the first one
-    /// `after_boot_min` minutes after boot at the earliest. Not run by the Task Scheduler yet:
-    /// a task with it is refused.
+    /// Every `hours` hours counted from the end of the last run (anacron-like, kept across
+    /// restarts and reboots: the history), the first one `after_boot_min` minutes after boot
+    /// at the earliest; the run policy's random delay is added to each interval. The timer
+    /// has `OnBootSec=` and `OnUnitInactiveSec=`; the gate skips a start whose interval has
+    /// not passed and rynasd starts the task when it is due.
     Interval {
         hours: u32,
         #[serde(default)]
@@ -477,8 +556,9 @@ pub enum TaskTrigger {
     },
     /// At the start of every block of a weekly window (168 characters `0`/`1`, Sunday first,
     /// `window[day * 24 + hour]`, like the other weekly grids); with `stop_at_end` the run is
-    /// stopped at the end of its block. Not run by the Task Scheduler yet: a task with it is
-    /// refused.
+    /// stopped at the end of its block. The timer fires at each block's start, and an hour
+    /// later for a block whose start did not exist that day (spring-forward): the gate lets
+    /// one start per block through.
     Window {
         window: String,
         #[serde(default)]
@@ -502,7 +582,11 @@ impl TaskTrigger {
     pub fn has_timer(&self) -> bool {
         matches!(
             self,
-            TaskTrigger::Calendar { .. } | TaskTrigger::Recurrence { .. } | TaskTrigger::Boot { .. }
+            TaskTrigger::Calendar { .. }
+                | TaskTrigger::Recurrence { .. }
+                | TaskTrigger::Boot { .. }
+                | TaskTrigger::Interval { .. }
+                | TaskTrigger::Window { .. }
         )
     }
 
@@ -516,12 +600,9 @@ impl TaskTrigger {
         }
     }
 
-    /// The Task Scheduler can run it today (the other kinds come with the scheduling gate).
+    /// The Task Scheduler can run it today (after a task comes later).
     pub fn runnable(&self) -> bool {
-        !matches!(
-            self,
-            TaskTrigger::Interval { .. } | TaskTrigger::Window { .. } | TaskTrigger::After { .. }
-        )
+        !matches!(self, TaskTrigger::After { .. })
     }
 }
 
@@ -567,6 +648,11 @@ pub struct TaskStatus {
     /// A failed run will be tried again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<PendingRetry>,
+    /// Run by a timer of the system, not by units of the Task Scheduler (the automatic system
+    /// updates: Debian's `apt-daily-upgrade.timer`): listed read-only, edited on its page;
+    /// no run now, pause or history here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub system: bool,
 }
 
 /// A pause of the scheduled starts (`POST /api/v1/scheduler/pause`, or
@@ -682,6 +768,12 @@ pub enum SkipReason {
     Overlap,
     /// The previous run of the task is still going in rynas.
     Running,
+    /// Past the task's start window (a catch-up, queued start or retry that came after the
+    /// window of its scheduled time had ended).
+    Window,
+    /// Nothing due: an interval task whose interval has not passed since its last run, a
+    /// weekly-window task that already ran in this block. Not recorded in the history.
+    NotDue,
 }
 
 /// One recorded run (from the `ExecStopPost` hook).
@@ -910,4 +1002,195 @@ pub struct CronEntry {
     /// The equivalent trigger, when there is one (`@reboot` is a boot trigger).
     #[serde(default)]
     pub trigger: Option<TaskTrigger>,
+}
+
+/// The tasks of rynas's own recurring jobs, owned by their feature and built from its
+/// settings (S3 of `docs/research/scheduling.md`: the loops rynasd ran itself). Their
+/// schedules are the ones the loops had: the same times, windows and intervals.
+pub mod system {
+    use super::{
+        MissedPolicy, NotifyPolicy, RunPolicy, ScheduledTask, TaskAction, TaskOwner, TaskTrigger,
+    };
+    use crate::docker::AutoUpdateSettings;
+    use crate::updates::AutoUpdates;
+
+    pub const UPDATES_CHECK: &str = "updates-check";
+    pub const SYSTEM_UPGRADE: &str = "apt-upgrade";
+    pub const DOCKER_IMAGE_CHECK: &str = "docker-update-check";
+    pub const DOCKER_AUTO_UPDATE: &str = "docker-auto-update";
+    pub const APPS_CATALOG: &str = "apps-catalog-refresh";
+    pub const PC_MAINTENANCE: &str = "pc-maintenance";
+    pub const PC_RETENTION: &str = "pcbackup-retention";
+
+    /// A late nightly PC maintenance runs up to this many hours after its hour.
+    pub const PC_MAINTENANCE_CATCH_UP_H: u32 = 6;
+
+    fn task(id: &str, name: &str, description: &str, action: TaskAction, trigger: TaskTrigger) -> ScheduledTask {
+        let owner = TaskOwner::of_action(&action);
+        ScheduledTask {
+            id: id.into(),
+            name: name.into(),
+            description: description.into(),
+            enabled: true,
+            action,
+            trigger,
+            timeout_s: None,
+            nice: None,
+            io_weight: None,
+            // these jobs notify by themselves, as before; a failed check only logged
+            notify: NotifyPolicy::Never,
+            notify_output: false,
+            owner,
+            policy: RunPolicy::default(),
+        }
+    }
+
+    fn daily(hour: u8, minute: u8) -> String {
+        format!("*-*-* {:02}:{:02}:00", hour.min(23), minute.min(59))
+    }
+
+    /// The "updates available" check: ten minutes after boot, then every 24 hours.
+    pub fn updates_check() -> ScheduledTask {
+        task(
+            UPDATES_CHECK,
+            "Updates check",
+            "Refreshes the package lists when they are old and notifies about available updates. Set in Updates.",
+            TaskAction::UpdatesCheck,
+            TaskTrigger::Interval { hours: 24, after_boot_min: 10 },
+        )
+    }
+
+    /// The automatic system updates: the daily window of `updates.auto` (its start, and a
+    /// random delay over its whole length), caught up after boot as Debian's timer does.
+    /// The `apt-daily-upgrade.timer` drop-in is rendered from this task.
+    pub fn system_upgrade(a: &AutoUpdates) -> ScheduledTask {
+        let jitter = u32::from(a.window_min) * 60;
+        let mut t = task(
+            SYSTEM_UPGRADE,
+            "Automatic system updates",
+            "Installs the updates of the operating system inside the update window. Set in Updates.",
+            TaskAction::SystemUpgrade,
+            TaskTrigger::Calendar {
+                on_calendar: daily(a.hour, a.minute),
+                cron: None,
+                persistent: true,
+                randomized_delay_s: jitter,
+            },
+        );
+        t.enabled = a.mode != crate::updates::AutoMode::Off;
+        t.policy.missed = Some(MissedPolicy::RunOnce { within_h: None });
+        t.policy.jitter_s = Some(jitter);
+        t.policy.window_min = Some(u32::from(a.window_min));
+        t
+    }
+
+    /// The Docker image check: 5 minutes after boot at the earliest, then every 24 hours plus
+    /// up to an hour at random.
+    pub fn docker_image_check() -> ScheduledTask {
+        let mut t = task(
+            DOCKER_IMAGE_CHECK,
+            "Docker image check",
+            "Checks the images of the stacks for updates. Set in Docker.",
+            TaskAction::DockerImageCheck,
+            TaskTrigger::Interval { hours: 24, after_boot_min: 5 },
+        );
+        t.policy.jitter_s = Some(3600);
+        t
+    }
+
+    /// The random delay of the automatic Docker updates inside their window: up to a third
+    /// of it, at most 20 minutes.
+    pub fn docker_window_delay_s(window_min: u16) -> u32 {
+        (u32::from(window_min) / 3).clamp(1, 20) * 60
+    }
+
+    /// The automatic Docker updates: the daily window of `docker.auto_update`, on while some
+    /// stack takes them. A start after boot inside the window still runs; outside it, not.
+    pub fn docker_auto_update(a: &AutoUpdateSettings) -> ScheduledTask {
+        let jitter = docker_window_delay_s(a.window_min);
+        let mut t = task(
+            DOCKER_AUTO_UPDATE,
+            "Docker automatic updates",
+            "Updates the stacks and apps that take automatic updates, one at a time, inside the update window. Set in Docker.",
+            TaskAction::DockerAutoUpdate,
+            TaskTrigger::Calendar {
+                on_calendar: daily(a.hour, a.minute),
+                cron: None,
+                persistent: true,
+                randomized_delay_s: jitter,
+            },
+        );
+        t.enabled = a.stacks.values().any(|s| s.enabled);
+        t.policy.missed = Some(MissedPolicy::RunOnce { within_h: None });
+        t.policy.jitter_s = Some(jitter);
+        t.policy.window_min = Some(u32::from(a.window_min));
+        t
+    }
+
+    /// The online app catalog: a few minutes after boot at the earliest, then every 24 hours
+    /// plus up to three hours at random; on while the online catalog is used.
+    pub fn apps_catalog(on: bool) -> ScheduledTask {
+        let mut t = task(
+            APPS_CATALOG,
+            "App catalog refresh",
+            "Downloads the signed online app catalog when a newer one is published. Set in Apps.",
+            TaskAction::AppsCatalog,
+            TaskTrigger::Interval { hours: 24, after_boot_min: 2 },
+        );
+        t.enabled = on;
+        t.policy.jitter_s = Some(3 * 3600);
+        t
+    }
+
+    /// The nightly maintenance of the PC backup repositories at `hour`:00, caught up after
+    /// boot up to [`PC_MAINTENANCE_CATCH_UP_H`] hours late.
+    pub fn pc_maintenance(hour: u8) -> ScheduledTask {
+        let mut t = task(
+            PC_MAINTENANCE,
+            "PC backup maintenance",
+            "Retention, cleanup and check of the PC backup repositories, every night. Set in Backups › PCs.",
+            TaskAction::PcMaintenance,
+            TaskTrigger::Calendar {
+                on_calendar: daily(hour, 0),
+                cron: None,
+                persistent: true,
+                randomized_delay_s: 0,
+            },
+        );
+        t.policy.missed = Some(MissedPolicy::RunOnce { within_h: Some(PC_MAINTENANCE_CATCH_UP_H) });
+        t.policy.jitter_s = Some(0);
+        t
+    }
+
+    /// The retention of the PC backup folders the NAS owns: two minutes after boot, then
+    /// every hour.
+    pub fn pc_retention() -> ScheduledTask {
+        task(
+            PC_RETENTION,
+            "PC backup retention",
+            "Deletes the old snapshots of the PC backup folders whose retention the NAS owns, and checks that backups arrive. Every hour.",
+            TaskAction::PcRetention,
+            TaskTrigger::Interval { hours: 1, after_boot_min: 2 },
+        )
+    }
+
+    /// The task a feature wants, with what a user may change on the Task Scheduler page kept
+    /// from the stored one (notifications, priority, timeout, overlap, retry; and whether it
+    /// is on, unless the feature decides that: `feature_enables`).
+    pub fn keep_options(mut want: ScheduledTask, cur: Option<&ScheduledTask>, feature_enables: bool) -> ScheduledTask {
+        if let Some(c) = cur {
+            if !feature_enables {
+                want.enabled = c.enabled;
+            }
+            want.notify = c.notify;
+            want.notify_output = c.notify_output;
+            want.nice = c.nice;
+            want.io_weight = c.io_weight;
+            want.timeout_s = c.timeout_s;
+            want.policy.overlap = c.policy.overlap;
+            want.policy.retry = c.policy.retry;
+            want.policy.notify = c.policy.notify;
+        }
+        want
+    }
 }

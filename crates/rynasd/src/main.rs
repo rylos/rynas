@@ -1129,7 +1129,8 @@ fn main() -> std::io::Result<()> {
             .with_boot(opened.modules.boot())
             .with_system_layer(opened.modules.boot().is_some() || opened.modules.ups().is_some()),
         );
-        rynasd::updates::spawn_daily(updates.clone());
+        // the daily check is the scheduler task updates-check
+        let _ = rynasd::updates::SVC.set(updates.clone());
         state.updates = Some(updates.clone());
         state.zram = Some(Arc::new(rynasd::zram::ZramApi {
             zram: Arc::new(rynasd::zram::Zram::new(config_root(&args), args.dry_system)),
@@ -1307,17 +1308,16 @@ fn main() -> std::io::Result<()> {
             rynasd::docker::spawn_stats(docker.clone());
             let apps = rynasd::apps::AppsSvc::new(docker.clone(), args.apps_dir.clone());
             let _ = apps.web.set(opened.web_access.clone());
-            // the daily image check and the automatic update window (installed apps too)
+            // the daily image check and the automatic update window (installed apps too) are
+            // the scheduler tasks docker-update-check and docker-auto-update
             let _ = docker.apps.set(Arc::downgrade(&apps));
-            rynasd::docker_auto::spawn(docker.clone());
-            // signed online catalogue updates: daily on a real system ("Check now" always)
+            // signed online catalogue updates: the scheduler task apps-catalog-refresh
+            // (daily on a real system; "Check now" always)
             let _ = apps.online.set(rynasd::apps::online::Online::new(
                 args.state_dir.join("catalog"),
                 rynas_apps::online::TRUSTED_KEYS,
             ));
-            if !args.dry_system {
-                apps.spawn_catalog_updates();
-            }
+            apps.log_catalog_key();
             // the catalogue is parsed on the first apps request and dropped when idle
             {
                 let apps = apps.clone();
@@ -1333,6 +1333,20 @@ fn main() -> std::io::Result<()> {
             }
             state.apps = Some(apps);
             state.docker = Some(docker);
+        }
+        // the scheduler tasks of rynas's own jobs (updates check, Docker, app catalog, PC
+        // backups, deduplication windows): created on the first start after the upgrade from
+        // the features' settings, kept in line with them afterwards
+        {
+            let cfg = ops.config.clone();
+            let pc_hour = state.pc_agent.as_ref().map(|a| a.snapshot().settings.maintenance_hour);
+            tokio::task::spawn_blocking(move || {
+                match rynasd::system_tasks::ensure(&cfg, pc_hour, &|l| tracing::info!("scheduler: {l}")) {
+                    Ok(Some(rev)) => tracing::info!("scheduler: tasks of rynas's jobs applied (revision {rev})"),
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("scheduler: tasks of rynas's jobs: {e}"),
+                }
+            });
         }
         // processes: sampled only while a page asks (D-PROCESSES)
         {

@@ -1,0 +1,9 @@
+# Managed by rynas — do not edit (sha256:a8db0ea852da1d4e648974228564e260200f5ae88dddb343f66d071e41f47de8)
+[Unit]
+Description=Timer of rynas task updates-check
+
+[Timer]
+OnBootSec=600
+OnUnitInactiveSec=86400
+AccuracySec=1s
+Unit=rynas-task-updates-check.service

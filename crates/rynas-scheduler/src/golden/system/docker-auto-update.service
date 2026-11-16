@@ -1,0 +1,14 @@
+# Managed by rynas — do not edit (sha256:ddfd779a3de6c189caa06d69898da3f34a658f6300331b38d040004ce27935cb)
+[Unit]
+Description=rynas task docker-auto-update: Docker automatic updates
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecCondition=+/usr/libexec/rynas/rynasctl gate docker-auto-update
+ExecStart=/usr/libexec/rynas/rynasctl job run docker-auto-update
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-docker-auto-update
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished docker-auto-update

@@ -1,0 +1,9 @@
+# Managed by rynas — do not edit (sha256:9485bb4a096540cb176b0a8338ad294d87d84f9402a99cc3bcab3fa918bcb320)
+[Unit]
+Description=Timer of rynas task pc-maintenance
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+AccuracySec=1s
+Unit=rynas-task-pc-maintenance.service

@@ -1,0 +1,14 @@
+# Managed by rynas — do not edit (sha256:799a7433f78e5101c68a55e36bfc5e1b248917ecdb1ae796d7cdda1c96f96870)
+[Unit]
+Description=rynas task pc-maintenance: PC backup maintenance
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecCondition=+/usr/libexec/rynas/rynasctl gate pc-maintenance
+ExecStart=/usr/libexec/rynas/rynasctl job run pc-maintenance
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-pc-maintenance
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished pc-maintenance

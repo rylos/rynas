@@ -54,8 +54,6 @@ const APT_GET: &str = "/usr/bin/apt-get";
 const SIM_TIMEOUT: Duration = Duration::from_secs(90);
 const KERNEL_TTL: Duration = Duration::from_secs(6 * 3600);
 const KERNEL_MIN_REFRESH: Duration = Duration::from_secs(60);
-const DAILY: Duration = Duration::from_secs(24 * 3600);
-const FIRST_CHECK: Duration = Duration::from_secs(10 * 60);
 const LISTS_MAX_AGE: Duration = Duration::from_secs(36 * 3600);
 const NOTIFY_KEY: &str = "updates:available";
 
@@ -695,36 +693,42 @@ async fn kernel_get(State(st): State<UpdState>, RawQuery(q): RawQuery) -> Res<Js
     Ok(Json(u.kernel(refresh).await))
 }
 
-/// The daily check: first ten minutes after start, then every 24 hours.
-pub fn spawn_daily(u: Arc<Updates>) {
-    tokio::spawn(async move {
-        tokio::time::sleep(FIRST_CHECK).await;
-        loop {
-            daily_check(&u).await;
-            tokio::time::sleep(DAILY).await;
-        }
-    });
-}
+/// The updates service of this rynasd, for its scheduled check.
+pub static SVC: std::sync::OnceLock<Arc<Updates>> = std::sync::OnceLock::new();
 
-async fn daily_check(u: &Arc<Updates>) {
-    if !u.apt_present() {
-        return;
-    }
-    let s = u.status(false).await;
-    let old = s
-        .lists_updated_ms
-        .is_none_or(|t| now_ms().saturating_sub(t) > LISTS_MAX_AGE.as_millis() as u64);
-    if old && !u.dry && s.running_task.is_none() {
-        // the task refreshes the cache and notifies when it ends
-        if let Err(e) = u.spawn("updates.check", "rynas", |u, ctx| async move {
-            u.run(&ctx, apt(&["update"], Duration::from_secs(600))).await?;
-            Ok(())
-        }) {
-            tracing::warn!("daily update check: {}", e.2);
+/// The scheduled "updates available" check (scheduler task `updates-check`: ten minutes
+/// after boot, then every 24 hours; before S3 a loop of rynasd): the task `updates.check`
+/// refreshes the package lists when they are older than [`LISTS_MAX_AGE`] and no other
+/// update task runs, then the notification is re-evaluated.
+pub fn spawn_scheduled_check(who: &str) -> Res<String> {
+    let u = SVC
+        .get()
+        .cloned()
+        .ok_or_else(|| Error::internal("updates are not enabled in this rynasd"))?;
+    let me = u.clone();
+    Ok(u.ops.tasks.spawn("updates.check", who, move |ctx| async move {
+        if !me.apt_present() {
+            ctx.log("apt is not installed: nothing to check");
+            return Ok(());
         }
-        return;
-    }
-    u.notify(&s);
+        let s = me.status(false).await;
+        let old = s
+            .lists_updated_ms
+            .is_none_or(|t| now_ms().saturating_sub(t) > LISTS_MAX_AGE.as_millis() as u64);
+        let other = s.running_task.as_deref().is_some_and(|id| id != ctx.id());
+        let r = if old && !me.dry && !other {
+            ctx.log("the package lists are old: refreshing them");
+            let r = me.run(&ctx, apt(&["update"], Duration::from_secs(600))).await.map(|_| ());
+            me.task_done();
+            r
+        } else {
+            ctx.log("the package lists are recent");
+            Ok(())
+        };
+        let s = me.status(false).await;
+        me.notify(&s);
+        r
+    })?)
 }
 
 #[cfg(test)]

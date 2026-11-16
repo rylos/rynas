@@ -11,7 +11,8 @@
 //! - [`history`]: the run history (SQLite) fed by `rynasctl task-finished` and the gate;
 //! - [`live`]: the live output of a running task (journal entries, event data);
 //! - [`preview`]: a schedule as the NAS will run it (next runs, DST notes), without systemd;
-//! - [`cron`]: read-only listing of crontab entries.
+//! - [`cron`]: read-only listing of crontab entries;
+//! - [`window`]: weekly-window triggers (calendar lines, one start per block).
 //!
 //! Run notifications (per-task policy) are emitted by rynasd through `rynas_notify::Notifier`.
 
@@ -24,6 +25,7 @@ pub mod live;
 pub mod preview;
 pub mod probe;
 pub mod units;
+pub mod window;
 
 pub use domain::{SCHEDULER_KEY, SchedulerDomain};
 

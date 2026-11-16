@@ -1,8 +1,11 @@
 //! The weekly window: 168 hours, Sunday first (`window[day * 24 + hour]`), in local time.
 //!
-//! The scheduler task fires at the start of each block of `1` hours (one calendar
-//! expression: the union of the start days and start hours, so it may also fire inside a
-//! block or outside the window; a run checks the window itself). A run stops at the end of
+//! The scheduler task has the window as its trigger (`TaskTrigger::Window`, since S3 of
+//! `docs/research/scheduling.md`): its timer fires at the exact starts of the blocks of `1`
+//! hours (and at a block's second hour, for a start that does not exist on the
+//! spring-forward night), and the scheduling gate lets one start per block through. Before,
+//! [`on_calendar`] made one expression of every start day times every start hour, which also
+//! fired inside blocks and outside the window; a run still checks the window. A run stops at the end of
 //! the block it started in ([`block_end`]). Arithmetic is on civil hours converted with the
 //! system time zone (DST: a missing hour counts as its neighbour, a repeated one once).
 

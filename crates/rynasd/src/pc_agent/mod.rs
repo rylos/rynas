@@ -1122,6 +1122,7 @@ async fn settings_put(
         let places = crate::places::places_in(&crate::places::mountinfo());
         check_folder(&folder, &places).map_err(|m| Error::invalid("folder", m))?;
     }
+    let hour = s.maintenance_hour;
     svc.edit(|r| {
         // existing repositories stay where they are; only new groups use a new folder
         r.settings = PcAgentSettings {
@@ -1130,6 +1131,12 @@ async fn settings_put(
         };
         Ok(())
     })?;
+    // the nightly maintenance is the scheduler task pc-maintenance: its hour goes live too
+    let (cfg, w) = (svc.ops.config.clone(), who.clone());
+    tokio::task::spawn_blocking(move || crate::system_tasks::apply_pc(&cfg, &w, hour))
+        .await
+        .map_err(Error::internal)?
+        .map_err(Error::internal)?;
     audit(&who, "settings", &folder);
     Ok(StatusCode::NO_CONTENT)
 }

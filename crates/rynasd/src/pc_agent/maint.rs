@@ -1110,10 +1110,11 @@ fn alerts(svc: &PcAgent, name: &str, d: &Dev) {
     }
 }
 
-/// Every five minutes: notifications, and each group's maintenance once a day from its hour
-/// on (retried while a PC is busy, and run late when the NAS was off or busy at that hour,
-/// up to 6 hours after it, as a catch-up that gives way to any PC of the group about to back
-/// up; the reason stays on the group when it cannot run).
+/// Every five minutes: the sessions and the late notifications. Each group's maintenance
+/// once a day is the scheduler task `pc-maintenance` ([`spawn_nightly`]): from its hour on,
+/// retried while a PC is busy, and run late when the NAS was off or busy at that hour, up to
+/// 6 hours after it, as a catch-up that gives way to any PC of the group about to back up;
+/// the reason stays on the group when it cannot run.
 pub fn spawn_watch(svc: Arc<PcAgent>) {
     // the registry's touched counters, written now and then off the async threads
     let s2 = svc.clone();
@@ -1135,42 +1136,116 @@ pub fn spawn_watch(svc: Arc<PcAgent>) {
             for (n, d) in &reg.devices {
                 alerts(&svc, n, d);
             }
-            if let Some((day, late)) = maint_due(reg.settings.maintenance_hour, jiff::Timestamp::now(), &rynas_power::system_tz()) {
-                for (n, g) in &reg.groups {
-                    if g.maintained_day == Some(day) || !reg.devices.values().any(|d| d.group == *n) {
-                        continue;
-                    }
-                    // a catch-up never takes the repository from a PC about to back up:
-                    // tried again in five minutes, until the catch-up window ends
-                    let started = if late && backup_pending(&reg, n, now_ms()) {
-                        Err(Error::new(StatusCode::CONFLICT, error_codes::BUSY, "a PC of the group is about to back up (late maintenance gives way)".into()))
-                    } else {
-                        start(&svc, n, "rynas", true)
-                    };
-                    match started {
-                        Ok(_) => {
-                            let _ = svc.edit(|r| {
-                                if let Some(x) = r.groups.get_mut(n) {
-                                    x.maintained_day = Some(day);
-                                }
-                                Ok(())
-                            });
-                        }
-                        Err(e) => {
-                            let why = format!("maintenance postponed: {}", e.2);
-                            let _ = svc.edit(|r| {
-                                if let Some(x) = r.groups.get_mut(n) {
-                                    x.maintenance.postponed = Some(why.clone());
-                                }
-                                Ok(())
-                            });
-                        }
-                    }
-                }
-            }
             tokio::time::sleep(Duration::from_secs(300)).await;
         }
     });
+}
+
+/// One pass over the groups due for tonight's maintenance (`day`): each one not maintained
+/// yet is started, or its reason kept when it cannot start (a catch-up gives way to a PC
+/// of the group about to back up). Returns the tasks started and how many groups wait.
+fn maintain_due(svc: &Arc<PcAgent>, day: i64, late: bool) -> (Vec<(String, String)>, usize) {
+    let reg = svc.snapshot();
+    let (mut started, mut waiting) = (Vec::new(), 0);
+    for (n, g) in &reg.groups {
+        if g.maintained_day == Some(day) || !reg.devices.values().any(|d| d.group == *n) {
+            continue;
+        }
+        // a catch-up never takes the repository from a PC about to back up: tried again
+        // in five minutes, until the catch-up window ends
+        let r = if late && backup_pending(&reg, n, now_ms()) {
+            Err(Error::new(StatusCode::CONFLICT, error_codes::BUSY, "a PC of the group is about to back up (late maintenance gives way)".into()))
+        } else {
+            start(svc, n, "rynas", true)
+        };
+        match r {
+            Ok(id) => {
+                let _ = svc.edit(|r| {
+                    if let Some(x) = r.groups.get_mut(n) {
+                        x.maintained_day = Some(day);
+                    }
+                    Ok(())
+                });
+                started.push((n.clone(), id));
+            }
+            Err(e) => {
+                waiting += 1;
+                let why = format!("maintenance postponed: {}", e.2);
+                let _ = svc.edit(|r| {
+                    if let Some(x) = r.groups.get_mut(n) {
+                        x.maintenance.postponed = Some(why.clone());
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
+    (started, waiting)
+}
+
+/// The scheduled nightly maintenance (scheduler task `pc-maintenance` at the maintenance
+/// hour, caught up after boot up to six hours late; before S3 a loop of rynasd): the task
+/// `pcbackup.nightly` starts each group's maintenance (`pcbackup.maintenance`), trying a
+/// busy group again every five minutes until the catch-up window ends, and waits for them;
+/// it fails when one of them failed.
+pub fn spawn_nightly(p: &crate::protection::Protection, who: &str) -> Result<String, String> {
+    let svc = p
+        .ops
+        .pc_agent
+        .get()
+        .and_then(std::sync::Weak::upgrade)
+        .ok_or("PC backups are not enabled in this rynasd")?;
+    let s = svc.clone();
+    svc.ops
+        .tasks
+        .spawn("pcbackup.nightly", who, move |ctx| async move {
+            let tz = rynas_power::system_tz();
+            let mut started: Vec<(String, String)> = Vec::new();
+            loop {
+                let hour = s.snapshot().settings.maintenance_hour;
+                let Some((day, late)) = maint_due(hour, jiff::Timestamp::now(), &tz) else {
+                    ctx.log(&format!("the maintenance window of {hour:02}:00 is over"));
+                    break;
+                };
+                let (now, waiting) = maintain_due(&s, day, late);
+                for (g, id) in &now {
+                    ctx.log(&format!("maintenance of backup group {g} started ({id})"));
+                }
+                started.extend(now);
+                if waiting == 0 {
+                    break;
+                }
+                ctx.log(&format!("{waiting} backup groups busy: trying again in five minutes"));
+                tokio::select! {
+                    _ = ctx.token().cancelled() => return Err("cancelled".into()),
+                    _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+                }
+            }
+            if started.is_empty() {
+                ctx.log("no backup group to maintain");
+            }
+            let mut failed = Vec::new();
+            for (g, id) in &started {
+                loop {
+                    match s.ops.tasks.get(id) {
+                        Some(t) if t.status.is_finished() => {
+                            if t.status != rynas_api_types::TaskStatus::Ok {
+                                failed.push(g.clone());
+                            }
+                            break;
+                        }
+                        None => break,
+                        _ => tokio::time::sleep(Duration::from_secs(5)).await,
+                    }
+                }
+            }
+            if failed.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("the maintenance of {} failed", failed.join(", ")))
+            }
+        })
+        .map_err(|e| e.to_string())
 }
 
 // ------------------------------------------------------------------ downloads

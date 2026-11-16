@@ -152,7 +152,37 @@ fn status_of(
         // filled in by task_views
         paused: None,
         retry: None,
+        system: false,
     }
+}
+
+/// The automatic system updates as the Task Scheduler lists them: the task of
+/// `updates.auto` (the one its `apt-daily-upgrade.timer` drop-in is rendered from), run by
+/// that Debian timer, read-only here. Listed once unattended-upgrades is set (the key has a
+/// value: applied, or what the system does).
+fn system_upgrade_view(p: &Protection, owner: &str, rt: &Runtime) -> Option<TaskView> {
+    use rynas_api_types::updates::AutoUpdates;
+    let (eff, cur, applied): (AutoUpdates, AutoUpdates, Option<AutoUpdates>) =
+        docs(&p.ops.config, owner, rynas_updates::domain::AUTO_KEY).ok()?;
+    let task = rynas_api_types::scheduler::system::system_upgrade(&eff);
+    let timer = rynas_updates::domain::UPGRADE_TIMER;
+    let pending = (eff != cur).then_some(rynas_api_types::PendingOp::Change);
+    Some(TaskView {
+        status: TaskStatus {
+            pending,
+            applied: applied.is_some(),
+            unit: "apt-daily-upgrade.service".into(),
+            running: rt.running.iter().any(|u| u == "apt-daily-upgrade.service"),
+            next_run_ms: if task.enabled && applied.is_some() {
+                rt.timers.iter().find(|x| x.unit == timer).and_then(|x| x.next_ms)
+            } else {
+                None
+            },
+            system: true,
+            ..Default::default()
+        },
+        task,
+    })
 }
 
 /// A task as the API shows it: in the current model (owner, run policy) even when the
@@ -203,6 +233,7 @@ pub(crate) fn task_views(p: &Protection, owner: &str, rt: &Runtime) -> Res<Vec<T
             .find(|(id, _)| *id == v.task.id)
             .map(|(_, a)| a.retry);
     }
+    out.extend(system_upgrade_view(p, owner, rt));
     Ok(out)
 }
 
@@ -324,6 +355,11 @@ async fn create(
                 "deduplication tasks are created with their settings (/storage/dedup)",
             ));
         }
+        if !t.owner.is_user() {
+            return Err(invalid(
+                "this task is created by the feature that owns it, with its settings",
+            ));
+        }
         stage_tasks(p, &o, |doc| {
             if doc.tasks.iter().any(|x| x.id == t.id) {
                 return Err(conflict(
@@ -437,6 +473,12 @@ async fn delete(
                     ),
                 ));
             }
+            if !rynas_api_types::scheduler::TaskOwner::of_action(&t.action).is_user() {
+                return Err(conflict(
+                    error_codes::CONFLICT,
+                    format!("task {id} is a job of rynas: turn it off instead, or change it on its page"),
+                ));
+            }
             doc.tasks.retain(|x| x.id != id);
             Ok(())
         })
@@ -460,6 +502,11 @@ async fn set_enabled(st: ProtState, h: HeaderMap, id: String, on: bool) -> Res<J
             if matches!(t.action, TaskAction::Dedup { .. }) {
                 return Err(invalid(
                     "a deduplication task is turned on and off with its settings in Storage",
+                ));
+            }
+            if matches!(t.action, TaskAction::DockerAutoUpdate | TaskAction::AppsCatalog) {
+                return Err(invalid(
+                    "this task is on while its feature uses it: change it in Docker or Apps",
                 ));
             }
             t.enabled = on;

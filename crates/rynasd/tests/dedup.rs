@@ -239,7 +239,12 @@ async fn overview_settings_and_the_scheduler_task() {
     let sched: SchedulerConfig = serde_json::from_value(e.config.applied(rynas_scheduler::SCHEDULER_KEY).unwrap().unwrap()).unwrap();
     let t = sched.tasks.iter().find(|t| t.id == "dedup-vol1").unwrap();
     assert_eq!(t.action, TaskAction::Dedup { volume: "vol1".into() });
-    assert!(matches!(&t.trigger, TaskTrigger::Calendar { on_calendar, persistent: false, .. } if on_calendar == "*-*-* 01:00:00"));
+    // the window itself (one start per block, never caught up after boot)
+    assert!(matches!(&t.trigger, TaskTrigger::Window { window, stop_at_end: true } if *window == rynas_api_types::dedup::default_window()));
+    assert!(!t.effective_policy().missed.catches_up());
+    let timer = std::fs::read_to_string(e._dir.path().join("root/etc/systemd/system/rynas-task-dedup-vol1.timer")).unwrap();
+    assert!(timer.contains("OnCalendar=*-*-* 01:00:00\nOnCalendar=*-*-* 02:00:00\n"), "{timer}");
+    assert!(!timer.contains("Persistent"), "{timer}");
     let o = overview(&e).await;
     let s1 = o.jobs[0].settings.clone().unwrap();
     assert!(s1.only_if_awake && s1.enabled);

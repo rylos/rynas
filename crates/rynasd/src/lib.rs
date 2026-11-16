@@ -51,6 +51,7 @@ pub mod snapshots;
 pub mod storage_ops;
 pub mod ssh;
 pub mod system_power;
+pub mod system_tasks;
 pub mod tailscale;
 pub mod tls;
 pub mod ui_prefs;

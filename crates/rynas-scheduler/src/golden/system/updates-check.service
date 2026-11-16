@@ -1,0 +1,14 @@
+# Managed by rynas — do not edit (sha256:29a927fcacbe37fa20387bf791178fd26d25c97f7f7a064b3b3a18d25d0d59d8)
+[Unit]
+Description=rynas task updates-check: Updates check
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecCondition=+/usr/libexec/rynas/rynasctl gate updates-check
+ExecStart=/usr/libexec/rynas/rynasctl job run updates-check
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-updates-check
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished updates-check
