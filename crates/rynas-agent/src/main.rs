@@ -161,7 +161,7 @@ fn pair(args: &[String]) -> Result<(), String> {
     // the certificate first: shown, compared, pinned
     let mut pin = String::new();
     if ep.tls {
-        let probe = Client::new(ep.clone(), "");
+        let probe = Client::probe(ep.clone());
         let _ = probe.request("GET", "/api/v1/auth/session", &[], &[]);
         let seen = probe.seen_fingerprint().ok_or_else(|| format!("{}: no TLS answer", ep.url()))?;
         match opt(args, "--fingerprint") {
@@ -212,8 +212,11 @@ fn pair(args: &[String]) -> Result<(), String> {
         ..Default::default()
     };
     // the NAS' certificate authority and identity, sent over the connection the code and the
-    // fingerprint authenticate: pinned once a connection trusting only them works
-    if let Some(t) = &r.trust {
+    // fingerprint authenticate: pinned once a connection trusting only them works. Never from
+    // an answer over plain http: anyone on the link could have written it.
+    if !ep.tls {
+        eprintln!("paired over plain http: this PC trusts no certificate of the NAS; pair it again over https for a NAS that can change its name or address");
+    } else if let Some(t) = &r.trust {
         let proved = trust::check(t).and_then(|c| {
             let eps = trust::endpoints(&ep.url(), &c.addresses)?;
             trust::prove(&c, eps, &st.token)
@@ -224,9 +227,7 @@ fn pair(args: &[String]) -> Result<(), String> {
                 st.cas = now.cas;
                 st.addresses = now.addresses;
                 st.trust_checked_ms = Some(now_ms());
-                if ep.tls {
-                    st.url = at;
-                }
+                st.url = at;
                 st.fingerprint.clear();
             }
             Err(e) => eprintln!("the NAS' certificate authority could not be checked ({e}): its certificate stays pinned, the service tries again later"),
@@ -297,8 +298,10 @@ fn status() -> Result<(), String> {
     let st = State::load()?;
     println!("NAS          {} ({})", st.url, st.nas_name);
     println!("PC           {} (group {})", st.device, st.group);
-    if st.nas_id.is_empty() {
-        println!("trust        the NAS certificate {} (pinned at pairing; replaced by the NAS' certificate authority at the next contact with a NAS that has it)", if st.fingerprint.is_empty() { "-" } else { &st.fingerprint });
+    if st.nas_id.is_empty() && st.fingerprint.is_empty() {
+        println!("trust        none (paired over plain http; pair again over https to trust the NAS' certificate authority)");
+    } else if st.nas_id.is_empty() {
+        println!("trust        the NAS certificate {} (pinned at pairing; replaced by the NAS' certificate authority at the next contact with a NAS that has it)", st.fingerprint);
     } else {
         println!("trust        the NAS' certificate authority, NAS identity {}", st.nas_id);
         if !st.addresses.is_empty() {
@@ -323,9 +326,8 @@ fn status() -> Result<(), String> {
 }
 
 /// `set-server <url>`: the NAS answers at an address this PC does not know (its name and
-/// addresses all changed). The new address is checked as every connection is: the NAS' CA
-/// and identity pinned at pairing (or, paired before, the certificate pin), with this PC's
-/// token; then it is stored first and the service restarted.
+/// addresses all changed). Checked as every connection is ([`trust::set_server`]), then
+/// stored first and the service restarted.
 fn set_server(args: &[String]) -> Result<(), String> {
     root_only()?;
     let pos = positional(args);
@@ -335,47 +337,22 @@ fn set_server(args: &[String]) -> Result<(), String> {
         return Err("plain http sends the token unprotected: use https, or --allow-http on a trusted link".into());
     }
     let mut st = State::load()?;
-    match trust::stored(&st) {
-        Some(t) => {
-            let (_, now) = if ep.tls {
-                trust::prove(&t, vec![ep.clone()], &st.token)?
-            } else {
-                let c = Client::with_trust(vec![ep.clone()], t.trust()).with_token(&st.token);
-                let now = trust::check(&c.get_json::<AgentTrust>(AGENT_TRUST)?)?;
-                if now.nas_id != t.nas_id {
-                    return Err("the NAS answered with another identity".into());
-                }
-                (ep.url(), now)
-            };
-            st.cas = now.cas;
-            st.addresses = now.addresses;
-            st.trust_checked_ms = Some(now_ms());
-        }
-        None => {
-            // paired before the CA was pinned: the certificate pin, then the upgrade if the NAS
-            // has its CA (a new host name re-issues the certificate: then pair again)
-            let c = Client::new(ep.clone(), &st.fingerprint).with_token(&st.token);
-            c.get_json::<AgentPlan>("/api/v1/pcbackup/agent/plan")
-                .map_err(|e| format!("{e} (this PC pinned the NAS certificate of its pairing; if the NAS changed its name, pair this PC again)"))?;
-        }
-    }
-    st.url = ep.url();
-    if st.nas_id.is_empty() {
-        match trust::refresh(&mut st) {
-            Ok(trust::Refreshed::Upgraded) => println!("the NAS' certificate authority is pinned now"),
-            Ok(_) => {}
-            Err(e) => eprintln!("the NAS' certificate authority could not be checked ({e}): the certificate stays pinned"),
-        }
-        st.url = ep.url();
+    for note in trust::set_server(&mut st, &ep)? {
+        eprintln!("{note}");
     }
     st.save()?;
     println!("NAS address: {}", st.url);
     // the service holds the old address in memory
-    let restarted = std::process::Command::new("systemctl")
-        .args(["try-restart", "rynas-agent.service"])
-        .stdin(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+    let restarted = ["/usr/bin/systemctl", "/bin/systemctl"]
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .is_some_and(|systemctl| {
+            std::process::Command::new(systemctl)
+                .args(["try-restart", "rynas-agent.service"])
+                .stdin(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        });
     if !restarted {
         println!("restart the service if it runs: systemctl restart rynas-agent.service");
     }

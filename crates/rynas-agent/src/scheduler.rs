@@ -123,6 +123,9 @@ fn refresh_trust(st: &mut State) -> u64 {
             if r == crate::trust::Refreshed::Upgraded {
                 eprintln!("the NAS' certificate authority is pinned now: a new name, address or certificate of the NAS needs no pairing again");
             }
+            if r == crate::trust::Refreshed::Cleartext {
+                eprintln!("the NAS is reached over plain http: nothing it answers is trusted (pair this PC again over https for a NAS that can change its name or address)");
+            }
             if r != crate::trust::Refreshed::Same {
                 let (nas_id, cas, addresses, url, fingerprint, checked) =
                     (st.nas_id.clone(), st.cas.clone(), st.addresses.clone(), st.url.clone(), st.fingerprint.clone(), st.trust_checked_ms);

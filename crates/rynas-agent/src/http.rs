@@ -95,11 +95,13 @@ fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-/// Accepts the certificate whose SHA-256 is `pin`; with `pin` empty, any certificate,
-/// remembering the one seen (only to show it before pairing).
+/// Accepts the certificate whose SHA-256 is `pin`, remembering the one seen. An empty pin
+/// accepts nothing, except in a probe ([`Client::probe`]: any certificate, only to show it
+/// before it is compared and pinned; nothing secret goes over a probe).
 #[derive(Debug)]
 struct Pinned {
     pin: String,
+    probe: bool,
     seen: Mutex<Option<String>>,
     algs: WebPkiSupportedAlgorithms,
 }
@@ -117,8 +119,13 @@ impl ServerCertVerifier for Pinned {
         if let Ok(mut s) = self.seen.lock() {
             *s = Some(fp.clone());
         }
-        if self.pin.is_empty() || self.pin == fp {
+        if self.probe || (!self.pin.is_empty() && self.pin == fp) {
             Ok(ServerCertVerified::assertion())
+        } else if self.pin.is_empty() {
+            // never "accept anything": a token or a code would go to whoever answers
+            Err(rustls::Error::General(format!(
+                "no certificate of the NAS is pinned (it shows {fp}): give its fingerprint, or pair this PC again over https"
+            )))
         } else {
             Err(rustls::Error::General(format!(
                 "the NAS certificate changed: expected {}, got {fp}",
@@ -159,30 +166,57 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// `https://nas:8443`, `nas:8443` (https), `http://…` (plain, only with `allow_http`).
+    /// `https://nas:8443`, `nas:8443` (https), `http://…` (plain, only with `--allow-http`).
+    /// Only a host (DNS name, IPv4, `[IPv6]`) and a port: no other scheme, user name, path,
+    /// query, spaces or control characters.
     pub fn parse(url: &str) -> Result<Endpoint, String> {
         let url = url.trim().trim_end_matches('/');
+        let shown: String = url.chars().filter(|c| !c.is_control()).take(200).collect();
+        let bad = |why: &str| format!("{shown}: {why}; give the NAS address only, as https://nas:8443");
+        if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(bad("spaces or control characters"));
+        }
         let (tls, rest) = if let Some(r) = url.strip_prefix("https://") {
             (true, r)
         } else if let Some(r) = url.strip_prefix("http://") {
             (false, r)
+        } else if url.contains("://") {
+            return Err(bad("only https:// (or http://) addresses"));
         } else {
             (true, url)
         };
-        if rest.contains('/') || rest.is_empty() {
-            return Err(format!("{url}: give the NAS address only, as https://nas:8443"));
+        if rest.is_empty() || rest.contains(['/', '?', '#', '@', '\\']) {
+            return Err(bad("no path, query or user name"));
         }
         let (host, port) = if let Some(h) = rest.strip_prefix('[') {
-            let (h, p) = h.split_once(']').ok_or("bad IPv6 address")?;
-            (h.to_string(), p.strip_prefix(':'))
-        } else {
-            match rest.rsplit_once(':') {
-                Some((h, p)) => (h.to_string(), Some(p)),
-                None => (rest.to_string(), None),
+            let (h, p) = h.split_once(']').ok_or_else(|| bad("bad IPv6 address"))?;
+            if h.parse::<std::net::Ipv6Addr>().is_err() {
+                return Err(bad("bad IPv6 address"));
             }
+            let port = match p {
+                "" => None,
+                p => Some(p.strip_prefix(':').ok_or_else(|| bad("bad port"))?),
+            };
+            (h.to_string(), port)
+        } else {
+            let (h, p) = match rest.rsplit_once(':') {
+                Some((h, p)) => (h, Some(p)),
+                None => (rest, None),
+            };
+            let label_ok = |l: &str| {
+                !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-')
+                    && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            };
+            if h.len() > 253 || !h.trim_end_matches('.').split('.').all(label_ok) {
+                return Err(bad("bad host name"));
+            }
+            (h.to_ascii_lowercase(), p)
         };
         let port = match port {
-            Some(p) => p.parse().map_err(|_| format!("{url}: bad port"))?,
+            Some(p) => match p.parse::<u16>() {
+                Ok(n) if n > 0 && p.bytes().all(|b| b.is_ascii_digit()) => n,
+                _ => return Err(bad("bad port")),
+            },
             None if tls => 443,
             None => 80,
         };
@@ -203,13 +237,15 @@ type Conn = BufReader<Box<dyn Stream>>;
 /// What a client trusts of the NAS.
 #[derive(Clone, Debug)]
 pub enum Trust {
-    /// The certificate whose SHA-256 is this (`AA:BB…`); empty: any (only to show it before
-    /// pairing). Agents paired before the NAS' local CA was pinned, and the restore.
+    /// The certificate whose SHA-256 is this (`AA:BB…`); empty: none is accepted over https
+    /// (only [`Client::probe`] accepts any). Agents paired before the NAS' local CA was
+    /// pinned, and the restore.
     Leaf(String),
     /// The NAS' local certificate authority: the chain must lead to one of `roots` (validity
-    /// periods checked) and the certificate must be issued for `name`, the NAS identity
-    /// ([`rynas_api_types::pcagent::agent_tls_name`]), which is also the name asked for
-    /// (SNI). Whatever host name or address the NAS has now.
+    /// periods of the leaf checked by rustls; WebPKI does not look at a root's own validity,
+    /// so `crate::trust::check` leaves expired CAs out of `roots`) and the certificate must be
+    /// issued for `name`, the NAS identity ([`rynas_api_types::pcagent::agent_tls_name`]),
+    /// which is also the name asked for (SNI). Whatever host name or address the NAS has now.
     Ca { name: String, roots: Arc<rustls::RootCertStore> },
 }
 
@@ -217,7 +253,7 @@ pub struct Client {
     /// Where the NAS may answer, tried in order from the one that worked last.
     eps: Vec<Endpoint>,
     cur: std::sync::atomic::AtomicUsize,
-    /// Pinned fingerprint (empty: accept any, pairing only).
+    /// Pinned fingerprint (empty: accept none, or any in a probe).
     verifier: Arc<Pinned>,
     tls: Arc<rustls::ClientConfig>,
     /// The name asked for and checked ([`Trust::Ca`]); `None`: the endpoint's host.
@@ -328,19 +364,31 @@ impl Response {
 }
 
 impl Client {
-    /// A client for `ep` with the certificate `pin` (`AA:BB…`; empty while pairing).
+    /// A client for `ep` with the certificate `pin` (`AA:BB…`). Over https an empty pin
+    /// accepts no certificate.
     pub fn new(ep: Endpoint, pin: &str) -> Client {
         Client::with_trust(vec![ep], Trust::Leaf(pin.to_string()))
     }
 
+    /// A client that accepts any certificate, only to read it ([`Client::seen_fingerprint`])
+    /// before the user compares it: never with a token, a code or a password.
+    pub fn probe(ep: Endpoint) -> Client {
+        Client::build(vec![ep], Trust::Leaf(String::new()), true)
+    }
+
     /// A client for the NAS at `eps` (tried in order; at least one), trusting `trust`.
     pub fn with_trust(eps: Vec<Endpoint>, trust: Trust) -> Client {
+        Client::build(eps, trust, false)
+    }
+
+    fn build(eps: Vec<Endpoint>, trust: Trust, probe: bool) -> Client {
         let p = provider();
         let verifier = Arc::new(Pinned {
             pin: match &trust {
                 Trust::Leaf(pin) => normalize_fp(pin),
                 Trust::Ca { .. } => String::new(),
             },
+            probe,
             seen: Mutex::new(None),
             algs: p.signature_verification_algorithms,
         });
@@ -756,8 +804,35 @@ mod tests {
         assert_eq!(Endpoint::parse("nas").unwrap().port, 443);
         assert!(!Endpoint::parse("http://10.0.2.2:18650").unwrap().tls);
         assert_eq!(Endpoint::parse("https://[fd00::1]:8443").unwrap().host, "fd00::1");
+        assert_eq!(Endpoint::parse("https://[fd00::1]").unwrap().port, 443);
         assert!(Endpoint::parse("https://nas/api").is_err());
         assert_eq!(Endpoint::parse("https://[fd00::1]:8443").unwrap().url(), "https://[fd00::1]:8443");
+        assert_eq!(Endpoint::parse(" https://NAS.Lan:8443 ").unwrap().host, "nas.lan");
+        for bad in [
+            "ftp://nas:21",
+            "file:///etc/passwd",
+            "https://user@nas:8443",
+            "https://user:pw@nas",
+            "https://nas:8443\r\nX-Evil: 1",
+            "https://nas\n:8443",
+            "https://na s:8443",
+            "https://nas:8443?x=1",
+            "https://nas:8443#f",
+            "https://:8443",
+            "https://nas:0",
+            "https://nas:65536",
+            "https://nas:+80",
+            "https://nas:",
+            "https://-nas:8443",
+            "https://na$s:8443",
+            "https://fd00::1:8443",
+            "https://[fd00::zz]:8443",
+            "https://[fd00::1]8443",
+            "https://nas..lan",
+            "",
+        ] {
+            assert!(Endpoint::parse(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

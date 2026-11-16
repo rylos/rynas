@@ -345,7 +345,7 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                     stage = 3;
                     continue;
                 }
-                let probe = Client::new(e.clone(), "");
+                let probe = Client::probe(e.clone());
                 let _ = probe.request("GET", "/api/v1/auth/session", &[], &[]);
                 let Some(seen) = probe.seen_fingerprint() else {
                     error = Some(format!("{}: no answer", e.url()));
