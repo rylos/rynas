@@ -948,7 +948,8 @@ ps.col_busy	Se occupato
 ps.startup	Accensione
 ps.shutdown	Spegnimento
 ps.enabled	Regola attiva
-ps.time_help	Ora locale del NAS.
+ps.time_help_down	Ora locale del NAS. Nella notte in cui l'orologio va avanti, un orario che quella notte non esiste viene saltato.
+ps.time_help_up	Ora locale del NAS. Nella notte in cui l'orologio va avanti, un orario che quella notte non esiste scatta subito dopo il cambio.
 ps.checks	Prima di spegnere, controlla
 ps.checks_help	Il NAS è occupato quando uno di questi controlli trova lavoro in corso.
 ps.check_storage	Risincronizzazione RAID o pulizia dati in corso
@@ -2503,6 +2504,17 @@ sch.desc.hourly	Ogni ora ai :{m}
 sch.desc.daily	Ogni giorno alle {time}
 sch.desc.weekly	{days} alle {time}
 sch.desc.monthly	Ogni mese il giorno {d} alle {time}
+sch.desc.hours	Ogni {n} ore ai :{m}
+sch.desc.span	{what}, {from}–{to}
+sch.desc.on_days	{what}, {days}
+sch.desc.monthly_last	Ogni mese l'ultimo giorno alle {time}
+sch.desc.monthly_nth	Ogni mese, {day} ({nth} del mese), alle {time}
+sch.desc.yearly	Ogni anno il {date} alle {time}
+sch.nth.first	1°
+sch.nth.second	2°
+sch.nth.third	3°
+sch.nth.fourth	4°
+sch.nth.last	ultimo
 sch.next_runs	Prossime esecuzioni
 sch.normalized	systemd la interpreta come
 sch.checking	Verifica…
@@ -5246,7 +5258,7 @@ pca.f.folder	Cartella degli archivi
 pca.f.folder_help	Dentro un volume. I gruppi esistenti restano dove sono.
 pca.f.default_quota	Quota dei nuovi gruppi (GiB)
 pca.f.hour	Ora della manutenzione
-pca.f.hour_help	0–23, ogni notte.
+pca.f.hour_help	0–23, ogni notte. Se a quell'ora il NAS è spento o occupato, parte più tardi, entro 12 ore.
 pca.f.memory	Quota di memoria (%)
 pca.f.memory_help	Della memoria del NAS, per una manutenzione. Una pulizia che richiede di più aspetta.
 pca.f.chunking	Dimensione dei blocchi dei nuovi gruppi

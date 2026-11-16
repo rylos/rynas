@@ -1,9 +1,14 @@
 //! Rules: validation, conflicts, next occurrences in local time.
 //!
-//! Times are wall-clock times of the system time zone. A rule time that does not exist on a
-//! DST spring-forward day (02:30 in Europe) happens at the first valid time after the gap
-//! (03:30), a time that exists twice on the fall-back day happens at its first occurrence
-//! (jiff's "compatible" disambiguation, the same as systemd's `OnCalendar=`).
+//! Times are wall-clock times of the system time zone. Around DST changes the two actions
+//! differ, because different clocks run them:
+//!
+//! - a **shutdown** is a systemd timer (`OnCalendar=`): a rule time that does not exist on
+//!   the spring-forward day (02:30 in Europe) is skipped that day, a time that exists twice
+//!   on the fall-back day happens once, the first time (systemd 257, computed with
+//!   `rynas-schedule`, which reproduces it);
+//! - a **startup** is the RTC alarm, an instant: a time in the gap happens at the first valid
+//!   time after it (03:30), a repeated one at its first occurrence (jiff's "compatible").
 
 use jiff::Timestamp;
 use jiff::civil::Date;
@@ -147,13 +152,25 @@ pub fn instant(d: Date, hour: u8, minute: u8, tz: &TimeZone) -> Option<Timestamp
     tz.to_ambiguous_timestamp(dt).compatible().ok()
 }
 
-/// The next occurrence strictly after `now` of an enabled rule with `action`, and its rule.
+/// The next occurrence strictly after `now` of an enabled rule with `action`, and its rule
+/// (a shutdown as its timer computes it, a startup as the RTC alarm: see the module).
 pub fn next(
     rules: &[PowerRule],
     action: PowerAction,
     now: Timestamp,
     tz: &TimeZone,
 ) -> Option<(Timestamp, String)> {
+    if action == PowerAction::Shutdown {
+        // the scheduler's timer decides: systemd's own computation
+        return rules
+            .iter()
+            .filter(|r| r.enabled && r.action == action && !r.days.is_empty())
+            .filter_map(|r| {
+                let spec = rynas_schedule::CalendarSpec::parse(&on_calendar(r)).ok()?;
+                Some((spec.next_after(tz, now)?, r.id.clone()))
+            })
+            .min_by_key(|(t, _)| *t);
+    }
     let today = now.to_zoned(tz.clone()).date();
     let mut best: Option<(Timestamp, String)> = None;
     // today and the next 7 days cover a whole week even when today's time already passed
@@ -396,6 +413,42 @@ mod tests {
         let r = vec![rule("odd", Startup, &[Sun], 2, 15)];
         let (t, _) = next(&r, Startup, at("2026-03-07T12:00", &ny), &ny).unwrap();
         assert_eq!(local(t, &ny), "Sun 2026-03-08 03:15 EDT");
+    }
+
+    #[test]
+    fn shutdowns_follow_the_timer_around_dst() {
+        let z = tz("Europe/Rome");
+        let sat = at("2026-03-28T12:00", &z);
+        // spring forward: the timer skips a 02:30 shutdown that day (the startup alarm,
+        // an instant, happens at 03:30)
+        let r = vec![
+            rule("down", Shutdown, &[Sun], 2, 30),
+            rule("up", Startup, &[Sun], 2, 30),
+        ];
+        let (t, _) = next(&r, Shutdown, sat, &z).unwrap();
+        assert_eq!(local(t, &z), "Sun 2026-04-05 02:30 CEST");
+        let (t, _) = next(&r, Startup, sat, &z).unwrap();
+        assert_eq!(local(t, &z), "Sun 2026-03-29 03:30 CEST");
+        // another rule later that night still comes first
+        let r2 = vec![
+            rule("down", Shutdown, &[Sun], 2, 30),
+            rule("late", Shutdown, &[Sun], 4, 0),
+        ];
+        let (t, id) = next(&r2, Shutdown, sat, &z).unwrap();
+        assert_eq!((local(t, &z), id.as_str()), ("Sun 2026-03-29 04:00 CEST".into(), "late"));
+        // fall back: once, the first 02:30; after it, next week
+        let (t, _) = next(&r, Shutdown, at("2026-10-24T12:00", &z), &z).unwrap();
+        assert_eq!(local(t, &z), "Sun 2026-10-25 02:30 CEST");
+        let (t2, _) = next(&r, Shutdown, t, &z).unwrap();
+        assert_eq!(local(t2, &z), "Sun 2026-11-01 02:30 CET");
+        // ordinary days: the same as before
+        let w = vec![rule("night", Shutdown, &Weekday::ALL, 23, 30)];
+        let (t, _) = next(&w, Shutdown, at("2026-11-04T10:00", &z), &z).unwrap();
+        assert_eq!(local(t, &z), "Wed 2026-11-04 23:30 CET");
+        // disabled rules and startups do not count
+        let mut off = w.clone();
+        off[0].enabled = false;
+        assert_eq!(next(&off, Shutdown, sat, &z), None);
     }
 
     #[test]

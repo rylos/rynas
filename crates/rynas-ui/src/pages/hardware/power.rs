@@ -493,7 +493,7 @@ fn editor(orig: Option<PowerRule>, rules: Signal<Vec<PowerRule>>, wake_ok: Signa
             <div class="field">
                 <label class="field-label" for=tid.clone()>{tr("sch.f.time")}</label>
                 <input id=tid class="input tnum" type="time" required prop:value=move || time.get() on:input=move |ev| time.set(event_target_value(&ev)) />
-                <span class="field-help">{tr("ps.time_help")}</span>
+                <span class="field-help">{move || t(if is_shutdown() { "ps.time_help_down" } else { "ps.time_help_up" })}</span>
             </div>
             {switch("ps.enabled", None, enabled, set_enabled)}
             <fieldset class="fieldset" hidden=move || !is_shutdown()>

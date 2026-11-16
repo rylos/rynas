@@ -347,17 +347,25 @@ pub fn next_window_ms(set: &AutoUpdateSettings, last: Option<&str>) -> u64 {
     at.timestamp().as_millisecond().max(0) as u64 - u64::from(at.second() as u8) * 1000
 }
 
+/// Task kinds (prefixes) that keep automatic updates from starting: storage work (the manual
+/// scrub is `storage.scrub`, the scheduled one `btrfs.scrub`), rollbacks and restores,
+/// replication, the NAS backups (`backup.run`, `backup.check`, `backup.restore`), the
+/// maintenance of the PC backup repositories, system updates, moves and config applies.
+const MAINTENANCE_KINDS: &[&str] = &[
+    "storage.", "btrfs.scrub", "snapshot.rollback", "snapshot.restore", "replication.", "backup.",
+    "pcbackup.maintenance", "pcbackup.prune", "updates.install", "docker.install", "docker.migrate",
+    "ids.remap", "homes.move", "power.", "config.apply", "crypt.",
+];
+
+fn is_maintenance(kind: &str) -> bool {
+    MAINTENANCE_KINDS.iter().any(|k| kind.starts_with(k))
+}
+
 /// What keeps automatic updates from starting now: a maintenance task of rynas or a RAID
 /// resync.
 pub fn maintenance(s: &DockerSvc) -> Option<String> {
-    const KINDS: &[&str] = &[
-        "storage.", "snapshot.rollback", "snapshot.restore", "replication.", "updates.install",
-        "docker.install", "docker.migrate", "ids.remap", "homes.move", "power.", "config.apply",
-        "crypt.",
-    ];
     let busy = s.ops.tasks.list(200).into_iter().find(|t| {
-        matches!(t.status, TaskStatus::Running | TaskStatus::Queued)
-            && KINDS.iter().any(|k| t.kind.starts_with(k))
+        matches!(t.status, TaskStatus::Running | TaskStatus::Queued) && is_maintenance(&t.kind)
     });
     if let Some(t) = busy {
         return Some(format!("task {} is running", t.kind));
@@ -904,6 +912,17 @@ mod tests {
             update_available: true,
             stacks: vec![stack.into()],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn maintenance_kinds() {
+        // the scheduled scrub, the NAS backups and the PC repositories' maintenance (I-6)
+        for k in ["btrfs.scrub", "storage.scrub", "backup.run", "backup.check", "backup.restore", "pcbackup.maintenance", "pcbackup.prune", "replication.run", "updates.install"] {
+            assert!(is_maintenance(k), "{k}");
+        }
+        for k in ["snapshot.run", "docker.update-check", "pcbackup.usage", "smb.recycle-cleanup", "apps.install"] {
+            assert!(!is_maintenance(k), "{k}");
         }
     }
 

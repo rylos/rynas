@@ -16,6 +16,10 @@ use rynas_api_types::scheduler::{
     LiveRun, TaskRun, TaskTrigger, TaskView,
 };
 
+use rynas_schedule::cal::{Cal, Repeat, Syntax};
+use rynas_schedule::describe::{all_day, day_span};
+use rynas_schedule::{Description, MonthDay, Nth, Recurrence, TimeOfDay, Weekdays, describe};
+
 use super::scheduler_live;
 use crate::api;
 use crate::form::{In, area_field, lens, lens_bool, number_field, save_bar, segmented, select_field, switch, tabs, text_field};
@@ -24,157 +28,80 @@ use crate::icons::{self, Icon};
 use crate::toast::{saved_applied, saved_pending, toast};
 use crate::ui::{self, Confirm, EmptyState, PageHeader, Remote, Tone, confirm, drawer};
 
-// ------------------------------------------------------------------ calendar builder (pure)
+// ------------------------------------------------------------------ calendar builder
 
-const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Repeat {
-    Minutes,
-    Hourly,
-    Daily,
-    Weekly,
-    Monthly,
-    Custom,
-    Cron,
+/// [`Cal::expression`] with the API's syntax.
+fn expression(c: &Cal) -> (String, CalendarSyntax) {
+    let (e, s) = c.expression();
+    (e, if s == Syntax::Cron { CalendarSyntax::Cron } else { CalendarSyntax::Calendar })
 }
 
-impl Repeat {
-    fn code(self) -> &'static str {
-        match self {
-            Repeat::Minutes => "minutes",
-            Repeat::Hourly => "hourly",
-            Repeat::Daily => "daily",
-            Repeat::Weekly => "weekly",
-            Repeat::Monthly => "monthly",
-            Repeat::Custom => "custom",
-            Repeat::Cron => "cron",
+/// Weekdays in words: "Mon–Fri", "Mon, Wed", "Sat, Sun".
+pub fn weekdays_text(days: Weekdays) -> String {
+    let d = days.days();
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < d.len() {
+        let mut j = i;
+        while j + 1 < d.len() && d[j + 1] == d[j] + 1 {
+            j += 1;
         }
+        if j >= i + 2 {
+            parts.push(format!("{}–{}", t(DAY_KEYS[d[i] as usize]), t(DAY_KEYS[d[j] as usize])));
+        } else {
+            parts.extend(d[i..=j].iter().map(|x| t(DAY_KEYS[*x as usize]).to_string()));
+        }
+        i = j + 1;
     }
-    fn parse(s: &str) -> Repeat {
-        [Repeat::Minutes, Repeat::Hourly, Repeat::Daily, Repeat::Weekly, Repeat::Monthly, Repeat::Custom, Repeat::Cron]
-            .into_iter()
-            .find(|r| r.code() == s)
-            .unwrap_or(Repeat::Daily)
-    }
+    parts.join(", ")
 }
 
-/// What the calendar builder edits; [`Cal::expression`] turns it into `OnCalendar=` (or cron).
-#[derive(Clone, PartialEq, Debug)]
-pub struct Cal {
-    pub repeat: Repeat,
-    pub every_min: u32,
-    pub minute: u32,
-    /// "HH:MM".
-    pub time: String,
-    /// 1 = Monday … 7 = Sunday.
-    pub days: Vec<u8>,
-    pub dom: u32,
-    pub custom: String,
-    pub cron: String,
+fn times_text(times: &[TimeOfDay]) -> String {
+    times.iter().map(|x| i18n::hm(u32::from(x.hour), u32::from(x.minute))).collect::<Vec<_>>().join(", ")
 }
 
-impl Default for Cal {
-    fn default() -> Self {
-        Cal { repeat: Repeat::Daily, every_min: 15, minute: 0, time: "03:00".into(), days: vec![1], dom: 1, custom: String::new(), cron: String::new() }
-    }
-}
+const NTH_KEYS: [(Nth, &str); 5] =
+    [(Nth::First, "sch.nth.first"), (Nth::Second, "sch.nth.second"), (Nth::Third, "sch.nth.third"), (Nth::Fourth, "sch.nth.fourth"), (Nth::Last, "sch.nth.last")];
 
-fn hhmm(s: &str) -> Option<String> {
-    let mut p = s.split(':');
-    let h: u32 = p.next()?.parse().ok()?;
-    let m: u32 = p.next()?.parse().ok()?;
-    match p.next() {
-        None | Some("00") | Some("0") => {}
-        Some(_) => return None,
-    }
-    (h < 24 && m < 60).then(|| format!("{h:02}:{m:02}"))
-}
-
-impl Cal {
-    /// The expression to preview and store, with its syntax.
-    pub fn expression(&self) -> (String, CalendarSyntax) {
-        let time = hhmm(&self.time).unwrap_or_else(|| "00:00".into());
-        let e = match self.repeat {
-            Repeat::Minutes => format!("*-*-* *:00/{:02}:00", self.every_min.clamp(1, 59)),
-            Repeat::Hourly => format!("*-*-* *:{:02}:00", self.minute.min(59)),
-            Repeat::Daily => format!("*-*-* {time}:00"),
-            Repeat::Weekly if !self.days.is_empty() => {
-                let mut d = self.days.clone();
-                d.sort_unstable();
-                d.dedup();
-                let names: Vec<&str> = d.iter().filter(|x| (1..=7).contains(*x)).map(|x| WEEKDAYS[*x as usize - 1]).collect();
-                format!("{} *-*-* {time}:00", names.join(","))
-            }
-            Repeat::Weekly => format!("*-*-* {time}:00"),
-            Repeat::Monthly => format!("*-*-{:02} {time}:00", self.dom.clamp(1, 31)),
-            Repeat::Custom => self.custom.trim().to_string(),
-            Repeat::Cron => return (self.cron.trim().to_string(), CalendarSyntax::Cron),
+/// A preset schedule in words ("Every 15 min, 08:00–18:45, Mon–Fri").
+pub fn recurrence_text(r: &Recurrence) -> String {
+    let hm = |x: TimeOfDay| i18n::hm(u32::from(x.hour), u32::from(x.minute));
+    let within = |what: String, days: Weekdays| {
+        let what = match day_span(r) {
+            Some((a, b)) if !all_day(r) => tf("sch.desc.span", &[("what", &what), ("from", &hm(a)), ("to", &hm(b))]),
+            _ => what,
         };
-        (e, CalendarSyntax::Calendar)
+        if days.every_day() { what } else { tf("sch.desc.on_days", &[("what", &what), ("days", &weekdays_text(days))]) }
+    };
+    match r {
+        Recurrence::Daily { days, times } if days.every_day() => tf("sch.desc.daily", &[("time", &times_text(times))]),
+        Recurrence::Daily { days, times } => tf("sch.desc.weekly", &[("days", &weekdays_text(*days)), ("time", &times_text(times))]),
+        Recurrence::Minutes { every, days, .. } => within(tf("sch.desc.minutes", &[("n", &every.to_string())]), *days),
+        Recurrence::Hours { every: 1, minute, days, .. } => within(tf("sch.desc.hourly", &[("m", &format!("{minute:02}"))]), *days),
+        Recurrence::Hours { every, minute, days, .. } => {
+            within(tf("sch.desc.hours", &[("n", &every.to_string()), ("m", &format!("{minute:02}"))]), *days)
+        }
+        Recurrence::Monthly { day: MonthDay::Days(d), times } => {
+            let d = d.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ");
+            tf("sch.desc.monthly", &[("d", &d), ("time", &times_text(times))])
+        }
+        Recurrence::Monthly { day: MonthDay::Last, times } => tf("sch.desc.monthly_last", &[("time", &times_text(times))]),
+        Recurrence::MonthlyNth { nth, weekday, times } => {
+            let n = NTH_KEYS.iter().find(|(k, _)| k == nth).map_or("", |(_, key)| t(key));
+            tf("sch.desc.monthly_nth", &[("nth", n), ("day", t(DAY_KEYS[usize::from(*weekday % 7)])), ("time", &times_text(times))])
+        }
+        Recurrence::Yearly { month, day, times } => {
+            tf("sch.desc.yearly", &[("date", &i18n::day_month(u32::from(*month), u32::from(*day))), ("time", &times_text(times))])
+        }
     }
+}
 
-    /// Recognize the expressions the builder writes (and systemd's shortcuts); anything else
-    /// opens as a custom expression.
-    pub fn parse(expr: &str) -> Cal {
-        let e = expr.trim();
-        let mut c = Cal::default();
-        let custom = |c: Cal| Cal { repeat: Repeat::Custom, custom: e.to_string(), ..c };
-        match e {
-            "hourly" => return Cal { repeat: Repeat::Hourly, ..c },
-            "daily" => return Cal { repeat: Repeat::Daily, time: "00:00".into(), ..c },
-            "weekly" => return Cal { repeat: Repeat::Weekly, time: "00:00".into(), ..c },
-            "monthly" => return Cal { repeat: Repeat::Monthly, time: "00:00".into(), ..c },
-            "" => return c,
-            _ => {}
-        }
-        let parts: Vec<&str> = e.split_whitespace().collect();
-        let (days, date, time) = match parts.as_slice() {
-            [date, time] => (None, *date, *time),
-            [days, date, time] => (Some(*days), *date, *time),
-            _ => return custom(c),
-        };
-        if let Some(rest) = time.strip_prefix("*:") {
-            if days.is_some() || date != "*-*-*" {
-                return custom(c);
-            }
-            if let Some(n) = rest.strip_prefix("00/").or_else(|| rest.strip_prefix("0/")) {
-                let n = n.trim_end_matches(":00");
-                if let Ok(n) = n.parse::<u32>() {
-                    return Cal { repeat: Repeat::Minutes, every_min: n, ..c };
-                }
-            } else if let Ok(m) = rest.trim_end_matches(":00").parse::<u32>()
-                && rest.len() <= 5
-            {
-                return Cal { repeat: Repeat::Hourly, minute: m, ..c };
-            }
-            return custom(c);
-        }
-        let Some(t) = hhmm(time) else { return custom(c) };
-        c.time = t;
-        if let Some(days) = days {
-            if date != "*-*-*" {
-                return custom(c);
-            }
-            let mut out = Vec::new();
-            for d in days.split(',') {
-                match WEEKDAYS.iter().position(|w| w.eq_ignore_ascii_case(d)) {
-                    Some(i) => out.push(i as u8 + 1),
-                    None => return custom(c),
-                }
-            }
-            return Cal { repeat: Repeat::Weekly, days: out, ..c };
-        }
-        if date == "*-*-*" {
-            return Cal { repeat: Repeat::Daily, ..c };
-        }
-        if let Some(dd) = date.strip_prefix("*-*-")
-            && let Ok(d) = dd.parse::<u32>()
-            && (1..=31).contains(&d)
-        {
-            return Cal { repeat: Repeat::Monthly, dom: d, ..c };
-        }
-        custom(c)
+/// An `OnCalendar=` expression in words; the normalized expression when no preset shows it.
+pub fn calendar_text(on_calendar: &str) -> String {
+    match describe(on_calendar) {
+        Description::Preset(r) => recurrence_text(&r),
+        Description::Advanced { normalized } => normalized,
+        Description::Invalid(_) => on_calendar.to_string(),
     }
 }
 
@@ -187,18 +114,7 @@ pub fn trigger_text(tr: &TaskTrigger) -> String {
             if on_calendar.is_empty() {
                 return cron.clone().unwrap_or_default();
             }
-            let c = Cal::parse(on_calendar);
-            match c.repeat {
-                Repeat::Minutes => tf("sch.desc.minutes", &[("n", &c.every_min.to_string())]),
-                Repeat::Hourly => tf("sch.desc.hourly", &[("m", &format!("{:02}", c.minute))]),
-                Repeat::Daily => tf("sch.desc.daily", &[("time", &i18n::hm_text(&c.time))]),
-                Repeat::Weekly => {
-                    let days: Vec<&str> = c.days.iter().map(|d| t(DAY_KEYS[*d as usize - 1])).collect();
-                    tf("sch.desc.weekly", &[("days", &days.join(", ")), ("time", &i18n::hm_text(&c.time))])
-                }
-                Repeat::Monthly => tf("sch.desc.monthly", &[("d", &c.dom.to_string()), ("time", &i18n::hm_text(&c.time))]),
-                Repeat::Custom | Repeat::Cron => on_calendar.clone(),
-            }
+            calendar_text(on_calendar)
         }
     }
 }
@@ -259,7 +175,7 @@ impl TriggerEdit {
         // live preview of the next runs, 300 ms after the last change
         Effect::new(move |_| {
             let is_cal = e.kind.with(|k| k == "calendar");
-            let (expr, syntax) = e.cal.with(Cal::expression);
+            let (expr, syntax) = e.cal.with(expression);
             e.seq.update_value(|s| *s += 1);
             let mine = e.seq.get_value();
             if !is_cal {
@@ -304,7 +220,7 @@ impl TriggerEdit {
                 if self.preview.with_untracked(|p| p.as_ref().is_some_and(|p| !p.valid)) {
                     return Err("sch.v.calendar");
                 }
-                let (expr, syntax) = self.cal.with_untracked(Cal::expression);
+                let (expr, syntax) = self.cal.with_untracked(expression);
                 if expr.is_empty() {
                     return Err("sch.v.calendar");
                 }
@@ -1341,34 +1257,33 @@ fn cron_panel(edit: RwSignal<Option<(ScheduledTask, bool)>>) -> AnyView {
 mod tests {
     use super::*;
 
-    fn roundtrip(c: Cal) {
-        let (e, _) = c.expression();
-        assert_eq!(Cal::parse(&e), c, "{e}");
+    #[test]
+    fn calendar_builder_syntax() {
+        let c = Cal { repeat: Repeat::Cron, cron: " 0 4 * * * ".into(), ..Cal::default() };
+        assert_eq!(expression(&c), ("0 4 * * *".into(), CalendarSyntax::Cron));
+        assert_eq!(expression(&Cal::default()), ("*-*-* 03:00:00".into(), CalendarSyntax::Calendar));
     }
 
     #[test]
-    fn calendar_builder_roundtrips() {
-        roundtrip(Cal { repeat: Repeat::Daily, time: "02:30".into(), ..Cal::default() });
-        roundtrip(Cal { repeat: Repeat::Weekly, days: vec![1, 5], time: "03:00".into(), ..Cal::default() });
-        roundtrip(Cal { repeat: Repeat::Monthly, dom: 15, time: "04:05".into(), ..Cal::default() });
-        roundtrip(Cal { repeat: Repeat::Hourly, minute: 7, ..Cal::default() });
-        roundtrip(Cal { repeat: Repeat::Minutes, every_min: 15, ..Cal::default() });
-    }
-
-    #[test]
-    fn calendar_expressions() {
-        let c = Cal { repeat: Repeat::Weekly, days: vec![5, 1, 1], time: "3:00".into(), ..Cal::default() };
-        assert_eq!(c.expression().0, "Mon,Fri *-*-* 03:00:00");
-        assert_eq!(Cal { repeat: Repeat::Monthly, dom: 1, time: "04:00".into(), ..Cal::default() }.expression().0, "*-*-01 04:00:00");
-        assert_eq!(Cal { repeat: Repeat::Cron, cron: " 0 4 * * * ".into(), ..Cal::default() }.expression(), ("0 4 * * *".into(), CalendarSyntax::Cron));
-        // shortcuts and systemd's own forms
-        assert_eq!(Cal::parse("hourly").repeat, Repeat::Hourly);
-        assert_eq!(Cal::parse("daily").time, "00:00");
-        assert_eq!(Cal::parse("*-*-* 02:30").time, "02:30");
-        assert_eq!(Cal::parse("*:0/10").repeat, Repeat::Custom); // no date part: kept as written
-        let odd = Cal::parse("Mon..Fri 02:30");
-        assert_eq!((odd.repeat, odd.custom.as_str()), (Repeat::Custom, "Mon..Fri 02:30"));
-        assert_eq!(Cal::parse("Sat,Sun *-*-* 09:15:00").days, vec![6, 7]);
+    fn schedules_in_words() {
+        assert_eq!(calendar_text("*-*-* 03:00:00"), "Daily at 03:00");
+        assert_eq!(calendar_text("*-*-* 08,20:00"), "Daily at 08:00, 20:00");
+        assert_eq!(calendar_text("Mon..Fri 02:30"), "Mon–Fri at 02:30");
+        assert_eq!(calendar_text("Mon,Wed *-*-* 23:05:00"), "Mon, Wed at 23:05");
+        assert_eq!(calendar_text("*-*-* *:00/15:00"), "Every 15 min");
+        assert_eq!(calendar_text("Mon..Fri 08..18:00/15"), "Every 15 min, 08:00–18:45, Mon–Fri");
+        assert_eq!(calendar_text("hourly"), "Hourly at :00");
+        assert_eq!(calendar_text("*-*-* 00/6:30"), "Every 6 hours at :30");
+        assert_eq!(calendar_text("*-*-* 08..20/4:00"), "Every 4 hours at :00, 08:00–20:00");
+        assert_eq!(calendar_text("*-*-01,15 04:00"), "Monthly on day 1, 15 at 04:00");
+        assert_eq!(calendar_text("*-*~01 23:00"), "Monthly on the last day at 23:00");
+        assert_eq!(calendar_text("Sun *-*-01..07 02:30"), "Monthly on the first Sun at 02:30");
+        assert_eq!(calendar_text("Fri *-*~07/1 18:00"), "Monthly on the last Fri at 18:00");
+        assert_eq!(calendar_text("*-12-25 00:00"), "Yearly on 12-25 at 00:00");
+        assert_eq!(calendar_text("quarterly"), "*-01,04,07,10-01 00:00:00");
+        assert_eq!(calendar_text("nonsense"), "nonsense");
+        assert_eq!(weekdays_text(Weekdays::of(&[0, 1, 2, 4, 5, 6])), "Mon–Wed, Fri–Sun");
+        assert_eq!(weekdays_text(Weekdays::of(&[5, 6])), "Sat, Sun");
     }
 
     #[test]

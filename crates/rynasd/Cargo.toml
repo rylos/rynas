@@ -43,6 +43,7 @@ rynas-hw-synology = { workspace = true, features = ["domain"] }
 rynas-hw-qnap = { workspace = true, features = ["domain"] }
 rynas-module.workspace = true
 rynas-power.workspace = true
+rynas-schedule = { workspace = true, features = ["next"] }
 jiff.workspace = true
 rynas-net.workspace = true
 rynas-updates.workspace = true

@@ -960,7 +960,8 @@ ps.col_busy	Если занят
 ps.startup	Включение
 ps.shutdown	Выключение
 ps.enabled	Правило включено
-ps.time_help	Местное время NAS.
+ps.time_help_down	Местное время NAS. В ночь перевода часов вперёд время, которого в эту ночь нет, пропускается.
+ps.time_help_up	Местное время NAS. В ночь перевода часов вперёд время, которого в эту ночь нет, наступает сразу после перевода.
 ps.checks	Перед выключением проверять
 ps.checks_help	NAS считается занятым, если одна из этих проверок обнаруживает выполняющуюся работу.
 ps.check_storage	Выполняется ресинхронизация RAID или проверка данных
@@ -2523,6 +2524,17 @@ sch.desc.hourly	Ежечасно в :{m}
 sch.desc.daily	Ежедневно в {time}
 sch.desc.weekly	{days} в {time}
 sch.desc.monthly	Ежемесячно, день {d}, в {time}
+sch.desc.hours	Раз в {n} ч в :{m}
+sch.desc.span	{what}, {from}–{to}
+sch.desc.on_days	{what}, {days}
+sch.desc.monthly_last	Ежемесячно, последний день, в {time}
+sch.desc.monthly_nth	Ежемесячно, {day} ({nth} в месяце), в {time}
+sch.desc.yearly	Ежегодно, {date}, в {time}
+sch.nth.first	1-й
+sch.nth.second	2-й
+sch.nth.third	3-й
+sch.nth.fourth	4-й
+sch.nth.last	последний
 sch.next_runs	Следующие запуски
 sch.normalized	systemd понимает это как
 sch.checking	Проверка…
@@ -5261,7 +5273,7 @@ pca.f.folder	Папка репозиториев
 pca.f.folder_help	Внутри тома. Существующие группы остаются на месте.
 pca.f.default_quota	Квота новых групп (ГиБ)
 pca.f.hour	Час обслуживания
-pca.f.hour_help	0–23, каждую ночь.
+pca.f.hour_help	0–23, каждую ночь. Если в это время NAS выключен или занят, запускается позже, в течение 12 часов.
 pca.f.memory	Доля памяти (%)
 pca.f.memory_help	От памяти NAS, на одно обслуживание. Очистка, которой нужно больше, ждёт.
 pca.f.chunking	Размер блока новых групп

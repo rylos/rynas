@@ -1025,10 +1025,20 @@ async fn maintain(svc: &Arc<PcAgent>, group: &str, ctx: &TaskCtx, scheduled: boo
 
 // ------------------------------------------------------------------ the daily round
 
-fn local_day_hour() -> (i64, i8) {
-    let z = jiff::Timestamp::now().to_zoned(rynas_power::system_tz());
-    let days = z.date().since(jiff::civil::date(1970, 1, 1)).map(|s| s.get_days() as i64).unwrap_or(0);
-    (days, z.hour())
+/// How long after its hour a missed maintenance still runs (the NAS was off or busy then).
+const MAINT_CATCH_UP: jiff::SignedDuration = jiff::SignedDuration::from_hours(12);
+
+/// The maintenance due at `now`: the local day (days since 1970-01-01) of the last
+/// `hour:00` at most [`MAINT_CATCH_UP`] ago, with systemd's DST rules (an hour that does not
+/// exist that day has no maintenance, a repeated one counts once).
+fn maint_due_day(hour: u8, now: jiff::Timestamp, tz: &jiff::tz::TimeZone) -> Option<i64> {
+    let spec = rynas_schedule::CalendarSpec::parse(&format!("*-*-* {:02}:00:00", hour.min(23))).ok()?;
+    let slot = spec.next_after(tz, now.checked_sub(MAINT_CATCH_UP).ok()?)?;
+    if slot > now {
+        return None;
+    }
+    let date = slot.to_zoned(tz.clone()).date();
+    date.since(jiff::civil::date(1970, 1, 1)).ok().map(|s| i64::from(s.get_days()))
 }
 
 /// Late and critical notifications of one device (state changes only).
@@ -1079,8 +1089,9 @@ fn alerts(svc: &PcAgent, name: &str, d: &Dev) {
     }
 }
 
-/// Every five minutes: notifications, and each group's maintenance in its hour (retried
-/// within the hour while a PC is busy; the reason stays on the group when it cannot run).
+/// Every five minutes: notifications, and each group's maintenance once a day from its hour
+/// on (retried while a PC is busy, and run late when the NAS was off or busy at that hour,
+/// up to 12 hours after it; the reason stays on the group when it cannot run).
 pub fn spawn_watch(svc: Arc<PcAgent>) {
     // the registry's touched counters, written now and then off the async threads
     let s2 = svc.clone();
@@ -1102,8 +1113,7 @@ pub fn spawn_watch(svc: Arc<PcAgent>) {
             for (n, d) in &reg.devices {
                 alerts(&svc, n, d);
             }
-            let (day, hour) = local_day_hour();
-            if i16::from(hour) == i16::from(reg.settings.maintenance_hour) {
+            if let Some(day) = maint_due_day(reg.settings.maintenance_hour, jiff::Timestamp::now(), &rynas_power::system_tz()) {
                 for (n, g) in &reg.groups {
                     if g.maintained_day == Some(day) || !reg.devices.values().any(|d| d.group == *n) {
                         continue;
@@ -1352,6 +1362,24 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn maintenance_catches_up_within_12_hours() {
+        let Ok(z) = jiff::tz::TimeZone::get("Europe/Rome") else { return };
+        let at = |s: &str| s.parse::<jiff::civil::DateTime>().unwrap().to_zoned(z.clone()).unwrap().timestamp();
+        let day = |s: &str| s.parse::<jiff::civil::Date>().unwrap().since(jiff::civil::date(1970, 1, 1)).unwrap().get_days() as i64;
+        // in its hour, and later the same morning (the NAS was off at 03:00)
+        assert_eq!(maint_due_day(3, at("2026-11-16T03:02"), &z), Some(day("2026-11-16")));
+        assert_eq!(maint_due_day(3, at("2026-11-16T14:59"), &z), Some(day("2026-11-16")));
+        // more than 12 hours later: skipped, and before the hour: yesterday's is too old
+        assert_eq!(maint_due_day(3, at("2026-11-16T15:01"), &z), None);
+        assert_eq!(maint_due_day(3, at("2026-11-16T02:59"), &z), None);
+        // across midnight
+        assert_eq!(maint_due_day(23, at("2026-11-17T01:00"), &z), Some(day("2026-11-16")));
+        // the spring-forward day has no 02:00
+        assert_eq!(maint_due_day(2, at("2026-03-29T05:00"), &z), None);
+        assert_eq!(maint_due_day(2, at("2026-03-30T05:00"), &z), Some(day("2026-03-30")));
     }
 
     #[test]

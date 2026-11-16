@@ -1501,7 +1501,8 @@ dict! { BLOB, LENS;
     "ps.startup" => "Startup";
     "ps.shutdown" => "Shutdown";
     "ps.enabled" => "Rule enabled";
-    "ps.time_help" => "Local time of the NAS.";
+    "ps.time_help_down" => "Local time of the NAS. On the night the clocks go forward, a time that does not exist that night is skipped.";
+    "ps.time_help_up" => "Local time of the NAS. On the night the clocks go forward, a time that does not exist that night happens just after the change.";
     "ps.checks" => "Before shutting down, check";
     "ps.checks_help" => "The NAS is busy when one of these checks finds work in progress.";
     "ps.check_storage" => "RAID resync or scrub running";
@@ -3166,6 +3167,17 @@ dict! { BLOB, LENS;
     "sch.desc.daily" => "Daily at {time}";
     "sch.desc.weekly" => "{days} at {time}";
     "sch.desc.monthly" => "Monthly on day {d} at {time}";
+    "sch.desc.hours" => "Every {n} hours at :{m}";
+    "sch.desc.span" => "{what}, {from}–{to}";
+    "sch.desc.on_days" => "{what}, {days}";
+    "sch.desc.monthly_last" => "Monthly on the last day at {time}";
+    "sch.desc.monthly_nth" => "Monthly on the {nth} {day} at {time}";
+    "sch.desc.yearly" => "Yearly on {date} at {time}";
+    "sch.nth.first" => "first";
+    "sch.nth.second" => "second";
+    "sch.nth.third" => "third";
+    "sch.nth.fourth" => "fourth";
+    "sch.nth.last" => "last";
     "sch.next_runs" => "Next runs";
     "sch.normalized" => "systemd reads it as";
     "sch.checking" => "Checking…";
@@ -5928,7 +5940,7 @@ dict! { BLOB, LENS;
     "pca.f.folder_help" => "Inside a volume. Existing groups stay where they are.";
     "pca.f.default_quota" => "Quota of new groups (GiB)";
     "pca.f.hour" => "Maintenance hour";
-    "pca.f.hour_help" => "0–23, every night.";
+    "pca.f.hour_help" => "0–23, every night. If the NAS is off or busy then, it runs later, within 12 hours.";
     "pca.f.memory" => "Memory share (%)";
     "pca.f.memory_help" => "Of the NAS' memory, for one maintenance. A prune that needs more waits.";
     "pca.f.chunking" => "Block size of new groups";
@@ -6247,12 +6259,12 @@ pub fn hm(h: u32, m: u32) -> String {
     date_with(civil_ms(2000, 1, 1, h % 24, m % 60), &[("timeZone", "UTC"), ("timeStyle", "short")])
 }
 
-/// [`hm`] of a stored `"HH:MM"` (seconds ignored); anything else comes back as it is.
-pub fn hm_text(s: &str) -> String {
-    match parse_hm(s) {
-        Some((h, m)) => hm(h, m),
-        None => s.to_string(),
+/// A day of the year with no year ("December 25" / "25 dicembre").
+pub fn day_month(month: u32, day: u32) -> String {
+    if cfg!(not(target_arch = "wasm32")) {
+        return format!("{month:02}-{day:02}");
     }
+    date_with(civil_ms(2000, month, day, 12, 0), &[("timeZone", "UTC"), ("month", "long"), ("day", "numeric")])
 }
 
 fn parse_hm(s: &str) -> Option<(u32, u32)> {
