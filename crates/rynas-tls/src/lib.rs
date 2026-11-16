@@ -216,8 +216,43 @@ pub fn generate_ca(hostname: &str, now_ms: i64) -> Result<PemPair, TlsError> {
     })
 }
 
+/// Whether `name` is in the zone reserved for the PC agents' certificate
+/// ([`rynas_api_types::pcagent::AGENT_TLS_SUFFIX`]), in any case.
+pub fn is_agent_name(name: &str) -> bool {
+    let n = name.trim_end_matches('.').to_ascii_lowercase();
+    let suffix = rynas_api_types::pcagent::AGENT_TLS_SUFFIX;
+    n == suffix.trim_start_matches('.') || n.ends_with(suffix)
+}
+
 /// A leaf for `names`, issued by `ca`; the chain is the leaf followed by the CA certificate.
+/// Names in the agents' reserved zone (`*.rynas.invalid`) are refused: the agents trust any
+/// leaf of the local CA carrying their NAS identity, so only [`issue_agent_leaf`] may issue
+/// one, for exactly that name.
 pub fn issue_leaf(ca: &PemPair, names: &Names, now_ms: i64) -> Result<PemPair, TlsError> {
+    if let Some(n) = names.dns.iter().find(|d| is_agent_name(d)) {
+        return Err(TlsError::cert(format!(
+            "{n}: names under {} are reserved for the PC agents' certificate",
+            rynas_api_types::pcagent::AGENT_TLS_SUFFIX
+        )));
+    }
+    issue(ca, names, now_ms)
+}
+
+/// The PC agents' leaf of the NAS `nas_id` ([`rynas_api_types::pcagent::valid_nas_id`]),
+/// issued by `ca` for the single name
+/// [`rynas_api_types::pcagent::agent_tls_name`]`(nas_id)`, no address.
+pub fn issue_agent_leaf(ca: &PemPair, nas_id: &str, now_ms: i64) -> Result<PemPair, TlsError> {
+    if !rynas_api_types::pcagent::valid_nas_id(nas_id) {
+        return Err(TlsError::cert("bad NAS identity for the PC agents' certificate"));
+    }
+    let names = Names {
+        dns: [rynas_api_types::pcagent::agent_tls_name(nas_id)].into(),
+        ips: BTreeSet::new(),
+    };
+    issue(ca, &names, now_ms)
+}
+
+fn issue(ca: &PemPair, names: &Names, now_ms: i64) -> Result<PemPair, TlsError> {
     let ca_key =
         KeyPair::from_pem(&ca.key).map_err(|e| TlsError::key(format!("local CA key: {e}")))?;
     let ca_der = first_der(&ca.chain)?;

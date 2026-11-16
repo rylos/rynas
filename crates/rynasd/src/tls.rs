@@ -13,7 +13,8 @@
 //!   name `<nas-id>.rynas.invalid` (whatever is active for the interface), re-issued with a
 //!   new CA or before it expires, never for a host name or an address;
 //! - `ca-next.crt`, `ca-next.key`: the next local CA, made ahead and announced to the agents
-//!   in the last two years of the current one ([`TlsSvc::agent_trust`]).
+//!   in the last two years of the current one ([`TlsSvc::agent_trust`]);
+//! - `retired/`: CA files replaced by a rotation (never deleted).
 //!
 //! The active pair is published for `rynas-web` in `/etc/rynas/tls/` (0750 root:rynas):
 //! `ui.crt` (chain, 0644), `ui.key` (0640 root:rynas), `agent.crt` / `agent.key` (same
@@ -91,12 +92,17 @@ struct HostRecord {
 /// The names probe: host name and interface addresses.
 pub type Probe = Box<dyn Fn() -> (String, Vec<IpAddr>) + Send + Sync>;
 
+/// Whether the system clock is synchronized (NTP).
+pub type ClockCheck = Box<dyn Fn() -> bool + Send + Sync>;
+
 pub struct TlsSvc {
     store: PathBuf,
     publish: PathBuf,
     /// Group that may read the published key (`rynas`), when rynasd runs as root.
     gid: Option<u32>,
     probe: Probe,
+    /// Whether the system clock is synchronized: asked only before a CA rotation.
+    synced: ClockCheck,
     lock: Mutex<()>,
 }
 
@@ -113,6 +119,17 @@ impl TlsSvc {
     /// (`<root>/etc/rynas/tls`); `group`: owner group of the published key (only applied as
     /// root).
     pub fn new(store: PathBuf, publish: PathBuf, group: Option<&str>, probe: Probe) -> Arc<Self> {
+        Self::with_clock(store, publish, group, probe, Self::system_clock())
+    }
+
+    /// [`Self::new`] with the clock check `synced` (tests).
+    pub fn with_clock(
+        store: PathBuf,
+        publish: PathBuf,
+        group: Option<&str>,
+        probe: Probe,
+        synced: ClockCheck,
+    ) -> Arc<Self> {
         let gid = group
             .filter(|_| nix::unistd::Uid::effective().is_root())
             .and_then(|g| nix::unistd::Group::from_name(g).ok().flatten())
@@ -122,8 +139,15 @@ impl TlsSvc {
             publish,
             gid,
             probe,
+            synced,
             lock: Mutex::new(()),
         })
+    }
+
+    /// The running system's clock check: what the Date and time page shows as synchronized
+    /// (timedated's NTPSynchronized, chrony's leap status).
+    pub fn system_clock() -> ClockCheck {
+        Box::new(|| crate::clock::Clock::new(PathBuf::from("/"), false).state().synchronized)
     }
 
     /// The probe of the running system: kernel host name, `ip -j addr show`.
@@ -238,43 +262,75 @@ impl TlsSvc {
         Ok(())
     }
 
-    /// The local CA: the stored one while it is valid for another [`CA_SWITCH_DAYS`], else a
-    /// new one. From [`CA_ANNOUNCE_DAYS`] before its end a next CA is made ahead
+    /// The local CA: the stored one while it has more than [`CA_SWITCH_DAYS`] left, else the
+    /// next one. From [`CA_ANNOUNCE_DAYS`] before its end a next CA is made ahead
     /// (`ca-next.*`) and announced to the PC agents ([`Self::agent_trust`]); the switch takes
     /// that one, so an agent that came by in that year already trusts it. An agent away for
     /// longer is refused with a clear error and is paired again.
+    ///
+    /// A stored CA is never replaced because of a wrong clock: one that looks not yet valid
+    /// (a clock behind: an RTC reset before NTP) is kept, and the next CA and the switch wait
+    /// for a synchronized clock. Replaced CA files are kept in `retired/`, never deleted.
     fn ca(&self, host: &str, now: i64) -> io::Result<(PemPair, bool)> {
-        let valid_for = |p: &PemPair, days: i64| {
-            rynas_tls::inspect(&p.chain).is_ok_and(|info| {
-                info[0].not_after_ms - now > days * DAY_MS && info[0].not_before_ms <= now + DAY_MS
-            }) && rynas_tls::key_der(&p.key).is_ok()
+        let first = |p: &PemPair| -> Option<rynas_api_types::tls::TlsCertificate> {
+            rynas_tls::key_der(&p.key).ok()?;
+            rynas_tls::inspect(&p.chain).ok()?.into_iter().next()
         };
+        let left_more_than = |p: &PemPair, days: i64| first(p).is_some_and(|i| i.not_after_ms - now > days * DAY_MS);
         if let Some(p) = self.read_pair("ca")
-            && valid_for(&p, CA_SWITCH_DAYS)
+            && let Some(info) = first(&p)
         {
-            if !valid_for(&p, CA_ANNOUNCE_DAYS)
-                && self
-                    .read_pair("ca-next")
-                    .is_none_or(|n| !valid_for(&n, CA_ANNOUNCE_DAYS))
-            {
-                let next = rynas_tls::generate_ca(host, now).map_err(io::Error::other)?;
-                self.write_pair("ca-next", &next)?;
-                tracing::info!(
-                    "tls: next local CA {} made ahead of the switch",
-                    rynas_tls::inspect(&next.chain)
-                        .map(|i| i[0].fingerprint_sha256.clone())
-                        .unwrap_or_default()
+            // A CA that looks not yet valid means a clock behind (an RTC reset before NTP),
+            // never a reason to replace it: every agent would have to pair again.
+            if info.not_before_ms > now {
+                tracing::warn!(
+                    "tls: the local CA starts in the future: the clock is behind, keeping it"
                 );
+                return Ok((p, false));
             }
-            return Ok((p, false));
+            if left_more_than(&p, CA_ANNOUNCE_DAYS) {
+                return Ok((p, false));
+            }
+            // Rotation only with a synchronized clock: one ahead would rotate early (and a
+            // CA made then would start in the future for the right time).
+            if !(self.synced)() {
+                tracing::warn!(
+                    "tls: the local CA ends in {} days, but the clock is not synchronized: no rotation yet",
+                    (info.not_after_ms - now) / DAY_MS
+                );
+                return Ok((p, false));
+            }
+            if left_more_than(&p, CA_SWITCH_DAYS) {
+                if self
+                    .read_pair("ca-next")
+                    .is_none_or(|n| !left_more_than(&n, CA_ANNOUNCE_DAYS))
+                {
+                    self.retire("ca-next", now)?;
+                    let next = rynas_tls::generate_ca(host, now).map_err(io::Error::other)?;
+                    self.write_pair("ca-next", &next)?;
+                    tracing::info!(
+                        "tls: next local CA {} made ahead of the switch",
+                        rynas_tls::inspect(&next.chain)
+                            .map(|i| i[0].fingerprint_sha256.clone())
+                            .unwrap_or_default()
+                    );
+                }
+                return Ok((p, false));
+            }
         }
+        // the switch (less than CA_SWITCH_DAYS left, by a synchronized clock), or no usable CA
+        // at all (first start): the announced next CA when there is one
         let ca = match self
             .read_pair("ca-next")
-            .filter(|n| valid_for(n, CA_SWITCH_DAYS))
+            .filter(|n| left_more_than(n, CA_SWITCH_DAYS))
         {
             Some(next) => next,
-            None => rynas_tls::generate_ca(host, now).map_err(io::Error::other)?,
+            None => {
+                self.retire("ca-next", now)?;
+                rynas_tls::generate_ca(host, now).map_err(io::Error::other)?
+            }
         };
+        self.retire("ca", now)?;
         self.write_pair("ca", &ca)?;
         let _ = std::fs::remove_file(self.path("ca-next.crt"));
         let _ = std::fs::remove_file(self.path("ca-next.key"));
@@ -285,6 +341,22 @@ impl TlsSvc {
                 .unwrap_or_default()
         );
         Ok((ca, true))
+    }
+
+    /// Moves `<stem>.crt` / `<stem>.key`, when there, to `retired/<stem>-<now>.*` in the
+    /// store: a CA key is never deleted (a rotation or a mistake can be undone by hand).
+    fn retire(&self, stem: &str, now: i64) -> io::Result<()> {
+        let dir = self.path("retired");
+        for ext in ["key", "crt"] {
+            let from = self.path(&format!("{stem}.{ext}"));
+            if std::fs::symlink_metadata(&from).is_err() {
+                continue;
+            }
+            std::fs::create_dir_all(&dir)?;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::rename(&from, dir.join(format!("{stem}-{now}.{ext}")))?;
+        }
+        Ok(())
     }
 
     /// This NAS' identity for its PC agents (`<store>/nas-id`, 32 hex digits, made once and
@@ -396,15 +468,16 @@ impl TlsSvc {
         };
         // the PC agents' leaf: the NAS identity as its only name, always from the local CA
         // (also while an imported certificate is active), served for that name only (SNI)
+        let nas_id = self.nas_id_locked()?;
         let agent_names = Names {
-            dns: [rynas_api_types::pcagent::agent_tls_name(&self.nas_id_locked()?)].into(),
+            dns: [rynas_api_types::pcagent::agent_tls_name(&nas_id)].into(),
             ips: BTreeSet::new(),
         };
         let agent = match self.current_leaf("agent", &ca, &agent_names, now) {
             Some(p) if !new_ca => p,
             _ => {
                 let leaf =
-                    rynas_tls::issue_leaf(&ca, &agent_names, now).map_err(io::Error::other)?;
+                    rynas_tls::issue_agent_leaf(&ca, &nas_id, now).map_err(io::Error::other)?;
                 self.write_pair("agent", &leaf)?;
                 tracing::info!("tls: new certificate for the PC agents");
                 leaf
@@ -726,11 +799,16 @@ mod tests {
     use super::*;
 
     fn svc_in(dir: &Path, host: &'static str, addrs: Vec<IpAddr>) -> Arc<TlsSvc> {
-        TlsSvc::new(
+        svc_clock(dir, host, addrs, true)
+    }
+
+    fn svc_clock(dir: &Path, host: &'static str, addrs: Vec<IpAddr>, synced: bool) -> Arc<TlsSvc> {
+        TlsSvc::with_clock(
             dir.join("state/tls"),
             dir.join("etc/rynas/tls"),
             None,
             Box::new(move || (host.to_string(), addrs.clone())),
+            Box::new(move || synced),
         )
     }
 
@@ -955,6 +1033,65 @@ mod tests {
             rynas_tls::inspect(&agent).unwrap()[1].fingerprint_sha256,
             rynas_tls::inspect(&next).unwrap()[0].fingerprint_sha256
         );
+    }
+
+    fn retired(store: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(store.join("retired"))
+            .map(|r| r.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_clock_behind_or_unsynchronized_never_replaces_the_ca() {
+        let d = tempfile::tempdir().unwrap();
+        let store = d.path().join("state/tls");
+        let now = rynas_tls::now();
+        // made when the clock was right; now the RTC was reset and NTP has not answered yet:
+        // the CA looks not yet valid
+        let s = svc_clock(d.path(), "nas", vec![], false);
+        s.ensure(false, false).unwrap();
+        let ahead = rynas_tls::generate_ca("nas", now + 30 * DAY_MS).unwrap();
+        std::fs::write(store.join("ca.crt"), &ahead.chain).unwrap();
+        std::fs::write(store.join("ca.key"), &ahead.key).unwrap();
+        s.ensure(false, false).unwrap();
+        assert_eq!(std::fs::read_to_string(store.join("ca.key")).unwrap(), ahead.key);
+        assert_eq!(s.agent_trust(8443).unwrap().cas, std::slice::from_ref(&ahead.chain));
+        // even with a synchronized clock (the CA is not past its end)
+        let s = svc_clock(d.path(), "nas", vec![], true);
+        s.ensure(false, false).unwrap();
+        assert_eq!(std::fs::read_to_string(store.join("ca.key")).unwrap(), ahead.key);
+        // near its end (or past it) by an unsynchronized clock: no next CA, no switch
+        let s = svc_clock(d.path(), "nas", vec![], false);
+        for left in [500, 300, -10] {
+            let old = rynas_tls::generate_ca("nas", now - (rynas_tls::CA_DAYS - left) * DAY_MS).unwrap();
+            std::fs::write(store.join("ca.crt"), &old.chain).unwrap();
+            std::fs::write(store.join("ca.key"), &old.key).unwrap();
+            s.ensure(false, false).unwrap();
+            assert_eq!(std::fs::read_to_string(store.join("ca.key")).unwrap(), old.key, "{left} days left");
+            assert!(!store.join("ca-next.key").exists());
+        }
+        assert!(retired(&store).is_empty());
+    }
+
+    #[test]
+    fn a_switch_keeps_the_old_ca_retired() {
+        let d = tempfile::tempdir().unwrap();
+        let store = d.path().join("state/tls");
+        let s = svc_in(d.path(), "nas", vec![]);
+        s.ensure(false, false).unwrap();
+        let now = rynas_tls::now();
+        let old = rynas_tls::generate_ca("nas", now - (rynas_tls::CA_DAYS - 300) * DAY_MS).unwrap();
+        std::fs::write(store.join("ca.crt"), &old.chain).unwrap();
+        std::fs::write(store.join("ca.key"), &old.key).unwrap();
+        assert!(s.ensure(false, false).unwrap());
+        assert_ne!(std::fs::read_to_string(store.join("ca.key")).unwrap(), old.key);
+        let r = retired(&store);
+        assert_eq!(r.len(), 2, "{r:?}");
+        let key = r.iter().find(|n| n.starts_with("ca-") && n.ends_with(".key")).unwrap();
+        assert_eq!(std::fs::read_to_string(store.join("retired").join(key)).unwrap(), old.key);
+        assert_eq!(mode(&store.join("retired")), 0o700);
     }
 
     #[test]

@@ -10,6 +10,12 @@ Description=rynas privileged daemon
 Documentation=https://github.com/rylos/rynas
 Requires=rynasd.socket
 After=rynasd.socket local-fs.target nss-user-lookup.target
+# The clock at least at the last saved time (systemd-timesyncd's clock file) before the
+# certificates are looked at. Not time-sync.target: with systemd-time-wait-sync enabled it
+# waits for a time server without end, and the NAS interface would stay down on a NAS
+# without internet. The certificates do not rely on it: a local CA is never replaced because
+# of the clock (crates/rynasd/src/tls.rs).
+After=time-set.target
 
 [Service]
 Type=simple

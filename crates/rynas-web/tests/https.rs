@@ -244,16 +244,12 @@ async fn the_agents_certificate_is_served_by_name() {
     write_pair(d.path(), &imported);
     let id = "0123456789abcdef0123456789abcdef";
     let name = rynas_api_types::pcagent::agent_tls_name(id);
-    let agent_names = rynas_tls::Names {
-        dns: [name.clone()].into(),
-        ips: Default::default(),
-    };
     let (port, reloader, _app) = start(d.path()).await;
     reloader.reload().unwrap();
     // no agent pair yet (an older rynasd): the agent name gets the interface's certificate
     assert!(https(port, &ca, &name, SESSION).await.is_err());
     assert!(https(port, &other_ca, &name, SESSION).await.is_err(), "not valid for the name");
-    let agent = rynas_tls::issue_leaf(&ca, &agent_names, now).unwrap();
+    let agent = rynas_tls::issue_agent_leaf(&ca, id, now).unwrap();
     std::fs::write(d.path().join("agent.key"), &agent.key).unwrap();
     std::fs::write(d.path().join("agent.crt"), &agent.chain).unwrap();
     assert!(reloader.reload().unwrap());

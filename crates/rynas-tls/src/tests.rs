@@ -195,3 +195,31 @@ fn import_normalises_pem_text() {
     let imp = validate_import(&noisy, &leaf.key, T0).unwrap();
     assert_eq!(imp.pair.chain, leaf.chain);
 }
+
+#[test]
+fn issue_leaf_refuses_the_agents_reserved_names() {
+    let ca = generate_ca("nas", T0).unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    for bad in [
+        format!("{id}.rynas.invalid"),
+        format!("{}.RYNAS.Invalid.", id.to_uppercase()),
+        "x.y.rynas.invalid".into(),
+        "rynas.invalid".into(),
+    ] {
+        let mut want = names("nas", &[]);
+        want.dns.insert(bad.clone());
+        let e = issue_leaf(&ca, &want, T0).unwrap_err();
+        assert!(e.message.contains("reserved"), "{bad}: {e}");
+    }
+    // other names ending alike are fine
+    let mut want = names("nas", &[]);
+    want.dns.insert("myrynas.invalid.example".into());
+    assert!(issue_leaf(&ca, &want, T0).is_ok());
+    // the dedicated function: exactly the identity's name, nothing else
+    let leaf = issue_agent_leaf(&ca, id, T0).unwrap();
+    let info = inspect(&leaf.chain).unwrap();
+    assert_eq!(info[0].dns_names, [format!("{id}.rynas.invalid")]);
+    assert!(info[0].ip_addresses.is_empty());
+    assert!(issue_agent_leaf(&ca, "NOTANID", T0).is_err());
+    assert!(issue_agent_leaf(&ca, "0123456789ABCDEF0123456789ABCDEF", T0).is_err());
+}
