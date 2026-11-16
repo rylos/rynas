@@ -612,7 +612,16 @@ fn task_row(
     let task = v.task.clone();
     let st = v.status.clone();
     let id = task.id.clone();
-    let name = if task.name.is_empty() { task.id.clone() } else { task.name.clone() };
+    // rynas's own jobs are named by their action (in the interface's language); their stored
+    // name and description are English
+    let own_job = owner_page(&task.action).is_some() && !matches!(task.action, TaskAction::PowerShutdown { .. });
+    let name = if own_job {
+        action_text(&task.action).0
+    } else if task.name.is_empty() {
+        task.id.clone()
+    } else {
+        task.name.clone()
+    };
     let deleting = st.pending == Some(PendingOp::Delete);
     // a deduplication task follows its window in Storage: read-only here
     // the automatic system updates run on the system's own timer: listed, nothing to do here
@@ -711,7 +720,7 @@ fn task_row(
                         <span class="cell-sub"><a href=href>{tf("sch.set_in", &[("page", t(page))])}</a></span>
                     })}
                     <span class="cell-sub mono">{task.id.clone()}</span>
-                    {(!task.description.is_empty()).then(|| view! { <span class="cell-sub">{task.description.clone()}</span> })}
+                    {(!own_job && !task.description.is_empty()).then(|| view! { <span class="cell-sub">{task.description.clone()}</span> })}
                 </div>
             }
             .into_any()),
@@ -972,7 +981,15 @@ fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyVie
     });
 
     let title = {
-        let n = d.with_untracked(|t| if t.name.is_empty() { t.id.clone() } else { t.name.clone() });
+        let n = d.with_untracked(|t| {
+            if owner_page(&t.action).is_some() && !matches!(t.action, TaskAction::PowerShutdown { .. }) {
+                action_text(&t.action).0
+            } else if t.name.is_empty() {
+                t.id.clone()
+            } else {
+                t.name.clone()
+            }
+        });
         Signal::derive(move || if is_new { t("sch.create").to_string() } else { tf("edit_named", &[("name", &n)]) })
     };
     let body = view! {
