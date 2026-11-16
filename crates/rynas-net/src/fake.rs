@@ -56,6 +56,8 @@ pub struct FakeState {
     pub reachable: Vec<String>,
     /// Hosts that answer pings from a time on (`now_ms`): a router back after a power cut.
     pub reachable_at: Vec<(String, u64)>,
+    /// Ports whose cable is pulled from a time on (`now_ms`).
+    pub unplugged_at: Vec<(String, u64)>,
     /// DNS servers that answer queries.
     pub dns_up: Vec<String>,
     /// DNS servers of the DHCP leases: iface → servers.
@@ -249,7 +251,7 @@ impl FakeOs {
                 .values()
                 .any(|x| x.master.as_deref() == Some(name) && x.carrier);
         }
-        l.carrier
+        l.carrier && !s.unplugged_at.iter().any(|(n, at)| n == name && s.now_ms >= *at)
     }
 
     /// networkd's reload: creates the netdevs of the `.netdev` files that do not exist (an
@@ -337,11 +339,21 @@ impl FakeOs {
         }
         let c = nf.to_config();
         link.addrs.retain(|(a, _, _)| a.starts_with("169.254."));
-        for a in &c.addresses {
+        // networkd configures static addresses next to DHCP too (the watchdog's rescue that
+        // keeps them); a static gateway serves when there is no lease (its metric is worse)
+        for a in nf
+            .addresses
+            .iter()
+            .filter(|a| a.parse::<crate::validate::Cidr>().is_ok())
+        {
             let (ip, p) = a.split_once('/').unwrap();
             link.addrs.push((ip.into(), p.parse().unwrap(), false));
         }
-        let mut gw = c.gateway.clone();
+        let mut gw = nf
+            .gateways
+            .iter()
+            .find(|g| g.parse::<std::net::Ipv4Addr>().is_ok())
+            .cloned();
         // static servers first, then those of the lease (networkd's order)
         link.nd_dns = c.dns.clone();
         if c.ipv4 == rynas_api_types::network::Ipv4Method::Dhcp {

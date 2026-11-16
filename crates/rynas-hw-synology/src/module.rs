@@ -34,29 +34,60 @@ pub const UPS_HOOK_LINK: &str = "/etc/synodeb/ups-pre-safemode.d/50-rynas";
 ///
 /// synohwd sends a status LED code only when its own choice changes, so the orange set here
 /// would stay until synohwd restarts: [`Signal::Clear`] sends back the code synohwd shows
-/// (`status_led` of its status file: orange blinking when it has a problem of its own),
-/// green when the file does not say.
+/// ([`Beeps::usual_led`]). `status_led` in its status file is synohwd's own choice, not an
+/// echo of what reaches the microcontroller: only its control loop (`set_status`: orange
+/// blinking for a stopped fan or a degraded md array, green otherwise) and its start set it;
+/// codes sent through the FIFO or the control socket go to the microcontroller untouched.
+///
+/// synohwd has no command to show its choice again: the reading and the sending race with
+/// its control loop (a choice changed in between would be covered by ours and never sent
+/// again). The race is narrowed from both sides: orange whenever synohwd's own conditions
+/// hold, even before its status file says so, and the status read again after the send,
+/// sending the newer choice when it changed. Closing it needs synohwd's help (a control
+/// socket command that makes it resend its choice, `docs/plugins/synology.md`).
 pub struct Beeps {
     pub fifo: PathBuf,
     /// synohwd's status file.
     pub status: PathBuf,
+    /// `/proc/mdstat`, for the degraded arrays synohwd turns the LED orange for.
+    pub mdstat: PathBuf,
 }
 
 impl Beeps {
-    /// The status LED code synohwd itself shows.
+    /// The status LED code synohwd itself shows: `status_led` of its status file, raised to
+    /// orange blinking when synohwd's own conditions for it already hold (a stopped fan in its
+    /// status, a degraded md array) and its file is not rewritten yet; green when nothing
+    /// says. Never anything but a status LED code, never a hardware alarm hidden.
     fn usual_led(&self) -> String {
-        std::fs::read_to_string(&self.status)
+        let status = std::fs::read_to_string(&self.status)
             .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        let fan_fail = status
+            .as_ref()
+            .and_then(|v| v.get("fan_fail")?.as_bool())
+            .unwrap_or(false);
+        let degraded = std::fs::read_to_string(&self.mdstat).is_ok_and(|t| md_degraded(&t));
+        if fan_fail || degraded {
+            return ORANGE_BLINK.into();
+        }
+        status
             .and_then(|v| v.get("status_led")?.as_str().map(str::to_string))
             .filter(|c| crate::status::led_word(c).is_some())
             .unwrap_or_else(|| GREEN.into())
     }
 }
 
+/// An md array missing a member in `/proc/mdstat` (`[U_]`), synohwd's test.
+fn md_degraded(mdstat: &str) -> bool {
+    mdstat.split('[').skip(1).any(|rest| {
+        rest.split_once(']').is_some_and(|(inside, _)| {
+            !inside.is_empty() && inside.contains('_') && inside.chars().all(|c| c == 'U' || c == '_')
+        })
+    })
+}
+
 impl Feedback for Beeps {
     fn signal(&self, s: Signal) {
-        let usual;
         let cmds: &[&str] = match s {
             Signal::PressAgain => &[crate::cmd::BEEP_SHORT, ORANGE_BLINK],
             Signal::Restoring => &[crate::cmd::BEEP_LONG],
@@ -64,8 +95,14 @@ impl Feedback for Beeps {
             // quiet: the NAS is fine, the network around it is not back yet
             Signal::Unreachable => &[ORANGE_BLINK],
             Signal::Clear => {
-                usual = self.usual_led();
-                &[usual.as_str()]
+                let usual = self.usual_led();
+                let _ = crate::cmd::send(&self.fifo, &usual);
+                // synohwd changed its choice between the read and the send: the newer one
+                let again = self.usual_led();
+                if again != usual {
+                    let _ = crate::cmd::send(&self.fifo, &again);
+                }
+                return;
             }
         };
         for c in cmds {
@@ -227,6 +264,7 @@ impl Module for SynologyModule {
             Arc::new(Beeps {
                 fifo: rynas_hw::under(&self.hw_root, crate::cmd::FIFO),
                 status: rynas_hw::under(&self.hw_root, crate::status::STATUS),
+                mdstat: rynas_hw::under(&self.hw_root, "/proc/mdstat"),
             }) as Arc<dyn Feedback>
         })
     }
@@ -374,6 +412,7 @@ mod tests {
         let b = Beeps {
             fifo,
             status: d.path().join("status.json"),
+            mdstat: d.path().join("mdstat"),
         };
         let mut read = || {
             let mut buf = [0u8; 64];
@@ -392,5 +431,25 @@ mod tests {
         std::fs::write(&b.status, r#"{"status_led": "1"}"#).unwrap();
         b.signal(Signal::Clear);
         assert_eq!(read(), "8\n", "never anything but a status LED code");
+        // synohwd's conditions hold before its status file says so: orange, never hidden
+        std::fs::write(&b.status, r#"{"status_led": "8", "fan_fail": true}"#).unwrap();
+        b.signal(Signal::Clear);
+        assert_eq!(read(), ";\n", "a stopped fan");
+        std::fs::write(&b.status, r#"{"status_led": "8", "fan_fail": false}"#).unwrap();
+        std::fs::write(
+            &b.mdstat,
+            "md2 : active raid1 sata2p3[1]\n      1000 blocks super 1.2 [2/1] [_U]\n",
+        )
+        .unwrap();
+        b.signal(Signal::Clear);
+        assert_eq!(read(), ";\n", "a degraded array");
+        std::fs::write(
+            &b.mdstat,
+            "md2 : active raid1 sata1p3[0] sata2p3[1]\n      1000 blocks super 1.2 [2/2] [UU]\n",
+        )
+        .unwrap();
+        b.signal(Signal::Clear);
+        assert_eq!(read(), "8\n");
+        assert!(!md_degraded("unused devices: <none>\n"));
     }
 }

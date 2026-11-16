@@ -21,7 +21,8 @@
 //!
 //! Around it: the boot guard (`rynas-net-guard.service`, before networkd) restores the last
 //! known good files when a trial was interrupted by a reboot; the post-boot watchdog keeps
-//! settings that worked before (it warns and waits for the LAN) and, for settings never
+//! settings that worked before (it warns and waits for the LAN; after 2 hours with a cable or
+//! at the 3rd boot in a row without network it adds DHCP next to them) and, for settings never
 //! confirmed that stay unhealthy, falls back to the last known good revision and then to the
 //! rescue configuration (DHCP and link-local on every port); the rescue paths ([`rescue`]):
 //! deterministic IPv4 link-local addresses, the Avahi service file, the Synology reset button

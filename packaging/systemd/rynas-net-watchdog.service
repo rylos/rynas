@@ -1,9 +1,12 @@
 # rynas post-boot network watchdog (D-NET), started by rynas-net-watchdog.timer 5 minutes
-# after boot. Only settings never confirmed are ever undone:
-# - settings that worked before this boot (the last known good revision, or files found
-#   healthy at an earlier boot) are never changed: when ports have a cable but none has a
-#   routable address with a reachable gateway (router or switch slower than the NAS after a
-#   power cut) it warns, signals it (status LED) and checks every 30 s for up to 30 minutes;
+# after boot. Only settings never confirmed are ever replaced:
+# - settings that worked before this boot (the last known good revision with the same
+#   network folder, or files found healthy before) are kept: when ports have a cable but
+#   none has a routable address with a reachable gateway (router or switch slower than the
+#   NAS after a power cut) it warns, signals it (status LED) and checks every 30 s; after
+#   2 hours with a cable and no network, or at the 3rd boot in a row without network, it
+#   adds DHCP and link-local next to them (the static address stays, used only if no other
+#   host has it; its gateway goes behind the one DHCP gives);
 # - settings never confirmed healthy: after 6 unhealthy checks in a row (30 s apart, within
 #   10 minutes) back to the last known good revision, then the rescue configuration (DHCP and
 #   link-local on every port), a notification and the hardware module's signal (beep, LED).
@@ -17,5 +20,6 @@ After=network.target
 [Service]
 Type=oneshot
 ExecStart=/usr/libexec/rynas/rynasctl net watchdog
-# up to 30 minutes of waiting, plus the checks and a rescue
-TimeoutStartSec=45min
+# up to 3 hours of waiting (2 hours with a cable, cables pulled restart the count), plus
+# the checks and a rescue
+TimeoutStartSec=3h15min

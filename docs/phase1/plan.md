@@ -1007,7 +1007,8 @@ schema 2 added the `code` and `body_format` columns.
 | `net.boot_dns_failed` | `revision` (ifupdown's, restored) | Network migration at boot undone: names did not resolve (`../research/network.md` §4.1) |
 | `net.dns_repaired` | `detail` (English, not translated) | Name resolution repaired: `/etc/resolv.conf` had no server while networkd ran the network |
 | `net.watchdog_restored` / `net.rescue` / `net.reset` | `revision` | Network restored to the last known good revision / rescue configuration / factory network |
-| `net.unreachable` / `net.reachable` | — | Network unreachable after boot; settings unchanged (warning, firing on key `network:unreachable`, settings that worked before are kept) / reachable again (resolves it) |
+| `net.unreachable` / `net.reachable` | `minutes`, `boot`, `boots` / — | Network unreachable after boot; settings unchanged (warning, firing on key `network:unreachable`, settings that worked before are kept; says in how many minutes DHCP is added next to them and which boot in a row this is) / reachable again (resolves it, once: the watchdog or rynasd, whoever removes `net/net-unreachable`) |
+| `net.rescue_kept` | `revision` | DHCP added next to settings that stopped working (critical, key `network:watchdog`): 2 hours with a cable and no network, or the 3rd boot in a row; static addresses and gateways kept; previous settings = {revision} |
 | `net.bond_member_down` | `bond`, `member`, `failures` | {member} of {bond} lost its link (warning; also a flap between two looks: the failure counter grew) |
 | `net.bond_active_changed` | `bond`, `from`, `to` | {to} carries the traffic of {bond} now (info) |
 | `net.bond_lacp_lost` | `bond` | The LACP group of {bond} with the switch is broken: no partner, or members in different aggregators (warning) |
@@ -1075,7 +1076,7 @@ domain (apply with `POST /api/v1/config/apply`); actions on the system are tasks
 |---|---|---|---|
 | GET | `/api/v1/scheduler/tasks` | — | `Vec<TaskView>` {task: `ScheduledTask`, status: {pending?, applied, unit, running, next_run_ms?, last_run?}} (staged view of the session user; staged deletions listed with `pending: delete`) |
 | POST | `/api/v1/scheduler/tasks` | `ScheduledTask` | 201 `TaskView`; 409 `already_exists`; 400 `invalid_value` (calendar refused by `systemd-analyze`, unknown user, system account, root task running a file others can change, snapshot action: use the jobs endpoint) |
-| GET/PUT/DELETE | `/api/v1/scheduler/tasks/{id}` | `ScheduledTask` (id cannot change; an internal task keeps its action) | `TaskView` / `StagedChanges`; DELETE of a job's task: 409 `conflict` (delete the job) |
+| GET/PUT/DELETE | `/api/v1/scheduler/tasks/{id}` | `ScheduledTask` (id cannot change; an internal task keeps its action; `owner` is ignored and recomputed from the action; a feature's task keeps what its owner decides: action, schedule, and the catch-up for power and deduplication tasks; `trigger.persistent`/`randomized_delay_s` and `policy.missed`/`jitter_s` given together must agree, the policy being the reference) | `TaskView` / `StagedChanges`; 400 `invalid_value` for a locked field changed or trigger and policy disagreeing; a power or deduplication task never catches up a missed run; DELETE of a job's task: 409 `conflict` (delete the job) |
 | POST | `/api/v1/scheduler/tasks/{id}/enable`, `/disable` | — | `TaskView` (stages `enabled`) |
 | POST | `/api/v1/scheduler/tasks/{id}/run` | — | 204: `systemctl start --no-block rynas-task-<id>.service` (same environment as a scheduled run); 409 `not_applied` while only staged |
 | GET | `/api/v1/scheduler/tasks/{id}/history?limit=N&before=<run id>` | — | `Vec<TaskRun>` {id, invocation_id, start_ms?, end_ms, result, exit_code?, signal?, ok, output_bytes, output_truncated}, newest first |
@@ -1525,24 +1526,44 @@ Safety net (units in `packaging/systemd/`, enabled by the package, not started a
   interrupted trial is undone **before networkd starts** (files and unit enablement only,
   report `boot_guard`); a migration planned for this boot is carried out (see below).
 - `rynas-net-watchdog.timer` (5 min after boot) → `rynasctl net watchdog`
-  (`TimeoutStartSec=45min`): healthy = a port with a cable has a routable IPv4 address with a
-  gateway that answers ping (or no default route at all). Only settings never confirmed are
-  undone. **Settings that worked before this boot** (files of the last known good revision,
-  or the digest of the files found healthy at an earlier boot, `net/healthy.json`) are never
-  changed: warning `net.unreachable` (firing, key `network:unreachable`), quiet signal
-  `Signal::Unreachable` (orange LED, no beep), a check every 30 s for up to 30 min, resolved
-  (`net.reachable`) at the first healthy check. **Settings never confirmed healthy**: after 6
-  unhealthy checks in a row (30 s apart, within 10 min; a healthy check cancels) the last
-  known good revision is restored if the files differ from it (30 s to come up), then the
-  **rescue configuration** (DHCP + link-local on every port, foreign `.netdev` suspended,
-  ifupdown put aside); notification `network:watchdog` critical, long signal of the hardware
-  module (`rynas_net::rescue::Feedback`, `Module::rescue_feedback`: on a Synology a long beep +
-  orange LED through synohwd's FIFO; silent elsewhere). No cable on any port: never a change.
-  A trial or a new last known good revision during the wait stops it. The signal (marker
-  `/run/rynas/net-signal`) ends with `Signal::Clear` when the network is healthy again
-  (watchdog, or rynasd every minute) or when an administrator acknowledges a notification of
-  `network:watchdog|unreachable|reset` (rynasd watches the notification engine's changes); on
-  a Synology the status LED gets back the code synohwd shows (`status.json`).
+  (`TimeoutStartSec=3h15min`): healthy = a port with a cable has a routable IPv4 address with
+  a gateway that answers ping (or no default route at all). **Settings that worked before
+  this boot** = the files of the last known good revision **and** the digest of the whole
+  network folder (`/etc/systemd/network`, `/etc/network/interfaces` and `interfaces.d`)
+  recorded when it was committed (`Revision.digest`: a foreign `10-foo.network` or an
+  `interfaces.d` stanza added later breaks the match), or the digest of the files found
+  healthy before (`net/healthy.json`, written by the watchdog and by rynasd every minute when
+  the files changed or every hour, never during a trial). They are kept: warning
+  `net.unreachable` (firing, key `network:unreachable`), quiet signal `Signal::Unreachable`
+  (orange LED, no beep), a check every 30 s, resolved (`net.reachable`) at the first healthy
+  check. **Bounded fallback** (a NAS moved to another network or whose subnet changed would
+  otherwise stay unreachable, and generic Debian has no reset button): after **2 hours with a
+  cable and no healthy network** (cables pulled restart the count; at most 3 hours of
+  watching), or at the **3rd boot in a row** that finds these files unhealthy (6 checks in a
+  row; `net/unreachable-boots.json`, keyed by the folder digest, reset by any healthy check),
+  the watchdog **adds** reachability instead of replacing the settings: DHCP and link-local on
+  every port (the factory network) with the static IPv4 addresses running now kept on their
+  port (a bond's or bridge's on its first physical member; a VLAN's not) in `[Address]`
+  sections with `DuplicateAddressDetection=ipv4` (configured only if no other host answers
+  for the address: never a duplicate on the new network) and their gateway as a `[Route]`
+  with `Metric=2048`, behind DHCP's default route (1024) and still used without a DHCP
+  server. A blackout loses nothing (same address, same gateway), a moved NAS gets an address
+  and a gateway from the new network. Notification `net.rescue_kept` (critical), long signal;
+  the previous settings are a revision to restore. The rescue file reads back as DHCP (the
+  kept lines are not settings: the next change of that port drops them). **Settings never
+  confirmed healthy**: after 6 unhealthy checks in a row (30 s apart, within 10 min; a healthy
+  check cancels) the last known good revision is restored if the files differ from it (30 s
+  to come up), then the **rescue configuration** (DHCP + link-local on every port, foreign
+  `.netdev` suspended, ifupdown put aside); notification `network:watchdog` critical, long
+  signal of the hardware module (`rynas_net::rescue::Feedback`, `Module::rescue_feedback`: on
+  a Synology a long beep + orange LED through synohwd's FIFO; silent elsewhere). No cable on
+  any port: never a change. A trial or a new last known good revision during the wait stops
+  it, and it is checked again under the lock right before restoring or rescuing (a trial
+  started meanwhile is never dropped). The signal (marker `/run/rynas/net-signal`) ends with
+  `Signal::Clear` when the network is healthy again (watchdog, or rynasd every minute) or when
+  an administrator acknowledges a notification of `network:watchdog|unreachable|reset`
+  (rynasd watches the notification engine's changes); on a Synology the status LED gets back
+  the code synohwd shows (see the Synology module).
 - Reset button (Synology): **one owner**. `/etc/synohwd.toml` has a single writer, the
   `synology.hw` key (`PUT /api/v1/modules/synology/settings`, `reset_button:
   network_rescue` = `reset_button = "command:/usr/libexec/rynas/rynasctl net reset-button"`);
@@ -1820,7 +1841,11 @@ worker's unit with `MemoryMax` = `maintenance_memory_pct` of the RAM. The need i
 from the size of the index files (40 bytes per blob on disk, 250 in memory, 32 MiB base); over
 the budget, prune and check are postponed and `PcMaintenance.postponed` says why. A
 maintenance starts only when no PC of the group uploaded in the last ten minutes or reports
-progress; while it runs, uploads answer 423.
+progress; while it runs, uploads answer 423. Once a day: retried every 5 minutes from its hour while a PC is busy;
+missed at its hour (NAS off or busy), it runs as a **catch-up** up to 6 hours after it, and a
+catch-up (more than an hour late) also gives way to any PC of the group about to back up (online
+in the last 15 minutes with a backup due or a command waiting), so a late maintenance never
+takes the repository from the day's PC backups; past 6 hours it waits for the next day.
 
 ### Console
 

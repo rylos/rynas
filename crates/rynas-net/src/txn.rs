@@ -31,6 +31,7 @@ use crate::rescue::{self, Press};
 use crate::resolv;
 use crate::store::{
     BootAdopt, FileState, HealthySeen, Marker, Observed, RevKind, Revision, Services, Store,
+    UnreachableBoots,
 };
 use crate::validate::{self, OtherPort};
 use crate::{
@@ -175,9 +176,29 @@ pub fn verdict(ports: &[PortHealth]) -> Verdict {
 
 /// How often the post-boot watchdog looks at the ports while it waits.
 pub const WATCHDOG_EVERY: Duration = Duration::from_secs(30);
-/// How long the watchdog waits for the network with settings that worked before: after a
-/// power cut the NAS often boots faster than the router and the switches.
-pub const KNOWN_GOOD_WAIT: Duration = Duration::from_secs(30 * 60);
+/// Settings that worked before are kept while the network is unreachable (after a power cut
+/// the NAS often boots faster than the router and the switches), but not forever: settings
+/// that are wrong for good (the NAS moved to another network, the subnet changed) would
+/// leave a NAS without a reset button unreachable. After this long with a cable connected
+/// and no healthy network, DHCP and link-local are added next to them ([`KEEP_STATIC_NOTE`]).
+pub const KNOWN_GOOD_RESCUE_AFTER: Duration = Duration::from_secs(2 * 60 * 60);
+/// ... or at this boot in a row that finds them unhealthy with a cable connected
+/// ([`RESCUE_STREAK`] checks in a row), a few minutes after boot.
+pub const KNOWN_GOOD_RESCUE_BOOTS: u32 = 3;
+/// The longest the watchdog watches settings that worked before (cables pulled and put back
+/// restart the [`KNOWN_GOOD_RESCUE_AFTER`] count; the service's `TimeoutStartSec` is above).
+pub const KNOWN_GOOD_MAX: Duration = Duration::from_secs(3 * 60 * 60);
+/// Metric of a kept static gateway after the rescue: worse than DHCP's default route (1024),
+/// so the gateway of the network the NAS is on now wins, and the old one still serves when
+/// there is no DHCP server.
+pub const KEPT_GATEWAY_METRIC: u32 = 2048;
+/// The comment that marks the static settings a rescue kept in a rynas file.
+pub const KEEP_STATIC_NOTE: &str = "# rescue (post-boot watchdog): static settings kept next to DHCP; the address only if no other host uses it, its gateway behind the one DHCP gives";
+/// The state-folder marker of a firing "unreachable" warning: whoever removes it (the
+/// watchdog or rynasd's minute check) resolves the warning, once.
+const UNREACHABLE_MARK: &str = "net-unreachable";
+/// How often rynasd records healthy network files that did not change.
+pub const HEALTHY_NOTE_EVERY: Duration = Duration::from_secs(60 * 60);
 /// How long it watches settings that were never confirmed healthy before it gives up.
 pub const UNCONFIRMED_WAIT: Duration = Duration::from_secs(10 * 60);
 /// Consecutive unhealthy checks (some port with a cable) before settings never confirmed
@@ -195,6 +216,9 @@ struct Expect {
     addrs: Vec<String>,
     mtu: Option<u32>,
     gateway: Option<String>,
+    /// Static addresses its file keeps next to DHCP (the watchdog's rescue): never removed
+    /// as old, never demanded either (configured only when no other host has them).
+    kept: Vec<String>,
 }
 
 /// `TrialKind` as stored revision kinds and event keys.
@@ -243,18 +267,46 @@ fn event(
 
 /// The watchdog keeps settings that worked before while the network is unreachable (firing
 /// until [`reachable_event`]).
-fn unreachable_event(why: &str) -> NewEvent {
+///
+/// It says what happens next and when: after `minutes` more minutes with a cable connected
+/// and no healthy network (or now, at boot [`KNOWN_GOOD_RESCUE_BOOTS`] in a row: a few
+/// minutes) DHCP and link-local are added next to the settings, which stay.
+fn unreachable_event(why: &str, boot: u32, minutes: u64) -> NewEvent {
+    let boots = KNOWN_GOOD_RESCUE_BOOTS;
     let mut e = event(
         NotifySeverity::Warning,
         "unreachable",
-        ("net.unreachable", &[]),
+        (
+            "net.unreachable",
+            &[
+                ("minutes", minutes.to_string()),
+                ("boot", boot.to_string()),
+                ("boots", boots.to_string()),
+            ],
+        ),
         "Network unreachable after boot; settings unchanged".into(),
         format!(
-            "No connected port has a routable address with a reachable gateway. The settings are {why}: they worked before and are kept, so the router or the switch is probably not back yet (after a power cut, for example). rynas checks again every 30 seconds."
+            "No connected port has a routable address with a reachable gateway. The settings are {why}: they worked before and are kept, so the router or the switch is probably not back yet (after a power cut, for example). rynas checks again every 30 seconds. If the network is still down in {minutes} minutes with a cable connected, rynas adds DHCP and a link-local address next to these settings, which stay (their gateway goes behind the one DHCP gives), so the NAS can be found on a network that changed. Boots in a row without network: {boot} of {boots}."
         ),
     );
     e.state = EventState::Firing;
     e
+}
+
+/// The watchdog added DHCP and link-local next to settings that worked before and stayed
+/// unhealthy ([`KNOWN_GOOD_RESCUE_AFTER`], [`KNOWN_GOOD_RESCUE_BOOTS`]).
+fn rescue_kept_event(before: u64) -> NewEvent {
+    event(
+        NotifySeverity::Critical,
+        "watchdog",
+        ("net.rescue_kept", &[("revision", before.to_string())]),
+        "Network: DHCP added next to settings that stopped working".into(),
+        format!(
+            "Settings that worked before found no working network for {} hours with a cable connected, or at {} boots in a row. They stay, with DHCP and a link-local address added on every port; a static address is used only if no other host has it, and its gateway now comes after the one DHCP gives. The previous settings are revision {before} (Network › Revisions): check them, for example after a move to another network.",
+            KNOWN_GOOD_RESCUE_AFTER.as_secs() / 3600,
+            KNOWN_GOOD_RESCUE_BOOTS
+        ),
+    )
 }
 
 /// The network works again after [`unreachable_event`].
@@ -1623,6 +1675,19 @@ impl Engine {
         out
     }
 
+    /// The static addresses `rev`'s file for `iface` keeps next to DHCP
+    /// ([`Engine::keep_static`]).
+    fn kept_static(rev: &Revision, iface: &str) -> Vec<String> {
+        let path = networkd::network_path(iface);
+        rev.files
+            .iter()
+            .find(|f| f.path == path)
+            .and_then(|f| f.content.as_deref())
+            .filter(|c| c.contains(KEEP_STATIC_NOTE))
+            .map(|c| NetworkFile::parse(c).addresses)
+            .unwrap_or_default()
+    }
+
     fn expectations(rev: &Revision, other: &Revision) -> BTreeMap<String, Expect> {
         let mut out = BTreeMap::new();
         let ifup = Self::ifupdown_static(rev);
@@ -1645,6 +1710,7 @@ impl Engine {
                     addrs,
                     mtu: o.map(|o| o.mtu),
                     gateway: o.and_then(|o| o.gateway.clone()).or(ig),
+                    kept: Vec::new(),
                 }
             } else if let Some(c) = rev.config.get(n) {
                 Expect {
@@ -1656,6 +1722,7 @@ impl Engine {
                     // no MTU in the file: the MTU it had before the change
                     mtu: c.mtu.or_else(|| other.observed.get(n).map(|o| o.mtu)),
                     gateway: c.gateway.clone(),
+                    kept: Self::kept_static(rev, n),
                 }
             } else {
                 continue;
@@ -1692,7 +1759,7 @@ impl Engine {
                 }
             }
             if let Some(old) = before.get(n) {
-                for a in old.addrs.iter().filter(|a| !e.addrs.contains(a)) {
+                for a in old.addrs.iter().filter(|a| !e.addrs.contains(a) && !e.kept.contains(a)) {
                     if l.static_v4().contains(a) {
                         problems.push(format!("{n}: old address {a} is still there"));
                     }
@@ -1766,7 +1833,7 @@ impl Engine {
                 continue;
             }
             if let Some(old) = before.get(n) {
-                for a in old.addrs.iter().filter(|a| !e.addrs.contains(a)) {
+                for a in old.addrs.iter().filter(|a| !e.addrs.contains(a) && !e.kept.contains(a)) {
                     if l.static_v4().contains(a) {
                         log(&format!("{n}: removing old address {a}"));
                         let _ = self.os.run(&["ip", "addr", "del", a, "dev", n], QUICK);
@@ -2216,6 +2283,8 @@ impl Engine {
     fn commit(&self, target: &Revision) -> Result<()> {
         let mut t = target.clone();
         t.good = true;
+        // the whole network folder as confirmed (a foreign file added later is not part of it)
+        t.digest = Some(self.network_digest());
         self.store.update_revision(&t)?;
         self.store.set_lkg(t.id)?;
         // the staged changes this revision applied are done
@@ -2909,12 +2978,92 @@ impl Engine {
         }
     }
 
+    /// Keeps the static IPv4 settings running now in a rescue `target` (DHCP and link-local
+    /// on every port), so that the rescue adds a way to reach the NAS instead of taking one
+    /// away: each address stays on its port (an address of a bond or a bridge goes to its
+    /// first physical member) in an `[Address]` section with IPv4 address conflict detection
+    /// (configured only if no other host answers for it: never a duplicate on a network the
+    /// NAS was moved to), and its gateway becomes a default route with
+    /// [`KEPT_GATEWAY_METRIC`], behind the one DHCP gives. Whoever configured them (rynas,
+    /// ifupdown, a foreign file) does not matter: the addresses are read from the kernel.
+    /// Addresses of a VLAN are not kept (the VLAN is suspended with the other netdevs).
+    fn keep_static(&self, target: &mut Revision, inv: &Inventory) {
+        let mut kept: BTreeMap<String, (Vec<String>, Vec<String>)> = BTreeMap::new();
+        let ports = inv.physical_ports();
+        for l in &inv.links {
+            let addrs = l.static_v4();
+            if addrs.is_empty() || l.kind == LinkKind::Loopback {
+                continue;
+            }
+            let port = if ports.iter().any(|p| p.name == l.name) {
+                Some(l.name.clone())
+            } else {
+                // a bond's or a bridge's member, or a bridge's bond's member
+                ports
+                    .iter()
+                    .filter(|p| {
+                        let m = p.master.as_deref();
+                        m == Some(l.name.as_str())
+                            || m.and_then(|m| inv.link(m))
+                                .and_then(|m| m.master.as_deref())
+                                == Some(l.name.as_str())
+                    })
+                    .map(|p| p.name.clone())
+                    .min()
+            };
+            let Some(port) = port else { continue };
+            let gateway = inv
+                .routes
+                .iter()
+                .find(|r| {
+                    r.destination == "default"
+                        && r.interface == l.name
+                        && r.family == rynas_api_types::network::IpFamily::Ipv4
+                        && !matches!(r.protocol.as_deref(), Some("dhcp" | "ra"))
+                })
+                .and_then(|r| r.gateway.clone());
+            let e = kept.entry(port).or_default();
+            e.0.extend(addrs);
+            e.1.extend(gateway);
+        }
+        for (port, (addrs, mut gateways)) in kept {
+            let path = networkd::network_path(&port);
+            let Some(f) = target
+                .files
+                .iter_mut()
+                .find(|f| f.path == path && f.content.is_some())
+            else {
+                continue;
+            };
+            gateways.dedup();
+            let mac = inv.link(&port).and_then(|l| l.mac.clone());
+            let c = target.config.get(&port).cloned().unwrap_or_default();
+            let mut body = networkd::render_network(&port, &c, mac.as_deref());
+            body.push('\n');
+            body.push_str(KEEP_STATIC_NOTE);
+            body.push('\n');
+            for a in &addrs {
+                body.push_str(&format!(
+                    "[Address]\nAddress={a}\nDuplicateAddressDetection=ipv4\n\n"
+                ));
+            }
+            for g in &gateways {
+                body.push_str(&format!(
+                    "[Route]\nGateway={g}\nMetric={KEPT_GATEWAY_METRIC}\n\n"
+                ));
+            }
+            *f = FileState::present(path, managed(body.trim_end()));
+        }
+    }
+
     /// Applies the factory network at once (lock held); the previous state is kept as a
-    /// revision that can be restored.
+    /// revision that can be restored. `keep_static`: the static settings running now stay
+    /// next to DHCP ([`Engine::keep_static`]).
     fn factory_locked(
         &self,
         author: &str,
         comment: &str,
+        keep_static: bool,
         log: &dyn Fn(&str),
     ) -> Result<(u64, u64)> {
         if self.store.marker()?.is_some() {
@@ -2929,7 +3078,10 @@ impl Engine {
                 "no Ethernet port found: the factory network is not applied".into(),
             ));
         }
-        let target = self.factory_target(&inv, author, comment);
+        let mut target = self.factory_target(&inv, author, comment);
+        if keep_static {
+            self.keep_static(&mut target, &inv);
+        }
         let before = self
             .store
             .add_revision(self.snapshot(&target, &inv, author))?;
@@ -2947,10 +3099,14 @@ impl Engine {
     ///
     /// Like `commit confirmed` on routers, `netplan try` or NetworkManager's checkpoints, only
     /// settings never confirmed are ever undone automatically: settings that worked before
-    /// this boot (the last known good revision, or files the watchdog found healthy at an
-    /// earlier boot) are kept whatever happens, since a missing gateway after a power cut is
-    /// the LAN's doing (router and switches boot slower than the NAS); the watchdog then warns
-    /// and waits up to [`KNOWN_GOOD_WAIT`]. Settings never confirmed are replaced only after
+    /// this boot (the last known good revision with the same network folder, or files found
+    /// healthy before, by the watchdog or rynasd) are kept, since a missing gateway after a
+    /// power cut is the LAN's doing (router and switches boot slower than the NAS); the
+    /// watchdog warns and waits. Kept with a bound, though: after [`KNOWN_GOOD_RESCUE_AFTER`]
+    /// with a cable connected, or at boot [`KNOWN_GOOD_RESCUE_BOOTS`] in a row without
+    /// network, DHCP and link-local are added next to them, which stay
+    /// ([`Engine::keep_static`]: a NAS moved to another network, or whose subnet changed,
+    /// is reachable again even without a reset button). Settings never confirmed are replaced only after
     /// [`RESCUE_STREAK`] consecutive unhealthy checks within [`UNCONFIRMED_WAIT`]. No cable on
     /// any port is never a reason to change anything.
     pub fn watchdog(&self, log: &dyn Fn(&str)) -> Result<String> {
@@ -2990,6 +3146,7 @@ impl Engine {
         }
         if verdict(&self.port_health()?) == Verdict::Healthy {
             self.note_healthy();
+            self.resolve_unreachable();
             self.clear_signal();
             return Ok("healthy: a connected port has a routable address".into());
         }
@@ -3007,6 +3164,7 @@ impl Engine {
             match verdict(&self.port_health()?) {
                 Verdict::Healthy => {
                     self.note_healthy();
+                    self.resolve_unreachable();
                     self.clear_signal();
                     return Ok(format!(
                         "healthy after {} s: nothing to undo",
@@ -3041,6 +3199,11 @@ impl Engine {
             && self.differs_from(&lkg)
         {
             let _lock = self.store.lock()?;
+            // a trial started since the last check (`begin` holds this lock): its own timer
+            // is in charge, never undone from here
+            if self.changed_since(lkg_id)? {
+                return Ok("the network settings changed meanwhile: the watchdog stops".into());
+            }
             let inv = self.inventory_fresh()?;
             let now = self
                 .store
@@ -3064,9 +3227,14 @@ impl Engine {
         }
         // 2. the rescue configuration
         let _lock = self.store.lock()?;
+        // `factory_locked` drops a change under test: never one started meanwhile
+        if self.changed_since(lkg_id)? {
+            return Ok("the network settings changed meanwhile: the watchdog stops".into());
+        }
         let (before, target) = self.factory_locked(
             "watchdog",
             "rescue configuration: no routable address after boot",
+            false,
             log,
         )?;
         self.raise(rescue::Signal::RescueApplied);
@@ -3084,51 +3252,124 @@ impl Engine {
         ))
     }
 
-    /// The watchdog with settings that worked before: never changed; a warning while the
-    /// network is unreachable, resolved when it works again.
+    /// The watchdog with settings that worked before: a warning while the network is
+    /// unreachable, resolved when it works again. Kept as they are for a blackout (router
+    /// and switches slower than the NAS), but with a bound: after
+    /// [`KNOWN_GOOD_RESCUE_AFTER`] with a cable connected and no healthy network, or at boot
+    /// [`KNOWN_GOOD_RESCUE_BOOTS`] in a row that finds them unhealthy, DHCP and link-local
+    /// are added next to them ([`Engine::keep_static`]): a NAS moved to another network can
+    /// be found again, and one waiting for its router loses nothing (its static address and
+    /// gateway stay).
     fn watch_known_good(&self, why: &str, log: &dyn Fn(&str)) -> Result<String> {
         let lkg_id = self.store.state()?.lkg;
+        let digest = self.network_digest();
         let start = self.os.now_ms();
-        let mut warned = false;
-        loop {
+        let after_ms = KNOWN_GOOD_RESCUE_AFTER.as_millis() as u64;
+        let every_ms = WATCHDOG_EVERY.as_millis() as u64;
+        // boots in a row before this one that found these files unhealthy
+        let earlier = self
+            .store
+            .unreachable_boots()?
+            .filter(|u| u.digest == digest)
+            .map_or(0, |u| u.boots);
+        let boot = earlier + 1;
+        let last_boot = boot >= KNOWN_GOOD_RESCUE_BOOTS;
+        let (mut warned, mut counted, mut streak) = (false, false, 0u32);
+        // since when ports have had a cable without a healthy network
+        let mut down_since: Option<u64> = None;
+        let rescue_cause = loop {
             if self.changed_since(lkg_id)? {
                 return Ok("the network settings changed meanwhile: the watchdog stops".into());
             }
+            let now = self.os.now_ms();
             match verdict(&self.port_health()?) {
                 Verdict::Healthy => {
                     self.note_healthy();
-                    if warned {
-                        self.emit(reachable_event());
-                    }
+                    self.resolve_unreachable();
                     self.clear_signal();
                     return Ok(format!(
                         "healthy after {} s: settings unchanged ({why})",
-                        self.os.now_ms().saturating_sub(start) / 1000
+                        now.saturating_sub(start) / 1000
                     ));
                 }
-                Verdict::Unhealthy if !warned => {
-                    log(&format!(
-                        "no connected port has a routable address with a reachable gateway; the settings are {why}, they worked before: kept, waiting for the network"
-                    ));
-                    self.emit(unreachable_event(why));
-                    self.raise(rescue::Signal::Unreachable);
-                    warned = true;
+                // cables out: nothing to judge, and the count starts again
+                Verdict::NoCarrier => {
+                    down_since = None;
+                    streak = 0;
                 }
-                _ => {}
+                Verdict::Unhealthy => {
+                    streak += 1;
+                    let since = *down_since.get_or_insert(now);
+                    if !warned {
+                        let minutes = if last_boot {
+                            u64::from(RESCUE_STREAK.saturating_sub(streak)) * every_ms / 60_000 + 1
+                        } else {
+                            (since + after_ms).saturating_sub(now).div_ceil(60_000)
+                        };
+                        log(&format!(
+                            "no connected port has a routable address with a reachable gateway; the settings are {why}, they worked before: kept, waiting for the network (DHCP added next to them in {minutes} minutes if it stays down; boot {boot} of {KNOWN_GOOD_RESCUE_BOOTS} in a row)"
+                        ));
+                        self.emit(unreachable_event(why, boot, minutes));
+                        self.mark_unreachable();
+                        self.raise(rescue::Signal::Unreachable);
+                        warned = true;
+                    }
+                    if streak >= RESCUE_STREAK && !counted {
+                        // this boot counts (a reboot during the wait does not lose it)
+                        counted = true;
+                        if let Err(e) = self.store.set_unreachable_boots(&UnreachableBoots {
+                            digest: digest.clone(),
+                            boots: boot,
+                            ts_ms: now,
+                        }) {
+                            tracing::warn!("network: unreachable boot not recorded: {e}");
+                        }
+                        if last_boot {
+                            break format!("boot {boot} in a row without network");
+                        }
+                    }
+                    if now.saturating_sub(since) >= after_ms {
+                        break format!(
+                            "{} hours with a cable connected and no network",
+                            KNOWN_GOOD_RESCUE_AFTER.as_secs() / 3600
+                        );
+                    }
+                }
             }
-            if self.os.now_ms().saturating_sub(start) >= KNOWN_GOOD_WAIT.as_millis() as u64 {
-                break;
+            if now.saturating_sub(start) >= KNOWN_GOOD_MAX.as_millis() as u64 {
+                return Ok(if warned {
+                    format!(
+                        "still unreachable after {} minutes, cables pulled meanwhile: settings unchanged ({why}); the warning goes away when the network works",
+                        KNOWN_GOOD_MAX.as_secs() / 60
+                    )
+                } else {
+                    "no port has a cable: nothing to check".into()
+                });
             }
             self.os.sleep(WATCHDOG_EVERY);
+        };
+        log(&format!(
+            "{rescue_cause} with settings that worked before ({why}): DHCP and link-local added next to them"
+        ));
+        let _lock = self.store.lock()?;
+        if self.changed_since(lkg_id)? {
+            return Ok("the network settings changed meanwhile: the watchdog stops".into());
         }
-        Ok(if warned {
-            format!(
-                "still unreachable after {} minutes: settings unchanged ({why}); the warning goes away when the network works",
-                KNOWN_GOOD_WAIT.as_secs() / 60
-            )
-        } else {
-            "no port has a cable: nothing to check".into()
-        })
+        let (before, target) = self.factory_locked(
+            "watchdog",
+            &format!("rescue next to the settings that worked before: {rescue_cause}"),
+            true,
+            log,
+        )?;
+        drop(_lock);
+        if let Err(e) = self.store.clear_unreachable_boots() {
+            tracing::warn!("network: unreachable boots not cleared: {e}");
+        }
+        self.raise(rescue::Signal::RescueApplied);
+        self.emit(rescue_kept_event(before));
+        Ok(format!(
+            "DHCP added next to the settings that worked before ({rescue_cause}; revision {target}); previous settings kept as revision {before}"
+        ))
     }
 
     /// An administrator changed the network since the watchdog started waiting: a change
@@ -3145,23 +3386,24 @@ impl Engine {
     }
 
     /// Why the network files on disk worked before this boot (`None`: never confirmed).
+    /// Every network file counts, not only a revision's own: a foreign `.network` file or an
+    /// ifupdown stanza added since can break the network while rynas's files are unchanged,
+    /// so the whole folder's digest must match too.
     fn known_good(&self) -> Result<Option<&'static str>> {
+        let digest = self.network_digest();
         if let Some(lkg) = self
             .store
             .state()?
             .lkg
             .and_then(|id| self.store.revision(id).ok().flatten())
             && !lkg.files.is_empty()
+            && lkg.digest.as_deref() == Some(digest.as_str())
             && !self.differs_from(&lkg)
         {
             return Ok(Some("the last known good revision"));
         }
-        if self
-            .store
-            .healthy()?
-            .is_some_and(|h| h.digest == self.network_digest())
-        {
-            return Ok(Some("those found healthy at an earlier boot"));
+        if self.store.healthy()?.is_some_and(|h| h.digest == digest) {
+            return Ok(Some("those found healthy before"));
         }
         Ok(None)
     }
@@ -3190,7 +3432,8 @@ impl Engine {
         sha256_hex(text.as_bytes())
     }
 
-    /// Remembers the network files on disk as healthy.
+    /// Remembers the network files on disk as healthy; boots without network with them are
+    /// history.
     fn note_healthy(&self) {
         let h = HealthySeen {
             digest: self.network_digest(),
@@ -3198,6 +3441,30 @@ impl Engine {
         };
         if let Err(e) = self.store.set_healthy(&h) {
             tracing::warn!("network: healthy files not recorded: {e}");
+        }
+        if let Err(e) = self.store.clear_unreachable_boots() {
+            tracing::warn!("network: unreachable boots not cleared: {e}");
+        }
+    }
+
+    /// In the state folder: a warning still firing at a reboot is resolved after it.
+    fn unreachable_mark(&self) -> PathBuf {
+        self.paths.state.join(UNREACHABLE_MARK)
+    }
+
+    /// The "unreachable" warning is firing (resolved once by [`Self::resolve_unreachable`]).
+    fn mark_unreachable(&self) {
+        let _ = std::fs::create_dir_all(&self.paths.state);
+        if let Err(e) = write_synced(&self.unreachable_mark(), b"", 0o600) {
+            tracing::warn!("network: unreachable warning not recorded: {e}");
+        }
+    }
+
+    /// Resolves the "unreachable" warning when it is firing. Removing the marker is the
+    /// claim: of the watchdog and rynasd's minute check, only one resolves it.
+    fn resolve_unreachable(&self) {
+        if std::fs::remove_file(self.unreachable_mark()).is_ok() {
+            self.emit(reachable_event());
         }
     }
 
@@ -3224,30 +3491,45 @@ impl Engine {
     }
 
     /// Puts the machine back to its usual state after a signal of the rescue paths (network
-    /// healthy again, notification acknowledged). Returns whether a signal was shown.
+    /// healthy again, notification acknowledged). Returns whether a signal was shown; removing
+    /// the marker is the claim, so two callers never both send it.
     pub fn clear_signal(&self) -> bool {
-        if self.raised_signal().is_none() {
+        if std::fs::remove_file(self.signal_mark()).is_err() {
             return false;
         }
-        let _ = std::fs::remove_file(self.signal_mark());
         self.feedback.signal(rescue::Signal::Clear);
         true
     }
 
     /// rynasd, every minute: once the network is healthy again, the signal shown since the
-    /// watchdog or the reset button goes away and the "unreachable" warning is resolved.
-    /// The first press of the reset button keeps its signal for the gesture's window.
+    /// watchdog or the reset button goes away and the "unreachable" warning is resolved (by
+    /// one of rynasd and the watchdog only, [`Self::resolve_unreachable`]). The network files
+    /// are recorded as healthy too when they changed (or every [`HEALTHY_NOTE_EVERY`]), so
+    /// settings that worked are known as such at the next boot, not only those the boot
+    /// watchdog saw; never while a change is under test. The first press of the reset button
+    /// keeps its signal for the gesture's window.
     pub fn watch_signal(&self) {
-        let Some((name, at)) = self.raised_signal() else {
-            return;
-        };
-        if self.os.now_ms().saturating_sub(at) <= rescue::GESTURE_WINDOW_MS {
+        let now = self.os.now_ms();
+        let signal = self
+            .raised_signal()
+            .filter(|(_, at)| now.saturating_sub(*at) > rescue::GESTURE_WINDOW_MS);
+        let firing = self.unreachable_mark().exists();
+        let note = !matches!(
+            self.store.healthy(),
+            Ok(Some(h)) if h.digest == self.network_digest()
+                && now.saturating_sub(h.ts_ms) < HEALTHY_NOTE_EVERY.as_millis() as u64
+        ) && matches!(self.store.marker(), Ok(None));
+        if signal.is_none() && !firing && !note {
             return;
         }
-        if matches!(self.port_health().map(|p| verdict(&p)), Ok(Verdict::Healthy)) {
-            if name == rescue::Signal::Unreachable.name() {
-                self.emit(reachable_event());
-            }
+        if !matches!(self.port_health().map(|p| verdict(&p)), Ok(Verdict::Healthy)) {
+            return;
+        }
+        if note {
+            self.note_healthy();
+        }
+        self.resolve_unreachable();
+        if signal.is_some() {
             self.clear_signal();
         }
     }
@@ -3276,6 +3558,7 @@ impl Engine {
                 let (before, target) = self.factory_locked(
                     "reset-button",
                     "factory network (reset button double press)",
+                    false,
                     log,
                 )?;
                 self.emit(event(

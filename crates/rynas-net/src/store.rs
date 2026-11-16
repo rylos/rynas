@@ -9,8 +9,10 @@
 //! - `trial.json`: the [`Marker`] of an unconfirmed change (its presence is what the boot
 //!   guard and the timer act on);
 //! - `boot-adopt.json`: an ifupdown migration waiting for the next boot;
-//! - `healthy.json`: a digest of the network files the watchdog last found healthy
+//! - `healthy.json`: a digest of the network files last found healthy (watchdog, rynasd)
 //!   ([`HealthySeen`]);
+//! - `unreachable-boots.json`: boots in a row without a healthy network with settings that
+//!   worked before ([`UnreachableBoots`]);
 //! - `staged.json`: changes staged per user;
 //! - `last-rollback.json`, `outbox.json`: the last rollback report and events waiting to be
 //!   handed to the notification engine;
@@ -125,6 +127,12 @@ pub struct Revision {
     /// Confirmed (or a snapshot of a running system): safe to go back to.
     #[serde(default)]
     pub good: bool,
+    /// Digest of every network file (networkd's folder, ifupdown's files) when the revision
+    /// became the last known good one: a foreign file added later makes the files on disk
+    /// no longer "known good" even if the revision's own files are unchanged. `None` in
+    /// revisions written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -186,6 +194,17 @@ pub struct BootAdopt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct HealthySeen {
     pub digest: String,
+    pub ts_ms: u64,
+}
+
+/// Boots in a row where the post-boot watchdog found settings that worked before (these
+/// files, by digest) with cables connected and no healthy network: after a few the files are
+/// probably wrong for this network (the NAS moved, the subnet changed), not just slow to
+/// come back, and the watchdog adds DHCP next to them. Reset when the network is healthy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UnreachableBoots {
+    pub digest: String,
+    pub boots: u32,
     pub ts_ms: u64,
 }
 
@@ -410,6 +429,19 @@ impl Store {
 
     pub fn set_healthy(&self, h: &HealthySeen) -> std::io::Result<()> {
         self.write_json("healthy.json", h)
+    }
+
+    /// Boots in a row without a healthy network with settings that worked before.
+    pub fn unreachable_boots(&self) -> std::io::Result<Option<UnreachableBoots>> {
+        self.read_json("unreachable-boots.json")
+    }
+
+    pub fn set_unreachable_boots(&self, u: &UnreachableBoots) -> std::io::Result<()> {
+        self.write_json("unreachable-boots.json", u)
+    }
+
+    pub fn clear_unreachable_boots(&self) -> std::io::Result<()> {
+        self.remove("unreachable-boots.json")
     }
 }
 

@@ -568,39 +568,186 @@ fn watchdog_blackout_keeps_known_good_settings() {
         (ok.state, ok.key.as_deref()),
         (EventState::Resolved, Some("network:unreachable"))
     );
+    assert_eq!(ev.iter().filter(|e| e.code == "net.reachable").count(), 1);
+    // rynasd's minute check right after: the warning is not resolved a second time
+    t.e.watch_signal();
+    assert!(!t.e.take_events().iter().any(|e| e.code == "net.reachable"));
 }
 
-/// A LAN that stays down for the whole wait: still nothing changed; rynasd clears the LED
-/// and resolves the warning once the network works.
+/// Settings that worked before, wrong for good (the NAS moved to another network): after
+/// two hours with a cable connected DHCP and link-local are added next to them; rynasd
+/// clears the LED and resolves the warning once the network works.
 #[test]
-fn watchdog_known_good_waits_then_rynasd_clears() {
+fn watchdog_known_good_moved_network_after_two_hours() {
     let t = networkd_box();
     // files found healthy at an earlier boot (no last known good revision)
     assert!(t.e.watchdog(&log).unwrap().starts_with("healthy"));
     assert!(t.e.store.state().unwrap().lkg.is_none());
+    // the NAS moved to another network: 192.0.2.1 is gone, a DHCP server gives 10.0.0.x
+    {
+        let mut s = t.os.state.lock().unwrap();
+        s.reachable = vec!["10.0.0.1".into()];
+        s.leases.clear();
+        s.leases
+            .insert("lan1".into(), ("10.0.0.50/24".into(), "10.0.0.1".into()));
+        s.links.get_mut("lan2").unwrap().addrs.clear();
+    }
+    let start = t.os.now_ms();
+    let msg = t.e.watchdog(&log).unwrap();
+    assert!(msg.starts_with("DHCP added next to the settings"), "{msg}");
+    let waited = t.os.now_ms() - start;
+    assert!(
+        waited >= KNOWN_GOOD_RESCUE_AFTER.as_millis() as u64
+            && waited < KNOWN_GOOD_RESCUE_AFTER.as_millis() as u64 + 120_000,
+        "{waited}"
+    );
+    // the static settings stay next to DHCP and link-local
+    let lan1 =
+        t.os.read_config(Path::new("/etc/systemd/network/05-rynas-lan1.network"))
+            .unwrap();
+    for want in [
+        "DHCP=ipv4",
+        "LinkLocalAddressing=yes",
+        "[Address]\nAddress=192.0.2.10/24\nDuplicateAddressDetection=ipv4",
+        &format!("[Route]\nGateway=192.0.2.1\nMetric={KEPT_GATEWAY_METRIC}"),
+    ] {
+        assert!(lan1.contains(want), "{want} in {lan1}");
+    }
+    let addrs = t.os.addrs("lan1");
+    assert!(
+        addrs.iter().any(|a| a.starts_with("192.0.2.10"))
+            && addrs.iter().any(|a| a.starts_with("10.0.0.50")),
+        "{addrs:?}"
+    );
+    // read back as DHCP (the kept gateway is not a setting): valid for the next change
+    let cur = t.e.current_config();
+    assert_eq!(cur["lan1"].ipv4, Ipv4Method::Dhcp);
+    assert_eq!(cur["lan1"].gateway, None);
+    let revs = t.e.revisions().unwrap();
+    assert_eq!((revs[0].kind.as_str(), revs[1].kind.as_str()), ("rescue", "snapshot"));
+    assert!(t.e.store.unreachable_boots().unwrap().is_none());
+    let ev = t.e.take_events();
+    let warn = ev.iter().find(|e| e.code == "net.unreachable").unwrap();
+    let field = |k: &str| warn.fields[k].clone();
+    assert_eq!(
+        (field("minutes"), field("boot"), field("boots")),
+        ("120".into(), "1".into(), "3".into()),
+        "the warning says what happens and when"
+    );
+    assert!(warn.body.contains("in 120 minutes"), "{}", warn.body);
+    let kept = ev.iter().find(|e| e.code == "net.rescue_kept").unwrap();
+    assert_eq!(kept.severity, NotifySeverity::Critical);
+    assert_eq!(signals(&t.e), "Unreachable\nRescueApplied\n");
+    // rynasd's minute check: healthy on the new network, the warning resolved once
+    t.os.sleep(Duration::from_secs(60));
+    t.e.watch_signal();
+    t.e.watch_signal();
+    assert_eq!(signals(&t.e), "Unreachable\nRescueApplied\nClear\n");
+    let ev = t.e.take_events();
+    assert_eq!(ev.iter().filter(|e| e.code == "net.reachable").count(), 1);
+}
+
+/// Settings that worked before, wrong for good, on a NAS rebooted again and again: at the
+/// third boot in a row without network the rescue comes a few minutes after boot.
+#[test]
+fn watchdog_known_good_rescue_at_third_boot() {
+    let t = networkd_box();
+    assert!(t.e.watchdog(&log).unwrap().starts_with("healthy"));
     {
         let mut s = t.os.state.lock().unwrap();
         s.reachable.clear();
         s.leases.clear();
         s.links.get_mut("lan2").unwrap().addrs.clear();
     }
-    let msg = t.e.watchdog(&log).unwrap();
-    assert!(msg.starts_with("still unreachable after 30 minutes"), "{msg}");
-    assert!(t.e.revisions().unwrap().is_empty(), "nothing applied");
-    assert_eq!(signals(&t.e), "Unreachable\n");
-    // still down: rynasd's minute check leaves it
-    t.e.watch_signal();
-    assert_eq!(signals(&t.e), "Unreachable\n");
-    t.os.state.lock().unwrap().reachable.push("192.0.2.1".into());
+    for boot in 1..=2u32 {
+        // unhealthy for 4 minutes, then the cables are pulled (the administrator reboots it)
+        {
+            let mut s = t.os.state.lock().unwrap();
+            let at = s.now_ms + 4 * 60_000;
+            s.unplugged_at = vec![("lan1".into(), at), ("lan2".into(), at)];
+        }
+        let msg = t.e.watchdog(&log).unwrap();
+        assert!(msg.starts_with("still unreachable"), "{msg}");
+        assert_eq!(t.e.store.unreachable_boots().unwrap().unwrap().boots, boot);
+        assert!(t.e.revisions().unwrap().is_empty(), "nothing changed at boot {boot}");
+        t.os.state.lock().unwrap().unplugged_at.clear();
+    }
     t.e.take_events();
-    t.e.watch_signal();
-    assert_eq!(signals(&t.e), "Unreachable\nClear\n");
-    assert!(t.e.raised_signal().is_none());
+    let start = t.os.now_ms();
+    let msg = t.e.watchdog(&log).unwrap();
+    assert!(msg.contains("boot 3 in a row"), "{msg}");
+    assert!(t.os.now_ms() - start < 5 * 60_000, "a few minutes after boot");
+    let lan1 =
+        t.os.read_config(Path::new("/etc/systemd/network/05-rynas-lan1.network"))
+            .unwrap();
+    assert!(lan1.contains("DHCP=ipv4") && lan1.contains("Address=192.0.2.10/24"));
+    let ev = t.e.take_events();
+    let warn = ev.iter().find(|e| e.code == "net.unreachable").unwrap();
     assert!(
-        t.e.take_events()
-            .iter()
-            .any(|e| e.code == "net.reachable" && e.state == EventState::Resolved)
+        warn.fields["boot"] == "3" && warn.fields["minutes"] == "3",
+        "{:?}",
+        warn.fields
     );
+    assert!(ev.iter().any(|e| e.code == "net.rescue_kept"));
+}
+
+/// A foreign file breaks the network while rynas's files are those of the last known good
+/// revision: not known good (the folder's digest differs), so it is undone like any
+/// change never confirmed.
+#[test]
+fn watchdog_foreign_file_is_not_known_good() {
+    let t = networkd_box();
+    t.e.stage("admin", "lan1", &st("192.0.2.50/24", Some("192.0.2.1")))
+        .unwrap();
+    let plan =
+        t.e.plan_apply("admin", "admin", "", ip("198.51.100.20"), None, true)
+            .unwrap();
+    t.e.begin(&plan, None, None, &log).unwrap();
+    assert_eq!(t.e.known_good().unwrap(), Some("the last known good revision"));
+    t.os.write_config(
+        "/etc/systemd/network/01-foo.network",
+        "[Match]\nName=lan1\n\n[Network]\nAddress=203.0.113.9/24\nGateway=203.0.113.1\n",
+    );
+    assert_eq!(t.e.known_good().unwrap(), None, "a foreign file changes the folder");
+    {
+        let mut s = t.os.state.lock().unwrap();
+        s.reachable.clear();
+        s.leases.clear();
+        s.links.get_mut("lan2").unwrap().addrs.clear();
+    }
+    t.e.take_events();
+    let msg = t.e.watchdog(&log).unwrap();
+    assert!(msg.contains("rescue configuration"), "{msg}");
+    assert!(
+        !t.e.take_events().iter().any(|e| e.code == "net.unreachable"),
+        "never kept as known good"
+    );
+}
+
+/// rynasd records healthy network files every minute when they changed (not only the boot
+/// watchdog), never while a change is under test.
+#[test]
+fn rynasd_records_healthy_files() {
+    let t = networkd_box();
+    assert!(t.e.store.healthy().unwrap().is_none());
+    t.e.watch_signal();
+    let first = t.e.store.healthy().unwrap().unwrap();
+    // unchanged and recent: not written again
+    t.os.sleep(Duration::from_secs(60));
+    t.e.watch_signal();
+    assert_eq!(t.e.store.healthy().unwrap().unwrap(), first);
+    // a change under test: not recorded until it is confirmed
+    t.e.stage("admin", "lan1", &st("192.0.2.50/24", Some("192.0.2.1")))
+        .unwrap();
+    let plan =
+        t.e.plan_apply("admin", "admin", "", ip("198.51.100.20"), None, false)
+            .unwrap();
+    t.e.begin(&plan, Some("token"), None, &log).unwrap();
+    assert!(t.e.store.marker().unwrap().is_some(), "a change under test");
+    {
+        t.e.watch_signal();
+        assert_eq!(t.e.store.healthy().unwrap().unwrap(), first);
+    }
 }
 
 #[test]

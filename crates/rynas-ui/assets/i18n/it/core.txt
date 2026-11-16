@@ -159,7 +159,9 @@ nev.net.watchdog_restored.body	Dopo l'avvio nessuna porta aveva un indirizzo ins
 nev.net.rescue.title	Configurazione di rete di emergenza applicata
 nev.net.rescue.body	Dopo l'avvio nessuna porta aveva un indirizzo instradabile. Tutte le porte sono in DHCP con link-local; le impostazioni precedenti sono la revisione {revision}.
 nev.net.unreachable.title	Rete non raggiungibile dopo l'avvio; impostazioni invariate
-nev.net.unreachable.body	Nessuna porta collegata ha un indirizzo instradabile con un gateway raggiungibile. Le impostazioni funzionavano già e restano, quindi probabilmente il router o lo switch non sono ancora tornati (per esempio dopo una mancanza di corrente). rynas ricontrolla ogni 30 secondi.
+nev.net.unreachable.body	Nessuna porta collegata ha un indirizzo instradabile con un gateway raggiungibile. Le impostazioni funzionavano già e restano, quindi probabilmente il router o lo switch non sono ancora tornati (per esempio dopo una mancanza di corrente). rynas ricontrolla ogni 30 secondi. Se fra {minutes} minuti la rete non funziona ancora con un cavo collegato, rynas aggiunge DHCP e un indirizzo link-local accanto a queste impostazioni, che restano (il loro gateway passa dopo quello dato dal DHCP), così il NAS si trova anche su una rete cambiata. Avvii di fila senza rete: {boot} di {boots}.
+nev.net.rescue_kept.title	Rete: DHCP aggiunto accanto a impostazioni che hanno smesso di funzionare
+nev.net.rescue_kept.body	Impostazioni che funzionavano non hanno trovato una rete funzionante per 2 ore con un cavo collegato, oppure per 3 avvii di fila. Restano, con DHCP e un indirizzo link-local aggiunti su ogni porta; un indirizzo statico si usa solo se nessun altro host lo ha, e il suo gateway ora viene dopo quello dato dal DHCP. Le impostazioni precedenti sono la revisione {revision} (Rete › Revisioni): controllale, per esempio dopo un trasloco su un'altra rete.
 nev.net.reachable.title	Rete di nuovo raggiungibile
 nev.net.reachable.body	Una porta collegata ha di nuovo un indirizzo instradabile con un gateway raggiungibile; le impostazioni non sono state cambiate.
 nev.net.reset.title	Rete di fabbrica ripristinata con il pulsante di reset
@@ -2437,6 +2439,7 @@ sch.run.signal	Interrotta ({sig})
 sch.delete_title	Eliminare l'attività {name}?
 sch.delete_text	La sua pianificazione viene rimossa all'applicazione delle modifiche. La cronologia resta.
 sch.delete_job_task	Questa attività appartiene a un job di snapshot, replica o backup, o alla pianificazione di alimentazione: modificala o eliminala lì.
+sch.schedule_owned	La pianificazione di questa attività appartiene al suo job di snapshot, replica o backup, o alla pianificazione di alimentazione: modificala lì.
 sch.sec.general	Generale
 sch.sec.action	Azione
 sch.sec.schedule	Pianificazione

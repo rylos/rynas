@@ -448,11 +448,16 @@ impl NetworkFile {
                 Ipv4Method::Static
             },
             addresses: if dhcp { Vec::new() } else { v4 },
-            gateway: self
-                .gateways
-                .iter()
-                .find(|g| g.parse::<Ipv4Addr>().is_ok())
-                .cloned(),
+            // with DHCP the gateway is the lease's (a static one next to it, as the
+            // watchdog's rescue keeps, is not part of the settings)
+            gateway: if dhcp {
+                None
+            } else {
+                self.gateways
+                    .iter()
+                    .find(|g| g.parse::<Ipv4Addr>().is_ok())
+                    .cloned()
+            },
             dns: self
                 .dns
                 .iter()

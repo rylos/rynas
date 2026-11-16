@@ -108,6 +108,31 @@ again. Tests: `rynas-hw-synology` `domain` (adoption, migration of every legacy 
 of both keys in any order, no drift), `packaging/test-synology.sh` (legacy file adopted for
 real).
 
+## Status LED after a rescue signal (2026-11-16)
+
+The rescue paths (watchdog, reset button) turn the status LED orange through synohwd's FIFO;
+`Signal::Clear` hands it back (`Beeps` in `module.rs`). synohwd's source (synodeb
+`synohwd/synohwd.py`) settles what can be read back: `status_led` in `status.json` is
+synohwd's **own choice**, set only by `set_status()` (at start: green; every control-loop pass:
+orange blinking `;` when a fan stopped or an md array is degraded, green `8` otherwise) and
+sent to the microcontroller only when that choice changes. Codes written to the FIFO
+(`cmd_loop`) or sent with the control socket's `send` go to the microcontroller untouched and
+never reach `status_led`: it is not an echo of rynas's orange.
+
+synohwd has no command to show its choice again, so the read and the send race with its
+control loop: a choice changed in between would be covered by the code rynas sends and never
+sent again (synohwd thinks the LED already shows it). rynas narrows the race from both sides
+and never hides an alarm synohwd wants to show:
+- orange whenever synohwd's own conditions hold, even before its status file is rewritten
+  (`fan_fail` in `status.json`, a degraded array in `/proc/mdstat`, the same test as synohwd);
+- the status read again right after the send, and the newer choice sent when it changed.
+
+What closing it would need in synodeb (proposal, not implemented there): a control socket
+command `{"cmd": "status_led", "action": "reassert"}` that sets `state["status_led"] = None`
+under the control loop's own lock (or wakes the loop), so that synohwd itself sends its
+current choice at its next pass; rynas would then send it instead of a code. Until then the
+behaviour above is the safest available.
+
 ## Power schedule (DSM model)
 
 DSM "Power Schedule": a list of rules, each with a weekday set, a time and an action (startup or
