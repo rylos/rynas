@@ -3126,8 +3126,6 @@ dict! { BLOB, LENS;
     "sch.f.minute" => "Minute";
     "sch.f.minute_help" => "Minute past every hour.";
     "sch.f.weekdays" => "Days";
-    "sch.f.dom" => "Day of the month";
-    "sch.f.dom_help" => "Months without this day are skipped.";
     "sch.f.expression" => "systemd calendar expression";
     "sch.f.expression_help" => "OnCalendar= syntax, e.g. Mon..Fri *-*-* 02:30:00 or *-*-1,15 04:00:00.";
     "sch.f.cron" => "Cron expression";
@@ -3156,11 +3154,9 @@ dict! { BLOB, LENS;
     "sch.trig.manual_help" => "No timer: the task runs only with Run now.";
     "sch.trig.boot_text" => "At boot (+{s} s)";
     "sch.rep.minutes" => "Every few minutes";
-    "sch.rep.hourly" => "Every hour";
     "sch.rep.daily" => "Every day";
-    "sch.rep.weekly" => "Every week";
     "sch.rep.monthly" => "Every month";
-    "sch.rep.custom" => "Custom (systemd)";
+    "sch.rep.custom" => "Advanced: systemd calendar";
     "sch.rep.cron" => "Cron syntax";
     "sch.desc.minutes" => "Every {n} min";
     "sch.desc.hourly" => "Hourly at :{m}";
@@ -3181,6 +3177,48 @@ dict! { BLOB, LENS;
     "sch.next_runs" => "Next runs";
     "sch.normalized" => "systemd reads it as";
     "sch.checking" => "Checking…";
+    "sch.rep.hours" => "Every few hours";
+    "sch.rep.weekdays" => "On chosen weekdays";
+    "sch.rep.monthly_nth" => "Every month on a weekday";
+    "sch.rep.yearly" => "Every year";
+    "sch.f.every_hours" => "Every (hours)";
+    "sch.f.from_hour" => "From";
+    "sch.f.to_hour" => "To";
+    "sch.f.hours_help" => "From 00:00 to 23:00: the whole day.";
+    "sch.f.days_any" => "None ticked: every day.";
+    "sch.f.times" => "Times";
+    "sch.f.time_n" => "Time {n}";
+    "sch.f.add_time" => "Add a time";
+    "sch.f.remove_time" => "Remove time {n}";
+    "sch.f.last_day" => "Last day of the month";
+    "sch.f.month_days" => "Days of the month";
+    "sch.f.month_days_help" => "Numbers from 1 to 31 separated by commas; a month without the day skips it.";
+    "sch.f.nth" => "Which";
+    "sch.f.weekday" => "Weekday";
+    "sch.f.month" => "Month";
+    "sch.f.day" => "Day";
+    "sch.f.nth.first" => "First";
+    "sch.f.nth.second" => "Second";
+    "sch.f.nth.third" => "Third";
+    "sch.f.nth.fourth" => "Fourth";
+    "sch.f.nth.last" => "Last";
+    "sch.e.no_times" => "Add at least one time.";
+    "sch.e.bad_time" => "Write each time as hours and minutes.";
+    "sch.e.not_grid" => "These times cannot be one schedule: every hour needs the same minutes (08:00 and 20:00, or 08:15, 08:45, 20:15 and 20:45). Use the advanced field for other combinations.";
+    "sch.e.no_days" => "Tick at least one day.";
+    "sch.e.hour_range" => "Choose hours that hold at least two runs, or the whole day.";
+    "sch.e.month_days" => "Write days of the month from 1 to 31, separated by commas.";
+    "sch.e.bad_date" => "This day does not exist in that month.";
+    "sch.e.empty" => "Write an expression.";
+    "sch.e.invalid" => "systemd does not accept this expression.";
+    "sch.p.next_in" => "Next runs ({tz})";
+    "sch.p.no_next" => "systemd finds no next run for this schedule in the NAS time zone: the task would never run. Choose other times.";
+    "sch.p.stops" => "systemd stops scheduling this on {date} (a clock change at midnight in the NAS time zone), and the task would not run again. Choose other times.";
+    "sch.p.dst_forward" => "{date}: clocks go forward from {from} to {to}; runs in between are skipped that day.";
+    "sch.p.dst_back" => "{date}: clocks go back from {from} to {to}; runs in between happen once.";
+    "sch.trig.interval_text" => "Every {n} h after the last successful run";
+    "sch.trig.window_text" => "In a weekly window";
+    "sch.trig.after_text" => "After task {task}";
     "sch.act.command" => "Command";
     "sch.act.script" => "Script";
     "sch.act.snapshot" => "Snapshot job";
@@ -6265,6 +6303,39 @@ pub fn day_month(month: u32, day: u32) -> String {
         return format!("{month:02}-{day:02}");
     }
     date_with(civil_ms(2000, month, day, 12, 0), &[("timeZone", "UTC"), ("month", "long"), ("day", "numeric")])
+}
+
+/// A month's name ("March" / "marzo"), 1-12.
+pub fn month_name(month: u32) -> String {
+    if cfg!(not(target_arch = "wasm32")) {
+        return format!("{month:02}");
+    }
+    date_with(civil_ms(2000, month, 1, 12, 0), &[("timeZone", "UTC"), ("month", "long")])
+}
+
+/// A wall-clock moment written by the server in some zone (`YYYY-MM-DD HH:MM[:SS]`, the NAS's
+/// local time of a schedule preview) as date and time, shown as written (no conversion to
+/// the browser's zone); text in any other shape comes back as it is.
+pub fn wall_datetime(s: &str) -> String {
+    let Some((y, mo, d, h, m)) = parse_wall(s) else { return s.to_string() };
+    if cfg!(not(target_arch = "wasm32")) {
+        return format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}");
+    }
+    date_with(civil_ms(y, mo, d, h, m), &[("timeZone", "UTC"), ("weekday", "short"), ("day", "numeric"), ("month", "short"), ("year", "numeric"), ("hour", "2-digit"), ("minute", "2-digit")])
+}
+
+/// A local date written by the server (`YYYY-MM-DD`), shown as written.
+pub fn wall_date(s: &str) -> String {
+    let mut p = s.trim().split('-');
+    let (Some(Ok(y)), Some(Ok(mo)), Some(Ok(d)), None) =
+        (p.next().map(str::parse::<i64>), p.next().map(str::parse::<u32>), p.next().map(str::parse::<u32>), p.next())
+    else {
+        return s.to_string();
+    };
+    if cfg!(not(target_arch = "wasm32")) || !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return s.to_string();
+    }
+    date_with(civil_ms(y, mo, d, 12, 0), &[("timeZone", "UTC"), ("dateStyle", "medium")])
 }
 
 fn parse_hm(s: &str) -> Option<(u32, u32)> {

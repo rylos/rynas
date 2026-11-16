@@ -1,0 +1,9 @@
+# Managed by rynas — do not edit (sha256:6cde25bc5e09a6b711e003e82908cb737d8779cb05a6425a0e364e5f7cbd3724)
+[Unit]
+Description=Timer of rynas task recycle
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=3600
+AccuracySec=1s
+Unit=rynas-task-recycle.service

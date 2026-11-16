@@ -2463,8 +2463,6 @@ sch.f.every_min	Ogni (minuti)
 sch.f.minute	Minuto
 sch.f.minute_help	Minuto di ogni ora.
 sch.f.weekdays	Giorni
-sch.f.dom	Giorno del mese
-sch.f.dom_help	I mesi senza questo giorno vengono saltati.
 sch.f.expression	Espressione di calendario systemd
 sch.f.expression_help	Sintassi OnCalendar=, es. Mon..Fri *-*-* 02:30:00 o *-*-1,15 04:00:00.
 sch.f.cron	Espressione cron
@@ -2493,11 +2491,9 @@ sch.trig.manual	Manuale
 sch.trig.manual_help	Nessun timer: l'attività parte solo con Esegui ora.
 sch.trig.boot_text	All'avvio (+{s} s)
 sch.rep.minutes	Ogni tot minuti
-sch.rep.hourly	Ogni ora
 sch.rep.daily	Ogni giorno
-sch.rep.weekly	Ogni settimana
 sch.rep.monthly	Ogni mese
-sch.rep.custom	Personalizzata (systemd)
+sch.rep.custom	Avanzata: calendario systemd
 sch.rep.cron	Sintassi cron
 sch.desc.minutes	Ogni {n} min
 sch.desc.hourly	Ogni ora ai :{m}
@@ -2518,6 +2514,48 @@ sch.nth.last	ultimo
 sch.next_runs	Prossime esecuzioni
 sch.normalized	systemd la interpreta come
 sch.checking	Verifica…
+sch.rep.hours	Ogni tot ore
+sch.rep.weekdays	In giorni della settimana scelti
+sch.rep.monthly_nth	Ogni mese in un giorno della settimana
+sch.rep.yearly	Ogni anno
+sch.f.every_hours	Ogni (ore)
+sch.f.from_hour	Dalle
+sch.f.to_hour	Alle
+sch.f.hours_help	Dalle 00:00 alle 23:00: tutto il giorno.
+sch.f.days_any	Nessuno spuntato: tutti i giorni.
+sch.f.times	Orari
+sch.f.time_n	Orario {n}
+sch.f.add_time	Aggiungi un orario
+sch.f.remove_time	Togli l'orario {n}
+sch.f.last_day	Ultimo giorno del mese
+sch.f.month_days	Giorni del mese
+sch.f.month_days_help	Numeri da 1 a 31 separati da virgole; un mese senza quel giorno lo salta.
+sch.f.nth	Quale
+sch.f.weekday	Giorno della settimana
+sch.f.month	Mese
+sch.f.day	Giorno
+sch.f.nth.first	Primo
+sch.f.nth.second	Secondo
+sch.f.nth.third	Terzo
+sch.f.nth.fourth	Quarto
+sch.f.nth.last	Ultimo
+sch.e.no_times	Aggiungi almeno un orario.
+sch.e.bad_time	Scrivi ogni orario come ore e minuti.
+sch.e.not_grid	Questi orari non possono stare in una sola pianificazione: ogni ora deve avere gli stessi minuti (08:00 e 20:00, oppure 08:15, 08:45, 20:15 e 20:45). Per altre combinazioni usa il campo avanzato.
+sch.e.no_days	Spunta almeno un giorno.
+sch.e.hour_range	Scegli ore che contengano almeno due esecuzioni, oppure tutto il giorno.
+sch.e.month_days	Scrivi giorni del mese da 1 a 31, separati da virgole.
+sch.e.bad_date	Questo giorno non esiste in quel mese.
+sch.e.empty	Scrivi un'espressione.
+sch.e.invalid	systemd non accetta questa espressione.
+sch.p.next_in	Prossime esecuzioni ({tz})
+sch.p.no_next	systemd non trova una prossima esecuzione per questa pianificazione nel fuso orario del NAS: l'attività non partirebbe mai. Scegli altri orari.
+sch.p.stops	systemd smette di pianificarla il {date} (un cambio dell'ora a mezzanotte nel fuso orario del NAS) e l'attività non partirebbe più. Scegli altri orari.
+sch.p.dst_forward	{date}: l'ora va avanti dalle {from} alle {to}; le esecuzioni in mezzo quel giorno saltano.
+sch.p.dst_back	{date}: l'ora torna indietro dalle {from} alle {to}; le esecuzioni in mezzo avvengono una volta sola.
+sch.trig.interval_text	Ogni {n} h dopo l'ultima esecuzione riuscita
+sch.trig.window_text	In una finestra settimanale
+sch.trig.after_text	Dopo l'attività {task}
 sch.act.command	Comando
 sch.act.script	Script
 sch.act.snapshot	Job di snapshot

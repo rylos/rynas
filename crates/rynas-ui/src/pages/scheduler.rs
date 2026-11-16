@@ -1,8 +1,8 @@
 //! Task Scheduler (D-TASKS; DSM Control Panel › Task Scheduler, OMV Scheduled Jobs): tasks
 //! that rynasd turns into persistent systemd units, with next run, last result, enable/disable,
 //! run now and the run history with its output (and the live output of the run going on now,
-//! [`super::scheduler_live`]); a calendar builder with a live preview of the
-//! next runs (`POST /scheduler/tasks/preview-calendar`); read-only views of the system timers
+//! [`super::scheduler_live`]); the shared schedule editor ([`crate::schedule::ScheduleEditor`],
+//! live preview of the next runs in the NAS's time zone); read-only views of the system timers
 //! and crontab entries found on the NAS ("create a task" from a cron line). Writes stage
 //! pending changes (`/config/apply` applies them).
 
@@ -11,30 +11,21 @@ use std::time::Duration;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::PendingOp;
-use rynas_api_types::scheduler::{
-    CalendarPreview, CalendarPreviewRequest, CalendarSyntax, CronEntry, NotifyPolicy, ScheduledTask, SmartTestKind, SystemTimer, TaskAction,
-    LiveRun, TaskRun, TaskTrigger, TaskView,
-};
+use rynas_api_types::scheduler::{CronEntry, LiveRun, NotifyPolicy, ScheduledTask, SmartTestKind, SystemTimer, TaskAction, TaskRun, TaskTrigger, TaskView};
 
-use rynas_schedule::cal::{Cal, Repeat, Syntax};
 use rynas_schedule::describe::{all_day, day_span};
 use rynas_schedule::{Description, MonthDay, Nth, Recurrence, TimeOfDay, Weekdays, describe};
 
 use super::scheduler_live;
 use crate::api;
-use crate::form::{In, area_field, lens, lens_bool, number_field, save_bar, segmented, select_field, switch, tabs, text_field};
+use crate::form::{In, area_field, lens, lens_bool, number_field, save_bar, select_field, switch, tabs, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
+use crate::schedule::ScheduleEditor;
 use crate::toast::{saved_applied, saved_pending, toast};
 use crate::ui::{self, Confirm, EmptyState, PageHeader, Remote, Tone, confirm, drawer};
 
-// ------------------------------------------------------------------ calendar builder
-
-/// [`Cal::expression`] with the API's syntax.
-fn expression(c: &Cal) -> (String, CalendarSyntax) {
-    let (e, s) = c.expression();
-    (e, if s == Syntax::Cron { CalendarSyntax::Cron } else { CalendarSyntax::Calendar })
-}
+// ------------------------------------------------------------------ schedules in words
 
 /// Weekdays in words: "Mon–Fri", "Mon, Wed", "Sat, Sun".
 pub fn weekdays_text(days: Weekdays) -> String {
@@ -116,221 +107,14 @@ pub fn trigger_text(tr: &TaskTrigger) -> String {
             }
             calendar_text(on_calendar)
         }
+        TaskTrigger::Recurrence { recurrence } => recurrence_text(recurrence),
+        TaskTrigger::Interval { hours, .. } => tf("sch.trig.interval_text", &[("n", &hours.to_string())]),
+        TaskTrigger::Window { .. } => t("sch.trig.window_text").to_string(),
+        TaskTrigger::After { task, .. } => tf("sch.trig.after_text", &[("task", task)]),
     }
 }
 
 pub const DAY_KEYS: [&str; 7] = ["day.1", "day.2", "day.3", "day.4", "day.5", "day.6", "day.7"];
-
-// ------------------------------------------------------------------ trigger editor
-
-const TRIGGERS: &[(&str, &str)] = &[("calendar", "sch.trig.calendar"), ("boot", "sch.trig.boot"), ("manual", "sch.trig.manual")];
-const TRIGGERS_TIMED: &[(&str, &str)] = &[("calendar", "sch.trig.calendar"), ("boot", "sch.trig.boot")];
-const REPEATS: &[(&str, &str)] = &[
-    ("minutes", "sch.rep.minutes"),
-    ("hourly", "sch.rep.hourly"),
-    ("daily", "sch.rep.daily"),
-    ("weekly", "sch.rep.weekly"),
-    ("monthly", "sch.rep.monthly"),
-    ("custom", "sch.rep.custom"),
-    ("cron", "sch.rep.cron"),
-];
-
-/// State of the schedule part of an editor (shared with the snapshot jobs).
-#[derive(Clone, Copy)]
-pub struct TriggerEdit {
-    kind: RwSignal<String>,
-    cal: RwSignal<Cal>,
-    persistent: RwSignal<bool>,
-    random_s: RwSignal<String>,
-    boot_s: RwSignal<String>,
-    preview: RwSignal<Option<CalendarPreview>>,
-    checking: RwSignal<bool>,
-    seq: StoredValue<u32>,
-}
-
-impl TriggerEdit {
-    pub fn new(trig: &TaskTrigger) -> Self {
-        let (kind, cal, persistent, random_s, boot_s) = match trig {
-            TaskTrigger::Calendar { on_calendar, cron, persistent, randomized_delay_s } => {
-                let cal = if on_calendar.is_empty() && cron.is_some() {
-                    Cal { repeat: Repeat::Cron, cron: cron.clone().unwrap_or_default(), ..Cal::default() }
-                } else {
-                    Cal::parse(on_calendar)
-                };
-                ("calendar", cal, *persistent, randomized_delay_s.to_string(), "60".to_string())
-            }
-            TaskTrigger::Boot { delay_s } => ("boot", Cal::default(), true, "0".into(), delay_s.to_string()),
-            TaskTrigger::Manual => ("manual", Cal::default(), true, "0".into(), "60".into()),
-        };
-        let e = TriggerEdit {
-            kind: RwSignal::new(kind.into()),
-            cal: RwSignal::new(cal),
-            persistent: RwSignal::new(persistent),
-            random_s: RwSignal::new(random_s),
-            boot_s: RwSignal::new(boot_s),
-            preview: RwSignal::new(None),
-            checking: RwSignal::new(false),
-            seq: StoredValue::new(0),
-        };
-        // live preview of the next runs, 300 ms after the last change
-        Effect::new(move |_| {
-            let is_cal = e.kind.with(|k| k == "calendar");
-            let (expr, syntax) = e.cal.with(expression);
-            e.seq.update_value(|s| *s += 1);
-            let mine = e.seq.get_value();
-            if !is_cal {
-                return;
-            }
-            if expr.is_empty() {
-                e.preview.set(None);
-                return;
-            }
-            e.checking.set(true);
-            set_timeout(
-                move || {
-                    if e.seq.get_value() != mine {
-                        return;
-                    }
-                    spawn_local(async move {
-                        let req = CalendarPreviewRequest { expression: expr, syntax, count: Some(5) };
-                        let r = api::post::<_, CalendarPreview>("/api/v1/scheduler/tasks/preview-calendar", Some(&req)).await;
-                        if e.seq.get_value() != mine {
-                            return;
-                        }
-                        e.checking.set(false);
-                        match r {
-                            Ok(p) => e.preview.set(Some(p)),
-                            Err(err) => e.preview.set(Some(CalendarPreview { valid: false, error: Some(err.text()), ..Default::default() })),
-                        }
-                    });
-                },
-                Duration::from_millis(300),
-            );
-        });
-        e
-    }
-
-    /// The trigger to save, or the i18n key of what is wrong.
-    pub fn trigger(self) -> Result<TaskTrigger, &'static str> {
-        let num = |s: RwSignal<String>| s.with_untracked(|v| v.trim().parse::<u32>().ok());
-        match self.kind.get_untracked().as_str() {
-            "boot" => Ok(TaskTrigger::Boot { delay_s: num(self.boot_s).ok_or("sch.v.delay")? }),
-            "manual" => Ok(TaskTrigger::Manual),
-            _ => {
-                if self.preview.with_untracked(|p| p.as_ref().is_some_and(|p| !p.valid)) {
-                    return Err("sch.v.calendar");
-                }
-                let (expr, syntax) = self.cal.with_untracked(expression);
-                if expr.is_empty() {
-                    return Err("sch.v.calendar");
-                }
-                let (on_calendar, cron) = if syntax == CalendarSyntax::Cron { (String::new(), Some(expr)) } else { (expr, None) };
-                Ok(TaskTrigger::Calendar {
-                    on_calendar,
-                    cron,
-                    persistent: self.persistent.get_untracked(),
-                    randomized_delay_s: num(self.random_s).unwrap_or(0),
-                })
-            }
-        }
-    }
-
-    /// Trigger kind, calendar builder, preview of the next runs.
-    pub fn view(self, allow_manual: bool) -> AnyView {
-        let e = self;
-        let none = Signal::derive(|| None::<String>);
-        let repeat = Memo::new(move |_| e.cal.with(|c| c.repeat));
-        let cal_text = move |get: fn(&Cal) -> String, set: fn(&mut Cal, String)| (Signal::derive(move || e.cal.with(get)), Callback::new(move |v| e.cal.update(|c| set(c, v))));
-        let builder = move || {
-            let time = {
-                let (v, s) = cal_text(|c| c.time.clone(), |c, v| c.time = v);
-                text_field("sch.f.time", v, s, none, In { kind: "time", ..In::default() })
-            };
-            match repeat.get() {
-                Repeat::Minutes => {
-                    let (v, s) = cal_text(|c| c.every_min.to_string(), |c, v| c.every_min = v.parse().unwrap_or(15));
-                    number_field("sch.f.every_min", None, v, s, 1, 59)
-                }
-                Repeat::Hourly => {
-                    let (v, s) = cal_text(|c| c.minute.to_string(), |c, v| c.minute = v.parse().unwrap_or(0));
-                    number_field("sch.f.minute", Some("sch.f.minute_help"), v, s, 0, 59)
-                }
-                Repeat::Daily => time,
-                Repeat::Weekly => {
-                    let days = (1..=7u8)
-                        .map(|d| {
-                            view! {
-                                <label class="check day">
-                                    <input type="checkbox" prop:checked=move || e.cal.with(|c| c.days.contains(&d))
-                                        on:change=move |ev| { let on = event_target_checked(&ev); e.cal.update(|c| { c.days.retain(|x| *x != d); if on { c.days.push(d); c.days.sort_unstable(); } }); } />
-                                    {tr(DAY_KEYS[d as usize - 1])}
-                                </label>
-                            }
-                        })
-                        .collect_view();
-                    view! {
-                        <fieldset class="fieldset">
-                            <legend class="field-label">{tr("sch.f.weekdays")}</legend>
-                            <div class="quiet-days">{days}</div>
-                        </fieldset>
-                        {time}
-                    }
-                    .into_any()
-                }
-                Repeat::Monthly => {
-                    let (v, s) = cal_text(|c| c.dom.to_string(), |c, v| c.dom = v.parse().unwrap_or(1));
-                    view! { <div class="form-row">{number_field("sch.f.dom", Some("sch.f.dom_help"), v, s, 1, 31)}{time}</div> }.into_any()
-                }
-                Repeat::Custom => {
-                    let (v, s) = cal_text(|c| c.custom.clone(), |c, v| c.custom = v);
-                    text_field("sch.f.expression", v, s, none, In { mono: true, help: Some("sch.f.expression_help"), placeholder: "Mon..Fri *-*-* 02:30:00", ..In::default() })
-                }
-                Repeat::Cron => {
-                    let (v, s) = cal_text(|c| c.cron.clone(), |c, v| c.cron = v);
-                    text_field("sch.f.cron", v, s, none, In { mono: true, help: Some("sch.f.cron_help"), placeholder: "0 4 * * *", ..In::default() })
-                }
-            }
-        };
-        let preview = move || {
-            let p = e.preview.get();
-            let checking = e.checking.get();
-            view! {
-                <div class="cal-preview" aria-live="polite">
-                    {match p {
-                        Some(p) if p.valid => view! {
-                            <span class="field-label">{tr("sch.next_runs")}{checking.then(|| view! { " " <span class="btn-spinner" aria-hidden="true"></span> })}</span>
-                            <ol class="plain-list tnum">{p.next_ms.iter().map(|m| view! { <li>{i18n::datetime(*m)}</li> }).collect_view()}</ol>
-                            {(!p.normalized.is_empty()).then(|| view! { <span class="field-help">{tr("sch.normalized")}" "<code class="mono">{p.normalized.clone()}</code></span> })}
-                        }.into_any(),
-                        Some(p) => view! {
-                            <p class="field-error" role="alert"><Icon icon=icons::CIRCLE_X size=12 /><span class="err-text">{tr("sch.v.calendar")}{p.error.filter(|e| !e.is_empty()).map(ui::tech_detail)}</span></p>
-                        }.into_any(),
-                        None if checking => view! { <span class="muted small">{tr("sch.checking")}</span> }.into_any(),
-                        None => ().into_any(),
-                    }}
-                </div>
-            }
-        };
-        let kind = Memo::new(move |_| e.kind.get());
-        let body = move || match kind.get().as_str() {
-            "calendar" => view! {
-                {select_field("sch.f.repeat", None, REPEATS, Signal::derive(move || e.cal.with(|c| c.repeat.code().to_string())), Callback::new(move |v: String| e.cal.update(|c| c.repeat = Repeat::parse(&v))))}
-                {builder}
-                {preview}
-                {switch("sch.f.persistent", Some("sch.f.persistent_help"), e.persistent.into(), Callback::new(move |v| e.persistent.set(v)))}
-                {number_field("sch.f.random", Some("sch.f.random_help"), e.random_s.into(), Callback::new(move |v| e.random_s.set(v)), 0, 86400)}
-            }
-            .into_any(),
-            "boot" => number_field("sch.f.boot_delay", Some("sch.f.boot_delay_help"), e.boot_s.into(), Callback::new(move |v| e.boot_s.set(v)), 0, 86400),
-            _ => view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("sch.trig.manual_help")}</p> }.into_any(),
-        };
-        view! {
-            {segmented("sch.f.trigger", if allow_manual { TRIGGERS } else { TRIGGERS_TIMED }, e.kind.into(), Callback::new(move |v| e.kind.set(v)))}
-            {body}
-        }
-        .into_any()
-    }
-}
 
 // ------------------------------------------------------------------ action draft (pure)
 
@@ -552,6 +336,8 @@ fn new_task() -> ScheduledTask {
         io_weight: None,
         notify: NotifyPolicy::OnFailure,
         notify_output: false,
+        owner: Default::default(),
+        policy: Default::default(),
     }
 }
 
@@ -796,7 +582,7 @@ fn task_row(
 fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyView {
     let internal_fixed = !is_new && init.action.is_internal();
     let action_summary = action_text(&init.action);
-    let trig = TriggerEdit::new(&init.trigger);
+    let trig = ScheduleEditor::new(&init.trigger);
     let act = RwSignal::new(ActionDraft::from_action(&init.action));
     let d = RwSignal::new(init);
     let id_touched = RwSignal::new(!is_new);
@@ -923,7 +709,10 @@ fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyVie
             }
         }
         match trig.trigger() {
-            Ok(tr) => task.trigger = tr,
+            Ok(tr) => {
+                task.trigger = tr;
+                trig.apply_policy(&mut task.policy);
+            }
             Err(k) => {
                 error.set(Some(t(k).to_string()));
                 return;
@@ -1256,13 +1045,6 @@ fn cron_panel(edit: RwSignal<Option<(ScheduledTask, bool)>>) -> AnyView {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn calendar_builder_syntax() {
-        let c = Cal { repeat: Repeat::Cron, cron: " 0 4 * * * ".into(), ..Cal::default() };
-        assert_eq!(expression(&c), ("0 4 * * *".into(), CalendarSyntax::Cron));
-        assert_eq!(expression(&Cal::default()), ("*-*-* 03:00:00".into(), CalendarSyntax::Calendar));
-    }
 
     #[test]
     fn schedules_in_words() {

@@ -1,0 +1,9 @@
+# Managed by rynas — do not edit (sha256:f12f3684f87f3db1b24c3c955dbbf5bf1116a6a99fd868bd5a815f10e484c4cc)
+[Unit]
+Description=Timer of rynas task backup-offsite
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 02:30:00
+Persistent=true
+AccuracySec=1s
+Unit=rynas-task-backup-offsite.service

@@ -1,0 +1,10 @@
+# Managed by rynas — do not edit (sha256:ed5aabe0eac459a71208c27623074ec46b73f1c9b46cf70829da09943fa78c29)
+[Unit]
+Description=Timer of rynas task replicate-docs-usb
+
+[Timer]
+OnCalendar=*-*-* 01:30:00
+Persistent=true
+RandomizedDelaySec=600
+AccuracySec=1s
+Unit=rynas-task-replicate-docs-usb.service

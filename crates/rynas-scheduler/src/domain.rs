@@ -6,7 +6,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use rynas_api_types::scheduler::{ScheduledTask, SchedulerConfig, TaskAction, TaskTrigger};
+use rynas_api_types::scheduler::{
+    MissedPolicy, RunPolicy, ScheduledTask, SchedulerConfig, TaskAction, TaskTrigger,
+};
 use rynas_config::files::HEADER_PREFIX;
 use rynas_config::{Applier, ApplyCtx, Candidate, ManagedFile};
 use rynas_tasks::Cmd;
@@ -90,11 +92,15 @@ fn valid_ref(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
 }
 
-/// Tasks of a configuration value (none for `None`).
+/// Tasks of a configuration value (none for `None`), brought to the current model
+/// ([`ScheduledTask::migrate`]).
 pub fn tasks_of(v: Option<&Value>) -> Vec<ScheduledTask> {
-    v.and_then(|v| serde_json::from_value::<SchedulerConfig>(v.clone()).ok())
+    let mut tasks = v
+        .and_then(|v| serde_json::from_value::<SchedulerConfig>(v.clone()).ok())
         .map(|c| c.tasks)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    tasks.iter_mut().for_each(ScheduledTask::migrate);
+    tasks
 }
 
 /// A user task that runs as `root` (administrators only).
@@ -124,7 +130,28 @@ pub fn root_task_changes(old: Option<&Value>, new: Option<&Value>) -> Vec<String
 }
 
 fn has_timer(t: &ScheduledTask) -> bool {
-    t.trigger != TaskTrigger::Manual
+    t.trigger.has_timer()
+}
+
+/// Bounds of a run policy.
+pub fn check_policy(p: &RunPolicy) -> Result<(), String> {
+    if let Some(MissedPolicy::RunOnce { within_h: Some(h) }) = p.missed
+        && !(1..=720).contains(&h)
+    {
+        return Err("the catch-up deadline is 1 to 720 hours".into());
+    }
+    if p.jitter_s.is_some_and(|s| s > 86_400) {
+        return Err("the random delay is at most one day".into());
+    }
+    if let Some(r) = p.retry
+        && (r.attempts > 10 || r.delay_s > 86_400 || r.max_delay_s > 7 * 86_400)
+    {
+        return Err("retry: at most 10 attempts, one day before the first, 7 days between two".into());
+    }
+    if !(1..=100).contains(&p.notify.after_failures) {
+        return Err("notify after 1 to 100 failed runs in a row".into());
+    }
+    Ok(())
 }
 
 /// Validates and normalizes one task (cron converted, name defaulted).
@@ -229,7 +256,25 @@ pub fn normalize_task(mut t: ScheduledTask) -> Result<ScheduledTask, String> {
             }
         }
     }
+    if !t.trigger.runnable() {
+        return Err(format!(
+            "task {id}: interval, window and after-task schedules are not supported by the Task Scheduler yet"
+        ));
+    }
     t.trigger = match t.trigger {
+        // a preset is stored as its expression (catch-up and delay from the policy)
+        TaskTrigger::Recurrence { recurrence } => {
+            let on_calendar = recurrence
+                .to_calendar()
+                .map_err(|e| format!("task {id}: {e}"))?;
+            let p = &t.policy;
+            TaskTrigger::Calendar {
+                on_calendar,
+                cron: None,
+                persistent: p.missed.is_none_or(|m| m.catches_up()),
+                randomized_delay_s: p.jitter_s.unwrap_or(0),
+            }
+        }
         TaskTrigger::Calendar {
             on_calendar,
             cron: Some(cron),
@@ -264,6 +309,8 @@ pub fn normalize_task(mut t: ScheduledTask) -> Result<ScheduledTask, String> {
         }
         other => other,
     };
+    t.migrate();
+    check_policy(&t.policy).map_err(|e| format!("task {id}: {e}"))?;
     match &t.trigger {
         TaskTrigger::Calendar {
             randomized_delay_s, ..
@@ -443,7 +490,11 @@ impl Applier for SchedulerDomain {
             }
         }
         for n in new.iter().filter(|t| t.enabled && has_timer(t)) {
-            let unchanged = old.iter().any(|o| o == n);
+            // the timer file, not the whole task: a document brought to a newer model (owner,
+            // policy) with the same timer does not restart it
+            let unchanged = old
+                .iter()
+                .any(|o| o.id == n.id && o.enabled && render_timer(o) == render_timer(n));
             if unchanged {
                 ctx.system.start_unit(&timer_name(&n.id))?;
             } else {

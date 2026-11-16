@@ -19,7 +19,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use rynas_api_types::scheduler::{
     CalendarPreview, CalendarPreviewRequest, CalendarSyntax, CronEntry, NotifyPolicy,
-    ScheduledTask, SchedulerConfig, SystemTimer, TaskAction, TaskRun, TaskStatus, TaskView,
+    SchedulePreview, SchedulePreviewRequest, ScheduledTask, SchedulerConfig, SystemTimer,
+    TaskAction, TaskRun, TaskStatus, TaskView,
 };
 use rynas_api_types::snapshots::SnapshotsConfig;
 use rynas_api_types::{StagedChanges, TaskStarted, error_codes};
@@ -63,6 +64,7 @@ pub fn router(st: ProtState) -> Router {
             "/v1/scheduler/tasks/preview-calendar",
             post(preview_calendar),
         )
+        .route("/v1/scheduler/preview", post(preview))
         .route(
             "/v1/scheduler/tasks/{id}",
             get(get_one).put(put).delete(delete),
@@ -142,6 +144,14 @@ fn status_of(
     }
 }
 
+/// A task as the API shows it: in the current model (owner, run policy) even when the
+/// stored document predates it.
+fn migrated(t: &ScheduledTask) -> ScheduledTask {
+    let mut t = t.clone();
+    t.migrate();
+    t
+}
+
 pub(crate) fn task_views(p: &Protection, owner: &str, rt: &Runtime) -> Res<Vec<TaskView>> {
     let c = &p.ops.config;
     let (eff, cur, applied): (SchedulerConfig, SchedulerConfig, Option<SchedulerConfig>) =
@@ -159,7 +169,7 @@ pub(crate) fn task_views(p: &Protection, owner: &str, rt: &Runtime) -> Res<Vec<T
             let base = cur.tasks.iter().find(|x| x.id == t.id);
             TaskView {
                 status: status_of(t, is_applied(&t.id), pending_op(Some(t), base), rt, &latest),
-                task: t.clone(),
+                task: migrated(t),
             }
         })
         .collect();
@@ -170,7 +180,7 @@ pub(crate) fn task_views(p: &Protection, owner: &str, rt: &Runtime) -> Res<Vec<T
     {
         out.push(TaskView {
             status: status_of(t, is_applied(&t.id), pending_op(None, Some(t)), rt, &latest),
-            task: t.clone(),
+            task: migrated(t),
         });
     }
     Ok(out)
@@ -602,6 +612,23 @@ async fn preview_calendar(
             ..bad(e)
         },
     }))
+}
+
+/// A schedule as the NAS will run it, in its time zone ([`rynas_scheduler::preview`]: next
+/// runs with systemd's DST rules, clock changes that touch it, "no next run"); always 200,
+/// `valid: false` with the reason when it is not usable.
+async fn preview(
+    State(st): State<ProtState>,
+    body: Result<Json<SchedulePreviewRequest>, JsonRejection>,
+) -> Res<Json<SchedulePreview>> {
+    prot(&st)?;
+    let req = json_body(body)?;
+    let p = tokio::task::spawn_blocking(move || {
+        rynas_scheduler::preview::preview(&req, &rynas_power::system_tz(), jiff::Timestamp::now())
+    })
+    .await
+    .map_err(Error::internal)?;
+    Ok(Json(p))
 }
 
 async fn system_timers(State(st): State<ProtState>) -> Res<Json<Vec<SystemTimer>>> {

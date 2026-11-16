@@ -1,0 +1,13 @@
+# Managed by rynas — do not edit (sha256:cd5776b433322696871c2958c5ba5961e66ddecb8d2247cc4ecccd20dca9ba00)
+[Unit]
+Description=rynas task power-off-night: Scheduled shutdown
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/rynas/rynasctl power scheduled-shutdown night
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-power-off-night
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished power-off-night

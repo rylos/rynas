@@ -293,6 +293,8 @@ fn job_task(
             io_weight: None,
             notify: NotifyPolicy::OnFailure,
             notify_output: false,
+            owner: Default::default(),
+            policy: Default::default(),
         },
         Some(&job.name),
     )

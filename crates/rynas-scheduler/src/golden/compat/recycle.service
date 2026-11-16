@@ -1,0 +1,13 @@
+# Managed by rynas — do not edit (sha256:d162bd53108fe8a197eb379bd0258a7629dc27c66af4c6d06b1c2b940e08d441)
+[Unit]
+Description=rynas task recycle: recycle
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/rynas/rynasctl job run recycle
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-recycle
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished recycle

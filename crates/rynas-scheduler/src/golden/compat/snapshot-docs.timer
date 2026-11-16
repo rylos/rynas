@@ -1,0 +1,9 @@
+# Managed by rynas — do not edit (sha256:327f553b6be71e83c6cc1690adea169f5c2b1d6a078198b32a8f3c744a7acf69)
+[Unit]
+Description=Timer of rynas task snapshot-docs
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+AccuracySec=1s
+Unit=rynas-task-snapshot-docs.service

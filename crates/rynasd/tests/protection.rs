@@ -268,6 +268,39 @@ async fn tasks_are_staged_previewed_run_and_recorded() {
     )
     .await;
     assert!(!serde_json::from_slice::<CalendarPreview>(&b).unwrap().valid);
+    // the schedule preview of the editor: rynas-schedule in a given zone
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/scheduler/preview",
+        Some(json!({"expression": "Mon..Fri 02:30", "tz": "Europe/Rome", "count": 3})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let p: rynas_api_types::scheduler::SchedulePreview = serde_json::from_slice(&b).unwrap();
+    assert!(p.valid && p.tz == "Europe/Rome" && p.runs.len() == 3, "{p:?}");
+    assert_eq!(p.normalized, "Mon..Fri *-*-* 02:30:00");
+    assert!(p.runs.iter().all(|r| r.local.ends_with(" 02:30:00")), "{p:?}");
+    assert!(p.preset.is_some());
+    let (_, b) = call(
+        &e,
+        "POST",
+        "/v1/scheduler/preview",
+        Some(json!({"trigger": {"kind": "recurrence", "recurrence": {"kind": "minutes", "every": 7, "from": 0, "to": 23, "days": 0}}})),
+    )
+    .await;
+    let p: rynas_api_types::scheduler::SchedulePreview = serde_json::from_slice(&b).unwrap();
+    assert!(!p.valid && p.error.is_some(), "{p:?}");
+    // (the DST cases, which depend on the date, are tested with fixed dates in rynas-scheduler)
+    // a trigger the Task Scheduler does not run yet is refused
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/scheduler/tasks",
+        Some(json!({"id": "every-day", "action": {"kind": "command", "command": "true"}, "trigger": {"kind": "interval", "hours": 24}})),
+    )
+    .await;
+    assert_eq!((s, code(&b).as_str()), (StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE));
 
     // run now needs the applied unit
     let (s, b) = call(&e, "POST", "/v1/scheduler/tasks/hello/run", None).await;

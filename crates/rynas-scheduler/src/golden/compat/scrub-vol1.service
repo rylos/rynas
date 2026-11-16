@@ -1,0 +1,16 @@
+# Managed by rynas — do not edit (sha256:8c9a4f720fcb35a68a2946848664a0bf5b2e509cd832bd2a042957fb1d795e5f)
+[Unit]
+Description=rynas task scrub-vol1: Scrub
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/rynas/rynasctl job run scrub-vol1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-scrub-vol1
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished scrub-vol1
+RuntimeMaxSec=86400
+Nice=5
+IOWeight=20

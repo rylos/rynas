@@ -8,6 +8,7 @@
 //! - [`probe`]: read-only systemd questions (timers, journal) behind a trait;
 //! - [`history`]: the run history (SQLite) fed by `rynasctl task-finished`;
 //! - [`live`]: the live output of a running task (journal entries, event data);
+//! - [`preview`]: a schedule as the NAS will run it (next runs, DST notes), without systemd;
 //! - [`cron`]: read-only listing of crontab entries.
 //!
 //! Run notifications (per-task policy) are emitted by rynasd through `rynas_notify::Notifier`.
@@ -17,6 +18,7 @@ pub mod cron;
 pub mod domain;
 pub mod history;
 pub mod live;
+pub mod preview;
 pub mod probe;
 pub mod units;
 

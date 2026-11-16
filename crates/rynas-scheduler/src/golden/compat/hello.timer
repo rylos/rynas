@@ -1,0 +1,8 @@
+# Managed by rynas — do not edit (sha256:a31525d90f2c5da162025bc998c8528292e846d762bf3e2a9856e6c39e2676f6)
+[Unit]
+Description=Timer of rynas task hello
+
+[Timer]
+OnBootSec=60
+AccuracySec=1s
+Unit=rynas-task-hello.service

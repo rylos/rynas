@@ -1,0 +1,17 @@
+# Managed by rynas — do not edit (sha256:83edbc7ca4301d0d638f61a2bc7a81fcb9d207875105ac5226ad09390140b552)
+[Unit]
+Description=rynas task hello: hello
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+StandardInput=file:/var/lib/rynas/tasks/hello/run
+ExecStart=/bin/sh -
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-hello
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished hello
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes

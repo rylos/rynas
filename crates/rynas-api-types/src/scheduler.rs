@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use rynas_schedule::Recurrence;
+
 use crate::PendingOp;
 
 fn default_true() -> bool {
@@ -49,6 +51,303 @@ pub struct ScheduledTask {
     /// Attach the output (last 256 KiB) to the notification.
     #[serde(default)]
     pub notify_output: bool,
+    /// Who owns the task: the user (Task Scheduler page) or a feature that creates, changes
+    /// and removes it with its own settings. Absent in documents written before owners:
+    /// [`ScheduledTask::migrate`] derives it from the action.
+    #[serde(default, skip_serializing_if = "TaskOwner::is_user")]
+    pub owner: TaskOwner,
+    /// Missed runs, overlap, random delay, retry, notification rules. Its defaults are the
+    /// behaviour of tasks written before run policies (see [`ScheduledTask::effective_policy`]).
+    #[serde(default, skip_serializing_if = "RunPolicy::is_empty")]
+    pub policy: RunPolicy,
+}
+
+impl ScheduledTask {
+    /// Brings a task written by an older rynas to the current model; idempotent, and a task
+    /// already in the current model is left as it is:
+    ///
+    /// - `owner` from the action when a feature creates that kind of task;
+    /// - `policy.missed` and `policy.jitter_s` from a calendar trigger's `persistent` and
+    ///   `randomized_delay_s` when absent; then the trigger's two fields mirror the policy
+    ///   (the policy is the reference, the trigger fields stay readable for older clients).
+    ///
+    /// The units of a migrated task are the units of the task before (golden tests in
+    /// `rynas-scheduler`).
+    pub fn migrate(&mut self) {
+        if let feature @ TaskOwner::Feature { .. } = TaskOwner::of_action(&self.action) {
+            self.owner = feature;
+        }
+        if let TaskTrigger::Calendar {
+            persistent,
+            randomized_delay_s,
+            ..
+        } = &mut self.trigger
+        {
+            let missed = *self.policy.missed.get_or_insert(if *persistent {
+                MissedPolicy::RunOnce { within_h: None }
+            } else {
+                MissedPolicy::Skip
+            });
+            let jitter = *self.policy.jitter_s.get_or_insert(*randomized_delay_s);
+            *persistent = missed.catches_up();
+            *randomized_delay_s = jitter;
+        }
+    }
+
+    /// The policy that applies, with the defaults filled in: catch-up and random delay from
+    /// the trigger when the policy has none, overlap `skip` (systemd never starts a second
+    /// run of an active service), retry by kind ([`Retry::default_for`]), notification level
+    /// from `notify`.
+    pub fn effective_policy(&self) -> EffectivePolicy {
+        let (persistent, delay) = match &self.trigger {
+            TaskTrigger::Calendar {
+                persistent,
+                randomized_delay_s,
+                ..
+            } => (*persistent, *randomized_delay_s),
+            // a preset is a calendar: catch-up on unless the policy says otherwise
+            TaskTrigger::Recurrence { .. } => (true, 0),
+            _ => (false, 0),
+        };
+        let calendar = matches!(
+            self.trigger,
+            TaskTrigger::Calendar { .. } | TaskTrigger::Recurrence { .. }
+        );
+        EffectivePolicy {
+            missed: match self.policy.missed {
+                Some(m) if calendar => m,
+                _ if calendar && persistent => MissedPolicy::RunOnce { within_h: None },
+                _ => MissedPolicy::Skip,
+            },
+            jitter_s: self.policy.jitter_s.unwrap_or(delay),
+            overlap: self.policy.overlap.unwrap_or_default(),
+            retry: self
+                .policy
+                .retry
+                .unwrap_or_else(|| Retry::default_for(&self.action)),
+            notify: self.notify,
+            rules: self.policy.notify,
+        }
+    }
+}
+
+/// Who owns a task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskOwner {
+    /// Made on the Task Scheduler page (or through its API).
+    #[default]
+    User,
+    /// Created, changed and removed by a feature with its own settings (`key`: the job, the
+    /// replica `job/target`, the power rule, the deduplication volume).
+    Feature { feature: OwnerFeature, key: String },
+}
+
+/// The features that own tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerFeature {
+    Snapshots,
+    Replication,
+    Backup,
+    Power,
+    Dedup,
+}
+
+/// Parts of a task its owner decides: the Task Scheduler page shows them read-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockedField {
+    Action,
+    Schedule,
+    /// Catch-up of missed runs (a shutdown or a deduplication run never catches up).
+    Missed,
+}
+
+impl TaskOwner {
+    pub fn is_user(&self) -> bool {
+        *self == TaskOwner::User
+    }
+
+    /// The owner of a task with this action: the feature that creates such tasks, else the
+    /// user.
+    pub fn of_action(a: &TaskAction) -> TaskOwner {
+        let (feature, key) = match a {
+            TaskAction::Snapshot { job } => (OwnerFeature::Snapshots, job.clone()),
+            TaskAction::Replicate { job, target } => {
+                (OwnerFeature::Replication, format!("{job}/{target}"))
+            }
+            TaskAction::Backup { job } => (OwnerFeature::Backup, job.clone()),
+            TaskAction::PowerShutdown { rule } => (OwnerFeature::Power, rule.clone()),
+            TaskAction::Dedup { volume } => (OwnerFeature::Dedup, volume.clone()),
+            _ => return TaskOwner::User,
+        };
+        TaskOwner::Feature { feature, key }
+    }
+
+    /// What the owner decides.
+    pub fn locked(&self) -> &'static [LockedField] {
+        match self {
+            TaskOwner::User => &[],
+            TaskOwner::Feature {
+                feature: OwnerFeature::Power | OwnerFeature::Dedup,
+                ..
+            } => &[
+                LockedField::Action,
+                LockedField::Schedule,
+                LockedField::Missed,
+            ],
+            TaskOwner::Feature { .. } => &[LockedField::Action, LockedField::Schedule],
+        }
+    }
+}
+
+/// How a task runs beyond its trigger. Every field is optional: absent = the default of the
+/// task's kind, which is what rynas did before run policies.
+///
+/// Enforced today: `missed` (`Persistent=`) and `jitter_s` (`RandomizedDelaySec=`). The
+/// catch-up deadline, `overlap` other than `skip`, `retry` and the notification rules are
+/// stored and shown, and applied by the scheduling gate of a later release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RunPolicy {
+    /// A run missed while the NAS was off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missed: Option<MissedPolicy>,
+    /// Random delay of each start (`RandomizedDelaySec=`), at most one day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_s: Option<u32>,
+    /// A start while the previous run is still going.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<Overlap>,
+    /// Retry of a failed run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<Retry>,
+    /// When to notify, on top of the task's `notify` level.
+    #[serde(default, skip_serializing_if = "NotifyRules::is_default")]
+    pub notify: NotifyRules,
+}
+
+impl RunPolicy {
+    pub fn is_empty(&self) -> bool {
+        *self == RunPolicy::default()
+    }
+}
+
+/// A run missed while the NAS was off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MissedPolicy {
+    /// Not caught up.
+    Skip,
+    /// Caught up once at the next boot (`Persistent=`); with `within_h`, only when the boot
+    /// comes at most that many hours after the missed time.
+    RunOnce {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        within_h: Option<u32>,
+    },
+}
+
+impl MissedPolicy {
+    pub fn catches_up(self) -> bool {
+        matches!(self, MissedPolicy::RunOnce { .. })
+    }
+}
+
+/// A start while the previous run is still going.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Overlap {
+    /// The new start is dropped (what systemd does with an active service).
+    #[default]
+    Skip,
+    /// The new run waits for the running one.
+    Queue,
+    /// The running one is stopped, the new one starts.
+    Replace,
+}
+
+/// Retry of a failed run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retry {
+    /// Further attempts after a failure; 0 = none.
+    pub attempts: u8,
+    /// Wait before the first retry.
+    pub delay_s: u32,
+    /// Each wait doubles the one before, up to `max_delay_s`.
+    #[serde(default = "default_true")]
+    pub backoff: bool,
+    #[serde(default)]
+    pub max_delay_s: u32,
+}
+
+impl Retry {
+    pub const NONE: Retry = Retry {
+        attempts: 0,
+        delay_s: 0,
+        backoff: false,
+        max_delay_s: 0,
+    };
+    /// Backups and replications: a network or a target that is briefly away should not cost
+    /// a whole day (owner decision on the unified scheduling).
+    pub const TRANSFER: Retry = Retry {
+        attempts: 3,
+        delay_s: 600,
+        backoff: true,
+        max_delay_s: 3600,
+    };
+
+    /// The default of a kind of task.
+    pub fn default_for(a: &TaskAction) -> Retry {
+        match a {
+            TaskAction::Backup { .. } | TaskAction::Replicate { .. } => Retry::TRANSFER,
+            _ => Retry::NONE,
+        }
+    }
+}
+
+/// Notification rules on top of the task's `notify` level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyRules {
+    /// Notify a failure only after this many failed runs in a row (1 = every failure).
+    #[serde(default = "default_one")]
+    pub after_failures: u32,
+    /// Notify the first success after failures.
+    #[serde(default)]
+    pub on_recovery: bool,
+    /// Notify a run that was missed and not caught up.
+    #[serde(default)]
+    pub on_missed: bool,
+}
+
+fn default_one() -> u32 {
+    1
+}
+
+impl Default for NotifyRules {
+    fn default() -> Self {
+        NotifyRules {
+            after_failures: 1,
+            on_recovery: false,
+            on_missed: false,
+        }
+    }
+}
+
+impl NotifyRules {
+    pub fn is_default(&self) -> bool {
+        *self == NotifyRules::default()
+    }
+}
+
+/// [`RunPolicy`] with every default filled in ([`ScheduledTask::effective_policy`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectivePolicy {
+    pub missed: MissedPolicy,
+    pub jitter_s: u32,
+    pub overlap: Overlap,
+    pub retry: Retry,
+    pub notify: NotifyPolicy,
+    pub rules: NotifyRules,
 }
 
 /// What a task runs. User actions (`command`, `script`) run as `user`; internal actions run
@@ -157,10 +456,67 @@ pub enum TaskTrigger {
     },
     /// No timer: run now only.
     Manual,
+    /// One of the schedule editor's presets. The Task Scheduler stores it as the `Calendar`
+    /// of its expression (catch-up and random delay from the run policy), which
+    /// `Recurrence::from_calendar` recognizes again: the stored text is always the one
+    /// systemd uses.
+    Recurrence { recurrence: Recurrence },
+    /// Every `hours` hours counted from the last successful run (anacron-like), the first one
+    /// `after_boot_min` minutes after boot at the earliest. Not run by the Task Scheduler yet:
+    /// a task with it is refused.
+    Interval {
+        hours: u32,
+        #[serde(default)]
+        after_boot_min: u32,
+    },
+    /// At the start of every block of a weekly window (168 characters `0`/`1`, Sunday first,
+    /// `window[day * 24 + hour]`, like the other weekly grids); with `stop_at_end` the run is
+    /// stopped at the end of its block. Not run by the Task Scheduler yet: a task with it is
+    /// refused.
+    Window {
+        window: String,
+        #[serde(default)]
+        stop_at_end: bool,
+    },
+    /// After another task finished (only after a success with `only_on_success`). Not run by
+    /// the Task Scheduler yet: a task with it is refused.
+    After {
+        task: String,
+        #[serde(default)]
+        only_on_success: bool,
+    },
 }
 
 fn default_boot_delay() -> u32 {
     60
+}
+
+impl TaskTrigger {
+    /// The task gets a `.timer` unit.
+    pub fn has_timer(&self) -> bool {
+        matches!(
+            self,
+            TaskTrigger::Calendar { .. } | TaskTrigger::Recurrence { .. } | TaskTrigger::Boot { .. }
+        )
+    }
+
+    /// The `OnCalendar=` expression of a calendar or preset trigger (`None` for a preset that
+    /// is not one valid expression).
+    pub fn on_calendar(&self) -> Option<String> {
+        match self {
+            TaskTrigger::Calendar { on_calendar, .. } => Some(on_calendar.clone()),
+            TaskTrigger::Recurrence { recurrence } => recurrence.to_calendar().ok(),
+            _ => None,
+        }
+    }
+
+    /// The Task Scheduler can run it today (the other kinds come with the scheduling gate).
+    pub fn runnable(&self) -> bool {
+        !matches!(
+            self,
+            TaskTrigger::Interval { .. } | TaskTrigger::Window { .. } | TaskTrigger::After { .. }
+        )
+    }
 }
 
 /// When a finished run sends a notification.
@@ -293,6 +649,90 @@ pub struct CalendarPreview {
     pub next_ms: Vec<u64>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// `POST /api/v1/scheduler/preview`: a schedule as the NAS will run it. Give `expression`
+/// (an `OnCalendar=` expression, or a crontab line with `syntax: cron`) or `trigger`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SchedulePreviewRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    #[serde(default)]
+    pub syntax: CalendarSyntax,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TaskTrigger>,
+    /// IANA time zone; default the NAS's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz: Option<String>,
+    /// Number of next runs (default 5, at most 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+}
+
+/// Answer of `POST /api/v1/scheduler/preview` (always 200; `valid: false` with `error`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SchedulePreview {
+    pub valid: bool,
+    /// The time zone of the runs (IANA name; empty when the NAS's zone has none).
+    #[serde(default)]
+    pub tz: String,
+    /// The `OnCalendar=` expression to store (from cron or a preset), for calendar triggers.
+    #[serde(default)]
+    pub on_calendar: String,
+    /// systemd's normalized form of it.
+    #[serde(default)]
+    pub normalized: String,
+    /// The preset the expression is, if any: the structured description the interface puts
+    /// into words; `None` with `normalized` set: an advanced expression.
+    #[serde(default)]
+    pub preset: Option<Recurrence>,
+    /// Next runs.
+    #[serde(default)]
+    pub runs: Vec<PreviewRun>,
+    /// A valid schedule that systemd will never start again: a date in the past, or an
+    /// expression systemd gives up on around a DST change at midnight (the timer would stay
+    /// without a next run).
+    #[serde(default)]
+    pub no_next_run: bool,
+    /// The expression has no end but systemd stops scheduling it within the next year (at a
+    /// DST change at midnight): after its last run the timer has no next run.
+    #[serde(default)]
+    pub stops: bool,
+    /// When `stops`: the local date (`YYYY-MM-DD`) of the change where it stops.
+    #[serde(default)]
+    pub stops_on: Option<String>,
+    /// Clock changes in the next year that change when the schedule runs.
+    #[serde(default)]
+    pub dst: Vec<DstNote>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// One next run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PreviewRun {
+    pub ms: u64,
+    /// Wall-clock time in the preview's zone, `YYYY-MM-DD HH:MM:SS`.
+    pub local: String,
+    /// Zone abbreviation at that moment (`CET`, `CEST`), empty when the zone has none.
+    #[serde(default)]
+    pub abbreviation: String,
+    /// Seconds east of UTC at that moment.
+    pub offset_s: i32,
+}
+
+/// A clock change that affects a schedule: on `date` the clocks jump from `from` to `to`
+/// (local times, `HH:MM`). Forward: the schedule's times in between do not exist that day and
+/// are skipped. Back: its times in between exist twice and run once (the first time).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DstNote {
+    /// The moment of the change.
+    pub ms: u64,
+    /// `YYYY-MM-DD`, local.
+    pub date: String,
+    pub forward: bool,
+    pub from: String,
+    pub to: String,
 }
 
 /// `GET /api/v1/scheduler/system-timers`: systemd timers not generated by rynas (read-only).

@@ -1,0 +1,13 @@
+# Managed by rynas — do not edit (sha256:9de9b01e5bf9aa15f5d34b81897321f4c7f6a4503c2a4cac9e3cf34f39c8c3ae)
+[Unit]
+Description=rynas task replicate-docs-usb: Replica docs to usb
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/rynas/rynasctl job run replicate-docs-usb
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-replicate-docs-usb
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished replicate-docs-usb

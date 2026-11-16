@@ -1,0 +1,13 @@
+# Managed by rynas — do not edit (sha256:d7bc5730b9254d6c246f9dc3ab05c54ba364770106d9cfa82e9e91b3a7192866)
+[Unit]
+Description=rynas task backup-offsite: Backup offsite
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/rynas/rynasctl job run backup-offsite
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-backup-offsite
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished backup-offsite

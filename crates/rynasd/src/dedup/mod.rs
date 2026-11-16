@@ -1009,6 +1009,8 @@ pub fn job_task(key: &str, s: &VolumeDedup) -> ScheduledTask {
         // the run notifies by itself (dedup.ok / partial / failed)
         notify: NotifyPolicy::Never,
         notify_output: false,
+        owner: Default::default(),
+        policy: Default::default(),
     }
 }
 

@@ -1,0 +1,13 @@
+# Managed by rynas — do not edit (sha256:09e7078996458366a4c104c6195801663c0102871fb667f66fae322c3114949f)
+[Unit]
+Description=rynas task dedup-vol1: Deduplication vol1
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/rynas/rynasctl job run dedup-vol1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-dedup-vol1
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished dedup-vol1

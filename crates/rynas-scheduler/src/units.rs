@@ -155,23 +155,25 @@ pub fn render_service(t: &ScheduledTask, p: &Paths) -> Result<String, String> {
 /// The `.timer` unit, `None` for manual tasks.
 pub fn render_timer(t: &ScheduledTask) -> Option<String> {
     let body = match &t.trigger {
-        TaskTrigger::Manual => return None,
-        TaskTrigger::Calendar {
-            on_calendar,
-            persistent,
-            randomized_delay_s,
-            ..
-        } => {
-            let mut b = format!("OnCalendar={on_calendar}\n");
-            if *persistent {
+        TaskTrigger::Calendar { .. } | TaskTrigger::Recurrence { .. } => {
+            // the policy decides catch-up and delay (the same values as the trigger fields
+            // of a normalized task)
+            let p = t.effective_policy();
+            let mut b = format!("OnCalendar={}\n", t.trigger.on_calendar()?);
+            if p.missed.catches_up() {
                 b.push_str("Persistent=true\n");
             }
-            if *randomized_delay_s > 0 {
-                b.push_str(&format!("RandomizedDelaySec={randomized_delay_s}\n"));
+            if p.jitter_s > 0 {
+                b.push_str(&format!("RandomizedDelaySec={}\n", p.jitter_s));
             }
             b
         }
         TaskTrigger::Boot { delay_s } => format!("OnBootSec={}\n", (*delay_s).max(1)),
+        // no timer (manual), or not run by the Task Scheduler yet (refused when staged)
+        TaskTrigger::Manual
+        | TaskTrigger::Interval { .. }
+        | TaskTrigger::Window { .. }
+        | TaskTrigger::After { .. } => return None,
     };
     Some(format!(
         "[Unit]\nDescription=Timer of rynas task {id}\n\n[Timer]\n{body}AccuracySec=1s\nUnit={svc}\n",
@@ -184,7 +186,7 @@ pub fn render_timer(t: &ScheduledTask) -> Option<String> {
 pub fn render_dropin(tasks: &[ScheduledTask]) -> String {
     let timers: Vec<String> = tasks
         .iter()
-        .filter(|t| t.enabled && t.trigger != TaskTrigger::Manual)
+        .filter(|t| t.enabled && t.trigger.has_timer())
         .map(|t| timer_name(&t.id))
         .collect();
     let mut s = String::from(

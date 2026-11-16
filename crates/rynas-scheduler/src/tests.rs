@@ -17,6 +17,8 @@ use crate::domain::{
 };
 use crate::units::Paths;
 
+mod compat;
+
 fn golden(name: &str, actual: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/golden")
@@ -105,6 +107,8 @@ fn task(id: &str, action: TaskAction, trigger: TaskTrigger) -> ScheduledTask {
         io_weight: None,
         notify: NotifyPolicy::OnFailure,
         notify_output: false,
+        owner: Default::default(),
+        policy: Default::default(),
     }
 }
 

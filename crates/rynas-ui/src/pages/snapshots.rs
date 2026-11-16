@@ -17,7 +17,8 @@ use crate::api;
 use crate::form::{Draft, In, stale_notice, lens, lens_bool, number_field, save_bar, segmented, switch, tabs, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::pages::scheduler::{TriggerEdit, run_status, trigger_text};
+use crate::schedule::ScheduleEditor;
+use crate::pages::scheduler::{run_status, trigger_text};
 use crate::tasks;
 use crate::toast::{saved_applied, saved_pending, toast};
 use crate::ui::{self, Confirm, EmptyState, ErrorBox, Notice, PageHeader, Remote, Skeleton, Tone, confirm, drawer};
@@ -744,7 +745,7 @@ fn job_editor(init: Option<SnapshotJobView>, close: Callback<()>) -> AnyView {
             true,
         ),
     };
-    let trig = TriggerEdit::new(&schedule.unwrap_or(TaskTrigger::Calendar { on_calendar: "hourly".into(), cron: None, persistent: true, randomized_delay_s: 0 }));
+    let trig = ScheduleEditor::new(&schedule.unwrap_or(TaskTrigger::Calendar { on_calendar: "hourly".into(), cron: None, persistent: true, randomized_delay_s: 0 }));
     let source = RwSignal::new(if job.share.is_some() || is_new { "share" } else { "path" }.to_string());
     let d = RwSignal::new(job);
     let on = RwSignal::new(enabled);

@@ -1,0 +1,13 @@
+# Managed by rynas — do not edit (sha256:6588118cba061cae32bdb8f3567bfac1ea99c4cfed4396dac72835fa36d8ab71)
+[Unit]
+Description=rynas task snapshot-docs: Snapshots of docs
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/rynas/rynasctl job run snapshot-docs
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-snapshot-docs
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished snapshot-docs

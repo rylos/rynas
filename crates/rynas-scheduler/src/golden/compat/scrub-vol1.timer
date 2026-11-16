@@ -1,0 +1,9 @@
+# Managed by rynas — do not edit (sha256:ecc274d17144feabc5b7f5e0b8f23b8692b6b6b45bd92fd8cf6ac645b9565660)
+[Unit]
+Description=Timer of rynas task scrub-vol1
+
+[Timer]
+OnCalendar=*-*-01 04:00:00
+Persistent=true
+AccuracySec=1s
+Unit=rynas-task-scrub-vol1.service

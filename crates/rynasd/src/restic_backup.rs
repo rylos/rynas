@@ -634,6 +634,8 @@ fn job_task(
             io_weight: None,
             notify,
             notify_output: false,
+            owner: Default::default(),
+            policy: Default::default(),
         },
         None,
     )

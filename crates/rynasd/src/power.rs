@@ -150,6 +150,8 @@ pub fn shutdown_task(r: &PowerRule) -> ScheduledTask {
         io_weight: None,
         notify: NotifyPolicy::OnFailure,
         notify_output: false,
+        owner: Default::default(),
+        policy: Default::default(),
     }
 }
 

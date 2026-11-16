@@ -264,6 +264,8 @@ fn replica_task(
             // the transfer notifies by itself (replication.*)
             notify: NotifyPolicy::Never,
             notify_output: false,
+            owner: Default::default(),
+            policy: Default::default(),
         },
         None,
     )

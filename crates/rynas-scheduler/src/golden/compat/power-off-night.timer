@@ -1,0 +1,8 @@
+# Managed by rynas — do not edit (sha256:3d408a953fe7f118fabce4a6a3eb2504508a80f48e964b3e78671127ec6175d7)
+[Unit]
+Description=Timer of rynas task power-off-night
+
+[Timer]
+OnCalendar=Mon,Tue,Wed,Thu,Fri *-*-* 23:30:00
+AccuracySec=1s
+Unit=rynas-task-power-off-night.service

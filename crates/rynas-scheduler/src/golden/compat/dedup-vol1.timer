@@ -1,0 +1,8 @@
+# Managed by rynas — do not edit (sha256:26fb6208cfc5a708ded319f0a28d23e6686bc6b85b9126ec24a613b3218ea5e8)
+[Unit]
+Description=Timer of rynas task dedup-vol1
+
+[Timer]
+OnCalendar=Sat,Sun *-*-* 01,02,03:00:00
+AccuracySec=1s
+Unit=rynas-task-dedup-vol1.service

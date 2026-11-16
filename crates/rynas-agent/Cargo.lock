@@ -1874,8 +1874,16 @@ dependencies = [
 name = "rynas-api-types"
 version = "0.8.13"
 dependencies = [
+ "rynas-schedule",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rynas-schedule"
+version = "0.8.13"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

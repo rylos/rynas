@@ -172,6 +172,7 @@ pub fn routes() -> Router<AppState> {
         // task scheduler and snapshots (P3)
         .route("/scheduler/tasks", get(forward).post(forward))
         .route("/scheduler/tasks/preview-calendar", post(forward))
+        .route("/scheduler/preview", post(forward))
         .route(
             "/scheduler/tasks/{id}",
             get(forward).put(forward).delete(forward),

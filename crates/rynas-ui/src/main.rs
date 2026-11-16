@@ -31,6 +31,7 @@ mod prefs;
 mod qr;
 mod removable;
 mod reorder;
+mod schedule;
 mod schema_form;
 mod shell;
 mod sidebar;

@@ -24,7 +24,8 @@ use crate::api;
 use crate::form::{In, SaveBar, area_field, number_field, save_bar, save_bar_with, segmented, select_field, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::pages::scheduler::{TriggerEdit, run_status, trigger_text};
+use crate::schedule::ScheduleEditor;
+use crate::pages::scheduler::{run_status, trigger_text};
 use crate::tasks;
 use crate::toast::{saved_applied, saved_pending, toast};
 use crate::ui::{self, Confirm, DlgKind, EmptyState, Remote, Tone, confirm, dialog, drawer};
@@ -512,7 +513,7 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
     let has_secret = init.as_ref().is_some_and(|v| v.has_destination_secret);
     let has_rclone = init.as_ref().is_some_and(|v| v.has_rclone_config);
     let shares = Remote::<Vec<ShareView>>::with_config("/api/v1/shares");
-    let trig = TriggerEdit::new(&init.as_ref().and_then(|v| v.schedule.clone()).unwrap_or(TaskTrigger::Calendar {
+    let trig = ScheduleEditor::new(&init.as_ref().and_then(|v| v.schedule.clone()).unwrap_or(TaskTrigger::Calendar {
         on_calendar: "*-*-* 02:00:00".into(),
         cron: None,
         persistent: true,

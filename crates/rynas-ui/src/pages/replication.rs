@@ -19,7 +19,8 @@ use crate::api;
 use crate::form::{In, lens, number_field, save_bar, segmented, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::pages::scheduler::{TriggerEdit, trigger_text};
+use crate::schedule::ScheduleEditor;
+use crate::pages::scheduler::{trigger_text};
 use crate::pages::snapshots::retention_text;
 use crate::tasks;
 use crate::toast::toast;
@@ -453,7 +454,7 @@ fn editor(init: Option<ReplicaView>, jobs: Remote<Vec<SnapshotJobView>>, close: 
         }
     };
     let schedule = init.as_ref().and_then(|v| v.schedule.clone());
-    let trig = TriggerEdit::new(&schedule.unwrap_or(TaskTrigger::Calendar { on_calendar: "daily".into(), cron: None, persistent: true, randomized_delay_s: 0 }));
+    let trig = ScheduleEditor::new(&schedule.unwrap_or(TaskTrigger::Calendar { on_calendar: "daily".into(), cron: None, persistent: true, randomized_delay_s: 0 }));
     let d = RwSignal::new(start);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);

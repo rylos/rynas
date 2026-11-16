@@ -1908,6 +1908,17 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .cal-preview { display: flex; flex-direction: column; gap: var(--s-1); padding: var(--s-3); border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--border); font-size: var(--fs-13); }
 .cal-preview:empty { display: none; }
 .cal-preview ol { display: flex; flex-direction: column; gap: var(--s-1); }
+.cal-preview .sched-words { font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+/* schedule editor (crate::schedule): times of the day, notes of the preview */
+.sched-times { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.sched-time { display: inline-flex; align-items: center; gap: var(--s-1); }
+.sched-time .input { width: auto; min-width: 7.5rem; }
+.sched-notes { display: flex; flex-direction: column; gap: var(--s-1); margin-top: var(--s-1); }
+.sched-note { display: flex; align-items: flex-start; gap: var(--s-2); font-size: var(--fs-12); color: var(--tone); overflow-wrap: anywhere; }
+.sched-note svg { flex: none; }
+.sched-note.info { --tone: var(--text-muted); }
+.sched-note.warn { --tone: var(--warning); }
+.sched-note.err { --tone: var(--danger); font-weight: 500; }
 .run-log { flex: none; max-height: 360px; min-height: 120px; border-radius: var(--r-md); border: 1px solid var(--border); }
 /* live output of a running task: long lines wrap, never a horizontal scroll (390 px too) */
 .live-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-4); }

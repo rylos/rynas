@@ -2483,8 +2483,6 @@ sch.f.every_min	Каждые (минут)
 sch.f.minute	Минута
 sch.f.minute_help	Минута каждого часа.
 sch.f.weekdays	Дни
-sch.f.dom	День месяца
-sch.f.dom_help	Месяцы без этого дня пропускаются.
 sch.f.expression	Календарное выражение systemd
 sch.f.expression_help	Синтаксис OnCalendar=, например Mon..Fri *-*-* 02:30:00 или *-*-1,15 04:00:00.
 sch.f.cron	Выражение cron
@@ -2513,11 +2511,9 @@ sch.trig.manual	Вручную
 sch.trig.manual_help	Без таймера: задача запускается только кнопкой «Запустить сейчас».
 sch.trig.boot_text	При загрузке (+{s} с)
 sch.rep.minutes	Каждые несколько минут
-sch.rep.hourly	Каждый час
 sch.rep.daily	Каждый день
-sch.rep.weekly	Каждую неделю
 sch.rep.monthly	Каждый месяц
-sch.rep.custom	Особое (systemd)
+sch.rep.custom	Расширенный: календарь systemd
 sch.rep.cron	Синтаксис cron
 sch.desc.minutes	Раз в {n} мин
 sch.desc.hourly	Ежечасно в :{m}
@@ -2538,6 +2534,48 @@ sch.nth.last	последний
 sch.next_runs	Следующие запуски
 sch.normalized	systemd понимает это как
 sch.checking	Проверка…
+sch.rep.hours	Каждые несколько часов
+sch.rep.weekdays	В выбранные дни недели
+sch.rep.monthly_nth	Каждый месяц в день недели
+sch.rep.yearly	Каждый год
+sch.f.every_hours	Каждые (часов)
+sch.f.from_hour	С
+sch.f.to_hour	До
+sch.f.hours_help	С 00:00 до 23:00: весь день.
+sch.f.days_any	Ничего не отмечено: каждый день.
+sch.f.times	Время
+sch.f.time_n	Время {n}
+sch.f.add_time	Добавить время
+sch.f.remove_time	Убрать время {n}
+sch.f.last_day	Последний день месяца
+sch.f.month_days	Дни месяца
+sch.f.month_days_help	Числа от 1 до 31 через запятую; месяц без такого дня его пропускает.
+sch.f.nth	Какой
+sch.f.weekday	День недели
+sch.f.month	Месяц
+sch.f.day	День
+sch.f.nth.first	Первый
+sch.f.nth.second	Второй
+sch.f.nth.third	Третий
+sch.f.nth.fourth	Четвёртый
+sch.f.nth.last	Последний
+sch.e.no_times	Добавьте хотя бы одно время.
+sch.e.bad_time	Укажите каждое время в часах и минутах.
+sch.e.not_grid	Это время нельзя задать одним расписанием: у каждого часа должны быть одинаковые минуты (08:00 и 20:00 или 08:15, 08:45, 20:15 и 20:45). Для других сочетаний используйте расширенное поле.
+sch.e.no_days	Отметьте хотя бы один день.
+sch.e.hour_range	Выберите часы, в которые помещается хотя бы два запуска, или весь день.
+sch.e.month_days	Укажите дни месяца от 1 до 31 через запятую.
+sch.e.bad_date	Такого дня нет в этом месяце.
+sch.e.empty	Введите выражение.
+sch.e.invalid	systemd не принимает это выражение.
+sch.p.next_in	Следующие запуски ({tz})
+sch.p.no_next	systemd не находит следующего запуска для этого расписания в часовом поясе NAS: задача никогда не запустится. Выберите другое время.
+sch.p.stops	systemd перестаёт планировать это {date} (перевод часов в полночь в часовом поясе NAS), и задача больше не запустится. Выберите другое время.
+sch.p.dst_forward	{date}: часы переводятся вперёд с {from} на {to}; запуски между ними в этот день пропускаются.
+sch.p.dst_back	{date}: часы переводятся назад с {from} на {to}; запуски между ними выполняются один раз.
+sch.trig.interval_text	Каждые {n} ч после последнего успешного запуска
+sch.trig.window_text	В недельном окне
+sch.trig.after_text	После задачи {task}
 sch.act.command	Команда
 sch.act.script	Скрипт
 sch.act.snapshot	Задание снимков
