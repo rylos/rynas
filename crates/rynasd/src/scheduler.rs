@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rynas_api_types::scheduler::{
-    CalendarPreview, CalendarPreviewRequest, CalendarSyntax, CronEntry, NotifyPolicy, PauseInfo,
+    CalendarPreview, CalendarPreviewRequest, CalendarSyntax, CronEntry, NotifyPolicy, Overlap, PauseInfo,
     PauseRequest, RunTrigger, SchedulePreview, SchedulePreviewRequest, ScheduledTask,
     SchedulerConfig, SchedulerPause, SystemTimer, TaskAction, TaskRun, TaskStatus, TaskView,
 };
@@ -290,7 +290,10 @@ async fn create(
     body: Result<Json<ScheduledTask>, JsonRejection>,
 ) -> Res<Response> {
     let (p, owner) = (prot(&st)?, user(&h)?);
-    let t = json_body(body)?;
+    let mut t = json_body(body)?;
+    // a new task skips a start whose time came during its previous run; tasks written
+    // before S2 keep systemd's behaviour (queue) by having no overlap stored
+    t.policy.overlap.get_or_insert(Overlap::Skip);
     let id = t.id.trim().to_string();
     let o = owner.clone();
     blocking(&p, move |p| {
@@ -506,12 +509,17 @@ async fn run_now(
             ));
         };
         guard_root_task(p, &who, &t)?;
-        // the gate records it as run now, and lets it run while paused
-        p.gate.request(&id, RunTrigger::Manual, 0);
+        // the gate records it as run now, and lets it run while paused; a task that runs
+        // already gets no request (the start is a no-op for systemd: the request would be
+        // left for a later start)
+        let unit = service_name(&id);
+        if p.probe.current_run(&unit).ok().flatten().is_none() {
+            p.gate.request(&id, RunTrigger::Manual, 0);
+        }
         p.ops
             .config
             .system()
-            .start_unit(&service_name(&id))
+            .start_unit(&unit)
             .map_err(Error::internal)?;
         Ok(id)
     })
@@ -718,35 +726,35 @@ async fn finished(
     })
     .await?;
     p.invalidate();
-    let Some(run_id) = recorded else {
+    let Some((run_id, notify)) = recorded else {
         return Ok(StatusCode::NO_CONTENT);
     };
     let p2 = p.clone();
     tokio::spawn(async move {
         // journald may still be processing the last lines of the stream
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let _ = tokio::task::spawn_blocking(move || collect_output(&p2, &id, run_id)).await;
+        let _ = tokio::task::spawn_blocking(move || collect_output(&p2, &id, run_id, notify)).await;
     });
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// Records the end of run `f.invocation_id` of task `id` (from `task-finished`, or from the
-/// spool when rynasd was away), drops its lease and arms or clears its retry. `None` for a
-/// start the gate skipped (recorded already: nothing ran).
+/// spool when rynasd was away), drops its lease and moves its retry chain on
+/// ([`crate::gate::after_run`]). `None` when there is nothing more to do: a start the gate
+/// skipped (recorded then: nothing ran), or an end recorded before (a spooled end imported
+/// again). Otherwise the run and whether it notifies now (`false`: an armed retry holds its
+/// failure back).
 pub(crate) fn record_end(
     p: &Protection,
     id: &str,
     f: &TaskFinished,
     start_ms: Option<u64>,
     end_ms: u64,
-) -> Res<Option<(u64, NewRun)>> {
-    let skipped = p
-        .history
-        .by_invocation(&f.invocation_id)
-        .map_err(Error::internal)?
-        .is_some_and(|r| r.skipped.is_some());
-    if skipped || f.result == "exec-condition" {
-        p.gate.release(id, &f.invocation_id);
+) -> Res<Option<((u64, NewRun), bool)>> {
+    // the run is over whatever happens below: its lease goes now (a heavy lock, a scrub's
+    // filesystem lock, its task panel entry), never left behind by an error
+    p.gate.release(id, &f.invocation_id, &f.result);
+    if f.result == "exec-condition" {
         return Ok(None);
     }
     let (exit_code, signal) = match f.exit_code.as_str() {
@@ -755,6 +763,11 @@ pub(crate) fn record_end(
         _ => (None, None),
     };
     let note = p.history.gate_note(&f.invocation_id).ok().flatten();
+    // no note: a skipped row of this start (a late answer) still knows how it came about
+    let prior = match note {
+        Some(_) => None,
+        None => p.history.by_invocation(&f.invocation_id).ok().flatten().and_then(|r| r.trigger),
+    };
     let run = NewRun {
         start_ms: start_ms.or(note.as_ref().map(|n| n.at_ms)),
         end_ms,
@@ -767,20 +780,27 @@ pub(crate) fn record_end(
         },
         exit_code,
         signal,
-        trigger: note.as_ref().and_then(|n| n.trigger),
+        trigger: note.as_ref().and_then(|n| n.trigger).or(prior),
         attempt: note.as_ref().map_or(0, |n| n.attempt),
         ungated: note.as_ref().is_some_and(|n| n.ungated),
         ..NewRun::default()
     };
-    let run_id = p.history.record(&run).map_err(Error::internal)?;
-    p.gate.release(id, &run.invocation_id);
-    if let Some(task) = applied_task(p, id)? {
-        crate::gate::after_run(p, &task, &run);
+    // a skipped row of this start (a gate answer that came too late) gives way to the run
+    let (run_id, written) = p.history.record_once(&run).map_err(Error::internal)?;
+    if !written {
+        return Ok(None);
     }
-    Ok(Some((run_id, run)))
+    let notify = match applied_task(p, id)? {
+        Some(task) => crate::gate::after_run(p, &task, &run),
+        None => true,
+    };
+    Ok(Some(((run_id, run), notify)))
 }
 
-pub(crate) fn collect_output(p: &Protection, task_id: &str, (run_id, run): (u64, NewRun)) {
+/// Stores the output of a recorded run and notifies following the task's policy: now
+/// (`notify`), or held in the task's armed retry until its chain ends
+/// ([`crate::gate::hold`]).
+pub(crate) fn collect_output(p: &Protection, task_id: &str, (run_id, run): (u64, NewRun), notify: bool) {
     p.probe.sync_journal();
     let out = match p.probe.journal(&run.invocation_id, OUTPUT_MAX) {
         Ok(o) => o,
@@ -795,18 +815,16 @@ pub(crate) fn collect_output(p: &Protection, task_id: &str, (run_id, run): (u64,
     let Ok(Some(task)) = applied_task(p, task_id) else {
         return;
     };
-    // a failure that will be tried again notifies only if the last attempt fails too
-    if !run.ok() && crate::gate::retry_pending(p, task_id) {
+    // skipped starts are not failures
+    let failed_before = p.history.failed_before(task_id, run_id).unwrap_or(false);
+    let Some(ev) = run_event(&task, &run, &out.text, failed_before) else {
         return;
-    }
-    let failed_before = p
-        .history
-        .list(task_id, 2, None)
-        .ok()
-        .and_then(|l| l.get(1).map(|r| !r.ok))
-        .unwrap_or(false);
-    if let Some(ev) = run_event(&task, &run, &out.text, failed_before) {
+    };
+    if notify {
         p.notifier.emit(ev);
+    } else {
+        // a failure that will be tried again: sent once if its retries end without success
+        crate::gate::hold(p, task_id, ev);
     }
 }
 
@@ -944,6 +962,8 @@ async fn execute(
         return Err(invalid(format!("task {id} is not an internal task")));
     }
     if req.plan && let Some(plan) = crate::jobs::plan(&p, &task).await? {
+        // in the task panel as before, cancellable (stops the unit)
+        crate::jobs::track(&p, &task);
         return Ok((StatusCode::OK, Json(plan)).into_response());
     }
     let upid = crate::jobs::spawn(&p, &task, SCHEDULER_USER).await?;

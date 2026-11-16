@@ -54,6 +54,15 @@ CREATE TABLE IF NOT EXISTS retries (
 );
 ";
 
+/// Columns added to `retries` after its first version (added on open).
+const ADDED_RETRIES: [(&str, &str); 2] = [
+    // the retry's unit was started at (ms): the next run end is the retry
+    ("started_ms", "INTEGER"),
+    // the failure notification held back while the retry is armed (JSON, sent once when the
+    // chain ends without a success)
+    ("held", "TEXT"),
+];
+
 /// Columns added to `runs` by the scheduling gate (older databases get them on open).
 const ADDED: [(&str, &str); 5] = [
     ("trigger", "TEXT"),
@@ -80,6 +89,8 @@ pub struct GateNote {
 pub struct ArmedRetry {
     pub retry: PendingRetry,
     pub after_ms: u64,
+    /// The retry's unit was started then (`None`: waiting for `due_ms`).
+    pub started_ms: Option<u64>,
 }
 
 fn word<T: serde::Serialize>(v: &T) -> Option<String> {
@@ -167,6 +178,23 @@ fn row(r: &rusqlite::Row, with_output: bool) -> rusqlite::Result<TaskRun> {
 
 const COLS: &str = "id, task_id, invocation_id, start_ms, end_ms, result, exit_code, signal, ok, output, output_truncated, trigger, skipped, attempt, detail, ungated";
 
+const RETRY_COLS: &str = "task_id, attempt, attempts, due_ms, after_ms, started_ms";
+
+fn retry_row(r: &rusqlite::Row) -> rusqlite::Result<(String, ArmedRetry)> {
+    Ok((
+        r.get::<_, String>(0)?,
+        ArmedRetry {
+            retry: PendingRetry {
+                attempt: r.get::<_, i64>(1)?.clamp(0, 255) as u8,
+                attempts: r.get::<_, i64>(2)?.clamp(0, 255) as u8,
+                due_ms: r.get::<_, i64>(3)? as u64,
+            },
+            after_ms: r.get::<_, i64>(4)? as u64,
+            started_ms: r.get::<_, Option<i64>>(5)?.map(|v| v as u64),
+        },
+    ))
+}
+
 impl History {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         if let Some(d) = path.parent() {
@@ -186,17 +214,40 @@ impl History {
                 c.execute_batch(&format!("ALTER TABLE runs ADD COLUMN {col} {ty}"))?;
             }
         }
+        let have: Vec<String> = c
+            .prepare("SELECT name FROM pragma_table_info('retries')")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (col, ty) in ADDED_RETRIES {
+            if !have.iter().any(|h| h == col) {
+                c.execute_batch(&format!("ALTER TABLE retries ADD COLUMN {col} {ty}"))?;
+            }
+        }
         Ok(Self { db: Mutex::new(c) })
     }
 
-    /// Records a finished run or a skipped start (a second report of the same invocation is
-    /// ignored: the first one stays); returns its id.
+    /// [`History::record_once`], returning the id only.
     pub fn record(&self, r: &NewRun) -> rusqlite::Result<u64> {
+        self.record_once(r).map(|(id, _)| id)
+    }
+
+    /// Records a finished run or a skipped start; returns its id and whether this call wrote
+    /// it. A second report of the same invocation is ignored (the first one stays), except
+    /// that the end of a run that really ran replaces a skipped row of its invocation (a
+    /// gate answer that came too late: rynasctl had run the start meanwhile).
+    pub fn record_once(&self, r: &NewRun) -> rusqlite::Result<(u64, bool)> {
         let db = self.db.lock().unwrap();
-        db.execute(
-            "INSERT OR IGNORE INTO runs (task_id, invocation_id, start_ms, end_ms, result, exit_code, signal, ok,
-                                         trigger, skipped, attempt, detail, ungated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        let written = db.execute(
+            "INSERT INTO runs (task_id, invocation_id, start_ms, end_ms, result, exit_code, signal, ok,
+                               trigger, skipped, attempt, detail, ungated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT (invocation_id) DO UPDATE SET
+                 start_ms = coalesce(excluded.start_ms, runs.start_ms), end_ms = excluded.end_ms,
+                 result = excluded.result, exit_code = excluded.exit_code, signal = excluded.signal,
+                 ok = excluded.ok, trigger = coalesce(excluded.trigger, runs.trigger), skipped = NULL,
+                 attempt = excluded.attempt, detail = excluded.detail, ungated = excluded.ungated
+             WHERE runs.skipped IS NOT NULL AND excluded.skipped IS NULL
+                 AND excluded.result <> 'exec-condition'",
             params![
                 r.task_id,
                 r.invocation_id,
@@ -212,7 +263,7 @@ impl History {
                 r.detail,
                 r.ungated as i64
             ],
-        )?;
+        )? > 0;
         let id: i64 = db.query_row(
             "SELECT id FROM runs WHERE invocation_id = ?1",
             [&r.invocation_id],
@@ -228,7 +279,7 @@ impl History {
             "DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY id DESC LIMIT ?1)",
             [KEEP_TOTAL as i64],
         )?;
-        Ok(id as u64)
+        Ok((id as u64, written))
     }
 
     /// Stores the output of a run (already cut to [`OUTPUT_MAX`]).
@@ -317,9 +368,14 @@ impl History {
     /// Notes how a start the gate let through came about.
     pub fn note_gate(&self, n: &GateNote) -> rusqlite::Result<()> {
         let db = self.db.lock().unwrap();
+        // a note of a start without the gate (spooled by rynasctl) never replaces the note of
+        // a real answer for the same start (a late answer: both exist)
         db.execute(
-            "INSERT OR REPLACE INTO gates (invocation_id, task_id, at_ms, trigger, attempt, ungated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO gates (invocation_id, task_id, at_ms, trigger, attempt, ungated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (invocation_id) DO UPDATE SET task_id = excluded.task_id, at_ms = excluded.at_ms,
+                 trigger = excluded.trigger, attempt = excluded.attempt, ungated = excluded.ungated
+             WHERE excluded.ungated = 0 OR gates.ungated = 1",
             params![
                 n.invocation_id,
                 n.task_id,
@@ -356,22 +412,25 @@ impl History {
         .optional()
     }
 
-    /// Arms (or replaces) the retry of a task.
+    /// Arms (or replaces) the retry of a task; a notification it holds stays.
     pub fn set_retry(&self, task_id: &str, a: &ArmedRetry) -> rusqlite::Result<()> {
         self.db.lock().unwrap().execute(
-            "INSERT OR REPLACE INTO retries (task_id, attempt, attempts, due_ms, after_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO retries (task_id, attempt, attempts, due_ms, after_ms, started_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (task_id) DO UPDATE SET attempt = excluded.attempt, attempts = excluded.attempts,
+                 due_ms = excluded.due_ms, after_ms = excluded.after_ms, started_ms = excluded.started_ms",
             params![
                 task_id,
                 a.retry.attempt as i64,
                 a.retry.attempts as i64,
                 a.retry.due_ms as i64,
-                a.after_ms as i64
+                a.after_ms as i64,
+                a.started_ms.map(|v| v as i64)
             ],
         )?;
         Ok(())
     }
 
-    /// Drops the retry of a task; `true` when there was one.
+    /// Drops the retry of a task with the notification it held; `true` when there was one.
     pub fn clear_retry(&self, task_id: &str) -> rusqlite::Result<bool> {
         Ok(self
             .db
@@ -381,24 +440,72 @@ impl History {
             > 0)
     }
 
+    /// Takes the retry of a task away (atomically: one caller gets it) with the notification
+    /// it held back.
+    pub fn take_retry(&self, task_id: &str) -> rusqlite::Result<Option<(ArmedRetry, Option<String>)>> {
+        let db = self.db.lock().unwrap();
+        let got = db
+            .query_row(
+                &format!("SELECT {RETRY_COLS}, held FROM retries WHERE task_id = ?1"),
+                [task_id],
+                |r| Ok((retry_row(r)?.1, r.get::<_, Option<String>>(6)?)),
+            )
+            .optional()?;
+        if got.is_some() {
+            db.execute("DELETE FROM retries WHERE task_id = ?1", [task_id])?;
+        }
+        Ok(got)
+    }
+
+    /// Holds a failure notification (JSON) in the task's armed retry, in place of the one it
+    /// held; `false` when no retry is armed.
+    pub fn hold(&self, task_id: &str, event: &str) -> rusqlite::Result<bool> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE retries SET held = ?2 WHERE task_id = ?1", params![task_id, event])?
+            > 0)
+    }
+
+    /// The retry's unit was started at `ms`; `false` when no retry is armed.
+    pub fn retry_started(&self, task_id: &str, ms: u64) -> rusqlite::Result<bool> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE retries SET started_ms = ?2 WHERE task_id = ?1", params![task_id, ms as i64])?
+            > 0)
+    }
+
+    /// The armed retry of a task.
+    pub fn retry(&self, task_id: &str) -> rusqlite::Result<Option<ArmedRetry>> {
+        let db = self.db.lock().unwrap();
+        db.query_row(
+            &format!("SELECT {RETRY_COLS} FROM retries WHERE task_id = ?1"),
+            [task_id],
+            |r| Ok(retry_row(r)?.1),
+        )
+        .optional()
+    }
+
     /// Every armed retry.
     pub fn retries(&self) -> rusqlite::Result<Vec<(String, ArmedRetry)>> {
         let db = self.db.lock().unwrap();
-        let mut st = db.prepare("SELECT task_id, attempt, attempts, due_ms, after_ms FROM retries")?;
-        st.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                ArmedRetry {
-                    retry: PendingRetry {
-                        attempt: r.get::<_, i64>(1)?.clamp(0, 255) as u8,
-                        attempts: r.get::<_, i64>(2)?.clamp(0, 255) as u8,
-                        due_ms: r.get::<_, i64>(3)? as u64,
-                    },
-                    after_ms: r.get::<_, i64>(4)? as u64,
-                },
-            ))
-        })?
-        .collect()
+        let mut st = db.prepare(&format!("SELECT {RETRY_COLS} FROM retries"))?;
+        st.query_map([], retry_row)?.collect()
+    }
+
+    /// The run before run `id` of the task (skipped starts left out) failed.
+    pub fn failed_before(&self, task_id: &str, id: u64) -> rusqlite::Result<bool> {
+        let db = self.db.lock().unwrap();
+        db.query_row(
+            "SELECT ok FROM runs WHERE task_id = ?1 AND id < ?2 AND skipped IS NULL ORDER BY id DESC LIMIT 1",
+            params![task_id, id as i64],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .map(|ok| ok.is_some_and(|v| v == 0))
     }
 
     /// A run of the task that really ran ended after `ms`.
@@ -474,7 +581,7 @@ mod tests {
         assert_eq!(h.gate_note("cc03").unwrap(), Some(n));
         assert_eq!(h.gate_note("nope").unwrap(), None);
 
-        let a = ArmedRetry { retry: PendingRetry { attempt: 1, attempts: 3, due_ms: 70 }, after_ms: 60 };
+        let a = ArmedRetry { retry: PendingRetry { attempt: 1, attempts: 3, due_ms: 70 }, after_ms: 60, started_ms: None };
         h.set_retry("t", &a).unwrap();
         assert_eq!(h.retries().unwrap(), vec![("t".to_string(), a)]);
         assert!(h.clear_retry("t").unwrap());
@@ -482,6 +589,67 @@ mod tests {
         h.set_retry("t", &a).unwrap();
         h.forget("t").unwrap();
         assert!(h.retries().unwrap().is_empty() && h.gate_note("cc03").unwrap().is_none());
+    }
+
+    #[test]
+    fn late_ends_spooled_notes_held_notifications() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("scheduler.db");
+        // a retries table of the first S2 build: the new columns are added on open
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE retries (task_id TEXT PRIMARY KEY, attempt INTEGER NOT NULL, attempts INTEGER NOT NULL,
+                 due_ms INTEGER NOT NULL, after_ms INTEGER NOT NULL);
+                 INSERT INTO retries VALUES ('old', 1, 3, 10, 5);",
+            )
+            .unwrap();
+        }
+        let h = History::open(&path).unwrap();
+        assert_eq!(h.retry("old").unwrap().unwrap().started_ms, None);
+
+        // a skip recorded by a late answer, then the end of the run that ran meanwhile: the
+        // run replaces the skip; a repeated report of that end writes nothing
+        let s = NewRun::skipped("t", "dd01", 3000, RunTrigger::Timer, SkipReason::Overlap, None);
+        let (sid, w) = h.record_once(&s).unwrap();
+        assert!(w);
+        assert!(!h.record_once(&run("t", "dd01", "exec-condition")).unwrap().1);
+        let mut end = run("t", "dd01", "exit-code");
+        end.trigger = None;
+        assert_eq!(h.record_once(&end).unwrap(), (sid, true));
+        let got = h.by_invocation("dd01").unwrap().unwrap();
+        assert_eq!((got.skipped, got.result.as_str(), got.trigger), (None, "exit-code", Some(RunTrigger::Timer)));
+        assert_eq!(h.record_once(&end).unwrap(), (sid, false), "a spooled end imported twice");
+        assert!(!h.record_once(&NewRun::skipped("t", "dd01", 1, RunTrigger::Timer, SkipReason::Paused, None)).unwrap().1);
+
+        // failed_before ignores skipped rows
+        let ok = h.record(&run("t", "dd02", "success")).unwrap();
+        h.record(&NewRun::skipped("t", "dd03", 4000, RunTrigger::Timer, SkipReason::Paused, None)).unwrap();
+        let next = h.record(&run("t", "dd04", "success")).unwrap();
+        assert!(!h.failed_before("t", next).unwrap());
+        assert!(h.failed_before("t", ok).unwrap());
+        assert!(!h.failed_before("t", sid).unwrap());
+
+        // a spooled note without the gate never replaces the note of a real answer
+        let real = GateNote { invocation_id: "ee01".into(), task_id: "t".into(), at_ms: 9, trigger: Some(RunTrigger::Queued), attempt: 0, ungated: false };
+        h.note_gate(&real).unwrap();
+        h.note_gate(&GateNote { trigger: Some(RunTrigger::Timer), ungated: true, ..real.clone() }).unwrap();
+        assert_eq!(h.gate_note("ee01").unwrap(), Some(real.clone()));
+        let spooled = GateNote { invocation_id: "ee02".into(), ungated: true, ..real.clone() };
+        h.note_gate(&spooled).unwrap();
+        h.note_gate(&GateNote { ungated: false, ..spooled.clone() }).unwrap();
+        assert!(!h.gate_note("ee02").unwrap().unwrap().ungated);
+
+        // a held notification survives re-arming and goes once with the retry
+        let a = ArmedRetry { retry: PendingRetry { attempt: 1, attempts: 2, due_ms: 70 }, after_ms: 60, started_ms: None };
+        assert!(!h.hold("t", "{}").unwrap(), "nothing armed");
+        h.set_retry("t", &a).unwrap();
+        assert!(h.hold("t", "{\"title\":\"x\"}").unwrap());
+        assert!(h.retry_started("t", 80).unwrap());
+        h.set_retry("t", &ArmedRetry { retry: PendingRetry { attempt: 2, ..a.retry }, ..a }).unwrap();
+        let (got, held) = h.take_retry("t").unwrap().unwrap();
+        assert_eq!((got.retry.attempt, got.started_ms, held.as_deref()), (2, None, Some("{\"title\":\"x\"}")));
+        assert!(h.take_retry("t").unwrap().is_none());
     }
 
     #[test]

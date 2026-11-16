@@ -14,8 +14,17 @@
 //!   ([`Gate::rebuild`]), so nothing is persisted that could go stale.
 //! - **Requests**: "run now" and the retries tell the gate what is about to start, so the
 //!   start is recorded as such and is not held back by a pause or a deadline (a retry is).
+//!   A request never applies to a start of the task's own timer, and is used once.
+//! - **Retry chains** (`retries` in `scheduler.db`): a failed scheduled run arms the next
+//!   attempt and holds its failure notification back; a newer scheduled failure keeps the
+//!   chain's count. The chain ends with a success (nothing is sent), with its last attempt
+//!   (that run notifies), or dropped (task deleted or off, a pause at the due time, its start
+//!   skipped or lost): then the held notification goes, once ([`drop_retry`]).
+//! - **Late answers**: an answer decided after rynasctl's deadline
+//!   ([`GateRequest::answer_by_ms`]) says "run" and records no skip, since rynasctl may have
+//!   run the start already.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,13 +35,13 @@ use rynas_api_types::scheduler::{
     PauseInfo, RunTrigger, ScheduledTask, SchedulerPause, SkipReason, TaskAction,
 };
 use rynas_notify::event::{code, field, oneshot};
-use rynas_notify::{NotifyCategory, NotifySeverity};
+use rynas_notify::{NewEvent, NotifyCategory, NotifySeverity};
 use rynas_scheduler::gate::{
-    Decision, GateAnswer, GateRequest, Start, decide, load_pause, replace_due, save_pause,
-    spool_take,
+    Decision, GateAnswer, GateRequest, Start, decide, load_pause, next_retry, replace_due,
+    retries_after, save_pause, spool_take,
 };
 use rynas_scheduler::history::{ArmedRetry, GateNote, NewRun};
-use rynas_scheduler::units::{UNIT_PREFIX, service_name, timer_name};
+use rynas_scheduler::units::{UNIT_PREFIX, runs_in_unit, service_name, timer_name};
 use rynas_tasks::{Cmd, now_ms};
 
 use crate::fslock::HeavyGuard;
@@ -52,6 +61,15 @@ struct Lease {
     _guard: Option<HeavyGuard>,
     /// The task action takes the heavy lock (docker updates wait for it).
     heavy: bool,
+    /// The task panel's entry of a run working in its own unit ([`crate::jobs::track`]):
+    /// told systemd's result when the run ends.
+    tracker: Option<tokio::sync::oneshot::Sender<String>>,
+}
+
+impl Lease {
+    fn new(invocation_id: &str, heavy: bool) -> Self {
+        Lease { invocation_id: invocation_id.to_string(), upid: None, _guard: None, heavy, tracker: None }
+    }
 }
 
 pub struct Gate {
@@ -59,6 +77,8 @@ pub struct Gate {
     pause: Mutex<SchedulerPause>,
     requested: Mutex<HashMap<String, (RunTrigger, u8, Instant)>>,
     leases: Mutex<HashMap<String, Lease>>,
+    /// The applied task ids at the last watch tick (a task gone since was deleted).
+    known: Mutex<Option<HashSet<String>>>,
 }
 
 impl Gate {
@@ -70,6 +90,7 @@ impl Gate {
             pause: Mutex::new(pause),
             requested: Mutex::new(HashMap::new()),
             leases: Mutex::new(HashMap::new()),
+            known: Mutex::new(None),
         }
     }
 
@@ -119,6 +140,7 @@ impl Gate {
             .insert(id.to_string(), (trigger, attempt, Instant::now()));
     }
 
+    /// Takes the request of `id` (used once, whoever started the unit).
     fn take_request(&self, id: &str) -> Option<(RunTrigger, u8)> {
         let mut r = self.requested.lock().unwrap();
         r.retain(|_, (_, _, at)| at.elapsed() < REQUEST_TTL);
@@ -126,15 +148,10 @@ impl Gate {
     }
 
     fn grant(&self, id: &str, invocation_id: &str, heavy: bool) {
-        self.leases.lock().unwrap().insert(
-            id.to_string(),
-            Lease {
-                invocation_id: invocation_id.to_string(),
-                upid: None,
-                _guard: None,
-                heavy,
-            },
-        );
+        self.leases
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), Lease::new(invocation_id, heavy));
     }
 
     /// The run of `id` started the rynasd task `upid`.
@@ -147,23 +164,39 @@ impl Gate {
     /// The run of `id` holds a filesystem lock until it ends.
     pub fn attach_guard(&self, id: &str, guard: HeavyGuard) {
         let mut l = self.leases.lock().unwrap();
-        match l.get_mut(id) {
-            Some(lease) => lease._guard = Some(guard),
-            // a start without the gate (rynasd was down then): a lease of its own
-            None => {
-                l.insert(
-                    id.to_string(),
-                    Lease { invocation_id: String::new(), upid: None, _guard: Some(guard), heavy: true },
-                );
-            }
-        }
+        // a start without the gate (rynasd was down then): a lease of its own
+        l.entry(id.to_string())
+            .or_insert_with(|| Lease::new("", true))
+            ._guard = Some(guard);
     }
 
-    /// The run `invocation_id` of `id` ended: its lease goes (the lock with it).
-    pub fn release(&self, id: &str, invocation_id: &str) {
+    /// The run of `id` has a task panel entry waiting for its end; returns the run's
+    /// invocation id (empty when the gate did not see its start).
+    pub fn attach_tracker(
+        &self,
+        id: &str,
+        heavy: bool,
+        tracker: tokio::sync::oneshot::Sender<String>,
+    ) -> String {
         let mut l = self.leases.lock().unwrap();
-        if l.get(id).is_some_and(|x| x.invocation_id == invocation_id || x.invocation_id.is_empty()) {
-            l.remove(id);
+        let lease = l.entry(id.to_string()).or_insert_with(|| Lease::new("", heavy));
+        lease.tracker = Some(tracker);
+        lease.invocation_id.clone()
+    }
+
+    /// The run `invocation_id` of `id` ended with systemd's `result`: its lease goes (the
+    /// lock with it), its task panel entry learns the result.
+    pub fn release(&self, id: &str, invocation_id: &str, result: &str) {
+        let lease = {
+            let mut l = self.leases.lock().unwrap();
+            if l.get(id).is_some_and(|x| x.invocation_id == invocation_id || x.invocation_id.is_empty()) {
+                l.remove(id)
+            } else {
+                None
+            }
+        };
+        if let Some(t) = lease.and_then(|mut x| x.tracker.take()) {
+            let _ = t.send(result.to_string());
         }
     }
 
@@ -191,7 +224,7 @@ impl Gate {
     }
 
     /// After a start of rynasd: a lease for every task unit that runs now (with the lock of
-    /// those that work in their own unit).
+    /// those that work in their own unit, and their task panel entry).
     pub async fn rebuild(p: &Arc<Protection>) {
         let p2 = p.clone();
         let found = tokio::task::spawn_blocking(move || -> Vec<(ScheduledTask, String)> {
@@ -213,6 +246,9 @@ impl Gate {
             if let TaskAction::Scrub { filesystem } = &t.action {
                 let g = crate::fslock::FsLocks::global().heavy_paths(&[filesystem], "btrfs.scrub").await;
                 p.gate.attach_guard(&t.id, g);
+            }
+            if runs_in_unit(&t.action) {
+                crate::jobs::track(p, &t);
             }
             tracing::info!("scheduler: task {} runs ({inv}): lease rebuilt", t.id);
         }
@@ -247,7 +283,8 @@ fn reason_text(r: SkipReason) -> &'static str {
 }
 
 /// Records what rynasctl spooled while rynasd could not be reached: skipped starts, starts
-/// that ran without the gate, ends of runs (with their output from the journal).
+/// that ran without the gate, ends of runs (with their output from the journal). Each entry
+/// is recorded once however often it is imported.
 pub fn import_spool(p: &Protection) {
     for e in spool_take(&p.state_dir) {
         let trigger = if e.by_timer { RunTrigger::Timer } else { RunTrigger::Other };
@@ -259,7 +296,7 @@ pub fn import_spool(p: &Protection) {
                 exit_status: f.exit_status.clone(),
             };
             match crate::scheduler::record_end(p, &e.task_id, &end, None, e.at_ms) {
-                Ok(Some(run)) => crate::scheduler::collect_output(p, &e.task_id, run),
+                Ok(Some((run, notify))) => crate::scheduler::collect_output(p, &e.task_id, run, notify),
                 Ok(None) => {}
                 Err(err) => tracing::warn!("scheduler: spooled end of {}: {}", e.task_id, err.2),
             }
@@ -292,9 +329,9 @@ pub fn import_spool(p: &Protection) {
     }
 }
 
-/// The gate: `POST /v1/scheduler/tasks/{id}/gate` (root only, from `rynasctl gate`).
+/// The gate: `POST /v1/scheduler/tasks/{id}/gate` (root only, from `rynasctl gate`). Quick
+/// on purpose (the spool is imported by the watch loop, not here).
 pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
-    import_spool(p);
     let now = now_ms();
     let Some(task) = crate::scheduler::applied_task(p, id)? else {
         // a unit left by an apply in progress: as before the gate
@@ -305,6 +342,8 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
             message: format!("rynas: task {id} is not in the applied configuration; running it"),
         });
     };
+    let by_timer = req.trigger_unit == timer_name(id);
+    // used once, and dropped by a start of the timer (run now on a running task left it)
     let requested = p.gate.take_request(id);
     let pause = p.gate.pause();
     let tz = TimeZone::system();
@@ -312,58 +351,69 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
     let start = Start {
         task: &task,
         now_ms: now,
-        by_timer: req.trigger_unit == timer_name(id),
+        by_timer,
         requested,
         last_run,
         pause: &pause,
         running_elsewhere: p.gate.running_elsewhere(id, &req.invocation_id, &p.ops.tasks),
         tz: &tz,
     };
-    match decide(&start) {
-        Decision::Run { trigger, attempt } => {
-            p.gate.grant(id, &req.invocation_id, heavy_action(&task.action));
-            p.history
-                .note_gate(&GateNote {
-                    invocation_id: req.invocation_id.clone(),
-                    task_id: id.to_string(),
-                    at_ms: now,
-                    trigger: Some(trigger),
-                    attempt,
-                    ungated: false,
-                })
-                .map_err(Error::internal)?;
-            let message = match trigger {
-                RunTrigger::Retry => format!(
-                    "rynas: retry {attempt} of {} after a failed run",
-                    task.effective_policy().retry.attempts
-                ),
-                RunTrigger::Queued => {
-                    "rynas: its time came while the previous run was going: starting now (overlap policy queue)".into()
-                }
-                RunTrigger::CatchUp => "rynas: catching up a run missed while the NAS was off".into(),
-                _ => String::new(),
-            };
-            Ok(GateAnswer { run: true, trigger, skipped: None, message })
+    let decision = decide(&start);
+    let late = req.answer_by_ms > 0 && now_ms() > req.answer_by_ms;
+    let (trigger, attempt) = match &decision {
+        Decision::Run { trigger, attempt } => (*trigger, *attempt),
+        Decision::Skip { trigger, .. } if late => {
+            let attempt = if by_timer { 0 } else { requested.map_or(0, |(_, a)| a) };
+            tracing::warn!(
+                "scheduler: task {id}: the gate decided after rynasctl's deadline: running the start, no skip recorded"
+            );
+            (*trigger, attempt)
         }
         Decision::Skip { trigger, reason, detail } => {
+            let (trigger, reason) = (*trigger, *reason);
             let run = NewRun::skipped(id, &req.invocation_id, now, trigger, reason, detail.clone());
             p.history.record(&run).map_err(Error::internal)?;
             p.invalidate();
-            if reason == SkipReason::Missed
-                && task.effective_policy().rules.on_missed
-            {
+            if trigger == RunTrigger::Retry {
+                drop_retry(p, id, "its start was skipped");
+            }
+            if reason == SkipReason::Missed && task.effective_policy().rules.on_missed {
                 p.notifier.emit(missed_event(&task));
             }
             let mut message = format!("rynas: start skipped: {}", reason_text(reason));
             if let Some(d) = detail {
                 message.push_str(&format!(" ({d})"));
             }
-            Ok(GateAnswer { run: false, trigger, skipped: Some(reason), message })
+            return Ok(GateAnswer { run: false, trigger, skipped: Some(reason), message });
         }
-    }
+    };
+    p.gate.grant(id, &req.invocation_id, heavy_action(&task.action));
+    p.history
+        .note_gate(&GateNote {
+            invocation_id: req.invocation_id.clone(),
+            task_id: id.to_string(),
+            at_ms: now,
+            trigger: Some(trigger),
+            attempt,
+            ungated: false,
+        })
+        .map_err(Error::internal)?;
+    let message = match trigger {
+        _ if late => "rynas: the scheduling gate answered late; running the start".into(),
+        RunTrigger::Retry => format!(
+            "rynas: retry {attempt} of {} after a failed run",
+            task.effective_policy().retry.attempts
+        ),
+        RunTrigger::Queued => {
+            "rynas: its time came while the previous run was going: starting now (overlap policy queue)".into()
+        }
+        RunTrigger::CatchUp => "rynas: catching up a run missed while the NAS was off".into(),
+        _ => String::new(),
+    };
+    Ok(GateAnswer { run: true, trigger, skipped: None, message })
 }
 
-fn missed_event(task: &ScheduledTask) -> rynas_notify::NewEvent {
+fn missed_event(task: &ScheduledTask) -> NewEvent {
     let name = if task.name.is_empty() { task.id.clone() } else { task.name.clone() };
     let mut ev = oneshot(
         NotifyCategory::Task,
@@ -377,19 +427,34 @@ fn missed_event(task: &ScheduledTask) -> rynas_notify::NewEvent {
     field(field(ev, "task", &task.id), "name", name)
 }
 
-/// After a run ended: arms its retry, or drops the armed one. `run` is the recorded run with
-/// the trigger and attempt from the gate.
-pub fn after_run(p: &Protection, task: &ScheduledTask, run: &NewRun) {
+/// After a run ended: arms its retry, keeps the chain going or ends it. `true`: the run
+/// notifies now; `false`: an armed retry holds its failure notification back ([`hold`]).
+///
+/// - a success ends the chain (the held failure is dropped: the task works again);
+/// - the run of a started retry is that retry, whatever the gate saw (a request lost to a
+///   restart of rynasd); the chain moves on, or ends with it (then it notifies);
+/// - a newer scheduled run that fails while the chain waits keeps the chain's count and time;
+/// - a run started by hand notifies as it always did and leaves the chain alone.
+pub fn after_run(p: &Protection, task: &ScheduledTask, run: &NewRun) -> bool {
     if run.ok() {
         let _ = p.history.clear_retry(&task.id);
-        return;
+        return true;
     }
-    if run.skipped.is_some() || !rynas_scheduler::gate::retries_after(run.trigger) {
-        return;
-    }
+    let armed = p.history.retry(&task.id).ok().flatten();
+    let done = match armed {
+        Some(a) if a.started_ms.is_some() => a.retry.attempt,
+        Some(a) if retries_after(run.trigger) => {
+            if let Err(e) = p.history.set_retry(&task.id, &ArmedRetry { after_ms: run.end_ms, ..a }) {
+                tracing::warn!("scheduler: retry of {}: {e}", task.id);
+            }
+            return false;
+        }
+        _ if !retries_after(run.trigger) => return true,
+        _ if run.trigger == Some(RunTrigger::Retry) => run.attempt,
+        _ => 0,
+    };
     let policy = task.effective_policy();
-    let next = rynas_scheduler::gate::next_retry(&policy.retry, run.attempt, run.end_ms);
-    let r = match next {
+    match next_retry(&policy.retry, done, run.end_ms) {
         Some(retry) => {
             tracing::info!(
                 "scheduler: task {} failed; retry {} of {} at {}",
@@ -398,20 +463,47 @@ pub fn after_run(p: &Protection, task: &ScheduledTask, run: &NewRun) {
                 retry.attempts,
                 retry.due_ms
             );
-            p.history.set_retry(&task.id, &ArmedRetry { retry, after_ms: run.end_ms })
+            let armed = ArmedRetry { retry, after_ms: run.end_ms, started_ms: None };
+            match p.history.set_retry(&task.id, &armed) {
+                Ok(()) => false,
+                Err(e) => {
+                    tracing::warn!("scheduler: retry of {}: {e}", task.id);
+                    true
+                }
+            }
         }
-        None => p.history.clear_retry(&task.id).map(|_| ()),
-    };
-    if let Err(e) = r {
-        tracing::warn!("scheduler: retry of {}: {e}", task.id);
+        // the last attempt failed: its own notification is the chain's
+        None => {
+            let _ = p.history.clear_retry(&task.id);
+            true
+        }
     }
 }
 
-/// A retry is armed for the task: a failure notification waits for the last attempt.
-pub fn retry_pending(p: &Protection, id: &str) -> bool {
-    p.history
-        .retries()
-        .is_ok_and(|l| l.iter().any(|(t, _)| t == id))
+/// Holds the failure notification of a run in the task's armed retry ([`after_run`] said
+/// so); sent at once when the chain ended meanwhile.
+pub fn hold(p: &Protection, id: &str, ev: NewEvent) {
+    let held = serde_json::to_string(&ev)
+        .ok()
+        .is_some_and(|j| p.history.hold(id, &j).unwrap_or(false));
+    if !held {
+        p.notifier.emit(ev);
+    }
+}
+
+/// Ends the retry chain of `id` without a success: the failure notification it held back is
+/// sent now. Exactly once: only the caller that takes the chain's row sends it.
+pub fn drop_retry(p: &Protection, id: &str, why: &str) {
+    match p.history.take_retry(id) {
+        Ok(Some((armed, held))) => {
+            tracing::info!("scheduler: task {id}: retry {} dropped: {why}", armed.retry.attempt);
+            if let Some(ev) = held.and_then(|j| serde_json::from_str::<NewEvent>(&j).ok()) {
+                p.notifier.emit(ev);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("scheduler: retry of {id}: {e}"),
+    }
 }
 
 /// The watch loop: due retries, the overlap policy `replace`, pauses that end by themselves.
@@ -425,62 +517,95 @@ pub async fn watch(p: Arc<Protection>) {
     }
 }
 
-fn tick(p: &Protection) {
+/// Tasks gone from the applied configuration since the last tick (deleted): their pause and
+/// their retry chain go.
+fn forget_deleted(p: &Protection, applied: &[ScheduledTask]) {
+    let now: HashSet<String> = applied.iter().map(|t| t.id.clone()).collect();
+    let gone: Vec<String> = {
+        let mut known = p.gate.known.lock().unwrap();
+        let gone = known
+            .as_ref()
+            .map(|old| old.difference(&now).cloned().collect())
+            .unwrap_or_default();
+        *known = Some(now);
+        gone
+    };
+    for id in gone {
+        if p.gate.pause().tasks.contains_key(&id) {
+            match p.gate.set_pause_task(&id, None) {
+                Ok(_) => tracing::info!("scheduler: task {id} deleted: its pause goes"),
+                Err(e) => tracing::warn!("scheduler: pause of deleted task {id}: {}", e.2),
+            }
+        }
+        drop_retry(p, &id, "the task was deleted");
+    }
+}
+
+/// One turn of the watch loop (public for the tests).
+pub fn tick(p: &Protection) {
     import_spool(p);
     let now = now_ms();
-    let due: Vec<(String, ArmedRetry)> = p
-        .history
-        .retries()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(_, a)| a.retry.due_ms <= now)
-        .collect();
-    let applied: Vec<ScheduledTask> = p
-        .ops
-        .config
-        .applied(rynas_scheduler::SCHEDULER_KEY)
-        .ok()
-        .flatten()
-        .map(|v| rynas_scheduler::domain::tasks_of(Some(&v)))
-        .unwrap_or_default();
+    let applied: Vec<ScheduledTask> = match p.ops.config.applied(rynas_scheduler::SCHEDULER_KEY) {
+        Ok(v) => rynas_scheduler::domain::tasks_of(v.as_ref()),
+        Err(e) => {
+            tracing::warn!("scheduler watch: {e}");
+            return;
+        }
+    };
+    forget_deleted(p, &applied);
+    let retries = p.history.retries().unwrap_or_default();
     let replacing: Vec<&ScheduledTask> = applied
         .iter()
         .filter(|t| t.effective_policy().overlap == rynas_api_types::scheduler::Overlap::Replace)
         .collect();
     // nothing to do: no systemd question
-    if due.is_empty() && replacing.is_empty() {
+    if retries.is_empty() && replacing.is_empty() {
         return;
     }
     let pause = p.gate.pause();
     let running = p.probe.running_tasks().unwrap_or_default();
-    for (id, armed) in due {
+    for (id, armed) in retries {
         let unit = service_name(&id);
-        let task = applied.iter().find(|t| t.id == id);
-        // gone, off, or a newer run happened (the schedule, a catch-up, run now)
-        let stale = task.is_none_or(|t| !t.enabled)
-            || p.history.ran_since(&id, armed.after_ms).unwrap_or(false);
-        if stale {
-            let _ = p.history.clear_retry(&id);
+        let Some(task) = applied.iter().find(|t| t.id == id) else {
+            drop_retry(p, &id, "the task is gone");
+            continue;
+        };
+        if !task.enabled {
+            drop_retry(p, &id, "the task is off");
             continue;
         }
-        // it runs now: the retry waits for that run to end
+        // a run goes on: its end moves the chain on (the retry itself, or a run before it)
         if running.contains(&unit) {
             continue;
         }
-        let _ = p.history.clear_retry(&id);
+        if let Some(at) = armed.started_ms {
+            // started, nothing runs and no end came: the start was lost
+            if now.saturating_sub(at) > REQUEST_TTL.as_millis() as u64 {
+                drop_retry(p, &id, "its start did not happen");
+            }
+            continue;
+        }
+        if armed.retry.due_ms > now {
+            continue;
+        }
         if let Some(reason) = pause.blocks(&id, now) {
-            // a pause drops the retry (the next scheduled run comes after the pause)
+            // a pause drops the chain (the next scheduled run comes after the pause)
             let inv = format!("retry{:x}{}", now, armed.retry.attempt);
             let mut r = NewRun::skipped(&id, &inv, now, RunTrigger::Retry, reason, None);
             r.attempt = armed.retry.attempt;
             let _ = p.history.record(&r);
             p.invalidate();
+            drop_retry(p, &id, "the task is paused");
             continue;
         }
+        let _ = p.history.retry_started(&id, now);
         p.gate.request(&id, RunTrigger::Retry, armed.retry.attempt);
         match p.ops.config.system().start_unit(&unit) {
             Ok(()) => tracing::info!("scheduler: task {id}: retry {} started", armed.retry.attempt),
-            Err(e) => tracing::warn!("scheduler: task {id}: retry: {e}"),
+            Err(e) => {
+                tracing::warn!("scheduler: task {id}: retry: {e}");
+                drop_retry(p, &id, "its unit could not be started");
+            }
         }
     }
     // overlap policy replace: a time came after the running one started

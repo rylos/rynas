@@ -1,7 +1,9 @@
 //! Internal actions of scheduler tasks. Started by `rynasctl job run <id>` from the task's
 //! unit: an action that is one command (scrub, SMART self-test, a snapshot job without
 //! targets that follow it) is handed to the unit as a [`JobPlan`] and runs there, outside
-//! rynasd; the others run as rynasd tasks (UPID, log, cancel; visible in the task panel),
+//! rynasd, in the unit's sandbox (`rynas_scheduler::units::JOB_SANDBOX`), with an entry in
+//! the task panel that follows it and stops the unit when cancelled ([`track`]); the others
+//! run as rynasd tasks (UPID, log, cancel; visible in the task panel),
 //! which the unit follows to their end so that the unit's result is the task's.
 
 use std::sync::Arc;
@@ -165,6 +167,100 @@ pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>
             }))
         }
         _ => Ok(None),
+    }
+}
+
+/// The task panel's entry of a run working in its own unit (a planned scrub, SMART test or
+/// snapshot), as when it ran inside rynasd: its log follows the unit's output in the journal,
+/// it ends with the run (told by the run's end, [`crate::gate::Gate::release`]), and
+/// cancelling it stops the unit.
+pub fn track(p: &Arc<Protection>, t: &ScheduledTask) {
+    let kind = match &t.action {
+        TaskAction::Scrub { .. } => "btrfs.scrub",
+        TaskAction::SmartTest { .. } => "smart.test",
+        TaskAction::Snapshot { .. } => "snapshot.run",
+        _ => return,
+    };
+    let unit = rynas_scheduler::units::service_name(&t.id);
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let inv = p
+        .gate
+        .attach_tracker(&t.id, crate::gate::heavy_action(&t.action), tx);
+    let p2 = p.clone();
+    let r = p.ops.tasks.spawn(kind, crate::scheduler::SCHEDULER_USER, move |ctx| async move {
+        ctx.log(&format!("runs in {unit}"));
+        let mut feed = journal_lines(&inv);
+        let mut rx = rx;
+        let mut stopping = false;
+        loop {
+            tokio::select! {
+                end = &mut rx => {
+                    // the last lines journald still had
+                    if let Some((_, lines)) = feed.as_mut() {
+                        while let Ok(Ok(Some(l))) =
+                            tokio::time::timeout(Duration::from_millis(300), lines.next_line()).await
+                        {
+                            ctx.log(&l);
+                        }
+                    }
+                    return match end {
+                        Ok(r) if r == "success" => Ok(()),
+                        Ok(r) if stopping => Err(format!("cancelled: the unit stopped ({r})")),
+                        Ok(r) => Err(format!("the run failed ({r})")),
+                        Err(_) => Err("the run ended (its result is in the task's history)".into()),
+                    };
+                }
+                _ = ctx.token().cancelled(), if !stopping => {
+                    stopping = true;
+                    ctx.log(&format!("stopping {unit}"));
+                    let (p3, u) = (p2.clone(), unit.clone());
+                    let _ = tokio::task::spawn_blocking(move || {
+                        p3.ops.config.system().run(&Cmd::new("systemctl").args(["stop", "--no-block", &u]))
+                    })
+                    .await;
+                }
+                line = next_line(&mut feed) => match line {
+                    Some(l) => ctx.log(&l),
+                    None => feed = None,
+                },
+            }
+        }
+    });
+    if let Err(e) = r {
+        tracing::warn!("scheduler: task {}: task panel entry: {e}", t.id);
+    }
+}
+
+type JournalFeed = (
+    tokio::process::Child,
+    tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+);
+
+/// `journalctl --follow` of one run's output (messages only); `None` without an invocation
+/// id or without journalctl. The child goes with the feed.
+fn journal_lines(invocation_id: &str) -> Option<JournalFeed> {
+    use tokio::io::AsyncBufReadExt;
+    if invocation_id.is_empty() || !invocation_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut child = tokio::process::Command::new("journalctl")
+        .args(["--no-pager", "-o", "cat", "--follow", "-n", "all"])
+        .arg(format!("_SYSTEMD_INVOCATION_ID={invocation_id}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let out = child.stdout.take()?;
+    Some((child, tokio::io::BufReader::new(out).lines()))
+}
+
+/// The next line of the feed; never ready without one.
+async fn next_line(feed: &mut Option<JournalFeed>) -> Option<String> {
+    match feed {
+        Some((_, lines)) => lines.next_line().await.ok().flatten(),
+        None => std::future::pending().await,
     }
 }
 

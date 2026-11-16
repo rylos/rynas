@@ -12,7 +12,8 @@
 //! 1. pause of every task, then of this task ([`SchedulerPause::blocks`]);
 //! 2. overlap: a timer whose time came while its service was running starts it once more as
 //!    soon as the run ends (systemd 257, checked in `packaging/test-deb-systemd.sh`); with the
-//!    overlap policy `skip` that start is skipped (`queue` lets it run);
+//!    overlap policy `skip` (stored on tasks created since S2) that start is skipped;
+//!    `queue` (the default of a task without one: systemd's behaviour before) lets it run;
 //! 3. the catch-up deadline: a catch-up start (`Persistent=` after downtime) runs only when a
 //!    scheduled time lies within `missed.within_h` hours before it;
 //! 4. another run of the task still going in rynasd (the lease of an earlier start).
@@ -61,7 +62,16 @@ pub struct GateRequest {
     /// `$TRIGGER_UNIT` (systemd ≥ 253): the timer that started it, empty otherwise.
     #[serde(default)]
     pub trigger_unit: String,
+    /// rynasctl runs the start anyway after this time (ms since the epoch; 0: unknown). An
+    /// answer decided later says "run" and records no skip: the start may already be running.
+    #[serde(default)]
+    pub answer_by_ms: u64,
 }
+
+/// How long rynasd may take to decide before its answer counts as late
+/// ([`GateRequest::answer_by_ms`]): well before [`GATE_TIMEOUT`], the margin covers the trip
+/// back to rynasctl.
+pub const ANSWER_BY: Duration = Duration::from_secs(15);
 
 /// Answer of the gate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,9 +262,16 @@ fn timer_start(s: &Start) -> TimerStart {
     }
 }
 
+/// The start rynasd asked for, unless the task's own timer started it: a request left
+/// behind (run now on a running task is a no-op for systemd) must never turn a timer's start
+/// into a manual one that skips the pause, the overlap policy and the deadline.
+fn requested(s: &Start) -> Option<(RunTrigger, u8)> {
+    if s.by_timer { None } else { s.requested }
+}
+
 /// How the start came about.
 pub fn classify(s: &Start) -> RunTrigger {
-    if let Some((t, _)) = s.requested {
+    if let Some((t, _)) = requested(s) {
         return t;
     }
     if !s.by_timer {
@@ -272,7 +289,7 @@ pub fn classify(s: &Start) -> RunTrigger {
 /// The gate's decision for a start.
 pub fn decide(s: &Start) -> Decision {
     let trigger = classify(s);
-    let attempt = s.requested.map_or(0, |(_, a)| a);
+    let attempt = requested(s).map_or(0, |(_, a)| a);
     let skip = |reason, detail| Decision::Skip {
         trigger,
         reason,
@@ -289,7 +306,7 @@ pub fn decide(s: &Start) -> Decision {
             return skip(reason, detail);
         }
         let policy = s.task.effective_policy();
-        if s.by_timer && s.requested.is_none() && !matches!(s.task.trigger, TaskTrigger::Boot { .. })
+        if s.by_timer && !matches!(s.task.trigger, TaskTrigger::Boot { .. })
         {
             match timer_start(s) {
                 TimerStart::AfterOverlap if policy.overlap == Overlap::Skip => {
@@ -461,6 +478,7 @@ mod tests {
         // the deadline never touches a start on time, nor one asked for by hand
         assert_eq!(decide(&start(&late, "2026-11-16T02:00:00", &none, &tz)), Decision::Run { trigger: RunTrigger::Timer, attempt: 0 });
         let mut by_hand = start(&late, "2026-11-16T09:00:00", &none, &tz);
+        by_hand.by_timer = false;
         by_hand.requested = Some((RunTrigger::Manual, 0));
         assert_eq!(decide(&by_hand), Decision::Run { trigger: RunTrigger::Manual, attempt: 0 });
         by_hand.requested = None;
@@ -495,6 +513,7 @@ mod tests {
         assert!(matches!(decide(&start(&t, "2026-11-16T07:00:00", &p, &tz)), Decision::Skip { reason: SkipReason::Paused, .. }));
         // run now goes ahead while paused; a retry does not
         let mut s = start(&t, "2026-11-16T05:00:00", &p, &tz);
+        s.by_timer = false;
         s.requested = Some((RunTrigger::Manual, 0));
         assert!(matches!(decide(&s), Decision::Run { .. }));
         s.requested = Some((RunTrigger::Retry, 1));
@@ -511,13 +530,18 @@ mod tests {
         let none = SchedulerPause::default();
         // every 10 minutes; the run of 05:00 went on until 05:12: systemd starts it again
         // at 05:12 for the time of 05:10
-        let t = task("*:0/10", RunPolicy::default());
+        let t = task("*:0/10", RunPolicy { overlap: Some(Overlap::Skip), ..Default::default() });
         let mut s = start(&t, "2026-11-16T05:12:00", &none, &tz);
         s.last_run = Some((at("2026-11-16T05:00:00"), at("2026-11-16T05:11:59")));
         assert_eq!(decide(&s), Decision::Skip { trigger: RunTrigger::Timer, reason: SkipReason::Overlap, detail: None });
         let q = task("*:0/10", RunPolicy { overlap: Some(Overlap::Queue), ..Default::default() });
         let mut s2 = s.clone();
         s2.task = &q;
+        assert_eq!(decide(&s2), Decision::Run { trigger: RunTrigger::Queued, attempt: 0 });
+        // a task without a stored overlap (written before S2) queues, as systemd did
+        let old = task("*:0/10", RunPolicy::default());
+        assert_eq!(old.effective_policy().overlap, Overlap::Queue);
+        s2.task = &old;
         assert_eq!(decide(&s2), Decision::Run { trigger: RunTrigger::Queued, attempt: 0 });
         // a boot long after the last run is a catch-up, not an overlap
         let mut s3 = start(&t, "2026-11-16T09:15:00", &none, &tz);
@@ -527,6 +551,7 @@ mod tests {
         let mut s4 = start(&t, "2026-11-16T05:20:00", &none, &tz);
         s4.running_elsewhere = true;
         assert!(matches!(decide(&s4), Decision::Skip { reason: SkipReason::Running, .. }));
+        s4.by_timer = false;
         s4.requested = Some((RunTrigger::Manual, 0));
         assert!(matches!(decide(&s4), Decision::Skip { trigger: RunTrigger::Manual, reason: SkipReason::Running, .. }));
         // replace: due once a time came after the run started
@@ -543,6 +568,40 @@ mod tests {
         let mut t = task("hourly", RunPolicy::default());
         t.trigger = TaskTrigger::Boot { delay_s: 60 };
         assert_eq!(decide(&start(&t, "2026-11-16T05:12:00", &none, &tz)), Decision::Run { trigger: RunTrigger::Boot, attempt: 0 });
+    }
+
+    #[test]
+    fn a_stale_request_never_takes_over_a_timer_start() {
+        let tz = utc();
+        let mut paused = SchedulerPause::default();
+        paused.tasks.insert("t".into(), PauseInfo { since_ms: 0, ..Default::default() });
+        let late = task("*-*-* 02:00:00", RunPolicy { missed: Some(MissedPolicy::RunOnce { within_h: Some(1) }), ..Default::default() });
+        // run now on a running task left a request behind; the timer's next start is still
+        // the timer's: paused, past its deadline
+        let mut s = start(&late, "2026-11-16T09:00:00", &paused, &tz);
+        s.requested = Some((RunTrigger::Manual, 0));
+        assert_eq!(classify(&s), RunTrigger::CatchUp);
+        assert!(matches!(decide(&s), Decision::Skip { trigger: RunTrigger::CatchUp, reason: SkipReason::Paused, .. }));
+        let none = SchedulerPause::default();
+        s.pause = &none;
+        assert!(matches!(decide(&s), Decision::Skip { reason: SkipReason::Missed, .. }));
+        s.requested = Some((RunTrigger::Retry, 2));
+        assert!(matches!(decide(&s), Decision::Skip { trigger: RunTrigger::CatchUp, reason: SkipReason::Missed, .. }));
+        // the same request on a start rynasd made (no timer) counts
+        s.by_timer = false;
+        assert_eq!(decide(&s), Decision::Run { trigger: RunTrigger::Retry, attempt: 2 });
+    }
+
+    #[test]
+    fn run_now_across_a_scheduled_time_keeps_the_scheduled_run_with_queue() {
+        let tz = utc();
+        let none = SchedulerPause::default();
+        // run now at 04:58 ran until 05:03: the time of 05:00 fell inside it; systemd starts
+        // the unit by its timer right after
+        let q = task("*-*-* 05:00:00", RunPolicy::default());
+        let mut s = start(&q, "2026-11-16T05:03:01", &none, &tz);
+        s.last_run = Some((at("2026-11-16T04:58:00"), at("2026-11-16T05:03:00")));
+        assert_eq!(decide(&s), Decision::Run { trigger: RunTrigger::Queued, attempt: 0 });
     }
 
     #[test]

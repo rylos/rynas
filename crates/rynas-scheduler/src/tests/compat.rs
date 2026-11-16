@@ -52,11 +52,15 @@ fn documents_of_older_releases_render_the_same_units() {
             &format!("compat/{id}.timer"),
             &read(&e.root, &format!("{units}/rynas-task-{id}.timer")),
         );
-        // services: the same but for the scheduling gate added by S2 (the header carries
-        // the hash of the whole file, so it is left out too)
+        // services: the same but for the scheduling gate added by S2 and the sandbox of the
+        // units that run their command themselves (the header carries the hash of the
+        // whole file, so it is left out too)
         let service = read(&e.root, &format!("{units}/rynas-task-{id}.service"));
         let gate = format!("ExecCondition=+/usr/libexec/rynas/rynasctl gate {id}\n");
         assert!(service.contains(&gate), "{service}");
+        let sandboxed = ["snapshot-docs", "scrub-vol1"].contains(&id);
+        assert_eq!(service.contains(crate::units::JOB_SANDBOX), sandboxed, "{service}");
+        let service = service.replace(crate::units::JOB_SANDBOX, "");
         let body = |s: &str| s.lines().skip(1).map(|l| format!("{l}\n")).collect::<String>();
         let want = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -96,7 +100,9 @@ fn migrated_documents_keep_their_timers_running() {
     assert_eq!(scrub.owner, TaskOwner::User);
     assert_eq!(scrub.policy.missed, Some(MissedPolicy::RunOnce { within_h: None }));
     assert_eq!(scrub.effective_policy().retry, Retry::NONE);
-    assert_eq!(scrub.effective_policy().overlap, Overlap::Skip);
+    // no overlap stored: queue, what systemd did before the gate
+    assert_eq!(scrub.policy.overlap, None);
+    assert_eq!(scrub.effective_policy().overlap, Overlap::Queue);
     // staging the migrated tasks again (what any later change does) restarts no timer and
     // changes no file
     e.sys.state().calls.clear();

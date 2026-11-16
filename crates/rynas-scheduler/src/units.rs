@@ -10,7 +10,8 @@
 //!   User actions read their script on standard input (`StandardInput=file:`): the file stays
 //!   root:root 0700, the service manager opens it before dropping privileges, the user never
 //!   gets a path to it. Internal actions run `rynasctl job run <id>`, which starts the rynasd
-//!   task and follows it to the end.
+//!   task and follows it to the end, or runs the command rynasd plans for it (scrub, SMART
+//!   test, snapshots: [`runs_in_unit`], sandboxed with [`JOB_SANDBOX`]).
 //! - `rynas-task-<id>.timer`: `OnCalendar=` (+ `Persistent=`, `RandomizedDelaySec=`) or
 //!   `OnBootSec=`; no `[Install]` section.
 //! - `timers.target.d/rynas-tasks.conf`: `Wants=` on the timers of the enabled tasks. Enabling
@@ -155,8 +156,44 @@ pub fn render_service(t: &ScheduledTask, p: &Paths) -> Result<String, String> {
     if !internal {
         s.push_str("NoNewPrivileges=yes\nPrivateTmp=yes\n");
     }
+    if runs_in_unit(&t.action) {
+        s.push_str(JOB_SANDBOX);
+    }
     Ok(s)
 }
+
+/// Internal actions whose command the unit runs itself (`rynasctl job run` gets a plan from
+/// rynasd: btrfs scrub, smartctl, btrbk) instead of following a rynasd task.
+pub fn runs_in_unit(a: &TaskAction) -> bool {
+    matches!(
+        a,
+        TaskAction::Scrub { .. } | TaskAction::SmartTest { .. } | TaskAction::Snapshot { .. }
+    )
+}
+
+/// The sandbox of a unit that runs btrfs, smartctl or btrbk as root: what rynasd's own unit
+/// allowed those commands when they ran inside it, without the rest (no network, no
+/// changing users, no namespaces). `ExecCondition=+`/`ExecStopPost=+` run outside it.
+pub const JOB_SANDBOX: &str = "\
+NoNewPrivileges=yes
+ProtectSystem=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN CAP_FSETID
+";
 
 /// The `.timer` unit, `None` for manual tasks.
 pub fn render_timer(t: &ScheduledTask) -> Option<String> {

@@ -54,6 +54,8 @@ struct Env {
     probe: Arc<FakeProbe>,
     notifier: Arc<MemoryNotifier>,
     config: Arc<Config>,
+    /// For the watch loop's turns (`rynasd::gate::tick`) and the scheduler history.
+    prot: Arc<Protection>,
 }
 
 fn env() -> Env {
@@ -146,7 +148,8 @@ fn env_inner(
         Some(d) => protection.with_live_demo(d),
         None => protection,
     };
-    st.protection = Some(Arc::new(protection));
+    let prot = Arc::new(protection);
+    st.protection = Some(prot.clone());
     Env {
         _dir: dir,
         app: router(st),
@@ -154,6 +157,7 @@ fn env_inner(
         probe,
         notifier,
         config,
+        prot,
     }
 }
 
@@ -498,14 +502,17 @@ async fn the_gate_skips_paused_starts_and_arms_retries() {
     tokio::time::sleep(Duration::from_millis(900)).await;
     assert!(e.notifier.take().is_empty(), "no notification while a retry is armed");
 
-    // rynasd was away: rynasctl spooled a start without the gate and its end; the next call
-    // of the gate brings them into the history (and a success drops the armed retry)
+    // rynasd was away: rynasctl spooled a start without the gate and its end; the gate does
+    // not import them (it must answer quickly), the watch loop's next turn does (and a
+    // success drops the armed retry)
     let state = e._dir.path().join("state");
     let spool = |entry: Value| rynas_scheduler::gate::spool_append(&state, &serde_json::from_value(entry).unwrap()).unwrap();
     spool(json!({"task_id": "nightly", "invocation_id": "bb01", "at_ms": 1_000, "by_timer": true}));
     spool(json!({"task_id": "nightly", "invocation_id": "bb01", "at_ms": 2_000, "by_timer": false,
         "finished": {"result": "success", "exit_code": "exited", "exit_status": "0"}}));
     ask("aa05", true).await;
+    assert!(e.prot.history.by_invocation("bb01").unwrap().is_none(), "imported by the gate");
+    rynasd::gate::tick(&e.prot);
     let (_, b) = call(&e, "GET", "/v1/scheduler/tasks/nightly/history", None).await;
     let runs: Vec<TaskRun> = serde_json::from_slice(&b).unwrap();
     let away = runs.iter().find(|r| r.invocation_id == "bb01").expect("spooled run recorded");
@@ -520,6 +527,239 @@ async fn the_gate_skips_paused_starts_and_arms_retries() {
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let plan: rynasd::jobs::JobPlan = serde_json::from_slice(&b).unwrap();
     assert_eq!(plan.argv, ["smartctl", "-t", "short", "/dev/sda"]);
+    // it shows in the task panel as before; cancelling it stops the unit, and the run's end
+    // ends the entry
+    let (_, b) = call(&e, "GET", "/v1/tasks", None).await;
+    let tasks: Vec<rynas_api_types::TaskInfo> = serde_json::from_slice(&b).unwrap();
+    let entry = tasks.iter().find(|t| t.kind == "smart.test").expect("in the task panel").id.clone();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (s, _) = call(&e, "POST", &format!("/v1/tasks/{entry}/cancel"), None).await;
+    assert!(s.is_success(), "{s}");
+    let mut stopped = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if e.sys.state().calls.iter().any(|c| c == "run systemctl stop --no-block rynas-task-smart-sda.service") {
+            stopped = true;
+            break;
+        }
+    }
+    assert!(stopped, "{:?}", e.sys.state().calls);
+    let end = json!({"invocation_id": "ff01", "result": "signal", "exit_code": "killed", "exit_status": "TERM"});
+    let (s, _) = call_peer(&e, Some(0), "POST", "/v1/scheduler/tasks/smart-sda/finished", Some(end)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let mut status = None;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (_, b) = call(&e, "GET", &format!("/v1/tasks/{entry}"), None).await;
+        let t: rynas_api_types::TaskInfo = serde_json::from_slice(&b).unwrap();
+        if t.status.is_finished() {
+            status = Some(t.status);
+            break;
+        }
+    }
+    assert_eq!(status, Some(rynas_api_types::TaskStatus::Cancelled));
+}
+
+/// The gate's answer for a start of `id` (`timer`: started by its own timer); `by`: the
+/// deadline rynasctl sends (0: none).
+async fn gate_ask(e: &Env, id: &str, inv: &str, timer: bool, by: u64) -> rynas_scheduler::gate::GateAnswer {
+    let unit = if timer { format!("rynas-task-{id}.timer") } else { String::new() };
+    let body = json!({"invocation_id": inv, "trigger_unit": unit, "answer_by_ms": by});
+    let (s, b) = call_peer(e, Some(0), "POST", &format!("/v1/scheduler/tasks/{id}/gate"), Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    serde_json::from_slice(&b).unwrap()
+}
+
+/// `task-finished` of run `inv` of `id` with systemd's `result`, then a wait for the output
+/// and the notification (they follow 500 ms later).
+async fn gate_end(e: &Env, id: &str, inv: &str, result: &str) {
+    let status = if result == "success" { "0" } else { "1" };
+    let body = json!({"invocation_id": inv, "result": result, "exit_code": "exited", "exit_status": status});
+    let (s, _) = call_peer(e, Some(0), "POST", &format!("/v1/scheduler/tasks/{id}/finished"), Some(body)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+}
+
+/// The armed retry of `id` falls due now.
+fn retry_due_now(e: &Env, id: &str) {
+    let a = e.prot.history.retry(id).unwrap().expect("retry armed");
+    e.prot
+        .history
+        .set_retry(id, &rynas_scheduler::history::ArmedRetry { retry: rynas_api_types::scheduler::PendingRetry { due_ms: 0, ..a.retry }, ..a })
+        .unwrap();
+}
+
+fn failures(events: &[rynas_api_types::notify::NewEvent], id: &str) -> usize {
+    events
+        .iter()
+        .filter(|ev| ev.key.as_deref() == Some(&format!("scheduler:task:{id}")) && ev.state == EventState::Firing)
+        .count()
+}
+
+/// A retry chain notifies its failure exactly once: at its last attempt, or when it is
+/// dropped; a newer scheduled failure keeps its count; a run by hand notifies as always.
+#[tokio::test]
+async fn a_retry_chain_notifies_its_failure_exactly_once() {
+    use rynas_api_types::scheduler::RunTrigger;
+    let e = env();
+    for id in ["chain", "off", "quiet", "gone"] {
+        let t = json!({"id": id, "name": id, "action": {"kind": "command", "command": "false"},
+            "trigger": {"kind": "calendar", "on_calendar": "minutely"}, "notify": "on_failure",
+            "policy": {"retry": {"attempts": 2, "delay_s": 60, "backoff": false}}});
+        let (s, b) = call(&e, "POST", "/v1/scheduler/tasks", Some(t)).await;
+        assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    }
+    apply(&e);
+    rynasd::gate::tick(&e.prot);
+    e.notifier.take();
+
+    // a scheduled failure arms retry 1 of 2 and says nothing
+    assert!(gate_ask(&e, "chain", "c001", true, 0).await.run);
+    gate_end(&e, "chain", "c001", "exit-code").await;
+    assert_eq!(e.prot.history.retry("chain").unwrap().unwrap().retry.attempt, 1);
+    assert_eq!(failures(&e.notifier.take(), "chain"), 0);
+    // a newer scheduled failure does not start the count again
+    assert!(gate_ask(&e, "chain", "c002", true, 0).await.run);
+    gate_end(&e, "chain", "c002", "exit-code").await;
+    assert_eq!(e.prot.history.retry("chain").unwrap().unwrap().retry.attempt, 1);
+    // run now fails while the retry waits: notified as always, the chain goes on
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/chain/run", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let a = gate_ask(&e, "chain", "c003", false, 0).await;
+    assert_eq!((a.run, a.trigger), (true, RunTrigger::Manual));
+    gate_end(&e, "chain", "c003", "exit-code").await;
+    assert_eq!(failures(&e.notifier.take(), "chain"), 1);
+    assert_eq!(e.prot.history.retry("chain").unwrap().unwrap().retry.attempt, 1);
+    // retry 1 fails: retry 2 armed, still silent
+    retry_due_now(&e, "chain");
+    rynasd::gate::tick(&e.prot);
+    assert!(e.sys.state().calls.iter().any(|c| c == "run systemctl start --no-block rynas-task-chain.service"));
+    let a = gate_ask(&e, "chain", "c004", false, 0).await;
+    assert_eq!((a.run, a.trigger), (true, RunTrigger::Retry));
+    gate_end(&e, "chain", "c004", "exit-code").await;
+    assert_eq!(e.prot.history.retry("chain").unwrap().unwrap().retry.attempt, 2);
+    assert_eq!(failures(&e.notifier.take(), "chain"), 0);
+    // the last attempt fails: one notification, nothing armed, nothing more later
+    retry_due_now(&e, "chain");
+    rynasd::gate::tick(&e.prot);
+    let a = gate_ask(&e, "chain", "c005", false, 0).await;
+    assert_eq!((a.trigger, a.message.contains("retry 2 of 2")), (RunTrigger::Retry, true), "{}", a.message);
+    gate_end(&e, "chain", "c005", "exit-code").await;
+    assert!(e.prot.history.retry("chain").unwrap().is_none());
+    rynasd::gate::tick(&e.prot);
+    assert_eq!(failures(&e.notifier.take(), "chain"), 1);
+    let runs = e.prot.history.list("chain", 10, None).unwrap();
+    assert_eq!(runs[0].attempt, 2);
+
+    // chains dropped before their end send the held failure once: task off, paused at the
+    // due time, deleted (its pause goes too)
+    // invocation ids are hex: the task's name in hex and a number
+    let inv = |id: &str, n: u8| format!("{}{n:02}", id.bytes().map(|b| format!("{b:02x}")).collect::<String>());
+    for id in ["off", "quiet", "gone"] {
+        assert!(gate_ask(&e, id, &inv(id, 1), true, 0).await.run);
+        gate_end(&e, id, &inv(id, 1), "exit-code").await;
+    }
+    assert_eq!(e.notifier.take().len(), 0);
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/off/disable", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/quiet/pause", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/gone/pause", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(&e, "DELETE", "/v1/scheduler/tasks/gone", None).await;
+    assert_eq!(s, StatusCode::OK);
+    apply(&e);
+    retry_due_now(&e, "quiet");
+    rynasd::gate::tick(&e.prot);
+    rynasd::gate::tick(&e.prot);
+    let ev = e.notifier.take();
+    for id in ["off", "quiet", "gone"] {
+        assert_eq!(failures(&ev, id), 1, "{id}: {ev:?}");
+        assert!(e.prot.history.retry(id).unwrap().is_none(), "{id}");
+    }
+    let quiet = e.prot.history.list("quiet", 1, None).unwrap();
+    assert_eq!((quiet[0].trigger, quiet[0].skipped), (Some(RunTrigger::Retry), Some(rynas_api_types::scheduler::SkipReason::Paused)));
+    let (_, b) = call(&e, "GET", "/v1/scheduler/pause", None).await;
+    let p: rynas_api_types::scheduler::SchedulerPause = serde_json::from_slice(&b).unwrap();
+    assert!(!p.tasks.contains_key("gone") && p.tasks.contains_key("quiet"), "{p:?}");
+    // a retry whose start the gate skips ends the chain too
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/quiet/resume", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(gate_ask(&e, "quiet", &inv("quiet", 2), true, 0).await.run);
+    gate_end(&e, "quiet", &inv("quiet", 2), "exit-code").await;
+    retry_due_now(&e, "quiet");
+    rynasd::gate::tick(&e.prot);
+    let (s, _) = call(&e, "POST", "/v1/scheduler/pause", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let a = gate_ask(&e, "quiet", &inv("quiet", 3), false, 0).await;
+    assert_eq!((a.run, a.trigger), (false, RunTrigger::Retry));
+    assert_eq!(failures(&e.notifier.take(), "quiet"), 1);
+    assert!(e.prot.history.retry("quiet").unwrap().is_none());
+}
+
+/// A stale request, a late answer, the default overlap of new tasks, a spooled end imported
+/// twice.
+#[tokio::test]
+async fn the_gate_resists_stale_requests_and_late_answers() {
+    use rynas_api_types::scheduler::{Overlap, RunTrigger, SkipReason};
+    let e = env();
+    let t = json!({"id": "night", "action": {"kind": "command", "command": "false"},
+        "trigger": {"kind": "calendar", "on_calendar": "minutely"}, "notify": "on_failure"});
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks", Some(t)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    apply(&e);
+    // a task created now skips overlapping starts; it is stored, not a default
+    let (_, b) = call(&e, "GET", "/v1/scheduler/tasks/night", None).await;
+    let v: TaskView = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v.task.policy.overlap, Some(Overlap::Skip));
+
+    // run now on a running task leaves no request; nor does any request take over a start
+    // of the timer
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/night/pause", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK);
+    {
+        let mut st = e.probe.state.lock().unwrap();
+        st.running.push("rynas-task-night.service".into());
+        st.invocations.insert("rynas-task-night.service".into(), "ab00".into());
+    }
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/night/run", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    e.probe.state.lock().unwrap().running.clear();
+    assert_eq!(gate_ask(&e, "night", "ab01", false, 0).await.trigger, RunTrigger::Other);
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/night/run", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let a = gate_ask(&e, "night", "ab02", true, 0).await;
+    assert_eq!((a.run, a.skipped, a.trigger), (false, Some(SkipReason::Paused), RunTrigger::Timer));
+    assert_eq!(gate_ask(&e, "night", "ab03", false, 0).await.trigger, RunTrigger::Other, "the request was used");
+
+    // an answer decided after rynasctl's deadline runs the start and records no skip
+    let a = gate_ask(&e, "night", "ab04", true, 1).await;
+    assert_eq!((a.run, a.skipped), (true, None));
+    assert!(e.prot.history.by_invocation("ab04").unwrap().is_none());
+    // a skip recorded in time, then the run happened anyway (rynasctl gave up waiting): the
+    // run's end replaces the skip
+    assert!(!gate_ask(&e, "night", "ab05", true, 0).await.run);
+    gate_end(&e, "night", "ab05", "exit-code").await;
+    let r = e.prot.history.by_invocation("ab05").unwrap().unwrap();
+    assert_eq!((r.skipped, r.result.as_str()), (None, "exit-code"));
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/night/resume", None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // a spooled end imported twice is recorded and notified once; a skipped start before it
+    // is not a failure before it
+    e.notifier.take();
+    let state = e._dir.path().join("state");
+    let end = json!({"task_id": "night", "invocation_id": "ab06", "at_ms": 5_000, "by_timer": false,
+        "finished": {"result": "exit-code", "exit_code": "exited", "exit_status": "1"}});
+    for _ in 0..2 {
+        rynas_scheduler::gate::spool_append(&state, &serde_json::from_value(end.clone()).unwrap()).unwrap();
+    }
+    rynasd::gate::tick(&e.prot);
+    rynas_scheduler::gate::spool_append(&state, &serde_json::from_value(end).unwrap()).unwrap();
+    rynasd::gate::tick(&e.prot);
+    let runs = e.prot.history.list("night", 50, None).unwrap();
+    assert_eq!(runs.iter().filter(|r| r.invocation_id == "ab06").count(), 1);
+    assert_eq!(failures(&e.notifier.take(), "night"), 1);
 }
 
 #[tokio::test]

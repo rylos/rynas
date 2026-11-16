@@ -96,8 +96,8 @@ impl ScheduledTask {
     }
 
     /// The policy that applies, with the defaults filled in: catch-up and random delay from
-    /// the trigger when the policy has none, overlap `skip` (systemd never starts a second
-    /// run of an active service), retry by kind ([`Retry::default_for`]), notification level
+    /// the trigger when the policy has none, overlap `queue` (systemd starts a service once
+    /// more after a run its time fell into: the behaviour before the gate), retry by kind ([`Retry::default_for`]), notification level
     /// from `notify`.
     pub fn effective_policy(&self) -> EffectivePolicy {
         let (persistent, delay) = match &self.trigger {
@@ -261,11 +261,12 @@ impl MissedPolicy {
 pub enum Overlap {
     /// The new start is dropped and recorded as `overlap`. (A timer whose time comes while
     /// its service runs starts it once more right after the run ends: the gate skips that
-    /// start.)
-    #[default]
+    /// start.) Stored explicitly on every task created on the Task Scheduler page since S2.
     Skip,
     /// The new run waits for the running one and starts when it ends (once, however many
-    /// times came meanwhile).
+    /// times came meanwhile). The default of a task without a stored overlap: what systemd
+    /// did before the gate, so an upgrade changes no task's behaviour.
+    #[default]
     Queue,
     /// The running one is stopped, the new one starts (checked every few seconds).
     Replace,

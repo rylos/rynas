@@ -52,7 +52,8 @@ use rynas_api_types::{TaskInfo, TaskStarted, TaskStatus};
 use rynas_auth::ipc::{DEFAULT_SOCKET, USER_HEADER};
 use rynas_btrfs::system::{self, SystemSnapshot, Taken};
 use rynas_scheduler::gate::{
-    GATE_TIMEOUT, GateAnswer, GateRequest, SpoolEntry, SpoolFinished, load_pause, spool_append,
+    ANSWER_BY, GATE_TIMEOUT, GateAnswer, GateRequest, SpoolEntry, SpoolFinished, load_pause,
+    spool_append,
 };
 use rynasd::jobs::{JobPlan, PlanReport};
 use rynasd::scheduler::{ExecuteRequest, TaskFinished};
@@ -368,34 +369,41 @@ fn task_finished(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCod
         exit_status: env("EXIT_STATUS"),
     };
     let json = serde_json::to_vec(&body).unwrap_or_default();
-    match request(
+    let failed = match request(
         socket,
         "POST",
         &format!("/v1/scheduler/tasks/{id}/finished"),
         Some(&json),
     ) {
-        Ok(a) if a.status / 100 == 2 => {}
-        Ok(a) => eprintln!("rynasctl: recording the run of {id}: {}", a.error()),
-        Err(e) => {
-            // rynasd is away: it records the run from the spool when it is back
-            eprintln!("rynasctl: recording the run of {id}: {e}; kept for rynasd");
-            let entry = SpoolEntry {
-                task_id: id.to_string(),
-                invocation_id: body.invocation_id.clone(),
-                at_ms: rynas_tasks::now_ms(),
-                by_timer: false,
-                skipped: None,
-                finished: Some(SpoolFinished {
-                    result: body.result,
-                    exit_code: body.exit_code,
-                    exit_status: body.exit_status,
-                }),
-            };
-            if !entry.invocation_id.is_empty()
-                && let Err(err) = spool_append(state, &entry)
-            {
-                eprintln!("rynasctl: spooling the run of {id}: {err}");
-            }
+        Ok(a) if a.status / 100 == 2 => None,
+        // a refusal (4xx) will not change on a second try
+        Ok(a) if a.status / 100 == 4 => {
+            warn(&format!("rynasctl: recording the run of {id}: {}", a.error()));
+            None
+        }
+        // rynasd is away or could not record it (5xx): recorded from the spool later (an end
+        // recorded twice is kept once)
+        Ok(a) => Some(a.error()),
+        Err(e) => Some(e),
+    };
+    if let Some(e) = failed {
+        warn(&format!("rynasctl: recording the run of {id}: {e}; kept for rynasd"));
+        let entry = SpoolEntry {
+            task_id: id.to_string(),
+            invocation_id: body.invocation_id.clone(),
+            at_ms: rynas_tasks::now_ms(),
+            by_timer: false,
+            skipped: None,
+            finished: Some(SpoolFinished {
+                result: body.result,
+                exit_code: body.exit_code,
+                exit_status: body.exit_status,
+            }),
+        };
+        if !entry.invocation_id.is_empty()
+            && let Err(err) = spool_append(state, &entry)
+        {
+            warn(&format!("rynasctl: spooling the run of {id}: {err}"));
         }
     }
     ExitCode::SUCCESS
@@ -415,12 +423,16 @@ fn on_stop_signals() {
     }
 }
 
-/// `rynasctl gate <id>` ([`rynas_scheduler::gate`]).
+/// `rynasctl gate <id>` ([`rynas_scheduler::gate`]). Never exits with anything but 0 (run)
+/// or 1 (skip): an internal error runs the start ([`main`] turns a panic into exit 0 too).
 fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
     let env = |k: &str| std::env::var(k).unwrap_or_default();
     let req = GateRequest {
         invocation_id: env("INVOCATION_ID"),
         trigger_unit: env("TRIGGER_UNIT"),
+        // after this rynasd answers "run" without recording a skip: the start may be
+        // running by the time a late answer arrives
+        answer_by_ms: rynas_tasks::now_ms() + ANSWER_BY.as_millis() as u64,
     };
     let body = serde_json::to_vec(&req).unwrap_or_default();
     let answer = request_waiting(
@@ -434,10 +446,6 @@ fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
         200 => serde_json::from_slice::<GateAnswer>(&a.body).map_err(|e| e.to_string()),
         _ => Err(a.error()),
     });
-    let say = |m: &str| {
-        println!("{m}");
-        let _ = std::io::stdout().flush();
-    };
     match answer {
         Ok(a) => {
             if !a.message.is_empty() {
@@ -461,7 +469,7 @@ fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
             if !req.invocation_id.is_empty()
                 && let Err(err) = spool_append(state, &entry)
             {
-                eprintln!("rynasctl: spooling the gate outcome: {err}");
+                warn(&format!("rynasctl: spooling the gate outcome: {err}"));
             }
             if skipped.is_some() {
                 say(&format!("rynas: no answer from the scheduling gate ({e}); the task is paused: start skipped"));
@@ -472,6 +480,18 @@ fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
             }
         }
     }
+}
+
+/// One line on standard output; a failed write (journal gone) is ignored, never a panic.
+fn say(m: &str) {
+    let mut o = std::io::stdout().lock();
+    let _ = writeln!(o, "{m}");
+    let _ = o.flush();
+}
+
+/// One line on standard error, ignoring a failed write.
+fn warn(m: &str) {
+    let _ = writeln!(std::io::stderr().lock(), "{m}");
 }
 
 fn job_run(socket: &PathBuf, id: &str) -> ExitCode {
@@ -924,8 +944,55 @@ fn net(socket: &PathBuf, state_dir: &std::path::Path, flush: bool, action: NetAc
     }
 }
 
+/// The subcommand named on the command line (the first word that is not an option or the
+/// value of `--socket`).
+fn subcommand(args: &[String]) -> Option<&str> {
+    let mut it = args.iter().skip(1);
+    while let Some(a) = it.next() {
+        if a == "--socket" {
+            it.next();
+        } else if !a.starts_with('-') {
+            return Some(a);
+        }
+    }
+    None
+}
+
+/// The hooks of every task unit: `gate` (`ExecCondition=`: exit 1-254 skips the start, a
+/// signal or 255 fails it) and `task-finished` (`ExecStopPost=`). Whatever goes wrong inside
+/// them, the start goes ahead and the unit does not fail.
+fn is_unit_hook(cmd: Option<&str>) -> bool {
+    matches!(cmd, Some("gate" | "task-finished"))
+}
+
 fn main() -> ExitCode {
-    let args = Args::parse();
+    let argv: Vec<String> = std::env::args().collect();
+    let hook = is_unit_hook(subcommand(&argv));
+    if hook {
+        // panic = "abort": the hook runs before the abort, so exit 0 here (a signal exit
+        // would fail the unit, which then never runs)
+        std::panic::set_hook(Box::new(|info| {
+            warn(&format!("rynasctl: internal error ({info}); the start goes ahead"));
+            std::process::exit(0);
+        }));
+    }
+    let args = match Args::try_parse_from(&argv) {
+        Ok(a) => a,
+        // arguments of a newer or hand-edited unit: never a silent skip (exit 2)
+        Err(e)
+            if hook
+                && !matches!(
+                    e.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+        {
+            let first = e.to_string();
+            let first = first.lines().next().unwrap_or_default().to_string();
+            warn(&format!("rynasctl: {first}; the start goes ahead"));
+            return ExitCode::SUCCESS;
+        }
+        Err(e) => e.exit(),
+    };
     match args.command {
         Command::TaskFinished { id, state_dir } => task_finished(&args.socket, &state_dir, &id),
         Command::Gate { id, state_dir } => gate(&args.socket, &state_dir, &id),
@@ -997,5 +1064,19 @@ mod tests {
         assert_eq!(c.body, b"line two\n");
         assert_eq!(c.header("x-rynas-next-offset"), Some("9"));
         assert!(parse_answer(b"HTTP/1.1 200").is_err());
+    }
+
+    #[test]
+    fn unit_hooks_are_recognized_before_parsing() {
+        let v = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(subcommand(&v("rynasctl gate t1")), Some("gate"));
+        assert_eq!(subcommand(&v("rynasctl --socket /run/x.sock task-finished t1")), Some("task-finished"));
+        assert_eq!(subcommand(&v("rynasctl --socket=/run/x gate t1 --future-flag")), Some("gate"));
+        assert!(is_unit_hook(subcommand(&v("rynasctl gate t1 --unknown"))));
+        assert!(!is_unit_hook(subcommand(&v("rynasctl job run t1"))));
+        assert_eq!(subcommand(&v("rynasctl --socket")), None);
+        // what main turns into exit 0 for a hook
+        assert!(Args::try_parse_from(v("rynasctl gate t1 --unknown")).is_err());
+        assert!(Args::try_parse_from(v("rynasctl gate t1")).is_ok());
     }
 }

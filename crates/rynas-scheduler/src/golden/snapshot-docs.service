@@ -1,4 +1,4 @@
-# Managed by rynas — do not edit (sha256:d17e0d2a8fc0e2d6e6949b7b4b46f690731ec1ddcc225b4b59a937a2cd727556)
+# Managed by rynas — do not edit (sha256:30cfbd709c11fda17be2da92c5599296fcc89322a388318005109b2ed0c6e0ec)
 [Unit]
 Description=rynas task snapshot-docs: snapshot-docs
 Documentation=https://github.com/rylos/rynas
@@ -12,3 +12,21 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rynas-task-snapshot-docs
 ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished snapshot-docs
+NoNewPrivileges=yes
+ProtectSystem=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN CAP_FSETID

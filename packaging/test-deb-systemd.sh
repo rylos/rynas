@@ -102,6 +102,7 @@ PAST=$(date -d '-3 hours' '+*-*-* %H:%M:00')
 SOON=$(date -d '+40 seconds' '+%Y-%m-%d %H:%M:%S')
 mk "$(cmd tick 'echo tick' '*:*:0/10')"
 mk "$(cmd slow 'sleep 13' '*:*:0/10')"
+api GET /scheduler/tasks/slow; [ "$(echo "$BODY" | jq -r .task.policy.overlap)" = skip ] || fail "slow: overlap not stored: $BODY"
 mk "$(cmd slowq 'sleep 13' '*:*:0/10' '{"overlap":"queue"}')"
 mk "$(cmd miss 'echo nightly' "$PAST" '{"missed":{"kind":"run_once","within_h":1}}')"
 mk "$(cmd catchup 'echo nightly' "$PAST" '{"missed":{"kind":"run_once","within_h":6}}')"
@@ -121,8 +122,12 @@ wait_rows flaky '.trigger == "retry" and .attempt == 2' 1 80
 sleep 7
 [ "$(rows flaky '.trigger == "retry"')" = 2 ] || fail "flaky: not exactly two retries"
 api GET /scheduler/tasks/flaky; [ "$(echo "$BODY" | jq -c .status.retry)" = null ] || fail "flaky: retry still armed: $BODY"
+echo "--- retries exhausted: the failure is notified once (none while a retry was armed)"
+api GET '/notifications?key=scheduler:task:flaky&limit=50'; expect 200 notifications
+[ "$(echo "$BODY" | jq 'length')" = 1 ] || fail "flaky: not one failure notification: $BODY"
+[ "$(echo "$BODY" | jq '.[0].count')" = 1 ] || fail "flaky: the failure was notified more than once: $BODY"
 
-echo "--- overlap: skip (default) and queue"
+echo "--- overlap: skip (stored on tasks created now) and queue"
 wait_rows slow '.skipped == "overlap"' 1
 wait_rows slowq '.trigger == "queued" and .ok' 1
 for t in slow slowq; do api POST "/scheduler/tasks/$t/pause" '{"reason":"quiet"}'; expect 200 "pause $t"; done
@@ -182,6 +187,19 @@ T=$(date +%s)
 api POST /scheduler/tasks/scrubnone/run; expect 204 "run scrub"
 wait_rows scrubnone '.trigger == "manual" and (.ok | not)' 1
 journal_since scrubnone "$T" | grep -q '^\$ btrfs scrub start -B -d /srv/none' || { journal_since scrubnone "$T"; fail "scrub not run by the unit"; }
+for prop in NoNewPrivileges=yes ProtectSystem=yes ProtectKernelModules=yes; do
+    [ "$(systemctl show -p "${prop%%=*}" rynas-task-scrubnone.service)" = "$prop" ] || fail "scrub unit sandbox: no $prop"
+done
+systemctl show -P CapabilityBoundingSet rynas-task-scrubnone.service | grep -q cap_sys_admin || fail "scrub unit: no CAP_SYS_ADMIN"
+! systemctl show -P CapabilityBoundingSet rynas-task-scrubnone.service | grep -q cap_setuid || fail "scrub unit: full capabilities"
+panel=0
+for _ in $(seq 20); do
+    api GET '/tasks?limit=50'
+    panel=$(echo "$BODY" | jq '[.[] | select(.kind == "btrfs.scrub" and .user == "scheduler" and .status == "error")] | length')
+    [ "$panel" -ge 1 ] && break
+    sleep 0.5
+done
+[ "$panel" -ge 1 ] || fail "scrub not in the task panel (ended with its run): $BODY"
 echo "scheduling gate: OK"
 systemd-analyze security --no-pager rynas-web.service rynasd.service | tail -2
 echo "=== upgrade (reinstall)"
