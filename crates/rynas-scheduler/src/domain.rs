@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rynas_api_types::scheduler::{
-    MissedPolicy, RunPolicy, ScheduledTask, SchedulerConfig, TaskAction, TaskTrigger,
+    LockedField, MissedPolicy, RunPolicy, ScheduledTask, SchedulerConfig, TaskAction,
+    TaskTrigger,
 };
 use rynas_config::files::HEADER_PREFIX;
 use rynas_config::{Applier, ApplyCtx, Candidate, ManagedFile};
@@ -150,6 +151,78 @@ pub fn check_policy(p: &RunPolicy) -> Result<(), String> {
     }
     if !(1..=100).contains(&p.notify.after_failures) {
         return Err("notify after 1 to 100 failed runs in a row".into());
+    }
+    Ok(())
+}
+
+/// A calendar trigger's `persistent` and `randomized_delay_s` against the run policy's
+/// `missed` and `jitter_s`. The policy is the reference and the trigger fields mirror it
+/// ([`ScheduledTask::migrate`]); a write may give either, but when it gives both they must
+/// agree: a client that changes the trigger and sends back the old policy is refused rather
+/// than silently overruled.
+pub fn trigger_agrees(t: &ScheduledTask) -> Result<(), String> {
+    let TaskTrigger::Calendar {
+        persistent,
+        randomized_delay_s,
+        ..
+    } = &t.trigger
+    else {
+        return Ok(());
+    };
+    if let Some(m) = t.policy.missed
+        && m.catches_up() != *persistent
+    {
+        return Err(format!(
+            "trigger.persistent ({persistent}) disagrees with policy.missed ({}): change both, or send only the policy",
+            if m.catches_up() { "run_once" } else { "skip" }
+        ));
+    }
+    if let Some(j) = t.policy.jitter_s
+        && j != *randomized_delay_s
+    {
+        return Err(format!(
+            "trigger.randomized_delay_s ({randomized_delay_s}) disagrees with policy.jitter_s ({j}): change both, or send only the policy"
+        ));
+    }
+    Ok(())
+}
+
+/// What a change through the Task Scheduler may not touch in a task its owner decides
+/// ([`rynas_api_types::scheduler::TaskOwner::locked`]): the action, the schedule (its
+/// expression or boot delay; catch-up and random delay are options) and the catch-up of
+/// missed runs. Both tasks normalized; `cur` is the stored one.
+pub fn check_locked(cur: &ScheduledTask, new: &ScheduledTask) -> Result<(), String> {
+    let mut cur = cur.clone();
+    cur.migrate();
+    let locked = cur.owner.locked();
+    if locked.contains(&LockedField::Action) && cur.action != new.action {
+        return Err("the action of this task is decided by the feature that owns it".into());
+    }
+    let schedule = |t: &TaskTrigger| match t {
+        TaskTrigger::Calendar {
+            on_calendar, cron, ..
+        } => TaskTrigger::Calendar {
+            on_calendar: on_calendar.clone(),
+            cron: cron.clone(),
+            persistent: false,
+            randomized_delay_s: 0,
+        },
+        other => other.clone(),
+    };
+    if locked.contains(&LockedField::Schedule) && schedule(&cur.trigger) != schedule(&new.trigger)
+    {
+        return Err(
+            "the schedule of this task is decided by the feature that owns it: change it there"
+                .into(),
+        );
+    }
+    if locked.contains(&LockedField::Missed)
+        && cur.effective_policy().missed != new.effective_policy().missed
+    {
+        return Err(
+            "the catch-up of missed runs of this task is decided by the feature that owns it"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -309,8 +382,21 @@ pub fn normalize_task(mut t: ScheduledTask) -> Result<ScheduledTask, String> {
         }
         other => other,
     };
+    trigger_agrees(&t).map_err(|e| format!("task {id}: {e}"))?;
+    // the owner comes from the action, never from the client
     t.migrate();
     check_policy(&t.policy).map_err(|e| format!("task {id}: {e}"))?;
+    if t.owner.locked().contains(&LockedField::Missed)
+        && t.effective_policy().missed.catches_up()
+    {
+        return Err(format!(
+            "task {id}: a missed {} is never caught up (it would run right after boot)",
+            match t.action {
+                TaskAction::PowerShutdown { .. } => "shutdown",
+                _ => "run of this task",
+            }
+        ));
+    }
     match &t.trigger {
         TaskTrigger::Calendar {
             randomized_delay_s, ..

@@ -581,6 +581,12 @@ fn task_row(
 
 fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyView {
     let internal_fixed = !is_new && init.action.is_internal();
+    // the schedule of a job's, a replica's or a power rule's task is theirs (the server
+    // refuses a change here): shown, not edited
+    let schedule_owned = !is_new
+        && rynas_api_types::scheduler::TaskOwner::of_action(&init.action)
+            .locked()
+            .contains(&rynas_api_types::scheduler::LockedField::Schedule);
     let action_summary = action_text(&init.action);
     let trig = ScheduleEditor::new(&init.trigger);
     let act = RwSignal::new(ActionDraft::from_action(&init.action));
@@ -708,14 +714,16 @@ fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyVie
                 }
             }
         }
-        match trig.trigger() {
-            Ok(tr) => {
-                task.trigger = tr;
-                trig.apply_policy(&mut task.policy);
-            }
-            Err(k) => {
-                error.set(Some(t(k).to_string()));
-                return;
+        if !schedule_owned {
+            match trig.trigger() {
+                Ok(tr) => {
+                    task.trigger = tr;
+                    trig.apply_policy(&mut task.policy);
+                }
+                Err(k) => {
+                    error.set(Some(t(k).to_string()));
+                    return;
+                }
             }
         }
         task.name = task.name.trim().to_string();
@@ -754,7 +762,11 @@ fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyVie
             <h3 class="form-section">{tr("sch.sec.action")}</h3>
             {action_fields}
             <h3 class="form-section">{tr("sch.sec.schedule")}</h3>
-            {trig.view(true)}
+            {if schedule_owned {
+                view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("sch.schedule_owned")}</p> }.into_any()
+            } else {
+                trig.view(true)
+            }}
             <h3 class="form-section">{tr("sch.sec.notify")}</h3>
             {select_field("sch.f.notify", None, NOTIFY, notify, set_notify)}
             {switch("sch.f.notify_output", Some("sch.f.notify_output_help"), notify_output, set_notify_output)}

@@ -121,15 +121,34 @@ fn run_policy_and_new_triggers() {
     );
     let timer = crate::units::render_timer(&n).unwrap();
     assert!(timer.contains("OnCalendar=Mon..Fri *-*-* 02:30:00\nRandomizedDelaySec=300\n"), "{timer}");
-    // the policy is the reference when it is there, and the trigger fields follow it
+    // trigger and policy given together must agree: a client that changed the trigger and
+    // sent back the old policy is refused, never silently overruled
     let mut t = base.clone();
     t.policy.missed = Some(MissedPolicy::RunOnce { within_h: Some(12) });
     if let TaskTrigger::Calendar { persistent, .. } = &mut t.trigger {
         *persistent = false;
     }
+    let err = normalize_task(t.clone()).unwrap_err();
+    assert!(err.contains("trigger.persistent (false) disagrees with policy.missed"), "{err}");
+    let mut j = base.clone();
+    j.policy.jitter_s = Some(60);
+    let err = normalize_task(j).unwrap_err();
+    assert!(err.contains("randomized_delay_s (0) disagrees with policy.jitter_s (60)"), "{err}");
+    // agreeing: the policy keeps its deadline
+    if let TaskTrigger::Calendar { persistent, .. } = &mut t.trigger {
+        *persistent = true;
+    }
     let n = normalize_task(t).unwrap();
     assert!(matches!(n.trigger, TaskTrigger::Calendar { persistent: true, .. }));
+    assert_eq!(n.policy.missed, Some(MissedPolicy::RunOnce { within_h: Some(12) }));
     assert!(crate::units::render_timer(&n).unwrap().contains("Persistent=true\n"));
+    // only the trigger (an older client): the policy follows it
+    let mut o = base.clone();
+    if let TaskTrigger::Calendar { persistent, randomized_delay_s, .. } = &mut o.trigger {
+        (*persistent, *randomized_delay_s) = (false, 30);
+    }
+    let n = normalize_task(o).unwrap();
+    assert_eq!((n.policy.missed, n.policy.jitter_s), (Some(MissedPolicy::Skip), Some(30)));
     // not run by the Task Scheduler yet
     for trig in [
         TaskTrigger::Interval { hours: 24, after_boot_min: 10 },
@@ -176,4 +195,49 @@ fn the_model_reads_and_writes_older_documents() {
     ))
     .unwrap();
     assert_eq!(r.on_calendar().as_deref(), Some("*-*-* 00/6:15:00"));
+}
+
+#[test]
+fn owner_and_locked_fields_are_the_servers() {
+    // the owner always comes from the action, whatever the client sent
+    let mut user = task("t", TaskAction::Command { command: "true".into(), user: "root".into() }, calendar("daily"));
+    user.owner = TaskOwner::Feature { feature: OwnerFeature::Power, key: "x".into() };
+    assert_eq!(normalize_task(user).unwrap().owner, TaskOwner::User);
+    let mut snap = task("s", TaskAction::Snapshot { job: "docs".into() }, calendar("hourly"));
+    snap.owner = TaskOwner::User;
+    let snap = normalize_task(snap).unwrap();
+    assert_eq!(snap.owner, TaskOwner::Feature { feature: OwnerFeature::Snapshots, key: "docs".into() });
+    // a missed shutdown never runs right after boot
+    let power = task("p", TaskAction::PowerShutdown { rule: "night".into() }, calendar("*-*-* 23:30:00"));
+    let err = normalize_task(power.clone()).unwrap_err();
+    assert!(err.contains("a missed shutdown is never caught up"), "{err}");
+    let mut off = power.clone();
+    if let TaskTrigger::Calendar { persistent, .. } = &mut off.trigger {
+        *persistent = false;
+    }
+    let off = normalize_task(off).unwrap();
+    assert_eq!(off.policy.missed, Some(MissedPolicy::Skip));
+    // the Task Scheduler cannot change what the owner decides
+    let mut later = off.clone();
+    if let TaskTrigger::Calendar { on_calendar, .. } = &mut later.trigger {
+        *on_calendar = "*-*-* 22:00:00".into();
+    }
+    let err = crate::domain::check_locked(&off, &normalize_task(later).unwrap()).unwrap_err();
+    assert!(err.contains("schedule"), "{err}");
+    let mut opts = off.clone();
+    opts.nice = Some(5);
+    assert!(crate::domain::check_locked(&off, &opts).is_ok(), "options stay free");
+    // a snapshot task: schedule locked, catch-up free
+    let mut catch = snap.clone();
+    if let TaskTrigger::Calendar { persistent, .. } = &mut catch.trigger {
+        *persistent = false;
+    }
+    catch.policy.missed = Some(MissedPolicy::Skip);
+    let catch = normalize_task(catch).unwrap();
+    assert!(crate::domain::check_locked(&snap, &catch).is_ok());
+    // a user task: nothing locked
+    let u = normalize_task(task("u", TaskAction::Command { command: "true".into(), user: "root".into() }, calendar("daily"))).unwrap();
+    let mut u2 = u.clone();
+    u2.trigger = calendar("weekly");
+    assert!(crate::domain::check_locked(&u, &normalize_task(u2).unwrap()).is_ok());
 }

@@ -28,7 +28,7 @@ use rynas_btrfs::SNAPSHOTS_KEY;
 use rynas_notify::event::{code, field, firing, oneshot, resolved};
 use rynas_notify::{BodyFormat, NewEvent, NotifyCategory, NotifySeverity};
 use rynas_scheduler::calendar::{Converted, cron_to_calendar, plausible_calendar};
-use rynas_scheduler::domain::{normalize_task, valid_task_id};
+use rynas_scheduler::domain::{check_locked, normalize_task, valid_task_id};
 use rynas_scheduler::history::{NewRun, OUTPUT_MAX};
 use rynas_scheduler::units::{UNIT_PREFIX, service_name, timer_name};
 use rynas_scheduler::{SCHEDULER_KEY, cron};
@@ -357,6 +357,8 @@ async fn put(
             if !cur.action.is_internal() && t.action.is_internal() {
                 return Err(invalid("a user task cannot become an internal one"));
             }
+            // what the owner decides (schedule, catch-up) changes only with the owner
+            check_locked(cur, &t).map_err(invalid)?;
             *cur = t;
             Ok(())
         })

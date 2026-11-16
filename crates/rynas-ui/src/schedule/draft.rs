@@ -96,6 +96,10 @@ pub struct Draft {
     pub day: u8,
     pub advanced: String,
     pub cron: String,
+    /// The stored expression a preset was opened from, with the fields it opened as: saved
+    /// as it was (`hourly` stays `hourly`) until the fields change, so opening and saving
+    /// never rewrites the timer file nor restarts it.
+    pub stored: Option<(String, Box<Draft>)>,
 }
 
 impl Default for Draft {
@@ -117,6 +121,7 @@ impl Default for Draft {
             day: 1,
             advanced: String::new(),
             cron: String::new(),
+            stored: None,
         }
     }
 }
@@ -183,7 +188,10 @@ impl Draft {
             return d;
         }
         match classify(on_calendar) {
-            Parsed::Preset(r) => d.set_recurrence(&r),
+            Parsed::Preset(r) => {
+                d.set_recurrence(&r);
+                d.stored = Some((on_calendar.trim().to_string(), Box::new(d.clone())));
+            }
             Parsed::Advanced(_) | Parsed::Invalid(_) => {
                 d.preset = Preset::Advanced;
                 d.advanced = on_calendar.trim().to_string();
@@ -312,10 +320,24 @@ impl Draft {
         }))
     }
 
+    /// The stored expression, while the fields are still those it opened as.
+    fn untouched(&self) -> Option<&str> {
+        let (text, opened) = self.stored.as_ref()?;
+        let mut now = self.clone();
+        now.stored = None;
+        // a look at the advanced field and back is not an edit of the preset
+        now.advanced.clone_from(&opened.advanced);
+        now.cron.clone_from(&opened.cron);
+        (now == **opened).then_some(text.as_str())
+    }
+
     /// The expression to store and its syntax, or what is wrong. The advanced field is
     /// checked with systemd's grammar here; the NAS checks it again (time zone names, and
     /// `systemd-analyze` when saving).
     pub fn expression(&self) -> Result<(String, CalendarSyntax), DraftError> {
+        if let Some(text) = self.untouched() {
+            return Ok((text.to_string(), CalendarSyntax::Calendar));
+        }
         match self.preset {
             Preset::Advanced => {
                 let e = self.advanced.trim();
@@ -415,9 +437,32 @@ mod tests {
             assert_eq!(d.preset, preset, "{stored}");
             assert_eq!(expr(&d), stored, "{stored} saves unchanged");
         }
-        // shorthand forms are stored as systemd normalizes them
-        let d = Draft::from_calendar("hourly", None);
-        assert_eq!((d.preset, expr(&d)), (Preset::Hours, "*-*-* *:00:00".to_string()));
+        // other spellings of a preset open as the preset and save as stored until edited (no
+        // timer file change, no restart on open and save)
+        for (stored, preset) in [
+            ("hourly", Preset::Hours),
+            ("Mon..Fri 02:30", Preset::Weekly),
+            ("*-*-* 08..19/3:00:00", Preset::Hours),
+            ("daily", Preset::Daily),
+        ] {
+            let d = Draft::from_calendar(stored, None);
+            assert_eq!((d.preset, expr(&d).as_str()), (preset, stored), "{stored}");
+            // a look at the advanced field and back is not an edit
+            let mut look = d.clone();
+            look.switch_to(Preset::Advanced);
+            assert_eq!(look.advanced, stored);
+            look.switch_to(preset);
+            assert_eq!(expr(&look), stored);
+        }
+        // an edit saves the preset's normalized expression
+        let mut d = Draft::from_calendar("hourly", None);
+        d.minute = 15;
+        assert_eq!(expr(&d), "*-*-* *:15:00");
+        d.minute = 0;
+        assert_eq!(expr(&d), "hourly", "back to what it opened as");
+        let mut d = Draft::from_calendar("Mon..Fri 02:30", None);
+        d.times = vec!["02:45".into()];
+        assert_eq!(expr(&d), "Mon..Fri *-*-* 02:45:00");
         // anything else stays as typed in the advanced field
         let d = Draft::from_calendar("quarterly", None);
         assert_eq!((d.preset, d.advanced.as_str()), (Preset::Advanced, "quarterly"));

@@ -1025,20 +1025,41 @@ async fn maintain(svc: &Arc<PcAgent>, group: &str, ctx: &TaskCtx, scheduled: boo
 
 // ------------------------------------------------------------------ the daily round
 
-/// How long after its hour a missed maintenance still runs (the NAS was off or busy then).
-const MAINT_CATCH_UP: jiff::SignedDuration = jiff::SignedDuration::from_hours(12);
+/// How long after its hour a missed maintenance still runs (the NAS was off or busy then):
+/// short enough that a maintenance missed at night does not start in the afternoon.
+const MAINT_CATCH_UP: jiff::SignedDuration = jiff::SignedDuration::from_hours(6);
+/// Past this after its hour, a maintenance is a catch-up: it gives way to PC backups.
+const MAINT_ON_TIME: jiff::SignedDuration = jiff::SignedDuration::from_hours(1);
+/// A PC that asked for work this recently is online (agents poll every few minutes).
+const AGENT_ONLINE_MS: u64 = 15 * 60 * 1000;
 
 /// The maintenance due at `now`: the local day (days since 1970-01-01) of the last
 /// `hour:00` at most [`MAINT_CATCH_UP`] ago, with systemd's DST rules (an hour that does not
-/// exist that day has no maintenance, a repeated one counts once).
-fn maint_due_day(hour: u8, now: jiff::Timestamp, tz: &jiff::tz::TimeZone) -> Option<i64> {
+/// exist that day has no maintenance, a repeated one counts once), and whether it is a
+/// catch-up (more than [`MAINT_ON_TIME`] after its hour).
+fn maint_due(hour: u8, now: jiff::Timestamp, tz: &jiff::tz::TimeZone) -> Option<(i64, bool)> {
     let spec = rynas_schedule::CalendarSpec::parse(&format!("*-*-* {:02}:00:00", hour.min(23))).ok()?;
     let slot = spec.next_after(tz, now.checked_sub(MAINT_CATCH_UP).ok()?)?;
     if slot > now {
         return None;
     }
+    let late = now.duration_since(slot) >= MAINT_ON_TIME;
     let date = slot.to_zoned(tz.clone()).date();
-    date.since(jiff::civil::date(1970, 1, 1)).ok().map(|s| i64::from(s.get_days()))
+    date.since(jiff::civil::date(1970, 1, 1)).ok().map(|s| (i64::from(s.get_days()), late))
+}
+
+/// A PC of `group` is about to back up: online (asked for work in the last
+/// [`AGENT_ONLINE_MS`]) with a command waiting for it, or with a scheduled backup due (no
+/// good version for its interval, plan not paused). A catch-up maintenance waits for it:
+/// it would lock the repository right when the backup starts. A running backup or a recent
+/// upload is refused by [`take`] already.
+fn backup_pending(reg: &Registry, group: &str, now: u64) -> bool {
+    reg.devices.values().any(|d| {
+        let online = d.last_seen_ms.is_some_and(|t| now.saturating_sub(t) < AGENT_ONLINE_MS);
+        let due = !d.settings.plan.paused
+            && d.last_ok_ms.is_none_or(|t| now.saturating_sub(t) >= u64::from(d.settings.plan.interval_hours) * 3_600_000);
+        d.group == group && !d.revoked && online && (d.command.is_some() || due)
+    })
 }
 
 /// Late and critical notifications of one device (state changes only).
@@ -1091,7 +1112,8 @@ fn alerts(svc: &PcAgent, name: &str, d: &Dev) {
 
 /// Every five minutes: notifications, and each group's maintenance once a day from its hour
 /// on (retried while a PC is busy, and run late when the NAS was off or busy at that hour,
-/// up to 12 hours after it; the reason stays on the group when it cannot run).
+/// up to 6 hours after it, as a catch-up that gives way to any PC of the group about to back
+/// up; the reason stays on the group when it cannot run).
 pub fn spawn_watch(svc: Arc<PcAgent>) {
     // the registry's touched counters, written now and then off the async threads
     let s2 = svc.clone();
@@ -1113,12 +1135,19 @@ pub fn spawn_watch(svc: Arc<PcAgent>) {
             for (n, d) in &reg.devices {
                 alerts(&svc, n, d);
             }
-            if let Some(day) = maint_due_day(reg.settings.maintenance_hour, jiff::Timestamp::now(), &rynas_power::system_tz()) {
+            if let Some((day, late)) = maint_due(reg.settings.maintenance_hour, jiff::Timestamp::now(), &rynas_power::system_tz()) {
                 for (n, g) in &reg.groups {
                     if g.maintained_day == Some(day) || !reg.devices.values().any(|d| d.group == *n) {
                         continue;
                     }
-                    match start(&svc, n, "rynas", true) {
+                    // a catch-up never takes the repository from a PC about to back up:
+                    // tried again in five minutes, until the catch-up window ends
+                    let started = if late && backup_pending(&reg, n, now_ms()) {
+                        Err(Error::new(StatusCode::CONFLICT, error_codes::BUSY, "a PC of the group is about to back up (late maintenance gives way)".into()))
+                    } else {
+                        start(&svc, n, "rynas", true)
+                    };
+                    match started {
                         Ok(_) => {
                             let _ = svc.edit(|r| {
                                 if let Some(x) = r.groups.get_mut(n) {
@@ -1365,21 +1394,57 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_catches_up_within_12_hours() {
+    fn maintenance_catches_up_within_6_hours() {
         let Ok(z) = jiff::tz::TimeZone::get("Europe/Rome") else { return };
         let at = |s: &str| s.parse::<jiff::civil::DateTime>().unwrap().to_zoned(z.clone()).unwrap().timestamp();
         let day = |s: &str| s.parse::<jiff::civil::Date>().unwrap().since(jiff::civil::date(1970, 1, 1)).unwrap().get_days() as i64;
-        // in its hour, and later the same morning (the NAS was off at 03:00)
-        assert_eq!(maint_due_day(3, at("2026-11-16T03:02"), &z), Some(day("2026-11-16")));
-        assert_eq!(maint_due_day(3, at("2026-11-16T14:59"), &z), Some(day("2026-11-16")));
-        // more than 12 hours later: skipped, and before the hour: yesterday's is too old
-        assert_eq!(maint_due_day(3, at("2026-11-16T15:01"), &z), None);
-        assert_eq!(maint_due_day(3, at("2026-11-16T02:59"), &z), None);
+        // in its hour (on time), and later the same morning as a catch-up (the NAS was off)
+        assert_eq!(maint_due(3, at("2026-11-16T03:02"), &z), Some((day("2026-11-16"), false)));
+        assert_eq!(maint_due(3, at("2026-11-16T03:59"), &z), Some((day("2026-11-16"), false)));
+        assert_eq!(maint_due(3, at("2026-11-16T04:00"), &z), Some((day("2026-11-16"), true)));
+        assert_eq!(maint_due(3, at("2026-11-16T08:59"), &z), Some((day("2026-11-16"), true)));
+        // more than 6 hours later (an 08:00 boot after a 01:00 maintenance hour): skipped
+        assert_eq!(maint_due(3, at("2026-11-16T09:01"), &z), None);
+        assert_eq!(maint_due(1, at("2026-11-16T08:00"), &z), None);
+        assert_eq!(maint_due(3, at("2026-11-16T02:59"), &z), None);
         // across midnight
-        assert_eq!(maint_due_day(23, at("2026-11-17T01:00"), &z), Some(day("2026-11-16")));
+        assert_eq!(maint_due(23, at("2026-11-17T01:00"), &z), Some((day("2026-11-16"), true)));
         // the spring-forward day has no 02:00
-        assert_eq!(maint_due_day(2, at("2026-03-29T05:00"), &z), None);
-        assert_eq!(maint_due_day(2, at("2026-03-30T05:00"), &z), Some(day("2026-03-30")));
+        assert_eq!(maint_due(2, at("2026-03-29T05:00"), &z), None);
+        assert_eq!(maint_due(2, at("2026-03-30T05:00"), &z), Some((day("2026-03-30"), true)));
+    }
+
+    #[test]
+    fn late_maintenance_gives_way_to_pc_backups() {
+        let now = 1_800_000_000_000u64;
+        let hour = 3_600_000u64;
+        let dev = |group: &str, seen: Option<u64>, ok: Option<u64>| {
+            let mut d: Dev = serde_json::from_value(serde_json::json!({
+                "created_ms": 0, "group": group,
+                "settings": serde_json::to_value(PcDeviceSettings::default()).unwrap()
+            }))
+            .unwrap();
+            d.last_seen_ms = seen;
+            d.last_ok_ms = ok;
+            d
+        };
+        let mut reg = Registry::default();
+        // online, last good version 2 h ago, daily plan: not due
+        reg.devices.insert("a".into(), dev("g", Some(now - 60_000), Some(now - 2 * hour)));
+        assert!(!backup_pending(&reg, "g", now));
+        // due (25 h) but offline: nothing will start
+        reg.devices.insert("b".into(), dev("g", Some(now - 2 * hour), Some(now - 25 * hour)));
+        assert!(!backup_pending(&reg, "g", now));
+        // online and due: about to back up
+        reg.devices.get_mut("b").unwrap().last_seen_ms = Some(now - 60_000);
+        assert!(backup_pending(&reg, "g", now));
+        assert!(!backup_pending(&reg, "other", now), "another group's PC");
+        // paused plan: no scheduled backup
+        reg.devices.get_mut("b").unwrap().settings.plan.paused = true;
+        assert!(!backup_pending(&reg, "g", now));
+        // a command waiting ("Back up now") for an online PC
+        reg.devices.get_mut("a").unwrap().command = Some(AgentCommand::BackupNow { id: 1 });
+        assert!(backup_pending(&reg, "g", now));
     }
 
     #[test]

@@ -66,17 +66,18 @@ impl ScheduledTask {
     /// Brings a task written by an older rynas to the current model; idempotent, and a task
     /// already in the current model is left as it is:
     ///
-    /// - `owner` from the action when a feature creates that kind of task;
+    /// - `owner` always from the action ([`TaskOwner::of_action`]): never what a client sent,
+    ///   so a user task cannot claim a feature's locks and a feature's task cannot shed them;
     /// - `policy.missed` and `policy.jitter_s` from a calendar trigger's `persistent` and
     ///   `randomized_delay_s` when absent; then the trigger's two fields mirror the policy
     ///   (the policy is the reference, the trigger fields stay readable for older clients).
+    ///   A write that gives both must make them agree (`rynas_scheduler::normalize_task`
+    ///   refuses a disagreement instead of letting the policy win silently).
     ///
     /// The units of a migrated task are the units of the task before (golden tests in
     /// `rynas-scheduler`).
     pub fn migrate(&mut self) {
-        if let feature @ TaskOwner::Feature { .. } = TaskOwner::of_action(&self.action) {
-            self.owner = feature;
-        }
+        self.owner = TaskOwner::of_action(&self.action);
         if let TaskTrigger::Calendar {
             persistent,
             randomized_delay_s,
