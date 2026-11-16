@@ -85,7 +85,8 @@ pub fn started_by_timer(names_timer: bool, trigger_timer_ms: u64, request_ms: Op
     }
     match (trigger_timer_ms, request_ms) {
         (0, r) => r.is_none(),
-        (t, Some(r)) if t + 1000 < r => false,
+        // the request came after the timer elapsed: the details are an earlier start's
+        (t, Some(r)) if t < r => false,
         (t, _) => now_ms.saturating_sub(t) <= STALE_TRIGGER_MS,
     }
 }
@@ -623,6 +624,8 @@ mod tests {
         // a retry or run now after an earlier timer start: the details are older than the
         // request
         assert!(!started_by_timer(true, now - 9_000, Some(now - 2_000), now));
+        // run now 290 ms after a timer start (found on systemd 257)
+        assert!(!started_by_timer(true, now - 300, Some(now - 10), now));
         // details left from long ago, nothing asked (systemctl start by hand)
         assert!(!started_by_timer(true, now - STALE_TRIGGER_MS - 1, None, now));
         // an older systemd without the elapse time: a request wins
