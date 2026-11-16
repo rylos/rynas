@@ -368,7 +368,11 @@ pub fn Bell() -> impl IntoView {
                         <Show when=move || { notes.unread.get() > 0 }>
                             <span class="chip accent tnum">{move || notes.unread.get()}</span>
                         </Show>
-                        <button class="link-btn" disabled=move || notes.unread.get() == 0 on:click=move |_| notes.mark_all_read()>
+                        <button class="link-btn" disabled=move || notes.unread.get() == 0 on:click=move |_| {
+                            notes.mark_all_read();
+                            // nothing left to read: the panel closes, as after opening a notification
+                            open.set(false);
+                        }>
                             <Icon icon=icons::CHECK_CHECK size=14 />{tr("notif.mark_read")}
                         </button>
                     </div>
