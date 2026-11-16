@@ -52,6 +52,14 @@ pub const NAV: [NavItem; 13] = [
     NavItem { id: "system", path: "/system", key: "nav.system", icon: icons::SETTINGS },
 ];
 
+/// The browser tab's title: `rynas - <host name>`, only `rynas` while no host name is known.
+pub fn tab_title(host: Option<&str>) -> String {
+    match host.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) => format!("rynas - {h}"),
+        None => "rynas".to_string(),
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let ui = Ui::new();
@@ -83,6 +91,20 @@ pub fn App() -> impl IntoView {
             ui.usb_open.set(false);
         }
         ready
+    });
+
+    // the browser tab names the NAS once signed in (the login screen knows no host name)
+    Effect::new(move || {
+        let host = match auth.phase.get() {
+            Phase::Ready | Phase::Demo => live.system.with(|s| s.as_ref().map(|s| s.hostname.clone())),
+            _ => None,
+        };
+        let title = tab_title(host.as_deref());
+        if let Some(doc) = web_sys::window().and_then(|w| w.document())
+            && doc.title() != title
+        {
+            doc.set_title(&title);
+        }
     });
 
     // global shortcuts
@@ -534,5 +556,17 @@ fn BottomBar() -> impl IntoView {
                 <span class="bb-label">{tr("nav.menu")}</span>
             </button>
         </nav>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tab_title;
+
+    #[test]
+    fn tab_title_names_the_nas_when_known() {
+        assert_eq!(tab_title(Some("synodeb")), "rynas - synodeb");
+        assert_eq!(tab_title(None), "rynas");
+        assert_eq!(tab_title(Some("  ")), "rynas");
     }
 }

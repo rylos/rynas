@@ -260,6 +260,7 @@ fn renamed_note(r: Renamed) -> AnyView {
 fn hostname_dialog(current: String, net: Net, renamed: RwSignal<Option<Renamed>>, close: Callback<()>) -> AnyView {
     use rynas_api_types::{HostnameConfig, HostnameState, validate};
 
+    let live = crate::live::use_live();
     let value = RwSignal::new(current.clone());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -315,6 +316,8 @@ fn hostname_dialog(current: String, net: Net, renamed: RwSignal<Option<Renamed>>
                         renamed.set(Some(Renamed { name: h, url, moves, lost: r == Applied::Lost }));
                         if r == Applied::Yes {
                             net.reload();
+                            // the app bar's host chip and the tab title
+                            live.refresh_system();
                         }
                         close.run(());
                     }
