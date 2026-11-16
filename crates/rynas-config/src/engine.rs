@@ -153,13 +153,42 @@ struct Step {
     follow: bool,
 }
 
-/// The host name an apply of `steps` puts in force, when it changes it.
-fn hostname_change(steps: &[Step]) -> Option<String> {
+/// The host name an apply of `steps` puts in force, when it changes the running one
+/// (`running`): the first apply of the name the host already has (never applied by rynas
+/// before, `old` none) changes nothing.
+fn hostname_change(steps: &[Step], running: Option<&str>) -> Option<String> {
     let s = steps
         .iter()
         .find(|s| !s.follow && s.key == crate::domain::HOSTNAME_KEY && s.old != s.new)?;
     let h = s.new.as_ref()?.get("hostname")?.as_str()?;
-    (!h.is_empty()).then(|| h.to_string())
+    (!h.is_empty() && Some(h) != running).then(|| h.to_string())
+}
+
+/// Restarts the units the domains asked for at the end ([`ApplyCtx::restart_at_end`]), those
+/// still active; failures are logged.
+fn restart_at_end(ctx: &ApplyCtx) {
+    let units = std::mem::take(&mut *ctx.at_end.lock().unwrap());
+    for u in units {
+        if !ctx.system.unit_active(&u).unwrap_or(false) {
+            continue;
+        }
+        (ctx.log)(&format!("restarting {u}"));
+        if let Err(e) = ctx.restart_unit(&u) {
+            (ctx.log)(&format!("{u}: warning: {e}"));
+        }
+    }
+}
+
+/// The keys `steps` really change: a new value, except a host name equal to the running
+/// one ([`hostname_change`]).
+fn changed_keys(steps: &[Step], running: Option<&str>) -> Vec<String> {
+    let renamed = hostname_change(steps, running).is_some();
+    steps
+        .iter()
+        .filter(|s| !s.follow && s.old != s.new)
+        .filter(|s| s.key != crate::domain::HOSTNAME_KEY || renamed)
+        .map(|s| s.key.clone())
+        .collect()
 }
 
 /// A file written (or found already identical) by an apply.
@@ -301,6 +330,8 @@ impl Config {
             restarted: Mutex::new(Vec::new()),
             rolling_back: false,
             new_hostname: None,
+            hostname_reverted: false,
+            at_end: Mutex::new(Vec::new()),
         }
     }
 
@@ -776,11 +807,8 @@ impl Config {
     ) -> Result<u64> {
         // domains whose files carry a value that changes are written again with their own
         // applied value (the NetBIOS name follows the host name)
-        let changed: Vec<String> = steps
-            .iter()
-            .filter(|s| s.old != s.new)
-            .map(|s| s.key.clone())
-            .collect();
+        let running = self.system.hostname().ok();
+        let changed = changed_keys(&steps, running.as_deref());
         let mut followers = Vec::new();
         for (key, applier) in &self.appliers {
             if steps.iter().any(|s| &s.key == key) || !changed.iter().any(|k| applier.follows(k)) {
@@ -824,6 +852,9 @@ impl Config {
             return Err(e);
         }
         log(&format!("revision {rev} applied"));
+        for s in steps.iter().filter(|s| !s.follow) {
+            s.applier.committed(s.old.as_ref(), s.new.as_ref());
+        }
         if let Err(e) = self.prune() {
             tracing::warn!("revision retention: {e}");
         }
@@ -846,7 +877,10 @@ impl Config {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(Vec<Written>, Vec<Restore>)> {
         let mut ctx = self.ctx_logging(log);
-        ctx.new_hostname = hostname_change(steps);
+        ctx.new_hostname = hostname_change(steps, self.system.hostname().ok().as_deref());
+        // follow steps whose files could not be rendered or checked: left as they are, with a
+        // warning (a follower never fails the apply of the key it follows)
+        let mut skipped = vec![false; steps.len()];
         let fail = |key: &str, what: &str, e: String| {
             let m = format!("{key}: {what}: {e}");
             log(&m);
@@ -873,8 +907,16 @@ impl Config {
                         format!("{}: removed, putting back what it leaves behind", s.key)
                     })
                 }),
-            }
-            .map_err(|e| fail(&s.key, "render", e))?;
+            };
+            let files = match files {
+                Ok(f) => f,
+                Err(e) if s.follow => {
+                    log(&format!("{}: warning: not written again (render: {e})", s.key));
+                    skipped[i] = true;
+                    continue;
+                }
+                Err(e) => return Err(fail(&s.key, "render", e)),
+            };
             for f in files {
                 if !f.path.is_absolute() {
                     return Err(fail(
@@ -949,10 +991,17 @@ impl Config {
                 })
                 .collect();
             if let Err(e) = s.applier.check_files(&cands, &ctx) {
+                if s.follow {
+                    log(&format!("{}: warning: not written again (validation failed: {e})", s.key));
+                    skipped[i] = true;
+                    continue;
+                }
                 cleanup(&planned);
                 return Err(fail(&s.key, "validation failed", e));
             }
         }
+        let (dropped, planned): (Vec<Planned>, Vec<Planned>) = planned.into_iter().partition(|p| skipped[p.step]);
+        cleanup(&dropped);
         if cancelled() {
             cleanup(&planned);
             return Err(ConfigError::Cancelled);
@@ -1002,6 +1051,16 @@ impl Config {
 
         // 5. reload
         for (n, s) in steps.iter().enumerate() {
+            if s.follow {
+                // only what reads the followed value; a failure is a warning
+                if let (false, Some(v)) = (skipped[n], &s.new) {
+                    log(&format!("{}: reloading (follows)", s.key));
+                    if let Err(e) = s.applier.follow_reload(v, &ctx) {
+                        log(&format!("{}: warning: {e}", s.key));
+                    }
+                }
+                continue;
+            }
             log(&format!("{}: reloading", s.key));
             if let Err(e) = s.applier.reconcile(s.old.as_ref(), s.new.as_ref(), &ctx) {
                 let err = fail(&s.key, "reload", e);
@@ -1009,9 +1068,10 @@ impl Config {
                 return Err(err);
             }
         }
+        restart_at_end(&ctx);
 
-        // 6. health check
-        for s in steps {
+        // 6. health check (of the keys this apply changes: a follower's state is its own)
+        for s in steps.iter().filter(|s| !s.follow) {
             if let Err(e) = s.applier.health(s.new.as_ref(), &ctx) {
                 let err = fail(&s.key, "health check", e);
                 self.rollback(steps, &restore, steps.len(), log);
@@ -1024,7 +1084,7 @@ impl Config {
             .into_iter()
             // a file that must not exist, or left behind by a removed key, is not tracked by
             // the drift check
-            .filter(|p| p.file.kind != FileKind::Absent && steps[p.step].new.is_some())
+            .filter(|p| p.file.kind != FileKind::Absent && steps[p.step].new.is_some() && !skipped[p.step])
             .map(|p| Written {
                 path: p.file.path,
                 key: steps[p.step].key.clone(),
@@ -1041,6 +1101,12 @@ impl Config {
         log("rolling back");
         let mut ctx = self.ctx_logging(log);
         ctx.rolling_back = true;
+        // the apply renamed the host (its files, its services) and the previous name goes
+        // back: what announces it restarts at the end, after the name is back
+        let name = |v: &Option<Value>| v.as_ref().and_then(|v| v.get("hostname")?.as_str().map(str::to_string));
+        ctx.hostname_reverted = steps[..reloaded].iter().any(|s| {
+            !s.follow && s.key == crate::domain::HOSTNAME_KEY && name(&s.old).is_some_and(|o| Some(o) != name(&s.new))
+        });
         for r in restore.iter().rev() {
             ctx.replaced.lock().unwrap().push(r.target.clone());
             let res = match &r.backup {
@@ -1067,13 +1133,20 @@ impl Config {
             }
         }
         for s in steps[..reloaded].iter().rev() {
-            if let Err(e) = s.applier.reconcile(s.new.as_ref(), s.old.as_ref(), &ctx) {
+            let r = match (s.follow, &s.old) {
+                (true, Some(v)) => s.applier.follow_reload(v, &ctx),
+                (true, None) => Ok(()),
+                (false, _) => s.applier.reconcile(s.new.as_ref(), s.old.as_ref(), &ctx),
+            };
+            if let Err(e) = r {
                 log(&format!(
                     "{}: reload of the previous configuration failed: {e}",
                     s.key
                 ));
             }
         }
+        // after the host name is back (it rolls back after the domains that follow it)
+        restart_at_end(&ctx);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1091,8 +1164,11 @@ impl Config {
         let tx = db.transaction()?;
         for s in steps {
             if s.follow {
-                // only its files changed: they are recorded below
-                tx.execute("DELETE FROM managed_files WHERE key = ?1", [&s.key])?;
+                // only its files changed: they are recorded below (a follower left as it was
+                // keeps its records)
+                if written.iter().any(|w| w.key == s.key) {
+                    tx.execute("DELETE FROM managed_files WHERE key = ?1", [&s.key])?;
+                }
                 continue;
             }
             match &s.new {

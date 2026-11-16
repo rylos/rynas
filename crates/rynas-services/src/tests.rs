@@ -1031,6 +1031,86 @@ fn a_new_host_name_renames_the_netbios_name() {
     assert!(e.cfg.drift().unwrap().entries.is_empty());
 }
 
+/// The shares follow a rename with the light pass only: smb.conf, smbd, nmbd, wsdd2. A share
+/// whose folder can no longer take its ACLs (a missing volume) never stops the rename.
+#[test]
+fn a_rename_skips_the_rest_of_the_shares_reconcile() {
+    let e = env();
+    let mut d = shares_doc();
+    d.smb.netbios = true;
+    d.smb.wsdd = true;
+    stage(&e, SHARES_KEY, &d).unwrap();
+    apply(&e).unwrap();
+    for s in &d.shares {
+        e.host.state().fail_acl.push(s.path.clone());
+    }
+    e.host.state().log.clear();
+    e.sys.state().calls.clear();
+    e.cfg
+        .stage("admin", rynas_config::HOSTNAME_KEY, Some(serde_json::json!({ "hostname": "store" })))
+        .unwrap();
+    apply(&e).unwrap();
+    assert!(read(&e.root, "/etc/samba/smb.conf").contains("netbios name = STORE\n"));
+    // no ACL, no export, no folder touched
+    assert!(e.host.state().log.is_empty(), "{:?}", e.host.state().log);
+    let calls = e.sys.state().calls.clone();
+    assert!(!calls.iter().any(|c| c.contains("exportfs")), "{calls:?}");
+    // nmbd and wsdd2 start again after smbd read the new file
+    let at = |c: &str| calls.iter().position(|x| x == c).unwrap_or_else(|| panic!("{c} missing from {calls:?}"));
+    assert!(at("reload smbd.service") < at("run systemctl restart nmbd.service"));
+    at("run systemctl restart wsdd2.service");
+}
+
+/// A rename rolled back (the name did not take): smb.conf has the old NetBIOS name again,
+/// and nmbd and wsdd2 start again once the old name is back, so they announce it.
+#[test]
+fn a_failed_rename_announces_the_old_name_again() {
+    let e = env();
+    let mut d = shares_doc();
+    d.smb.netbios = true;
+    d.smb.wsdd = true;
+    stage(&e, SHARES_KEY, &d).unwrap();
+    apply(&e).unwrap();
+    e.cfg
+        .apply_value("admin", rynas_config::HOSTNAME_KEY, Some(serde_json::json!({ "hostname": "nas" })), "", &|_| {})
+        .unwrap();
+    e.sys.state().ignore_set_hostname = true;
+    e.sys.state().calls.clear();
+    e.cfg
+        .stage("admin", rynas_config::HOSTNAME_KEY, Some(serde_json::json!({ "hostname": "store" })))
+        .unwrap();
+    let err = apply(&e).unwrap_err();
+    assert!(err.to_string().contains("health check"), "{err}");
+    assert!(read(&e.root, "/etc/samba/smb.conf").contains("netbios name = NAS\n"));
+    let calls = e.sys.state().calls.clone();
+    let last = |c: &str| calls.iter().rposition(|x| x == c).unwrap_or_else(|| panic!("{c} missing from {calls:?}"));
+    for unit in ["nmbd", "wsdd2"] {
+        let restart = format!("run systemctl restart {unit}.service");
+        assert_eq!(calls.iter().filter(|c| **c == restart).count(), 2, "{calls:?}");
+        // the second start comes after the old name and the old smb.conf are back
+        assert!(last(&restart) > last("set-hostname nas"), "{calls:?}");
+    }
+}
+
+/// The first apply of the name the host already has (never applied by rynas) changes
+/// nothing: no share pass, no restart.
+#[test]
+fn applying_the_running_name_restarts_nothing() {
+    let e = env();
+    let mut d = shares_doc();
+    d.smb.netbios = true;
+    d.smb.wsdd = true;
+    stage(&e, SHARES_KEY, &d).unwrap();
+    apply(&e).unwrap();
+    e.sys.state().calls.clear();
+    // never applied by rynas (no previous value), the same name as the host's
+    e.cfg
+        .apply_value("admin", rynas_config::HOSTNAME_KEY, Some(serde_json::json!({ "hostname": "nas" })), "", &|_| {})
+        .unwrap();
+    let calls = e.sys.state().calls.clone();
+    assert!(!calls.iter().any(|c| c.contains("nmbd") || c.contains("wsdd2") || c.contains("smbd")), "{calls:?}");
+}
+
 
 /// NFS off from the start, but the Debian package started nfs-server at install: the first
 /// apply stops it; once it is stopped, later applies leave it alone.

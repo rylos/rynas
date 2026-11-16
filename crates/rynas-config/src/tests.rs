@@ -1177,3 +1177,122 @@ fn a_new_host_name_writes_the_domains_that_follow_it() {
     cfg.apply("bob", "bob", "", &|_| {}, &|| false).unwrap();
     assert!(read(&root, "/etc/names.conf").ends_with("name = nas\nsize = 2\n"));
 }
+
+/// A follower that cannot render the name "broken", and counts its light reloads.
+struct Fragile {
+    follows: Arc<Mutex<usize>>,
+}
+
+impl Applier for Fragile {
+    fn key(&self) -> &str {
+        "test.fragile"
+    }
+
+    fn order(&self) -> i32 {
+        20
+    }
+
+    fn validate(&self, value: serde_json::Value) -> std::result::Result<serde_json::Value, Invalid> {
+        Ok(value)
+    }
+
+    fn render(&self, _value: &serde_json::Value, ctx: &ApplyCtx) -> std::result::Result<Vec<ManagedFile>, String> {
+        let h = ctx.hostname()?;
+        if h == "broken" {
+            return Err("cannot name broken".into());
+        }
+        Ok(vec![ManagedFile::whole("/etc/fragile.conf", format!("name = {h}\n"), true)])
+    }
+
+    fn reconcile(
+        &self,
+        _from: Option<&serde_json::Value>,
+        _to: Option<&serde_json::Value>,
+        _ctx: &ApplyCtx,
+    ) -> std::result::Result<(), String> {
+        // the full pass: would fail (a missing volume)
+        Err("the full reconcile must not run for a rename".into())
+    }
+
+    fn follow_reload(&self, _value: &serde_json::Value, ctx: &ApplyCtx) -> std::result::Result<(), String> {
+        *self.follows.lock().unwrap() += 1;
+        // what reads the name restarts once every domain reloaded
+        ctx.restart_at_end("fragile.service");
+        Err("reload failed".into())
+    }
+
+    fn follows(&self, key: &str) -> bool {
+        key == HOSTNAME_KEY
+    }
+}
+
+#[test]
+fn a_follower_never_fails_nor_rolls_back_a_rename() {
+    /// The same key as [`Fragile`], with a working reconcile, to apply its value once.
+    struct Easy;
+    impl Applier for Easy {
+        fn key(&self) -> &str {
+            "test.fragile"
+        }
+        fn order(&self) -> i32 {
+            20
+        }
+        fn validate(&self, value: serde_json::Value) -> std::result::Result<serde_json::Value, Invalid> {
+            Ok(value)
+        }
+        fn render(&self, _value: &serde_json::Value, ctx: &ApplyCtx) -> std::result::Result<Vec<ManagedFile>, String> {
+            Ok(vec![ManagedFile::whole("/etc/fragile.conf", format!("name = {}\n", ctx.hostname()?), true)])
+        }
+    }
+    let e = env();
+    let (state, root) = (e.state.clone(), e.root.clone());
+    drop(e.cfg);
+    let cfg = Config::open(
+        ConfigOptions::new(&state, &root),
+        e.sys.clone(),
+        vec![Arc::new(HostnameDomain::new()), Arc::new(Easy)],
+    )
+    .unwrap();
+    cfg.apply_value("rynas", HOSTNAME_KEY, Some(hostname("first")), "", &|_| {}).unwrap();
+    cfg.apply_value("rynas", "test.fragile", Some(json!({})), "", &|_| {}).unwrap();
+    assert!(read(&root, "/etc/fragile.conf").ends_with("name = first\n"));
+    drop(cfg);
+
+    let follows = Arc::new(Mutex::new(0));
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen2 = seen.clone();
+    let cfg = Config::open(
+        ConfigOptions::new(&state, &root),
+        e.sys.clone(),
+        vec![
+            Arc::new(HostnameDomain::new().on_change(Box::new(move |h| seen2.lock().unwrap().push(h.to_string())))),
+            Arc::new(Fragile { follows: follows.clone() }),
+        ],
+    )
+    .unwrap();
+    // a rename: the light pass runs (its failure is a warning), the full reconcile never
+    let lines = Mutex::new(Vec::<String>::new());
+    let log = |l: &str| lines.lock().unwrap().push(l.to_string());
+    e.sys.state().calls.clear();
+    cfg.apply_value("rynas", HOSTNAME_KEY, Some(hostname("second")), "", &log).unwrap();
+    assert_eq!(*follows.lock().unwrap(), 1);
+    assert!(read(&root, "/etc/fragile.conf").ends_with("name = second\n"));
+    assert!(lines.lock().unwrap().iter().any(|l| l == "test.fragile: warning: reload failed"));
+    assert!(e.sys.state().calls.iter().any(|c| c == "run systemctl restart fragile.service"));
+    // the hook ran once, after the commit
+    assert_eq!(*seen.lock().unwrap(), ["second"]);
+    // a name the follower cannot render: left as it was, the rename goes through
+    cfg.apply_value("rynas", HOSTNAME_KEY, Some(hostname("broken")), "", &log).unwrap();
+    assert_eq!(e.sys.state().hostname, "broken");
+    assert!(read(&root, "/etc/fragile.conf").ends_with("name = second\n"));
+    assert!(lines.lock().unwrap().iter().any(|l| l.starts_with("test.fragile: warning: not written again (render")));
+    assert_eq!(*follows.lock().unwrap(), 1);
+    // its file record is kept: no drift
+    assert!(cfg.drift().unwrap().entries.is_empty());
+    assert_eq!(*seen.lock().unwrap(), ["second", "broken"]);
+
+    // a rename rolled back (the name does not take): the hook never runs
+    e.sys.state().ignore_set_hostname = true;
+    assert!(cfg.apply_value("rynas", HOSTNAME_KEY, Some(hostname("third")), "", &log).is_err());
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}

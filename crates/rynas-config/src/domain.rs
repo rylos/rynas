@@ -32,6 +32,10 @@ pub struct ApplyCtx<'a> {
     /// The host name this apply puts in force, when it changes `system.hostname`
     /// ([`ApplyCtx::hostname`]).
     pub(crate) new_hostname: Option<String>,
+    /// This rollback puts the previous host name back ([`ApplyCtx::hostname_changes`]).
+    pub(crate) hostname_reverted: bool,
+    /// Units to restart once every domain has reloaded ([`ApplyCtx::restart_at_end`]).
+    pub(crate) at_end: Mutex<Vec<String>>,
 }
 
 impl ApplyCtx<'_> {
@@ -45,10 +49,22 @@ impl ApplyCtx<'_> {
         }
     }
 
-    /// Whether this apply changes the host name: services that announce it (NetBIOS, WS
-    /// discovery) restart to take the new one.
+    /// Whether this apply changes the host name, or this rollback puts the previous one
+    /// back: services that announce it (NetBIOS, WS discovery) restart to take the name in
+    /// force ([`ApplyCtx::restart_at_end`]).
     pub fn hostname_changes(&self) -> bool {
-        self.new_hostname.is_some()
+        self.new_hostname.is_some() || self.hostname_reverted
+    }
+
+    /// Restarts `unit` (when active) after every domain of this apply or rollback has
+    /// reloaded: in a rollback the host name is put back after the domains that follow it,
+    /// so a service that reads it at start must start after that. A failure is logged, never
+    /// fails the apply.
+    pub fn restart_at_end(&self, unit: &str) {
+        let mut v = self.at_end.lock().unwrap();
+        if !v.iter().any(|u| u == unit) {
+            v.push(unit.to_string());
+        }
     }
 
     /// Whether this reconcile is the rollback of a failed apply: a domain does only what
@@ -225,6 +241,21 @@ pub trait Applier: Send + Sync {
         false
     }
 
+    /// Makes the system read this domain's files written again because a key it
+    /// [`follows`](Applier::follows) changed (`value`: its applied value, unchanged): only
+    /// what reads the followed value (e.g. reload smbd, restart nmbd and wsdd2), never the
+    /// whole [`reconcile`](Applier::reconcile) (folders, ACLs, exports). Also called by the
+    /// rollback of that apply. A failure is a warning: it never fails nor rolls back the
+    /// apply of the key followed. Default: the reconcile of `value` to itself.
+    fn follow_reload(&self, value: &Value, ctx: &ApplyCtx) -> Result<(), String> {
+        self.reconcile(Some(value), Some(value), ctx)
+    }
+
+    /// Called once the apply that changed this key from `old` to `new` is committed (never
+    /// after a rollback): side effects outside the system files that must not run for a
+    /// change that may still be rolled back (e.g. the daemon's reaction to a new host name).
+    fn committed(&self, _old: Option<&Value>, _new: Option<&Value>) {}
+
     /// The current state of the system as a value of this domain, used when rynas has never
     /// applied the key and to import drifted files.
     fn import(&self, _ctx: &ApplyCtx) -> Result<Option<Value>, String> {
@@ -247,14 +278,18 @@ pub trait Applier: Send + Sync {
 /// name changes, Avahi restarts (it does not follow the kernel's name: `<host>.local` would
 /// keep answering with the old one) and the hook runs with the new name, so the services of
 /// the daemon that hold the name (certificates, web access, notification texts) follow at
-/// once. Domains whose files carry the name re-render through [`Applier::follows`].
+/// once the apply is committed (a rolled back rename never reaches them). Domains whose files
+/// carry the name re-render through [`Applier::follows`].
 #[derive(Default)]
 pub struct HostnameDomain {
     on_change: Option<HostnameHook>,
+    /// The name the running apply put in force, for the hook once it is committed.
+    renamed: Mutex<Option<String>>,
 }
 
-/// Called with the new running host name after an apply (or its rollback) changed it. Runs
-/// inside the apply: it must not apply configuration itself (wake a task that does).
+/// Called with the new running host name once an apply that changed it is committed (never
+/// for a rollback). Runs inside the apply: it must not apply configuration itself (wake a
+/// task that does).
 pub type HostnameHook = Box<dyn Fn(&str) + Send + Sync>;
 
 /// The mDNS responder that publishes `<host>.local`.
@@ -331,12 +366,16 @@ impl Applier for HostnameDomain {
     }
 
     fn reload(&self, value: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {
+        *self.renamed.lock().unwrap() = None;
         let Some(v) = value else { return Ok(()) };
         let want = hostname_of(v)?;
         let before = ctx.system.hostname().unwrap_or_default();
         ctx.system.set_hostname(&want)?;
         if before == want {
             return Ok(());
+        }
+        if !ctx.rolling_back() {
+            *self.renamed.lock().unwrap() = Some(want.clone());
         }
         (ctx.log)(&format!("host name changed from {before:?} to {want:?}"));
         // best effort: a NAS without Avahi has no `.local` name to move
@@ -346,10 +385,14 @@ impl Applier for HostnameDomain {
                 (ctx.log)(&format!("Avahi: {e}"));
             }
         }
-        if let Some(f) = &self.on_change {
-            f(&want);
-        }
         Ok(())
+    }
+
+    fn committed(&self, _old: Option<&Value>, _new: Option<&Value>) {
+        let renamed = self.renamed.lock().unwrap().take();
+        if let (Some(h), Some(f)) = (renamed, &self.on_change) {
+            f(&h);
+        }
     }
 
     fn health(&self, value: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {

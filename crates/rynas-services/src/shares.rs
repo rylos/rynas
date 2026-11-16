@@ -158,6 +158,22 @@ fn smb_running(c: &SharesConfig) -> bool {
     c.smb.enabled
 }
 
+/// nmbd registers the NetBIOS name and wsdd2 announces the host name when they start: an
+/// apply that changes the host name, or its rollback that puts it back, starts the ones in
+/// use again once every domain reloaded (in a rollback the host name goes back after the
+/// shares).
+fn restart_announcers(c: &SharesConfig, ctx: &ApplyCtx) {
+    if !ctx.hostname_changes() {
+        return;
+    }
+    for (unit, on) in [(NMBD, c.smb.netbios), (WSDD2, c.smb.wsdd)] {
+        if on {
+            (ctx.log)(&format!("{unit} restarts for the host name"));
+            ctx.restart_at_end(unit);
+        }
+    }
+}
+
 fn nfs_running(c: &SharesConfig) -> bool {
     c.nfs.enabled && c.shares.iter().any(|s| s.nfs.enabled)
 }
@@ -871,6 +887,22 @@ impl Applier for SharesDomain {
         key == rynas_config::HOSTNAME_KEY
     }
 
+    /// A new host name: smbd reads the new `smb.conf`, nmbd and wsdd2 start again to
+    /// announce it. Nothing else of the reconcile (subvolumes, ACLs, snapshot folders,
+    /// exports): a missing volume never stops a rename.
+    fn follow_reload(&self, value: &Value, ctx: &ApplyCtx) -> Result<(), String> {
+        let c = parse(Some(value))?;
+        if !smb_running(&c) {
+            return Ok(());
+        }
+        if ctx.system.unit_active(SMBD).unwrap_or(false) {
+            (ctx.log)("reloading smbd for the host name");
+            ctx.system.reload_or_restart_unit(SMBD)?;
+        }
+        restart_announcers(&c, ctx);
+        Ok(())
+    }
+
     fn templates(&self) -> Vec<(String, String)> {
         vec![
             (smb::TEMPLATE_SMB.into(), smb::SMB_CONF_TEMPLATE.into()),
@@ -1086,16 +1118,7 @@ impl Applier for SharesDomain {
                 self.manage_unit(ctx, NMBD, to.smb.netbios)?;
             }
             self.manage_unit(ctx, WSDD2, to.smb.wsdd)?;
-            // nmbd registers the NetBIOS name and wsdd2 announces the host name when they
-            // start: a new host name needs both started again
-            if ctx.hostname_changes() && !ctx.rolling_back() {
-                for (unit, on) in [(NMBD, to.smb.netbios), (WSDD2, to.smb.wsdd)] {
-                    if on && ctx.system.unit_active(unit).unwrap_or(false) {
-                        (ctx.log)(&format!("restarting {unit} for the new host name"));
-                        ctx.system.restart_unit(unit)?;
-                    }
-                }
-            }
+            restart_announcers(&to, ctx);
         } else if smb_running(&from) || ctx.system.unit_active(SMBD)? {
             // the Debian package starts smbd at install: "off" stops it even then
             self.manage_unit(ctx, SMBD, false)?;
