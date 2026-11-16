@@ -1,0 +1,20 @@
+[package]
+name = "rynas-schedule"
+description = "rynas: schedules without I/O: systemd calendar expressions (parse, normalize, next runs with systemd's DST rules), the preset recurrences of the editor, descriptions"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+# `next_runs` (time zone arithmetic with jiff); the web interface builds without it
+default = ["next"]
+next = ["dep:jiff"]
+
+[dependencies]
+serde.workspace = true
+jiff = { workspace = true, optional = true }
+
+[dev-dependencies]
+jiff.workspace = true
+serde_json.workspace = true

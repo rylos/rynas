@@ -34,6 +34,7 @@ members = [
     "crates/rynas-backup",
     "crates/rynas-dedup",
     "crates/rynas-tz",
+    "crates/rynas-schedule",
 ]
 
 [workspace.package]
@@ -82,6 +83,8 @@ rynas-backup = { path = "crates/rynas-backup" }
 rynas-dedup = { path = "crates/rynas-dedup" }
 # the system time zone, read again when /etc/localtime changes (D-TIME)
 rynas-tz = { path = "crates/rynas-tz" }
+# schedules without I/O (calendar expressions, next runs, presets), also in the web interface
+rynas-schedule = { path = "crates/rynas-schedule", default-features = false }
 # local time zone arithmetic of the power schedule (DST-safe); the system tz database
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 serde = { version = "1", features = ["derive"] }

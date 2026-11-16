@@ -3848,6 +3848,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rynas-schedule"
+version = "0.8.13"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rynas-scheduler"
 version = "0.8.13"
 dependencies = [
