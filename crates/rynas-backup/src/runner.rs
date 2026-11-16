@@ -229,6 +229,11 @@ pub async fn run_worker(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if unit.is_none() {
+        // a plain child gets its own process group, so that a stop reaches what it started:
+        // a shell waiting for a foreground command ignores a SIGINT that its command survives
+        cmd.process_group(0);
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", argv[0]))?;
@@ -324,8 +329,8 @@ async fn stop(child: &mut tokio::process::Child, unit: Option<&str>) {
         }
         None => {
             if let Some(pid) = child.id() {
-                // SAFETY: a signal to our own child
-                unsafe { libc::kill(pid as i32, libc::SIGINT) };
+                // SAFETY: a signal to our own child's process group (it leads it, see run_worker)
+                unsafe { libc::kill(-(pid as i32), libc::SIGINT) };
             }
             if tokio::time::timeout(Duration::from_secs(30), child.wait())
                 .await
@@ -418,6 +423,19 @@ echo '{"event":"stats","bytes":5,"files":1}'"#,
         let r = run_worker(&Launch::Direct { exe: exe.clone() }, "j", &req(), &c, &none, |_| {}).await;
         assert_eq!(r.unwrap_err(), "cancelled");
         assert!(start.elapsed() < Duration::from_secs(10));
+        // the shell waits for a foreground command: the stop reaches the command too (a shell
+        // ignores a SIGINT that its foreground command survives)
+        let fg = fake(t.path(), "sleep 20; exec sleep 30");
+        let c = CancellationToken::new();
+        let c2 = c.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            c2.cancel();
+        });
+        let start = std::time::Instant::now();
+        let r = run_worker(&Launch::Direct { exe: fg }, "j", &req(), &c, &none, |_| {}).await;
+        assert_eq!(r.unwrap_err(), "cancelled");
+        assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
         let short = Limits {
             timeout: Some(Duration::from_millis(200)),
             ..Default::default()
