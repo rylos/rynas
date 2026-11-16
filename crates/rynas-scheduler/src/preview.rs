@@ -245,6 +245,22 @@ fn window_starts(window: &str, tz: &TimeZone, now: Timestamp, n: usize) -> Vec<T
         let Ok(next) = t.checked_add(hour) else { return out };
         t = next;
     }
+    // a window on all week has no block start: its run starts every Sunday at midnight
+    let all_week = cells.iter().all(|c| *c == b'1');
+    if all_week {
+        for _ in 0..WINDOW_HOURS {
+            let z = t.to_zoned(tz.clone());
+            if z.weekday() == jiff::civil::Weekday::Sunday && z.hour() == 0 {
+                out.push(t);
+                if out.len() == n {
+                    break;
+                }
+            }
+            let Ok(next) = t.checked_add(hour) else { break };
+            t = next;
+        }
+        return out;
+    }
     let mut prev_on = t.checked_sub(hour).map(on).unwrap_or(false);
     for _ in 0..WINDOW_HOURS {
         let cur = on(t);

@@ -409,7 +409,11 @@ async fn nas_retention_keeps_the_parent_and_the_pc_can_only_add() {
     let e = env();
     let path = "/volume1/backup/pc";
     // one run a day for 20 days, home and root
-    folder(&e, path, (1..=20).flat_map(|d| [snap_u("home", d), snap_u("root", d)]).collect());
+    let entries: Vec<Entry> = (1..=20).flat_map(|d| [snap_u("home", d), snap_u("root", d)]).collect();
+    // the name of the oldest home snapshot as the folder has it (a name made again later may
+    // fall on the next second on a busy machine)
+    let oldest_home = entries[38].name.clone();
+    folder(&e, path, entries);
     let retention = json!({"owner": "nas", "gfs": {"hourly": 0, "daily": 6, "weekly": 0, "monthly": 0, "yearly": 0, "min": "latest"}});
     let t = task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": path, "adopt": true, "public_key": KEY, "retention": retention}))).await;
     assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
@@ -435,7 +439,8 @@ async fn nas_retention_keeps_the_parent_and_the_pc_can_only_add() {
     let parent = parents[0].name.clone();
     let (s, b) = call(&e, "DELETE", &format!("/v1/pc-backups/targets/pc/snapshots/{parent}"), None).await;
     assert_eq!((s, err(&b).field.as_deref()), (StatusCode::CONFLICT, Some("snapshot")));
-    let old = snap("home", 20).name;
+    let old = oldest_home;
+    assert!(old.starts_with("home."));
     let t = task(&e, "DELETE", &format!("/v1/pc-backups/targets/pc/snapshots/{old}"), None).await;
     assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
     // a pass while a receive runs does nothing; then it deletes what the preview said
@@ -470,9 +475,10 @@ async fn sizes_bare_metal_and_the_new_alerts() {
     broken.info.as_mut().unwrap().received_uuid = None;
     broken.info.as_mut().unwrap().otime -= 3600;
     entries.push(broken);
+    // (names as the folder has them: one made again later may fall on the next second)
+    let newest_root = entries[0].name.clone();
     folder(&e, path, entries);
     // the newest @ snapshot carries a manifest that needs @ and @home
-    let newest_root = snap("@", 1).name;
     e.host.manifests.lock().unwrap().insert(
         PathBuf::from(path).join(&newest_root),
         serde_json::to_vec(&json!({"format": 1, "boot": {"loader": "grub"}, "btrbk": {"subvolumes": [{"name": "@", "mount": "/"}, {"name": "@home", "mount": "/home"}, {"name": "@games", "mount": "/home/games"}]}})).unwrap(),
@@ -881,9 +887,11 @@ async fn btrfs_restore_session_reads_only_its_own_pc() {
     broken.info.as_mut().unwrap().readonly = false;
     broken.info.as_mut().unwrap().received_uuid = None;
     let broken_name = broken.name.clone();
-    folder(&e, path, vec![snap_u("@", 1), snap_u("@home", 1), snap_u("@", 2), snap_u("@home", 2), broken]);
+    let snaps = vec![snap_u("@", 1), snap_u("@home", 1), snap_u("@", 2), snap_u("@home", 2), broken];
+    // (names as the folder has them: one made again later may fall on the next second)
+    let (newest, older, home) = (snaps[0].name.clone(), snaps[2].name.clone(), snaps[1].name.clone());
+    folder(&e, path, snaps);
     folder(&e, other, vec![snap_u("@", 1)]);
-    let (newest, older, home) = (snap("@", 1).name, snap("@", 2).name, snap("@home", 1).name);
     e.host.manifests.lock().unwrap().insert(
         PathBuf::from(path).join(&newest),
         serde_json::to_vec(&json!({"format": 1, "written_at_ms": 1, "hostname": "casa", "boot": {"uefi": true, "loader": "systemd_boot", "initramfs": "mkinitcpio"}, "disks": [], "btrbk": {"snapshot_dir": "/mnt/pool/btrbk_snapshots", "subvolumes": [{"name": "@", "path": "@", "mount": "/"}, {"name": "@home", "path": "@home", "mount": "/home"}]}})).unwrap(),

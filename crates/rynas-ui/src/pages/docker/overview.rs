@@ -457,7 +457,7 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
             </div>
             <h3 class="mini-title">{tr("dk.au.title")}</h3>
             <p class="field-help">{tr("dk.au.text")}</p>
-            {win.view(win_changed)}
+            {win.view(crate::schedule::window::Spread::FirstThird, win_changed)}
             {stale_notice(draft.stale, reset)}
             {form_error(error)}
             <div class="sec-actions">

@@ -267,6 +267,12 @@ impl Online {
         !self.keys.is_empty()
     }
 
+    /// When the catalog was last checked (automatic or "Check now"), ms since the epoch: the
+    /// next automatic refresh counts from it.
+    pub fn last_check_ms(&self) -> Option<u64> {
+        self.state.lock().unwrap().last_check.and_then(|s| u64::try_from(s).ok()).map(|s| s * 1000)
+    }
+
     /// The downloaded catalogue in use: `current`, else `previous` when `current` is
     /// unreadable.
     pub fn active(&self) -> Option<Active> {

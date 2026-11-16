@@ -336,19 +336,28 @@ impl Retry {
         max_delay_s: 3600,
     };
 
-    /// The online app catalog: a download that fails is tried again three hours later, as
-    /// the catalog loop did before it became a task (up to the next daily refresh).
+    /// The online app catalog: a download that fails is tried again three hours later until
+    /// it works, as the catalog loop did before it became a task (255 attempts: a month).
     pub const CATALOG: Retry = Retry {
-        attempts: 7,
+        attempts: u8::MAX,
         delay_s: 3 * 3600,
         backoff: false,
         max_delay_s: 0,
     };
-    /// The Docker image check: an engine that does not answer is asked again every hour, as
-    /// the check loop did before it became a task (up to the next daily check).
+    /// The Docker image check: an engine that does not answer is asked again every hour until
+    /// it does, as the check loop did before it became a task (255 attempts: ten days).
     pub const IMAGE_CHECK: Retry = Retry {
-        attempts: 23,
+        attempts: u8::MAX,
         delay_s: 3600,
+        backoff: false,
+        max_delay_s: 0,
+    };
+    /// The nightly PC backup maintenance: a run cut short (a restart of rynas) is tried again
+    /// every five minutes, as the maintenance loop did, until its start window (six hours
+    /// after its hour) ends.
+    pub const PC_MAINTENANCE: Retry = Retry {
+        attempts: 72,
+        delay_s: 300,
         backoff: false,
         max_delay_s: 0,
     };
@@ -359,6 +368,7 @@ impl Retry {
             TaskAction::Backup { .. } | TaskAction::Replicate { .. } => Retry::TRANSFER,
             TaskAction::AppsCatalog => Retry::CATALOG,
             TaskAction::DockerImageCheck => Retry::IMAGE_CHECK,
+            TaskAction::PcMaintenance => Retry::PC_MAINTENANCE,
             _ => Retry::NONE,
         }
     }
@@ -1022,6 +1032,17 @@ pub mod system {
     pub const PC_MAINTENANCE: &str = "pc-maintenance";
     pub const PC_RETENTION: &str = "pcbackup-retention";
 
+    /// The ids of rynas's own jobs: a task made on the Task Scheduler page cannot take them.
+    pub const RESERVED: &[&str] = &[
+        UPDATES_CHECK,
+        SYSTEM_UPGRADE,
+        DOCKER_IMAGE_CHECK,
+        DOCKER_AUTO_UPDATE,
+        APPS_CATALOG,
+        PC_MAINTENANCE,
+        PC_RETENTION,
+    ];
+
     /// A late nightly PC maintenance runs up to this many hours after its hour.
     pub const PC_MAINTENANCE_CATCH_UP_H: u32 = 6;
 
@@ -1159,6 +1180,8 @@ pub mod system {
         );
         t.policy.missed = Some(MissedPolicy::RunOnce { within_h: Some(PC_MAINTENANCE_CATCH_UP_H) });
         t.policy.jitter_s = Some(0);
+        // retries (a run cut short by a restart of rynas) only within those six hours
+        t.policy.window_min = Some(PC_MAINTENANCE_CATCH_UP_H * 60);
         t
     }
 

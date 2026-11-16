@@ -219,8 +219,12 @@ pub struct Start<'a> {
     pub by_timer: bool,
     /// A start rynasd itself asked for moments ago: run now, a retry (with its number).
     pub requested: Option<(RunTrigger, u8)>,
-    /// Start and end of the task's latest run (skips left out).
+    /// Start and end of the task's latest run (skips left out); for an interval task also
+    /// the feature's own last check (a "Check now", the check before the task existed).
     pub last_run: Option<(u64, u64)>,
+    /// An interval task that never ran is not due before this (its delay after boot, or after
+    /// the start of rynasd, as the loops it replaces counted it).
+    pub not_before_ms: u64,
     pub pause: &'a SchedulerPause,
     /// An earlier start of the task still runs in rynasd.
     pub running_elsewhere: bool,
@@ -315,28 +319,45 @@ pub fn classify(s: &Start) -> RunTrigger {
 }
 
 pub fn decide(s: &Start) -> Decision {
-    let trigger = classify(s);
+    let mut trigger = classify(s);
     let attempt = requested(s).map_or(0, |(_, a)| a);
-    let skip = |reason, detail| Decision::Skip {
+    let skip = |trigger, reason, detail| Decision::Skip {
         trigger,
         reason,
         detail,
     };
-    // nothing due: an interval that has not passed, a block that already had its start
+    let mut fallback = false;
+    // nothing due: an interval that has not passed, a block that already had its start, the
+    // DST fallback hour of a daily window on a normal night
     if s.by_timer && requested(s).is_none() {
         match &s.task.trigger {
             TaskTrigger::Interval { .. } => {
-                if let Some(due) = s.last_run.and_then(|(_, end)| interval_due_ms(s.task, end))
+                let due = match s.last_run {
+                    Some((_, end)) => interval_due_ms(s.task, end),
+                    None => Some(s.not_before_ms),
+                };
+                if let Some(due) = due
                     && s.now_ms + ON_TIME_MS < due
                 {
-                    return skip(SkipReason::NotDue, Some(format!("due at {due}")));
+                    return skip(trigger, SkipReason::NotDue, Some(format!("due at {due}")));
                 }
             }
             TaskTrigger::Window { window, .. }
                 if !crate::window::start_due(window, s.tz, s.now_ms, s.last_run.map(|r| r.0)) =>
             {
-                return skip(SkipReason::NotDue, None);
+                return skip(trigger, SkipReason::NotDue, None);
             }
+            TaskTrigger::Calendar { .. } if !on_time(s) => match fallback_start(s) {
+                // a normal night: the window already had its run (a catch-up after a boot
+                // in that hour still goes on as one)
+                Some(false) if ran_in_window(s) => return skip(trigger, SkipReason::NotDue, None),
+                Some(false) => {}
+                Some(true) => {
+                    fallback = true;
+                    trigger = RunTrigger::Timer;
+                }
+                None => {}
+            },
             _ => {}
         }
     }
@@ -348,21 +369,21 @@ pub fn decide(s: &Start) -> Decision {
                 _ => s.pause.tasks.get(&s.task.id),
             };
             let detail = p.map(|p| p.reason.clone()).filter(|r| !r.is_empty());
-            return skip(reason, detail);
+            return skip(trigger, reason, detail);
         }
         let policy = s.task.effective_policy();
         let calendar = matches!(
             s.task.trigger,
             TaskTrigger::Calendar { .. } | TaskTrigger::Recurrence { .. }
         );
-        if s.by_timer && calendar {
+        if s.by_timer && calendar && !fallback {
             match timer_start(s) {
                 TimerStart::AfterOverlap if policy.overlap == Overlap::Skip => {
-                    return skip(SkipReason::Overlap, None);
+                    return skip(trigger, SkipReason::Overlap, None);
                 }
                 TimerStart::AfterOverlap => {
                     if !within_window(s) {
-                        return skip(SkipReason::Window, Some(format!("{} min", policy.window_min)));
+                        return skip(trigger, SkipReason::Window, Some(format!("{} min", policy.window_min)));
                     }
                     return Decision::Run {
                         trigger: RunTrigger::Queued,
@@ -373,23 +394,49 @@ pub fn decide(s: &Start) -> Decision {
                     if let MissedPolicy::RunOnce { within_h: Some(h) } = policy.missed
                         && !within_deadline(s, h)
                     {
-                        return skip(SkipReason::Missed, Some(format!("{h} h")));
+                        return skip(trigger, SkipReason::Missed, Some(format!("{h} h")));
                     }
                     if !within_window(s) {
-                        return skip(SkipReason::Window, Some(format!("{} min", policy.window_min)));
+                        return skip(trigger, SkipReason::Window, Some(format!("{} min", policy.window_min)));
                     }
                 }
                 TimerStart::OnTime => {}
             }
         }
         if trigger == RunTrigger::Retry && calendar && !within_window(s) {
-            return skip(SkipReason::Window, Some(format!("{} min", policy.window_min)));
+            return skip(trigger, SkipReason::Window, Some(format!("{} min", policy.window_min)));
         }
     }
     if s.running_elsewhere {
-        return skip(SkipReason::Running, None);
+        return skip(trigger, SkipReason::Running, None);
     }
     Decision::Run { trigger, attempt }
+}
+
+/// A scheduled time of the task's calendar came within its random delay before the start.
+fn on_time(s: &Start) -> bool {
+    let Some(expr) = s.task.trigger.on_calendar() else {
+        return true;
+    };
+    let Ok(spec) = CalendarSpec::parse_with(&expr, |z| TimeZone::get(z).is_ok()) else {
+        return true;
+    };
+    let jitter = u64::from(s.task.effective_policy().jitter_s) * 1000;
+    slot_in(&spec, s.tz, s.now_ms.saturating_sub(jitter + ON_TIME_MS), s.now_ms)
+}
+
+/// A start in the DST fallback hour of a daily start window
+/// ([`crate::window::dst_fallback`]): `Some(due)`, or `None` when it is not one.
+fn fallback_start(s: &Start) -> Option<bool> {
+    let p = s.task.effective_policy();
+    let (h, m) = crate::window::daily_time(&s.task.trigger.on_calendar()?)?;
+    crate::window::fallback_due(s.tz, s.now_ms, h, m, p.window_min, u64::from(p.jitter_s) * 1000 + ON_TIME_MS)
+}
+
+/// The task's latest run started inside its start window before now.
+fn ran_in_window(s: &Start) -> bool {
+    let w = u64::from(s.task.effective_policy().window_min) * 60_000;
+    s.last_run.is_some_and(|(start, _)| start + w >= s.now_ms)
 }
 
 /// A scheduled time lies within the task's start window before the start (always, without
@@ -405,7 +452,21 @@ fn within_window(s: &Start) -> bool {
     let Ok(spec) = CalendarSpec::parse_with(&expr, |z| TimeZone::get(z).is_ok()) else {
         return true;
     };
-    slot_in(&spec, s.tz, s.now_ms.saturating_sub(u64::from(min) * 60_000), s.now_ms)
+    if slot_in(&spec, s.tz, s.now_ms.saturating_sub(u64::from(min) * 60_000), s.now_ms) {
+        return true;
+    }
+    // a daily window whose time did not exist today: its civil window still counts
+    let Some((h, m)) = crate::window::daily_time(&expr) else {
+        return false;
+    };
+    if !crate::window::gap_on_day(s.tz, s.now_ms, h, m) {
+        return false;
+    }
+    let Some(now) = ts(s.now_ms) else { return false };
+    let z = now.to_zoned(s.tz.clone());
+    let minute = u32::from(z.hour() as u8) * 60 + u32::from(z.minute() as u8);
+    let start = u32::from(h) * 60 + u32::from(m);
+    minute >= start && minute < start + min
 }
 
 /// When an interval task is due again after a run that ended at `end_ms`: the interval plus
@@ -545,6 +606,7 @@ mod tests {
             by_timer: true,
             requested: None,
             last_run: None,
+            not_before_ms: 0,
             pause,
             running_elsewhere: false,
             tz,

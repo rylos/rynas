@@ -87,8 +87,16 @@ pub struct Gate {
     known: Mutex<Option<HashSet<String>>>,
     /// When the watch loop last started each interval task that was due (it never starts
     /// one twice within [`INTERVAL_RESTART`], whatever the history says).
-    interval_started: Mutex<HashMap<String, Instant>>,
+    interval_started: Mutex<HashMap<String, IntervalStart>>,
 }
+
+/// The watch loop's last start of an interval task: when, the last run's end it saw then, how
+/// many starts in a row left that end where it was.
+type IntervalStart = (Instant, Option<u64>, u32);
+
+/// The history of a task could not be read.
+#[derive(Debug)]
+pub struct HistoryUnreadable;
 
 /// The watch loop starts a due interval task at most this often.
 const INTERVAL_RESTART: Duration = Duration::from_secs(600);
@@ -170,14 +178,27 @@ impl Gate {
             .is_some_and(|(_, _, at, _)| at.elapsed() < REQUEST_TTL)
     }
 
-    /// The watch loop may start the interval task `id` now (not within
-    /// [`INTERVAL_RESTART`] of its last start by the loop); records the start when it may.
-    fn interval_start(&self, id: &str) -> bool {
+    /// The watch loop may start the interval task `id` now; records the start when it may. A
+    /// start that left the task's last run where it was (the gate skipped it, the start was
+    /// lost) is tried again after [`INTERVAL_RESTART`], then twice as long each time, at most
+    /// the task's interval: never a start every few minutes.
+    fn interval_may_start(&self, id: &str, base: Option<u64>, t: &ScheduledTask) -> bool {
         let mut m = self.interval_started.lock().unwrap();
-        if m.get(id).is_some_and(|at| at.elapsed() < INTERVAL_RESTART) {
-            return false;
-        }
-        m.insert(id.to_string(), Instant::now());
+        let n = match m.get(id) {
+            Some((at, b, n)) if *b == base => {
+                let hours = match t.trigger {
+                    TaskTrigger::Interval { hours, .. } => u64::from(hours.max(1)),
+                    _ => 24,
+                };
+                let wait = INTERVAL_RESTART.saturating_mul(1u32 << (*n).min(10)).min(Duration::from_secs(hours * 3600));
+                if at.elapsed() < wait {
+                    return false;
+                }
+                n + 1
+            }
+            _ => 0,
+        };
+        m.insert(id.to_string(), (Instant::now(), base, n));
         true
     }
 
@@ -390,13 +411,23 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
     let requested = asked.map(|(t, a, _)| (t, a));
     let pause = p.gate.pause();
     let tz = TimeZone::system();
-    let last_run = p.history.last_ran(id).map_err(Error::internal)?;
+    let interval = matches!(task.trigger, TaskTrigger::Interval { .. });
+    let last_run = if interval {
+        // a history that cannot be read: an interval start is not due (no extra runs)
+        match interval_last(p, &task) {
+            Ok(l) => l,
+            Err(HistoryUnreadable) => Some((now, now)),
+        }
+    } else {
+        p.history.last_ran(id).map_err(Error::internal)?
+    };
     let start = Start {
         task: &task,
         now_ms: now,
         by_timer,
         requested,
         last_run,
+        not_before_ms: interval_not_before(&task, now),
         pause: &pause,
         running_elsewhere: p.gate.running_elsewhere(id, &req.invocation_id, &p.ops.tasks),
         tz: &tz,
@@ -424,8 +455,15 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
         }
         Decision::Skip { trigger, reason, detail } => {
             let (trigger, reason) = (*trigger, *reason);
-            let run = NewRun::skipped(id, &req.invocation_id, now, trigger, reason, detail.clone());
-            p.history.record(&run).map_err(Error::internal)?;
+            // an interval task's start skipped for the same reason as its latest one: one row
+            let repeated = interval
+                && p.history.list(id, 1, None).ok().and_then(|v| v.into_iter().next()).is_some_and(|r| {
+                    r.skipped == Some(reason) && r.trigger == Some(trigger) && r.detail == *detail
+                });
+            if !repeated {
+                let run = NewRun::skipped(id, &req.invocation_id, now, trigger, reason, detail.clone());
+                p.history.record(&run).map_err(Error::internal)?;
+            }
             p.invalidate();
             if trigger == RunTrigger::Retry {
                 drop_retry(p, id, "its start was skipped");
@@ -561,6 +599,7 @@ pub fn drop_retry(p: &Protection, id: &str, why: &str) {
 
 /// The watch loop: due retries, the overlap policy `replace`, pauses that end by themselves.
 pub async fn watch(p: Arc<Protection>) {
+    let _ = started_ms();
     let _ = RUNNING.set(p.gate.clone());
     Gate::rebuild(&p).await;
     loop {
@@ -603,11 +642,6 @@ fn boot_ms(now: u64) -> u64 {
     now.saturating_sub((up * 1000.0) as u64)
 }
 
-/// The interval tasks that are due now: their interval (and random part) has passed since
-/// the end of their last run, or, never run, their delay after boot has. Not while paused, a
-/// retry chain waits, or a start rynasd asked for is on its way. Their timer's own starts
-/// (after boot, an interval after the last run) go through the gate, which skips those that
-/// are not due; this is what starts them at the right time after such a skip.
 fn due_intervals<'a>(
     p: &Protection,
     applied: &'a [ScheduledTask],
@@ -615,27 +649,80 @@ fn due_intervals<'a>(
     pause: &SchedulerPause,
     now: u64,
 ) -> Vec<&'a ScheduledTask> {
-    let mut boot: Option<u64> = None;
-    applied
-        .iter()
-        .filter(|t| t.enabled)
-        .filter(|t| {
-            let TaskTrigger::Interval { after_boot_min, .. } = t.trigger else {
-                return false;
-            };
-            if pause.blocks(&t.id, now).is_some()
-                || retries.iter().any(|(id, _)| *id == t.id)
-                || p.gate.requested_now(&t.id)
-            {
-                return false;
-            }
-            let due = match p.history.last_ran(&t.id).ok().flatten() {
-                Some((_, end)) => rynas_scheduler::gate::interval_due_ms(t, end).unwrap_or(u64::MAX),
-                None => *boot.get_or_insert_with(|| boot_ms(now)) + u64::from(after_boot_min) * 60_000,
-            };
-            due <= now
-        })
-        .collect()
+    let mut out = Vec::new();
+    for t in applied.iter().filter(|t| matches!(t.trigger, TaskTrigger::Interval { .. })) {
+        // a history that cannot be read: nothing is started (no extra runs)
+        let Ok(last) = interval_last(p, t) else { continue };
+        let due = interval_due(t, last, now);
+        // the Docker page shows the next check: the same time the loop starts it at
+        if matches!(t.action, TaskAction::DockerImageCheck)
+            && let Some(d) = p.ops.docker.get()
+        {
+            d.next_check_ms.store(if t.enabled { due } else { 0 }, std::sync::atomic::Ordering::Relaxed);
+        }
+        if !t.enabled
+            || due > now
+            || pause.blocks(&t.id, now).is_some()
+            || retries.iter().any(|(id, _)| *id == t.id)
+            || p.gate.requested_now(&t.id)
+            || !p.gate.interval_may_start(&t.id, last.map(|l| l.1), t)
+        {
+            continue;
+        }
+        out.push(t);
+    }
+    out
+}
+
+/// When rynasd started (ms since the epoch): an interval task that never ran counts its
+/// delay from the later of the boot and this, as the loops it replaces did.
+static STARTED_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+pub fn started_ms() -> u64 {
+    *STARTED_MS.get_or_init(now_ms)
+}
+
+/// The job's own record of its last check, kept by its feature (before the task existed, or a
+/// "Check now"): the next automatic one counts from it too.
+fn feature_last_ms(p: &Protection, t: &ScheduledTask) -> Option<u64> {
+    let docker = p.ops.docker.get()?;
+    match t.action {
+        TaskAction::DockerImageCheck => Some(docker.report.lock().unwrap().checked_at_ms).filter(|m| *m > 0),
+        TaskAction::AppsCatalog => docker.apps.get()?.upgrade()?.online.get()?.last_check_ms(),
+        _ => None,
+    }
+}
+
+/// The last run of an interval task: its latest recorded run, or the feature's own last
+/// check when that is later (as `(start, end)`). `Err` when the history cannot be read.
+pub fn interval_last(p: &Protection, t: &ScheduledTask) -> Result<Option<(u64, u64)>, HistoryUnreadable> {
+    let ran = p.history.last_ran(&t.id).map_err(|e| {
+        tracing::warn!("scheduler: history of {}: {e}", t.id);
+        HistoryUnreadable
+    })?;
+    Ok(match (ran, feature_last_ms(p, t)) {
+        (Some(r), Some(f)) if f > r.1 => Some((f, f)),
+        (r, None) | (r @ Some(_), Some(_)) => r,
+        (None, Some(f)) => Some((f, f)),
+    })
+}
+
+/// An interval task that never ran is not due before its delay after the later of the boot
+/// and the start of rynasd.
+pub fn interval_not_before(t: &ScheduledTask, now: u64) -> u64 {
+    let TaskTrigger::Interval { after_boot_min, .. } = t.trigger else {
+        return 0;
+    };
+    boot_ms(now).max(started_ms()) + u64::from(after_boot_min) * 60_000
+}
+
+/// When an interval task is due ([`rynas_scheduler::gate::interval_due_ms`] from its last
+/// run, else [`interval_not_before`]).
+fn interval_due(t: &ScheduledTask, last: Option<(u64, u64)>, now: u64) -> u64 {
+    match last {
+        Some((_, end)) => rynas_scheduler::gate::interval_due_ms(t, end).unwrap_or(u64::MAX),
+        None => interval_not_before(t, now),
+    }
 }
 
 /// One turn of the watch loop (public for the tests).
@@ -664,7 +751,7 @@ pub fn tick(p: &Protection) {
     let running = p.probe.running_tasks().unwrap_or_default();
     for task in due {
         let unit = service_name(&task.id);
-        if running.contains(&unit) || !p.gate.interval_start(&task.id) {
+        if running.contains(&unit) {
             continue;
         }
         p.gate.request(&task.id, RunTrigger::Timer, 0);
@@ -737,5 +824,36 @@ pub fn tick(p: &Protection) {
                 .system()
                 .run(&Cmd::new("systemctl").args(["restart", "--no-block", &unit]));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A start of a due interval task that leaves its last run where it was (the gate skipped
+    /// it) is tried again later and later, never every few minutes; a new last run resets it.
+    #[test]
+    fn interval_restarts_back_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = Gate::new(dir.path().to_path_buf());
+        let t = rynas_api_types::scheduler::system::pc_retention();
+        assert!(g.interval_may_start(&t.id, Some(1), &t));
+        assert!(!g.interval_may_start(&t.id, Some(1), &t), "not again at once");
+        // pretend the wait passed: the next wait doubles
+        let back = |g: &Gate, by: Duration| {
+            let mut m = g.interval_started.lock().unwrap();
+            let e = m.get_mut(&t.id).unwrap();
+            e.0 = Instant::now().checked_sub(by).unwrap();
+        };
+        back(&g, INTERVAL_RESTART + Duration::from_secs(1));
+        assert!(g.interval_may_start(&t.id, Some(1), &t));
+        back(&g, INTERVAL_RESTART + Duration::from_secs(1));
+        assert!(!g.interval_may_start(&t.id, Some(1), &t), "the second wait is twice as long");
+        // at most the interval (one hour for the retention)
+        back(&g, Duration::from_secs(3601));
+        assert!(g.interval_may_start(&t.id, Some(1), &t));
+        // a run happened: at once again
+        assert!(g.interval_may_start(&t.id, Some(2), &t));
     }
 }

@@ -360,6 +360,12 @@ async fn create(
                 "this task is created by the feature that owns it, with its settings",
             ));
         }
+        if rynas_api_types::scheduler::system::RESERVED.contains(&t.id.as_str()) {
+            return Err(conflict(
+                error_codes::ALREADY_EXISTS,
+                format!("{} is the id of a job of rynas: choose another one", t.id),
+            ));
+        }
         stage_tasks(p, &o, |doc| {
             if doc.tasks.iter().any(|x| x.id == t.id) {
                 return Err(conflict(

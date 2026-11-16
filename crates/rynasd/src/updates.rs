@@ -256,6 +256,20 @@ impl Updates {
         s
     }
 
+    /// A running or queued `updates.*` task other than `me`.
+    fn running_other(&self, me: &str) -> Option<String> {
+        self.ops
+            .tasks
+            .list(100)
+            .into_iter()
+            .find(|t| {
+                t.id != me
+                    && t.kind.starts_with("updates.")
+                    && matches!(t.status, TaskStatus::Running | TaskStatus::Queued)
+            })
+            .map(|t| t.id)
+    }
+
     fn running_task(&self) -> Option<String> {
         self.ops
             .tasks
@@ -715,7 +729,8 @@ pub fn spawn_scheduled_check(who: &str) -> Res<String> {
         let old = s
             .lists_updated_ms
             .is_none_or(|t| now_ms().saturating_sub(t) > LISTS_MAX_AGE.as_millis() as u64);
-        let other = s.running_task.as_deref().is_some_and(|id| id != ctx.id());
+        // another update task (an upgrade, an install) runs: its apt must not be disturbed
+        let other = me.running_other(ctx.id()).is_some();
         let r = if old && !me.dry && !other {
             ctx.log("the package lists are old: refreshing them");
             let r = me.run(&ctx, apt(&["update"], Duration::from_secs(600))).await.map(|_| ());
@@ -749,5 +764,39 @@ mod tests {
         );
         // simulations stay in rynasd
         assert!(apt_sim(&["autoremove"]).display().starts_with("/usr/bin/apt-get -s"));
+    }
+
+    /// The scheduled check sees an upgrade that runs (the check itself is not "another update
+    /// task"): it must not refresh the lists under it.
+    #[tokio::test]
+    async fn the_check_sees_another_update_task_not_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(
+            rynas_config::Config::open(
+                rynas_config::ConfigOptions::new(dir.path().join("state"), dir.path()),
+                Arc::new(rynas_config::MemorySystem::new("nas")),
+                vec![],
+            )
+            .unwrap(),
+        );
+        let tasks = rynas_tasks::TaskManager::new(dir.path().join("tasks"), "nas", rynas_tasks::TaskConfig::default()).unwrap();
+        let ops = Arc::new(Ops::new(cfg, tasks));
+        let u = Updates::new(ops.clone(), Arc::new(rynas_notify::MemoryNotifier::default()), true, dir.path().into());
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let g = gate.clone();
+        let check = ops.tasks.spawn("updates.check", "rynas", move |_| async move {
+            g.notified().await;
+            Ok(())
+        }).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(u.running_other(&check), None, "the check alone");
+        let g2 = gate.clone();
+        let install = ops.tasks.spawn("updates.install", "admin", move |_| async move {
+            g2.notified().await;
+            Ok(())
+        }).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(u.running_other(&check), Some(install));
+        gate.notify_waiters();
     }
 }

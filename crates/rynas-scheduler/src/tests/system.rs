@@ -126,7 +126,7 @@ fn start<'a>(
     pause: &'a SchedulerPause,
     tz: &'a TimeZone,
 ) -> Start<'a> {
-    Start { task, now_ms: now, by_timer: true, requested: None, last_run: last, pause, running_elsewhere: false, tz }
+    Start { task, now_ms: now, by_timer: true, requested: None, last_run: last, not_before_ms: 0, pause, running_elsewhere: false, tz }
 }
 
 #[test]
@@ -168,4 +168,75 @@ fn the_gate_keeps_the_loops_rules() {
     now.by_timer = false;
     now.requested = Some((RunTrigger::Manual, 0));
     assert_eq!(decide(&now), Decision::Run { trigger: RunTrigger::Manual, attempt: 0 });
+}
+
+/// Review fixes: the DST fallback of Docker's window, retries of a PC maintenance cut short,
+/// the first interval start after the upgrade, a deduplication window on all week.
+#[test]
+fn the_gate_keeps_the_loops_rules_at_their_edges() {
+    let pause = SchedulerPause::default();
+    let rome = TimeZone::get("Europe/Rome").unwrap();
+    let local = |s: &str| {
+        let dt: jiff::civil::DateTime = s.parse().unwrap();
+        rome.to_ambiguous_zoned(dt).compatible().unwrap().timestamp().as_millisecond() as u64
+    };
+    // Docker's window at 02:30 for 90 minutes: the timer also fires at 03:00
+    let set: AutoUpdateSettings = serde_json::from_str(r#"{"hour":2,"minute":30,"window_min":90,"stacks":{"web":{"enabled":true}}}"#).unwrap();
+    let d = normalize_task(system::docker_auto_update(&set)).unwrap();
+    let timer = render_timer(&d).unwrap();
+    assert!(timer.contains("OnCalendar=*-*-* 02:30:00\nOnCalendar=*-*-* 03:00:00\n"), "{timer}");
+    // on the spring-forward night 02:30 does not exist: the 03:00 start runs it, as the loop
+    let gap = decide(&start(&d, local("2026-03-29T03:07:00"), None, &pause, &rome));
+    assert_eq!(gap, Decision::Run { trigger: RunTrigger::Timer, attempt: 0 });
+    // on other nights the 03:00 start is not due once the 02:30 one ran (no row)
+    let ran = Some((local("2026-04-05T02:41:00"), local("2026-04-05T02:50:00")));
+    let normal = decide(&start(&d, local("2026-04-05T03:07:00"), ran, &pause, &rome));
+    assert!(matches!(normal, Decision::Skip { reason: SkipReason::NotDue, .. }), "{normal:?}");
+    let on_time = decide(&start(&d, local("2026-04-05T02:41:00"), None, &pause, &rome));
+    assert_eq!(on_time, Decision::Run { trigger: RunTrigger::Timer, attempt: 0 });
+    // a window at a full hour has nothing to fall back to
+    let full: AutoUpdateSettings = serde_json::from_str(r#"{"hour":4,"minute":0,"window_min":90}"#).unwrap();
+    let plain = render_timer(&normalize_task(system::docker_auto_update(&full)).unwrap()).unwrap();
+    assert_eq!(plain.matches("OnCalendar=").count(), 1, "{plain}");
+
+    // PC maintenance: a run cut short is retried every five minutes inside its six hours
+    let m = normalize_task(system::pc_maintenance(3)).unwrap();
+    let p = m.effective_policy();
+    assert_eq!((p.retry.attempts, p.retry.delay_s, p.window_min), (72, 300, 360));
+    let utc = TimeZone::UTC;
+    let mut retry = start(&m, ms("2026-11-16T05:00:00"), None, &pause, &utc);
+    retry.by_timer = false;
+    retry.requested = Some((RunTrigger::Retry, 3));
+    assert_eq!(decide(&retry), Decision::Run { trigger: RunTrigger::Retry, attempt: 3 });
+    retry.now_ms = ms("2026-11-16T09:30:00");
+    assert!(matches!(decide(&retry), Decision::Skip { reason: SkipReason::Window, .. }));
+
+    // the first interval start after the upgrade waits for its delay after rynasd's start
+    let c = normalize_task(system::updates_check()).unwrap();
+    let mut first = start(&c, ms("2026-11-16T09:00:00"), None, &pause, &utc);
+    first.not_before_ms = ms("2026-11-16T09:10:00");
+    assert!(matches!(decide(&first), Decision::Skip { reason: SkipReason::NotDue, .. }));
+    first.now_ms = ms("2026-11-16T09:10:00");
+    assert_eq!(decide(&first), Decision::Run { trigger: RunTrigger::Timer, attempt: 0 });
+
+    // retries of the checks: until they work, at the loops' cadence
+    let i = system::docker_image_check().effective_policy().retry;
+    let a = system::apps_catalog(true).effective_policy().retry;
+    assert_eq!((i.attempts, i.delay_s, i.backoff), (u8::MAX, 3600, false));
+    assert_eq!((a.attempts, a.delay_s, a.backoff), (u8::MAX, 3 * 3600, false));
+
+    // a deduplication window on all week: its Sunday-midnight start runs, and the preview
+    // shows exactly those starts
+    let mut dd = super::task(
+        "dedup-vol1",
+        rynas_api_types::scheduler::TaskAction::Dedup { volume: "vol1".into() },
+        TaskTrigger::Window { window: "1".repeat(168), stop_at_end: true },
+    );
+    dd.policy.missed = Some(MissedPolicy::Skip);
+    let dd = normalize_task(dd).unwrap();
+    assert_eq!(decide(&start(&dd, local("2026-11-15T00:00:01"), None, &pause, &rome)), Decision::Run { trigger: RunTrigger::Timer, attempt: 0 });
+    let req = rynas_api_types::scheduler::SchedulePreviewRequest { trigger: Some(dd.trigger.clone()), count: Some(3), ..Default::default() };
+    let pv = crate::preview::preview(&req, &rome, Timestamp::from_millisecond(local("2026-11-16T10:00:00") as i64).unwrap());
+    let runs: Vec<&str> = pv.runs.iter().map(|r| r.local.as_str()).collect();
+    assert_eq!(runs, ["2026-11-22 00:00:00", "2026-11-29 00:00:00"]);
 }

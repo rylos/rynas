@@ -68,13 +68,18 @@ fn hour_start(dt: DateTime) -> DateTime {
 }
 
 /// The civil start of the block that `now` is in; `None` outside the window. A window on all
-/// week starts a week back.
+/// week has no block start of its own: its block starts every Sunday at midnight (the time
+/// its timer fires, as before S3).
 fn block_start(w: &[u8], now: DateTime) -> Option<DateTime> {
     let mut dt = hour_start(now);
     if !on(w, cell_of(&dt)) {
         return None;
     }
+    let all_week = (0..CELLS).all(|i| on(w, i));
     for _ in 0..CELLS {
+        if all_week && cell_of(&dt) == 0 {
+            break;
+        }
         let prev = dt.checked_sub(1.hour()).ok()?;
         if !on(w, cell_of(&prev)) {
             break;
@@ -82,6 +87,46 @@ fn block_start(w: &[u8], now: DateTime) -> Option<DateTime> {
         dt = prev;
     }
     Some(dt)
+}
+
+/// A daily time (`*-*-* HH:MM:00`, the form rynas writes for daily windows), when `expr` is
+/// one.
+pub fn daily_time(expr: &str) -> Option<(u8, u8)> {
+    let t = expr.strip_prefix("*-*-* ")?.strip_suffix(":00")?;
+    let (h, m) = t.split_once(':')?;
+    let (h, m): (u8, u8) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60 && t.len() == 5).then_some((h, m))
+}
+
+/// The DST fallback of a daily start window: when the window opens at `h:m` and lasts more
+/// than the rest of that hour, its next full hour is still inside it. systemd skips `h:m` on
+/// the night it does not exist (spring forward); the rynas loops looked at the clock and
+/// started at the next full hour then. The timer gets that hour as a second line, and the
+/// gate lets its start through only on such a night ([`fallback_due`]).
+pub fn dst_fallback(h: u8, m: u8, window_min: u32) -> Option<u8> {
+    (m > 0 && window_min > u32::from(60 - m)).then_some((h + 1) % 24)
+}
+
+/// `h:m` does not exist on the local day of `now_ms` (the clocks jump over it).
+pub fn gap_on_day(tz: &TimeZone, now_ms: u64, h: u8, m: u8) -> bool {
+    let Ok(now) = Timestamp::from_millisecond(now_ms as i64) else {
+        return false;
+    };
+    let d = now.to_zoned(tz.clone()).date();
+    let Ok(dt) = DateTime::new(d.year(), d.month(), d.day(), h as i8, m as i8, 0, 0) else {
+        return false;
+    };
+    matches!(tz.to_ambiguous_zoned(dt).offset(), AmbiguousOffset::Gap { .. })
+}
+
+/// A start of a daily window task in the hour of its DST fallback ([`dst_fallback`]): `None`
+/// when `now_ms` is not that start (within `slack_ms` after the full hour), else whether it is
+/// due: `h:m` did not exist that day.
+pub fn fallback_due(tz: &TimeZone, now_ms: u64, h: u8, m: u8, window_min: u32, slack_ms: u64) -> Option<bool> {
+    let fb = dst_fallback(h, m, window_min)?;
+    let now = Timestamp::from_millisecond(now_ms as i64).ok()?.to_zoned(tz.clone());
+    let into_ms = u64::from(now.minute() as u8) * 60_000 + u64::from(now.second() as u8) * 1000;
+    (now.hour() as u8 == fb && into_ms <= slack_ms).then(|| gap_on_day(tz, now_ms, h, m))
 }
 
 /// A timer start of a window task at `now_ms` is due: inside a block, at the block's start
@@ -179,5 +224,36 @@ mod tests {
         let first = ms("2026-10-25T02:00:00", &tz);
         assert!(start_due(&w, &tz, first, None));
         assert!(!start_due(&w, &tz, first + 3_600_000, Some(first)));
+    }
+
+    #[test]
+    fn a_window_on_all_week_starts_on_sunday_at_midnight() {
+        let tz = TimeZone::get("Europe/Rome").unwrap();
+        let w = "1".repeat(168);
+        // Sunday 2026-11-15 00:00: due (its timer's only time); later in the week, not
+        assert!(start_due(&w, &tz, ms("2026-11-15T00:00:01", &tz), None));
+        assert!(!start_due(&w, &tz, ms("2026-11-15T01:00:00", &tz), None));
+        assert!(!start_due(&w, &tz, ms("2026-11-18T13:00:00", &tz), None));
+        let ran = Some(ms("2026-11-15T00:00:02", &tz));
+        assert!(!start_due(&w, &tz, ms("2026-11-15T00:30:00", &tz), ran));
+        assert!(start_due(&w, &tz, ms("2026-11-22T00:00:01", &tz), ran));
+    }
+
+    #[test]
+    fn daily_windows_fall_back_to_the_next_hour_on_the_spring_forward_night() {
+        let tz = TimeZone::get("Europe/Rome").unwrap();
+        assert_eq!(daily_time("*-*-* 02:30:00"), Some((2, 30)));
+        assert_eq!(daily_time("Mon *-*-* 02:30:00"), None);
+        // 02:30 for 60 minutes: 03:00 is inside; 02:00 for 60 is not (the window ends at 03:00)
+        assert_eq!(dst_fallback(2, 30, 60), Some(3));
+        assert_eq!(dst_fallback(2, 0, 60), None);
+        assert_eq!(dst_fallback(2, 45, 10), None);
+        // 2026-03-29: 02:30 does not exist, the 03:00 start is due; a week later it is not
+        assert!(gap_on_day(&tz, ms("2026-03-29T03:00:00", &tz), 2, 30));
+        assert_eq!(fallback_due(&tz, ms("2026-03-29T03:05:00", &tz), 2, 30, 60, 22 * 60_000), Some(true));
+        assert_eq!(fallback_due(&tz, ms("2026-04-05T03:05:00", &tz), 2, 30, 60, 22 * 60_000), Some(false));
+        // not that hour, or past the random delay: not a fallback start
+        assert_eq!(fallback_due(&tz, ms("2026-03-29T03:40:00", &tz), 2, 30, 60, 22 * 60_000), None);
+        assert_eq!(fallback_due(&tz, ms("2026-04-05T02:40:00", &tz), 2, 30, 60, 22 * 60_000), None);
     }
 }

@@ -35,7 +35,6 @@ use crate::apps::AppCandidate;
 use crate::docker::{DockerSvc, audit, compose, compose_for, current_images, stack_services, do_rollback, mark_busy, pre_snapshot};
 
 const MIN: u64 = 60_000;
-const DAY: u64 = 24 * 60 * MIN;
 /// How often the scheduler looks at the clock.
 const TICK: Duration = Duration::from_secs(60);
 /// A report older than this is refreshed before a window.
@@ -269,11 +268,8 @@ pub fn enrich(s: &DockerSvc, mut r: UpdateReport) -> UpdateReport {
     let a = s.auto.lock().unwrap().clone();
     r.stacks = stack_updates(&r, &set, &a.apps, &a.held, &|n| s.updatable_stack(n));
     r.auto = a.results.into_values().collect();
-    // set by the scheduled check; before its first run since the start, a day after the last
-    r.next_check_ms = match s.next_check_ms.load(std::sync::atomic::Ordering::Relaxed) {
-        0 if r.checked_at_ms > 0 => r.checked_at_ms + DAY,
-        n => n,
-    };
+    // when the scheduler starts the check (its watch loop keeps it up to date)
+    r.next_check_ms = s.next_check_ms.load(std::sync::atomic::Ordering::Relaxed);
     r.next_window_ms = if set.stacks.values().any(|x| x.enabled) {
         next_window_ms(&set, a.last_window.as_deref())
     } else {
@@ -470,7 +466,7 @@ pub fn spawn_image_check(
     who: &str,
 ) -> Result<String, String> {
     let s = docker_of(p)?;
-    let task = t.clone();
+    let _ = t;
     let s2 = s.clone();
     s.ops
         .tasks
@@ -482,9 +478,8 @@ pub fn spawn_image_check(
                 }
                 return Err(format!("Docker does not answer: {}", e.2));
             }
+            // the next check is set by the scheduler's watch loop (the time it starts it at)
             let r = crate::docker::check_updates(&s2, &ctx, true).await;
-            let next = rynas_scheduler::gate::interval_due_ms(&task, rynas_tasks::now_ms()).unwrap_or(0);
-            s2.next_check_ms.store(next, std::sync::atomic::Ordering::Relaxed);
             s2.changed();
             r
         })
@@ -563,7 +558,26 @@ pub fn window_end(t: &rynas_api_types::scheduler::ScheduledTask, now_ms: u64) ->
         last = Some(slot.as_millisecond() as u64);
         slot = spec.next_after(&tz, slot)?;
     }
-    last.map(|s| s + min * MIN).filter(|e| *e > now_ms)
+    if let Some(e) = last.map(|s| s + min * MIN).filter(|e| *e > now_ms) {
+        return Some(e);
+    }
+    // the window's time did not exist today (spring forward): its civil window, as the loop
+    // read the clock (02:30 for 90 minutes: from the jump to 04:00)
+    let (h, m) = rynas_scheduler::window::daily_time(&expr)?;
+    if !rynas_scheduler::window::gap_on_day(&tz, now_ms, h, m) {
+        return None;
+    }
+    let local = jiff::Timestamp::from_millisecond(now_ms as i64).ok()?.to_zoned(tz.clone());
+    if u32::from(local.hour() as u8) * 60 + u32::from(local.minute() as u8) < u32::from(h) * 60 + u32::from(m) {
+        return None;
+    }
+    let today = local.date();
+    let end = today
+        .at(h as i8, m as i8, 0, 0)
+        .checked_add(jiff::SignedDuration::from_mins(min as i64))
+        .ok()?;
+    let end = tz.to_ambiguous_zoned(end).compatible().ok()?.timestamp().as_millisecond() as u64;
+    (end > now_ms).then_some(end)
 }
 
 /// The window: the allowed updates of the stacks that take them, one at a time.

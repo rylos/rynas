@@ -365,6 +365,14 @@ pub fn normalize_task(mut t: ScheduledTask) -> Result<ScheduledTask, String> {
                 "task {id}: a weekly window is 168 characters 0/1 with at least one 1"
             ));
         }
+        // only deduplication stops itself at the end of its block
+        TaskTrigger::Window { stop_at_end: true, .. }
+            if !matches!(t.action, TaskAction::Dedup { .. }) =>
+        {
+            return Err(format!(
+                "task {id}: only deduplication stops at the end of its window block (stop_at_end)"
+            ));
+        }
         _ => {}
     }
     t.trigger = match t.trigger {

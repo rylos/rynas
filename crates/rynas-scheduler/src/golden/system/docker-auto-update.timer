@@ -1,9 +1,10 @@
-# Managed by rynas — do not edit (sha256:8c581e420c62c5a62bbfdcd382c3ba261308219519439894b69a09e205315309)
+# Managed by rynas — do not edit (sha256:409c2c1e636494c38965a8d19dd7dc77e68846eb0917d8ff1d960b7cc739f28c)
 [Unit]
 Description=Timer of rynas task docker-auto-update
 
 [Timer]
 OnCalendar=*-*-* 04:30:00
+OnCalendar=*-*-* 05:00:00
 Persistent=true
 RandomizedDelaySec=1200
 AccuracySec=1s

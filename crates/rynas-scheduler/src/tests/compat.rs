@@ -174,7 +174,9 @@ fn run_policy_and_new_triggers() {
     for (trig, ok) in [
         (TaskTrigger::Interval { hours: 24, after_boot_min: 10 }, true),
         (TaskTrigger::Interval { hours: 0, after_boot_min: 10 }, false),
-        (TaskTrigger::Window { window: "1".repeat(168), stop_at_end: true }, true),
+        (TaskTrigger::Window { window: "1".repeat(168), stop_at_end: false }, true),
+        // only deduplication stops at the end of its block
+        (TaskTrigger::Window { window: "1".repeat(168), stop_at_end: true }, false),
         (TaskTrigger::Window { window: "0".repeat(168), stop_at_end: true }, false),
     ] {
         let mut t = base.clone();

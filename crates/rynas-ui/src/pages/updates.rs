@@ -20,6 +20,7 @@ use crate::form::{form_error, lens, lens_bool, segmented, spinner, stale_notice,
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::schedule::window::{hhmm, parse_hhmm, time_field};
+use crate::schedule::window::Spread;
 use crate::schedule::WeekWindowEditor;
 use crate::tasks::TaskRun;
 use crate::toast::saved_applied;
@@ -507,7 +508,7 @@ fn auto_form(s: AutoUpdatesState, auto: Remote<AutoUpdatesState>) -> AnyView {
             {segmented("upd.mode", MODES, mode, set_mode)}
             <p class="field-help">{tr("upd.mode_help")}</p>
             <div hidden=off>
-                {win.view(win_changed)}
+                {win.view(Spread::Whole, win_changed)}
                 {switch("upd.reboot", Some("upd.reboot_help"), reboot, set_reboot)}
                 <div hidden=move || !reboot.get()>{time_field("upd.reboot_time", Some("upd.reboot_time_help"), rtime, set_rtime)}</div>
             </div>

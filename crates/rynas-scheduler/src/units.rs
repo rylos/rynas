@@ -204,7 +204,15 @@ pub fn render_timer(t: &ScheduledTask) -> Option<String> {
             // the policy decides catch-up and delay (the same values as the trigger fields
             // of a normalized task)
             let p = t.effective_policy();
-            let mut b = format!("OnCalendar={}\n", t.trigger.on_calendar()?);
+            let expr = t.trigger.on_calendar()?;
+            let mut b = format!("OnCalendar={expr}\n");
+            // a daily start window whose time may not exist (spring forward): its next full
+            // hour too, which the gate lets through only on that night
+            if let Some((h, m)) = crate::window::daily_time(&expr)
+                && let Some(fb) = crate::window::dst_fallback(h, m, p.window_min)
+            {
+                b.push_str(&format!("OnCalendar=*-*-* {fb:02}:00:00\n"));
+            }
             if p.missed.catches_up() {
                 b.push_str("Persistent=true\n");
             }

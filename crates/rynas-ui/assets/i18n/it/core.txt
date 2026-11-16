@@ -2618,7 +2618,8 @@ sch.set_in	Si imposta in {page}
 sch.system_timer	Gira col timer del sistema
 sch.win.start	Inizio finestra
 sch.win.length	Durata finestra (minuti)
-sch.win.help	Il lavoro parte in un momento a caso dentro la finestra e, finita la finestra, non parte niente di nuovo. Ora locale del NAS.
+sch.win.help_whole	Il lavoro parte in un momento a caso dentro la finestra e, finita la finestra, non parte niente di nuovo. Ora locale del NAS.
+sch.win.help_early	Il lavoro parte in un momento a caso nel primo terzo della finestra (al massimo dopo 20 minuti) e, finita la finestra, non parte niente di nuovo. Ora locale del NAS.
 sch.win.next	Prossime finestre
 sch.win.until	fino alle {time}
 sch.managed_storage	Gestita in Archiviazione: modificala lì.

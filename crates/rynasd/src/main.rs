@@ -1336,15 +1336,25 @@ fn main() -> std::io::Result<()> {
         }
         // the scheduler tasks of rynas's own jobs (updates check, Docker, app catalog, PC
         // backups, deduplication windows): created on the first start after the upgrade from
-        // the features' settings, kept in line with them afterwards
+        // the features' settings, and kept in line with the applied settings afterwards (a
+        // restored revision, an imported archive, a rollback: checked every minute)
         {
             let cfg = ops.config.clone();
-            let pc_hour = state.pc_agent.as_ref().map(|a| a.snapshot().settings.maintenance_hour);
-            tokio::task::spawn_blocking(move || {
-                match rynasd::system_tasks::ensure(&cfg, pc_hour, &|l| tracing::info!("scheduler: {l}")) {
-                    Ok(Some(rev)) => tracing::info!("scheduler: tasks of rynas's jobs applied (revision {rev})"),
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!("scheduler: tasks of rynas's jobs: {e}"),
+            let agent = state.pc_agent.clone();
+            tokio::spawn(async move {
+                loop {
+                    let (cfg2, pc_hour) = (cfg.clone(), agent.as_ref().map(|a| a.snapshot().settings.maintenance_hour));
+                    let r = tokio::task::spawn_blocking(move || {
+                        rynasd::system_tasks::ensure(&cfg2, pc_hour, &|l| tracing::info!("scheduler: {l}"))
+                    })
+                    .await;
+                    match r {
+                        Ok(Ok(Some(rev))) => tracing::info!("scheduler: tasks of rynas's jobs applied (revision {rev})"),
+                        Ok(Ok(None)) => {}
+                        Ok(Err(e)) => tracing::warn!("scheduler: tasks of rynas's jobs: {e}"),
+                        Err(e) => tracing::warn!("scheduler: tasks of rynas's jobs: {e}"),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
             });
         }

@@ -179,6 +179,15 @@ impl NextRuns {
     }
 }
 
+/// Where in a window the work starts (its random delay).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Spread {
+    /// Anywhere inside it (automatic system updates).
+    Whole,
+    /// In its first third, at most 20 minutes in (Docker's automatic updates).
+    FirstThird,
+}
+
 /// A daily window: its start and its length in minutes, with the same help and the next
 /// windows wherever it is edited (automatic system updates, Docker's automatic updates).
 #[derive(Clone, Copy)]
@@ -217,7 +226,8 @@ impl WeekWindowEditor {
     }
 
     /// `on_change`: told after every edit (the page's draft follows the editor).
-    pub fn view(self, on_change: Callback<()>) -> AnyView {
+    /// `spread`: where in the window the work starts (the same sentence shape for both).
+    pub fn view(self, spread: Spread, on_change: Callback<()>) -> AnyView {
         let e = self;
         let length_now = move || e.length.with(|l| l.trim().parse::<u32>().unwrap_or(0));
         view! {
@@ -225,7 +235,10 @@ impl WeekWindowEditor {
                 {time_field("sch.win.start", None, e.start.into(), Callback::new(move |v| { e.start.set(v); on_change.run(()); }))}
                 {number_field("sch.win.length", None, e.length.into(), Callback::new(move |v| { e.length.set(v); on_change.run(()); }), i64::from(WINDOW_MIN), i64::from(WINDOW_MAX))}
             </div>
-            <p class="field-help">{tr("sch.win.help")}</p>
+            <p class="field-help">{tr(match spread {
+                Spread::Whole => "sch.win.help_whole",
+                Spread::FirstThird => "sch.win.help_early",
+            })}</p>
             {e.next.view(length_now)}
         }
         .into_any()

@@ -62,19 +62,30 @@ pub fn tasks(w: &Wanted) -> Vec<(ScheduledTask, bool)> {
 }
 
 /// Puts the wanted tasks into `doc`; `true` when something changed. A task the user made
-/// with the same id (another action) is left alone. A deduplication task is only rewritten
-/// when it exists (its settings create it).
+/// earlier with the id of one of rynas's jobs (another action) is renamed (`<id>-user`,
+/// schedule and everything else kept) and the job takes its id. A deduplication task is only
+/// rewritten when it exists (its settings create it).
 pub fn merge(doc: &mut SchedulerConfig, wanted: Vec<(ScheduledTask, bool)>, log: &dyn Fn(&str)) -> bool {
     let mut changed = false;
+    // the users' tasks on the ids of rynas's jobs move aside
+    // (the automatic system updates are never stored: a task with their id is always a user's)
+    let clash = |t: &ScheduledTask| system::RESERVED.contains(&t.id.as_str()) && t.action != system_action(&t.id);
+    let taken: Vec<usize> = doc.tasks.iter().enumerate().filter(|(_, t)| clash(t)).map(|(i, _)| i).collect();
+    for i in taken {
+        let old = doc.tasks[i].id.clone();
+        let new = (1..)
+            .map(|n| if n == 1 { format!("{old}-user") } else { format!("{old}-user-{n}") })
+            .find(|id| !doc.tasks.iter().any(|t| t.id == *id))
+            .unwrap_or_default();
+        let msg = format!("task {old} has the id of a job of rynas: renamed {new} (its schedule is kept)");
+        tracing::warn!("scheduler: {msg}");
+        log(&msg);
+        doc.tasks[i].id = new;
+        changed = true;
+    }
     for (want, feature_enables) in wanted {
         let pos = doc.tasks.iter().position(|t| t.id == want.id);
         let cur = pos.map(|i| doc.tasks[i].clone());
-        if let Some(c) = &cur
-            && std::mem::discriminant(&c.action) != std::mem::discriminant(&want.action)
-        {
-            log(&format!("task {} is a task of its own: not replaced by the job of rynas", want.id));
-            continue;
-        }
         if cur.is_none() && matches!(want.action, TaskAction::Dedup { .. }) {
             continue;
         }
@@ -102,6 +113,19 @@ pub fn merge(doc: &mut SchedulerConfig, wanted: Vec<(ScheduledTask, bool)>, log:
         changed = true;
     }
     changed
+}
+
+/// The action of the job of rynas with id `id` (none: a placeholder that matches nothing).
+fn system_action(id: &str) -> TaskAction {
+    match id {
+        system::UPDATES_CHECK => TaskAction::UpdatesCheck,
+        system::DOCKER_IMAGE_CHECK => TaskAction::DockerImageCheck,
+        system::DOCKER_AUTO_UPDATE => TaskAction::DockerAutoUpdate,
+        system::APPS_CATALOG => TaskAction::AppsCatalog,
+        system::PC_MAINTENANCE => TaskAction::PcMaintenance,
+        system::PC_RETENTION => TaskAction::PcRetention,
+        _ => TaskAction::SystemUpgrade,
+    }
 }
 
 /// At the start of rynasd: the tasks of the jobs, applied when they differ from the stored
@@ -189,13 +213,26 @@ mod tests {
         assert!(!doc.tasks[0].enabled);
         let m = doc.tasks.iter().find(|t| t.id == "pc-maintenance").unwrap();
         assert_eq!(m.trigger.on_calendar().as_deref(), Some("*-*-* 05:00:00"));
-        // a user task with the same id is not replaced
-        let mut mine = SchedulerConfig { tasks: vec![doc.tasks[0].clone()] };
-        mine.tasks[0].action = TaskAction::Command { command: "true".into(), user: "root".into() };
-        mine.tasks[0].owner = Default::default();
-        let before = mine.clone();
-        assert!(!merge(&mut mine, tasks(&Wanted { always: true, ..Default::default() }).into_iter().take(1).collect(), &|_| {}));
-        assert_eq!(mine, before);
+        // a user task made earlier with the id of a job moves aside, its schedule kept; one on
+        // the id of the automatic system updates too
+        let mut user = doc.tasks[0].clone();
+        user.action = TaskAction::Command { command: "true".into(), user: "root".into() };
+        user.owner = Default::default();
+        user.trigger = rynas_api_types::scheduler::TaskTrigger::Calendar {
+            on_calendar: "*-*-* 05:00:00".into(),
+            cron: None,
+            persistent: true,
+            randomized_delay_s: 0,
+        };
+        let mut apt = user.clone();
+        apt.id = "apt-upgrade".into();
+        let mut mine = SchedulerConfig { tasks: vec![user.clone(), apt] };
+        assert!(merge(&mut mine, tasks(&Wanted { always: true, ..Default::default() }), &|_| {}));
+        let ids: Vec<&str> = mine.tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["updates-check-user", "apt-upgrade-user", "updates-check", "pcbackup-retention"]);
+        assert_eq!(mine.tasks[0].trigger, user.trigger);
+        assert_eq!(mine.tasks[2].action, TaskAction::UpdatesCheck);
+        assert!(!merge(&mut mine, tasks(&Wanted { always: true, ..Default::default() }), &|_| {}));
     }
 
     #[test]
