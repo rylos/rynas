@@ -26,7 +26,7 @@ use rustic_core::{
 };
 use rynas_api_types::pcagent::*;
 
-use crate::http::{Client, Endpoint};
+use crate::http::Client;
 use crate::mounts::{self, Mount};
 use crate::state::{State, now_ms};
 use crate::{btrfs, freeze, lvm, manifest, probe};
@@ -461,8 +461,7 @@ fn reporter(client: Arc<Client>, run_id: String, c: Arc<Counters>, stop: Arc<Ato
 }
 
 pub fn client_of(st: &State) -> Result<Arc<Client>, String> {
-    let ep = Endpoint::parse(&st.url)?;
-    Ok(Arc::new(Client::new(ep, &st.fingerprint).with_token(&st.token)))
+    crate::trust::client(st).map(Arc::new)
 }
 
 /// One backup, start to report. `private_mounts` must have run already (the caller does it

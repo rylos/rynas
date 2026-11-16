@@ -721,6 +721,52 @@ pub struct PairResponse {
     #[serde(default)]
     pub nas_name: String,
     pub plan: AgentPlan,
+    /// What the agent pins instead of the certificate it saw (`None`: a NAS without its local
+    /// certificate authority, e.g. a dry system; the agent keeps the certificate pin).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<AgentTrust>,
+}
+
+/// What an agent trusts of its NAS (`PairResponse::trust`, and [`AGENT_TRUST`] on every
+/// contact): the NAS' **local certificate authority** and a stable identity, instead of the
+/// exact certificate seen at pairing. The NAS' own HTTPS port serves, to a client that asks
+/// for the name [`agent_tls_name`] (SNI), a certificate issued by that authority for that
+/// name only; the agent checks the chain up to the pinned authority (validity included) and
+/// the name. A new host name, a new address or a re-issued certificate change none of that,
+/// so PCs never need pairing again for them; a certificate of another NAS (another
+/// authority, or another identity) is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentTrust {
+    /// This NAS' identity: 32 lower-case hex digits, made once ([`valid_nas_id`]).
+    pub nas_id: String,
+    /// The local authority's certificates (PEM, one each): the current one, and ahead of a
+    /// rotation the next one too, so agents carry it before the switch.
+    pub cas: Vec<String>,
+    /// Where the NAS' own HTTPS port answers (`https://<name or address>:<port>`), host
+    /// names first: the agent tries them in order when its address stops answering.
+    #[serde(default)]
+    pub addresses: Vec<String>,
+}
+
+/// `GET` (device token): this NAS' [`AgentTrust`] now. 404 on a NAS that has none (older
+/// versions, dry systems).
+pub const AGENT_TRUST: &str = "/api/v1/pcbackup/agent/trust";
+/// The name an agent asks the NAS' HTTPS port for (`<nas id>` + this): a reserved top-level
+/// domain (RFC 6761), so it can never be a real name of anything.
+pub const AGENT_TLS_SUFFIX: &str = ".rynas.invalid";
+/// Most CA certificates an agent keeps (current and next, with room to spare).
+pub const AGENT_MAX_CAS: usize = 4;
+/// Most addresses an agent keeps.
+pub const AGENT_MAX_ADDRESSES: usize = 16;
+
+/// The TLS name of the NAS `nas_id` for its agents.
+pub fn agent_tls_name(nas_id: &str) -> String {
+    format!("{nas_id}{AGENT_TLS_SUFFIX}")
+}
+
+/// A NAS identity: 32 lower-case hex digits.
+pub fn valid_nas_id(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

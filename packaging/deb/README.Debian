@@ -101,7 +101,9 @@ The certificate:
   certificate is never renewed by rynas.
 - Files: rynasd keeps the CA key and every certificate in /var/lib/rynas/tls
   (0700 root) and publishes the active one for rynas-web in /etc/rynas/tls:
-  ui.crt (chain), ui.key (0640 root:rynas), ca.crt. Do not edit them by hand:
+  ui.crt (chain), ui.key (0640 root:rynas), ca.crt, and agent.crt/agent.key
+  (the certificate the PC backup agents check, from the local CA). Do not
+  edit them by hand:
   rynasd rewrites them. "systemctl reload rynas-web" re-reads them at once.
 - Locked out by an imported certificate your browser refuses? As root:
       /usr/libexec/rynas/rynasd tls-reset

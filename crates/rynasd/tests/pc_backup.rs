@@ -645,6 +645,12 @@ async fn agent_folder_pairing_listing_and_receive() {
     assert_eq!(p.device, "laptop");
     let tok = p.token.clone();
     assert_ne!(tok, first);
+    // no local CA in this NAS (no TLS service): the agent keeps the certificate pin
+    assert!(p.trust.is_none());
+    let (s, _) = agent_call(&e, Some(&tok), "GET", "/v1/pcbackup/agent/trust", Vec::new()).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = agent_call(&e, None, "GET", "/v1/pcbackup/agent/trust", Vec::new()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
     let (s, _) = agent_call(&e, Some(&first), "GET", "/v1/pcbackup/agent/btrfs/snapshots", Vec::new()).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     let dev: Value = serde_json::from_slice(&call(&e, "GET", "/v1/pcbackup/devices/laptop", None).await.1).unwrap();

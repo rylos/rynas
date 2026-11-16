@@ -231,3 +231,44 @@ async fn plain_http_redirects_once_https_is_ready_except_loopback() {
         assert_ne!(r.status(), StatusCode::TEMPORARY_REDIRECT, "{peer} {host}");
     }
 }
+
+/// The PC agents' certificate (`agent.crt` next to `ui.crt`): served only to clients that ask
+/// for the reserved agent name, issued by the same local CA for that name only; the
+/// interface keeps its own certificate (here one of another CA, as an imported one).
+#[tokio::test]
+async fn the_agents_certificate_is_served_by_name() {
+    let d = tempfile::tempdir().unwrap();
+    let now = rynas_tls::now();
+    let ca = rynas_tls::generate_ca("testnas", now).unwrap();
+    let (other_ca, imported) = local_pair();
+    write_pair(d.path(), &imported);
+    let id = "0123456789abcdef0123456789abcdef";
+    let name = rynas_api_types::pcagent::agent_tls_name(id);
+    let agent_names = rynas_tls::Names {
+        dns: [name.clone()].into(),
+        ips: Default::default(),
+    };
+    let (port, reloader, _app) = start(d.path()).await;
+    reloader.reload().unwrap();
+    // no agent pair yet (an older rynasd): the agent name gets the interface's certificate
+    assert!(https(port, &ca, &name, SESSION).await.is_err());
+    assert!(https(port, &other_ca, &name, SESSION).await.is_err(), "not valid for the name");
+    let agent = rynas_tls::issue_leaf(&ca, &agent_names, now).unwrap();
+    std::fs::write(d.path().join("agent.key"), &agent.key).unwrap();
+    std::fs::write(d.path().join("agent.crt"), &agent.chain).unwrap();
+    assert!(reloader.reload().unwrap());
+    let r = https(port, &ca, &name, SESSION).await.unwrap();
+    assert!(r.starts_with("HTTP/1.1 401"), "{r}");
+    // the case of the name does not matter (DNS names are case-insensitive)
+    assert!(https(port, &ca, &name.to_ascii_uppercase(), SESSION).await.is_ok());
+    // another NAS identity under the same CA: the certificate does not name it
+    let wrong = rynas_api_types::pcagent::agent_tls_name("ffffffffffffffffffffffffffffffff");
+    assert!(https(port, &ca, &wrong, SESSION).await.is_err());
+    // every other name still gets the interface's certificate
+    assert!(https(port, &other_ca, "localhost", SESSION).await.is_ok());
+    assert!(https(port, &ca, "localhost", SESSION).await.is_err());
+    // the agent pair removed: nothing served for it any more
+    std::fs::remove_file(d.path().join("agent.crt")).unwrap();
+    assert!(reloader.reload().unwrap());
+    assert!(https(port, &ca, &name, SESSION).await.is_err());
+}

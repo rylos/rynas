@@ -245,6 +245,9 @@ writer; rynas-web (user `rynas`) only reads.
 | `/var/lib/rynas/tls/active` | 0600 root | `local` or `imported` |
 | `/etc/rynas/tls/ui.crt` | 0644 (dir 0750 root:rynas) | **active** chain, read by rynas-web |
 | `/etc/rynas/tls/ui.key` | 0640 root:rynas | active key (written before `ui.crt`; each file through a temporary file and a rename) |
+| `/var/lib/rynas/tls/nas-id` | 0600 root | this NAS' identity for the PC agents (32 hex digits, made once) |
+| `/var/lib/rynas/tls/agent.crt`, `agent.key`, `ca-next.crt`, `ca-next.key` | 0600 root | the PC agents' leaf (only SAN `<nas-id>.rynas.invalid`, from the local CA) and the next CA announced ahead of a rotation (`docs/research/pc-backup.md` §4.2.1) |
+| `/etc/rynas/tls/agent.crt`, `agent.key` | 0644 / 0640 root:rynas | the agents' leaf, served by rynas-web only to clients asking for that name (SNI) |
 | `/etc/rynas/tls/ca.crt` | 0644 | local CA certificate ("Trust this NAS") |
 
 - **Local leaf**: ECDSA P-256 (every browser and TLS stack; Ed25519 certificates are still not
@@ -1843,7 +1846,8 @@ once per failure streak.
 
 | Method | Path | Auth | Body | Response |
 |---|---|---|---|---|
-| POST | `/api/v1/pcbackup/agent/pair` | pairing code in the body | `PairRequest` {code, hostname, machine_id, os, arch, agent_version, root_btrfs? (the PC's `/` is btrfs, also kept from every report as `PcDevice.root_btrfs`)} | `PairResponse` {device, group, token, repo_password, nas_name, plan `AgentPlan`}; 401 `invalid_credentials` |
+| POST | `/api/v1/pcbackup/agent/pair` | pairing code in the body | `PairRequest` {code, hostname, machine_id, os, arch, agent_version, root_btrfs? (the PC's `/` is btrfs, also kept from every report as `PcDevice.root_btrfs`)} | `PairResponse` {device, group, token, repo_password, nas_name, plan `AgentPlan`, trust? `AgentTrust`}; 401 `invalid_credentials` |
+| GET | `/api/v1/pcbackup/agent/trust` | device token | — | `AgentTrust` {nas_id (32 hex), cas (PEM: the local CA, plus the next one ahead of a rotation), addresses (`https://<name or IP>:<web TLS port>`, names first)}; 404 without a local CA (dry systems); 401 unknown or revoked token. What the agent pins instead of the certificate (`docs/research/pc-backup.md` §4.2) |
 | GET | `/api/v1/pcbackup/agent/plan?rev=&wait=` | device token | — | `AgentPlan` {rev, plan, command?, method files\|btrfs}; with `wait` (≤ 55 s) it answers when `rev` changes or at the deadline; 401 once revoked |
 | POST | `/api/v1/pcbackup/agent/status` | device token | `AgentStatus` {run_id, phase preparing\|snapshot\|uploading\|finishing, bytes_done, bytes_total, files_done, files_total, message? (English, for older UIs), btrfs? `BtrfsStep` {subvolume, snapshot, parent? (none: full), error_code?, error?}} | 204 |
 | POST | `/api/v1/pcbackup/agent/report` | device token | `AgentReport` {`PcRun` fields (each `Capture` with note? in English and btrfs? `BtrfsStep`; error codes: `snapshot`, `transport`, `cancelled` or the NAS' code), manifest?, agent_version, root_btrfs?} | 204 |

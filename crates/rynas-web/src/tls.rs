@@ -44,6 +44,8 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 
+use rynas_api_types::pcagent::AGENT_TLS_SUFFIX;
+
 use crate::conn::ConnAddrs;
 
 /// Default certificate chain and key, published by rynasd.
@@ -58,18 +60,34 @@ pub const CHECK_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Https;
 
-/// The certificate served to every client, swapped in place on reload.
+/// The certificate served to every client, swapped in place on reload; and the PC agents'
+/// certificate (`agent.crt`, issued by the local CA for the NAS identity only), served to
+/// clients that ask for a name ending in [`AGENT_TLS_SUFFIX`].
 #[derive(Debug, Default)]
 pub struct Resolver {
     current: RwLock<Option<Arc<CertifiedKey>>>,
+    agent: RwLock<Option<Arc<CertifiedKey>>>,
 }
 
 impl ResolvesServerCert for Resolver {
-    fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        self.current
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+    fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        self.pick(hello.server_name())
+    }
+}
+
+impl Resolver {
+    /// The pair for a client that asked for `sni`: the agents' one for their reserved name
+    /// (when loaded; else the interface's, which such a client refuses), the interface's for
+    /// any other name or none.
+    fn pick(&self, sni: Option<&str>) -> Option<Arc<CertifiedKey>> {
+        if sni.is_some_and(|n| {
+            n.len() > AGENT_TLS_SUFFIX.len()
+                && n.to_ascii_lowercase().ends_with(AGENT_TLS_SUFFIX)
+        }) && let Some(a) = self.agent.read().unwrap_or_else(|e| e.into_inner()).clone()
+        {
+            return Some(a);
+        }
+        self.resolve_any()
     }
 }
 
@@ -90,18 +108,25 @@ fn stamp_of(paths: [&PathBuf; 2]) -> Option<Stamp> {
 pub struct CertReloader {
     cert: PathBuf,
     key: PathBuf,
+    /// The PC agents' pair, next to `cert` (`agent.crt`, `agent.key`); optional.
+    agent_cert: PathBuf,
+    agent_key: PathBuf,
     resolver: Arc<Resolver>,
     stamp: Mutex<Option<Stamp>>,
+    agent_stamp: Mutex<Option<Stamp>>,
     provider: Arc<CryptoProvider>,
 }
 
 impl CertReloader {
     pub fn new(cert: PathBuf, key: PathBuf) -> Arc<Self> {
         Arc::new(Self {
+            agent_cert: cert.with_file_name("agent.crt"),
+            agent_key: cert.with_file_name("agent.key"),
             cert,
             key,
             resolver: Arc::default(),
             stamp: Mutex::new(None),
+            agent_stamp: Mutex::new(None),
             provider: Arc::new(rustls::crypto::ring::default_provider()),
         })
     }
@@ -128,6 +153,8 @@ impl CertReloader {
     }
 
     fn reload_inner(&self, force: bool) -> Result<bool, String> {
+        // the agents' pair first and on its own: missing or broken, the interface is served
+        let agent = self.reload_agent(force);
         let mut last = self.stamp.lock().unwrap_or_else(|e| e.into_inner());
         let now = stamp_of([&self.cert, &self.key]);
         if now.is_none() {
@@ -138,9 +165,9 @@ impl CertReloader {
             ));
         }
         if !force && now == *last && self.ready() {
-            return Ok(false);
+            return Ok(agent);
         }
-        let ck = self.load()?;
+        let ck = self.load(&self.cert, &self.key)?;
         *self
             .resolver
             .current
@@ -150,23 +177,52 @@ impl CertReloader {
         Ok(true)
     }
 
-    fn load(&self) -> Result<Arc<CertifiedKey>, String> {
-        let chain =
-            std::fs::read(&self.cert).map_err(|e| format!("{}: {e}", self.cert.display()))?;
-        let key = std::fs::read(&self.key).map_err(|e| format!("{}: {e}", self.key.display()))?;
+    /// Reloads the agents' pair when its files changed; `true` when what is served changed.
+    /// Missing files: none is served (older rynasd); a broken pair keeps the previous one.
+    fn reload_agent(&self, force: bool) -> bool {
+        let mut last = self.agent_stamp.lock().unwrap_or_else(|e| e.into_inner());
+        let now = stamp_of([&self.agent_cert, &self.agent_key]);
+        if !force && now == *last {
+            return false;
+        }
+        let slot = &self.resolver.agent;
+        if now.is_none() {
+            *last = None;
+            return slot
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .is_some();
+        }
+        match self.load(&self.agent_cert, &self.agent_key) {
+            Ok(ck) => {
+                *slot.write().unwrap_or_else(|e| e.into_inner()) = Some(ck);
+                *last = now;
+                true
+            }
+            Err(e) => {
+                tracing::debug!("https: agents' certificate not reloaded: {e}");
+                false
+            }
+        }
+    }
+
+    fn load(&self, cert: &PathBuf, key: &PathBuf) -> Result<Arc<CertifiedKey>, String> {
+        let chain = std::fs::read(cert).map_err(|e| format!("{}: {e}", cert.display()))?;
+        let key_pem = std::fs::read(key).map_err(|e| format!("{}: {e}", key.display()))?;
         let certs = CertificateDer::pem_slice_iter(&chain)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("{}: {e:?}", self.cert.display()))?;
+            .map_err(|e| format!("{}: {e:?}", cert.display()))?;
         if certs.is_empty() {
-            return Err(format!("{}: no certificate", self.cert.display()));
+            return Err(format!("{}: no certificate", cert.display()));
         }
-        let key = PrivateKeyDer::from_pem_slice(&key)
-            .map_err(|e| format!("{}: {e:?}", self.key.display()))?;
+        let k = PrivateKeyDer::from_pem_slice(&key_pem)
+            .map_err(|e| format!("{}: {e:?}", key.display()))?;
         let signer = self
             .provider
             .key_provider
-            .load_private_key(key)
-            .map_err(|e| format!("{}: {e}", self.key.display()))?;
+            .load_private_key(k)
+            .map_err(|e| format!("{}: {e}", key.display()))?;
         let ck = CertifiedKey::new(certs, signer);
         ck.keys_match().map_err(|_| {
             "the key does not match the certificate (update in progress?)".to_string()

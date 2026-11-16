@@ -5,6 +5,7 @@
 //! rynas-agent run                 the service (systemd unit rynas-agent.service)
 //! rynas-agent backup              one backup now, in the foreground
 //! rynas-agent status              pairing, plan, last backup
+//! rynas-agent set-server <url>    a new NAS address, checked with the pinned CA and identity
 //! rynas-agent manifest [--print]  writes /.rynas/manifest.json (or prints it)
 //!                                 (PCs that push with btrbk: run it before each btrbk run)
 //! rynas-agent restore [...]       bare-metal restore from a live system (TUI)
@@ -45,6 +46,7 @@ mod send_stream;
 #[allow(dead_code)]
 mod readahead;
 mod state;
+mod trust;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -60,6 +62,8 @@ const USAGE: &str = "usage:
   rynas-agent run
   rynas-agent backup
   rynas-agent status
+  rynas-agent set-server <nas address> [--allow-http]
+                   (the NAS moved to an address this PC does not know: no pairing again)
   rynas-agent manifest [--print] [--quiet]
   rynas-agent restore [--nas URL] [--code CODE] [--fingerprint FP] [--version ID]
                       [--disk /dev/X] [--confirm X] [--allow-http] [--dry-run]
@@ -196,7 +200,7 @@ fn pair(args: &[String]) -> Result<(), String> {
         root_btrfs: Some(btrfs::root_is_btrfs()),
     };
     let r: PairResponse = client.post_json("/api/v1/pcbackup/agent/pair", &req)?;
-    let st = State {
+    let mut st = State {
         url: ep.url(),
         fingerprint: pin,
         device: r.device.clone(),
@@ -207,6 +211,27 @@ fn pair(args: &[String]) -> Result<(), String> {
         plan: r.plan,
         ..Default::default()
     };
+    // the NAS' certificate authority and identity, sent over the connection the code and the
+    // fingerprint authenticate: pinned once a connection trusting only them works
+    if let Some(t) = &r.trust {
+        let proved = trust::check(t).and_then(|c| {
+            let eps = trust::endpoints(&ep.url(), &c.addresses)?;
+            trust::prove(&c, eps, &st.token)
+        });
+        match proved {
+            Ok((at, now)) => {
+                st.nas_id = now.nas_id;
+                st.cas = now.cas;
+                st.addresses = now.addresses;
+                st.trust_checked_ms = Some(now_ms());
+                if ep.tls {
+                    st.url = at;
+                }
+                st.fingerprint.clear();
+            }
+            Err(e) => eprintln!("the NAS' certificate authority could not be checked ({e}): its certificate stays pinned, the service tries again later"),
+        }
+    }
     st.save()?;
     println!("paired with {} as {} (group {})", if r.nas_name.is_empty() { ep.url() } else { r.nas_name }, r.device, r.group);
     println!("start the service: systemctl enable --now rynas-agent.service");
@@ -237,16 +262,21 @@ fn backup_cmd(_args: &[String]) -> Result<(), String> {
         st.plan = p;
     }
     st.last_attempt_ms = Some(now_ms());
-    let _ = st.save();
+    // only what this run changes: the service may refresh the address or the trust meanwhile
+    let _ = State::update(|s| {
+        s.plan = st.plan.clone();
+        s.last_attempt_ms = st.last_attempt_ms;
+    });
     let run = backup::run(&st);
     // saved after the thaw (never during a freeze)
-    if run.ok {
-        st.last_ok_ms = Some(run.ended_ms);
-        st.failures = 0;
-    } else {
-        st.failures += 1;
-    }
-    let _ = st.save();
+    let _ = State::update(|s| {
+        if run.ok {
+            s.last_ok_ms = Some(run.ended_ms);
+            s.failures = 0;
+        } else {
+            s.failures += 1;
+        }
+    });
     let changed = if run.changed_count > 0 { format!(", {} files changed while read", run.changed_count) } else { String::new() };
     match &run.error {
         None => {
@@ -267,6 +297,14 @@ fn status() -> Result<(), String> {
     let st = State::load()?;
     println!("NAS          {} ({})", st.url, st.nas_name);
     println!("PC           {} (group {})", st.device, st.group);
+    if st.nas_id.is_empty() {
+        println!("trust        the NAS certificate {} (pinned at pairing; replaced by the NAS' certificate authority at the next contact with a NAS that has it)", if st.fingerprint.is_empty() { "-" } else { &st.fingerprint });
+    } else {
+        println!("trust        the NAS' certificate authority, NAS identity {}", st.nas_id);
+        if !st.addresses.is_empty() {
+            println!("addresses    {}", st.addresses.join(", "));
+        }
+    }
     let p = &st.plan.plan;
     println!(
         "plan         every {} h, {}{}",
@@ -280,6 +318,66 @@ fn status() -> Result<(), String> {
     if let Some(d) = scheduler::next_due(&st, now_ms()) {
         let left = d.saturating_sub(now_ms()) / 60_000;
         println!("next         in about {left} min (when the service runs)");
+    }
+    Ok(())
+}
+
+/// `set-server <url>`: the NAS answers at an address this PC does not know (its name and
+/// addresses all changed). The new address is checked as every connection is: the NAS' CA
+/// and identity pinned at pairing (or, paired before, the certificate pin), with this PC's
+/// token; then it is stored first and the service restarted.
+fn set_server(args: &[String]) -> Result<(), String> {
+    root_only()?;
+    let pos = positional(args);
+    let url = pos.get(1).ok_or(USAGE)?;
+    let ep = Endpoint::parse(url)?;
+    if !ep.tls && !flag(args, "--allow-http") {
+        return Err("plain http sends the token unprotected: use https, or --allow-http on a trusted link".into());
+    }
+    let mut st = State::load()?;
+    match trust::stored(&st) {
+        Some(t) => {
+            let (_, now) = if ep.tls {
+                trust::prove(&t, vec![ep.clone()], &st.token)?
+            } else {
+                let c = Client::with_trust(vec![ep.clone()], t.trust()).with_token(&st.token);
+                let now = trust::check(&c.get_json::<AgentTrust>(AGENT_TRUST)?)?;
+                if now.nas_id != t.nas_id {
+                    return Err("the NAS answered with another identity".into());
+                }
+                (ep.url(), now)
+            };
+            st.cas = now.cas;
+            st.addresses = now.addresses;
+            st.trust_checked_ms = Some(now_ms());
+        }
+        None => {
+            // paired before the CA was pinned: the certificate pin, then the upgrade if the NAS
+            // has its CA (a new host name re-issues the certificate: then pair again)
+            let c = Client::new(ep.clone(), &st.fingerprint).with_token(&st.token);
+            c.get_json::<AgentPlan>("/api/v1/pcbackup/agent/plan")
+                .map_err(|e| format!("{e} (this PC pinned the NAS certificate of its pairing; if the NAS changed its name, pair this PC again)"))?;
+        }
+    }
+    st.url = ep.url();
+    if st.nas_id.is_empty() {
+        match trust::refresh(&mut st) {
+            Ok(trust::Refreshed::Upgraded) => println!("the NAS' certificate authority is pinned now"),
+            Ok(_) => {}
+            Err(e) => eprintln!("the NAS' certificate authority could not be checked ({e}): the certificate stays pinned"),
+        }
+        st.url = ep.url();
+    }
+    st.save()?;
+    println!("NAS address: {}", st.url);
+    // the service holds the old address in memory
+    let restarted = std::process::Command::new("systemctl")
+        .args(["try-restart", "rynas-agent.service"])
+        .stdin(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !restarted {
+        println!("restart the service if it runs: systemctl restart rynas-agent.service");
     }
     Ok(())
 }
@@ -379,6 +477,7 @@ fn main() {
         "run" => root_only().and_then(|_| scheduler::run_service()),
         "backup" => backup_cmd(&args),
         "status" => status(),
+        "set-server" => set_server(&args),
         "manifest" => manifest_cmd(&args),
         "btrfs-send" => btrfs_send_cmd(&args),
         // hidden, tests: what a run sends of the subvolumes nested in the given ones

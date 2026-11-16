@@ -474,7 +474,7 @@ impl BtrfsSource {
         let body = match self.client.get_stream(&path, &[("Accept", "application/zstd")], std::time::Duration::from_secs(600)) {
             Ok(Ok(b)) => b,
             Ok(Err(r)) => return Err(format!("{}: {}", c.snapshot, r.error_text())),
-            Err(e) => return Err(format!("{}: {e} (check the network and start the restore again)", self.client.ep.url())),
+            Err(e) => return Err(format!("{}: {e} (check the network and start the restore again)", self.client.ep().url())),
         };
         let mut dec = zstd::stream::read::Decoder::new(body).map_err(|e| format!("zstd: {e}"))?;
         dec.window_log_max(AGENT_ZSTD_WINDOW_LOG_MAX).map_err(|e| format!("zstd: {e}"))?;
@@ -576,7 +576,7 @@ impl RestoreSource for BtrfsSource {
             let r = self
                 .client
                 .request("GET", &format!("{RESTORE_BTRFS}/{}/manifest?snapshot={n}", self.dev.device), &[("Accept", "application/json")], &[])
-                .map_err(|e| format!("{}: {e}", self.client.ep.url()))?;
+                .map_err(|e| format!("{}: {e}", self.client.ep().url()))?;
             if r.status == 404 {
                 continue;
             }

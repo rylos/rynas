@@ -31,6 +31,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/pcbackup/agent/pair", post(forward))
         .route("/pcbackup/agent/plan", get(forward))
+        .route("/pcbackup/agent/trust", get(forward))
         .route("/pcbackup/agent/status", post(forward))
         .route("/pcbackup/agent/report", post(forward))
         .route("/pcbackup/agent/btrfs/snapshots", get(forward))

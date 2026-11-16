@@ -7,10 +7,17 @@
 //! - `local.crt`, `local.key`: the leaf it issued, re-issued when the host name or an
 //!   address is missing from it or 30 days before it expires ([`rynas_tls::needs_reissue`]);
 //! - `imported.crt`, `imported.key`: the administrator's certificate, when imported;
-//! - `active`: `local` or `imported`.
+//! - `active`: `local` or `imported`;
+//! - `nas-id`: this NAS' identity for the PC agents (32 hex digits, made once);
+//! - `agent.crt`, `agent.key`: the PC agents' leaf, issued by the local CA for the single
+//!   name `<nas-id>.rynas.invalid` (whatever is active for the interface), re-issued with a
+//!   new CA or before it expires, never for a host name or an address;
+//! - `ca-next.crt`, `ca-next.key`: the next local CA, made ahead and announced to the agents
+//!   in the last two years of the current one ([`TlsSvc::agent_trust`]).
 //!
 //! The active pair is published for `rynas-web` in `/etc/rynas/tls/` (0750 root:rynas):
-//! `ui.crt` (chain, 0644), `ui.key` (0640 root:rynas) and `ca.crt` (0644). rynas-web
+//! `ui.crt` (chain, 0644), `ui.key` (0640 root:rynas), `agent.crt` / `agent.key` (same
+//! modes; served only to clients asking for the agents' name) and `ca.crt` (0644). rynas-web
 //! reloads them without a restart. The key is written before the chain, each file atomically
 //! (temporary file + rename), and rynas-web only takes a pair whose key matches.
 //!
@@ -38,6 +45,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use rynas_api_types::error_codes;
+use rynas_api_types::pcagent::AgentTrust;
 use rynas_api_types::tls::{TlsImportRequest, TlsSource, TlsStatus};
 use rynas_tls::{Names, PemPair};
 
@@ -61,6 +69,13 @@ const SKIPPED_IFACES: &[&str] = &[
 /// How long the local certificate keeps the names of the previous host name after a rename
 /// (the next issue after that leaves them out).
 pub const FORMER_NAMES_MS: i64 = 86_400_000;
+
+const DAY_MS: i64 = 86_400_000;
+/// The local CA is replaced when it has less than this left (it is made for
+/// [`rynas_tls::CA_DAYS`]).
+pub const CA_SWITCH_DAYS: i64 = 365;
+/// From this long before its end the next CA is made and announced to the PC agents.
+pub const CA_ANNOUNCE_DAYS: i64 = 2 * 365;
 
 /// `<store>/host`: the host name the local certificate was last issued for, and the one
 /// before it while its names are kept ([`FORMER_NAMES_MS`]).
@@ -223,17 +238,46 @@ impl TlsSvc {
         Ok(())
     }
 
-    /// The local CA: the stored one while it is valid for another year, else a new one.
+    /// The local CA: the stored one while it is valid for another [`CA_SWITCH_DAYS`], else a
+    /// new one. From [`CA_ANNOUNCE_DAYS`] before its end a next CA is made ahead
+    /// (`ca-next.*`) and announced to the PC agents ([`Self::agent_trust`]); the switch takes
+    /// that one, so an agent that came by in that year already trusts it. An agent away for
+    /// longer is refused with a clear error and is paired again.
     fn ca(&self, host: &str, now: i64) -> io::Result<(PemPair, bool)> {
+        let valid_for = |p: &PemPair, days: i64| {
+            rynas_tls::inspect(&p.chain).is_ok_and(|info| {
+                info[0].not_after_ms - now > days * DAY_MS && info[0].not_before_ms <= now + DAY_MS
+            }) && rynas_tls::key_der(&p.key).is_ok()
+        };
         if let Some(p) = self.read_pair("ca")
-            && let Ok(info) = rynas_tls::inspect(&p.chain)
-            && info[0].not_after_ms - now > 365 * 86_400_000
-            && rynas_tls::key_der(&p.key).is_ok()
+            && valid_for(&p, CA_SWITCH_DAYS)
         {
+            if !valid_for(&p, CA_ANNOUNCE_DAYS)
+                && self
+                    .read_pair("ca-next")
+                    .is_none_or(|n| !valid_for(&n, CA_ANNOUNCE_DAYS))
+            {
+                let next = rynas_tls::generate_ca(host, now).map_err(io::Error::other)?;
+                self.write_pair("ca-next", &next)?;
+                tracing::info!(
+                    "tls: next local CA {} made ahead of the switch",
+                    rynas_tls::inspect(&next.chain)
+                        .map(|i| i[0].fingerprint_sha256.clone())
+                        .unwrap_or_default()
+                );
+            }
             return Ok((p, false));
         }
-        let ca = rynas_tls::generate_ca(host, now).map_err(io::Error::other)?;
+        let ca = match self
+            .read_pair("ca-next")
+            .filter(|n| valid_for(n, CA_SWITCH_DAYS))
+        {
+            Some(next) => next,
+            None => rynas_tls::generate_ca(host, now).map_err(io::Error::other)?,
+        };
         self.write_pair("ca", &ca)?;
+        let _ = std::fs::remove_file(self.path("ca-next.crt"));
+        let _ = std::fs::remove_file(self.path("ca-next.key"));
         tracing::info!(
             "tls: new local CA {}",
             rynas_tls::inspect(&ca.chain)
@@ -241,6 +285,59 @@ impl TlsSvc {
                 .unwrap_or_default()
         );
         Ok((ca, true))
+    }
+
+    /// This NAS' identity for its PC agents (`<store>/nas-id`, 32 hex digits, made once and
+    /// never changed: it outlives CA rotations and host names). Call with the lock held.
+    fn nas_id_locked(&self) -> io::Result<String> {
+        let p = self.path("nas-id");
+        if let Ok(s) = std::fs::read_to_string(&p)
+            && rynas_api_types::pcagent::valid_nas_id(s.trim())
+        {
+            return Ok(s.trim().to_string());
+        }
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b).map_err(|e| io::Error::other(e.to_string()))?;
+        let id: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        write_atomic(&p, format!("{id}\n").as_bytes(), 0o600, None)?;
+        Ok(id)
+    }
+
+    /// The stored leaf `stem` when it can be served as it is: readable, its key matching,
+    /// issued by `ca`, covering `want` and not about to expire.
+    fn current_leaf(&self, stem: &str, ca: &PemPair, want: &Names, now: i64) -> Option<PemPair> {
+        let p = self.read_pair(stem)?;
+        let info = rynas_tls::inspect(&p.chain).ok()?;
+        let ca_fp = rynas_tls::inspect(&ca.chain).ok()?.remove(0).fingerprint_sha256;
+        (rynas_tls::certified_key(&p).is_ok()
+            && info.get(1).is_some_and(|c| c.fingerprint_sha256 == ca_fp)
+            && !rynas_tls::needs_reissue(&info[0], want, now))
+        .then_some(p)
+    }
+
+    /// What PC agents trust of this NAS ([`AgentTrust`]): the identity, the local CA (and the
+    /// next one ahead of a switch), and the addresses of the HTTPS port `port`: the host name,
+    /// its mDNS name, then the interface addresses (no loopback).
+    pub fn agent_trust(&self, port: u16) -> io::Result<AgentTrust> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let nas_id = self.nas_id_locked()?;
+        let mut cas = Vec::new();
+        for stem in ["ca", "ca-next"] {
+            if let Some(p) = self.read_pair(stem)
+                && rynas_tls::chain_der(&p.chain).is_ok_and(|d| d.len() == 1)
+            {
+                cas.push(p.chain);
+            }
+        }
+        if cas.is_empty() {
+            return Err(io::Error::other("no local CA yet"));
+        }
+        let (host, addrs) = (self.probe)();
+        Ok(AgentTrust {
+            nas_id,
+            cas,
+            addresses: agent_addresses(&host, &addrs, port),
+        })
     }
 
     /// Makes sure a valid pair is active and published: creates the local CA and leaf on the
@@ -284,17 +381,7 @@ impl TlsSvc {
         let pair = match pair {
             Some(p) => p,
             None => {
-                let current = self.read_pair("local").filter(|p| {
-                    let Ok(info) = rynas_tls::inspect(&p.chain) else {
-                        return false;
-                    };
-                    rynas_tls::certified_key(p).is_ok()
-                        && info.get(1).is_some_and(|c| {
-                            rynas_tls::inspect(&ca.chain)
-                                .is_ok_and(|ci| ci[0].fingerprint_sha256 == c.fingerprint_sha256)
-                        })
-                        && !rynas_tls::needs_reissue(&info[0], &want, now)
-                });
+                let current = self.current_leaf("local", &ca, &want, now);
                 match current {
                     Some(p) if !reissue && !new_ca => p,
                     _ => {
@@ -307,10 +394,26 @@ impl TlsSvc {
                 }
             }
         };
+        // the PC agents' leaf: the NAS identity as its only name, always from the local CA
+        // (also while an imported certificate is active), served for that name only (SNI)
+        let agent_names = Names {
+            dns: [rynas_api_types::pcagent::agent_tls_name(&self.nas_id_locked()?)].into(),
+            ips: BTreeSet::new(),
+        };
+        let agent = match self.current_leaf("agent", &ca, &agent_names, now) {
+            Some(p) if !new_ca => p,
+            _ => {
+                let leaf =
+                    rynas_tls::issue_leaf(&ca, &agent_names, now).map_err(io::Error::other)?;
+                self.write_pair("agent", &leaf)?;
+                tracing::info!("tls: new certificate for the PC agents");
+                leaf
+            }
+        };
         if active != self.active() || !self.path("active").exists() {
             self.set_active(active)?;
         }
-        self.publish(&pair, &ca)
+        self.publish(&pair, &agent, &ca)
     }
 
     /// The local CA (made when missing): the web-access module issues the certificate of
@@ -329,12 +432,14 @@ impl TlsSvc {
         self.ca(&host, rynas_tls::now()).map(|(p, _)| p)
     }
 
-    /// Writes the published files that differ from `pair` / `ca`.
-    fn publish(&self, pair: &PemPair, ca: &PemPair) -> io::Result<bool> {
-        // the key first: rynas-web only takes a pair whose key matches the chain
-        let files: [(&str, &str, u32); 3] = [
+    /// Writes the published files that differ from `pair`, `agent` / `ca`.
+    fn publish(&self, pair: &PemPair, agent: &PemPair, ca: &PemPair) -> io::Result<bool> {
+        // each key first: rynas-web only takes a pair whose key matches the chain
+        let files: [(&str, &str, u32); 5] = [
             ("ui.key", &pair.key, 0o640),
             ("ui.crt", &pair.chain, 0o644),
+            ("agent.key", &agent.key, 0o640),
+            ("agent.crt", &agent.chain, 0o644),
             ("ca.crt", &ca.chain, 0o644),
         ];
         let mut changed = false;
@@ -457,6 +562,35 @@ pub fn parse_ip_addrs(json: &str) -> Vec<IpAddr> {
         }
     }
     out
+}
+
+/// The addresses PC agents may reach the HTTPS port `port` at: the host name (the full one
+/// when it has dots, then its first label), its mDNS name, then the interface addresses
+/// (IPv4 first; no loopback, no IPv6 link-local).
+pub fn agent_addresses(host: &str, addrs: &[IpAddr], port: u16) -> Vec<String> {
+    let names = rynas_tls::names(host, addrs);
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let first = host.split('.').next().unwrap_or_default().to_string();
+    let mut out: Vec<String> = Vec::new();
+    for d in [host.clone(), first.clone(), format!("{first}.local")] {
+        if names.dns.contains(&d) && d != "localhost" && !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    out.extend(
+        names
+            .ips
+            .iter()
+            .filter(|i| !i.is_loopback())
+            .map(|i| match i {
+                IpAddr::V4(v4) => v4.to_string(),
+                IpAddr::V6(v6) => format!("[{v6}]"),
+            }),
+    );
+    out.into_iter()
+        .take(rynas_api_types::pcagent::AGENT_MAX_ADDRESSES)
+        .map(|h| format!("https://{h}:{port}"))
+        .collect()
 }
 
 /// Ensures the certificate at start, then re-checks the names every [`CHECK_INTERVAL`] and
@@ -740,5 +874,105 @@ mod tests {
         let got: Vec<String> = parse_ip_addrs(json).iter().map(|i| i.to_string()).collect();
         assert_eq!(got, ["192.0.2.10", "2001:db8::10", "fe80::1", "100.64.0.5"]);
         assert!(parse_ip_addrs("garbage").is_empty());
+    }
+
+    #[test]
+    fn the_agent_leaf_carries_the_nas_id_and_survives_renames_and_imports() {
+        let d = tempfile::tempdir().unwrap();
+        let s = svc_in(d.path(), "nas", vec!["192.0.2.10".parse().unwrap()]);
+        s.ensure(false, false).unwrap();
+        let pubdir = d.path().join("etc/rynas/tls");
+        assert_eq!(mode(&pubdir.join("agent.key")), 0o640);
+        let t = s.agent_trust(8443).unwrap();
+        assert!(rynas_api_types::pcagent::valid_nas_id(&t.nas_id));
+        assert_eq!(t.cas.len(), 1);
+        assert_eq!(t.cas[0], std::fs::read_to_string(pubdir.join("ca.crt")).unwrap());
+        assert_eq!(
+            t.addresses,
+            ["https://nas:8443", "https://nas.local:8443", "https://192.0.2.10:8443"]
+        );
+        let agent = std::fs::read_to_string(pubdir.join("agent.crt")).unwrap();
+        let info = rynas_tls::inspect(&agent).unwrap();
+        assert_eq!(
+            info[0].dns_names,
+            [rynas_api_types::pcagent::agent_tls_name(&t.nas_id)]
+        );
+        assert!(info[0].ip_addresses.is_empty());
+        assert_eq!(info[1], s.status().unwrap().local_ca.unwrap());
+        // a new name and address: the UI leaf changes, the agent leaf and the id do not
+        let s = svc_in(d.path(), "store", vec!["192.0.2.99".parse().unwrap()]);
+        assert!(s.ensure(false, false).unwrap());
+        assert_eq!(std::fs::read_to_string(pubdir.join("agent.crt")).unwrap(), agent);
+        let t2 = s.agent_trust(8443).unwrap();
+        assert_eq!((t2.nas_id.as_str(), &t2.cas), (t.nas_id.as_str(), &t.cas));
+        assert_eq!(t2.addresses[0], "https://store:8443");
+        // an imported certificate for the interface: the agent leaf stays the local CA's
+        let now = rynas_tls::now();
+        let other = rynas_tls::generate_ca("other", now).unwrap();
+        let leaf = rynas_tls::issue_leaf(&other, &rynas_tls::names("store", &[]), now).unwrap();
+        s.import(&TlsImportRequest {
+            certificate: leaf.chain,
+            private_key: leaf.key,
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(pubdir.join("agent.crt")).unwrap(), agent);
+    }
+
+    #[test]
+    fn the_next_ca_is_announced_a_year_ahead_and_taken_at_the_switch() {
+        let d = tempfile::tempdir().unwrap();
+        let s = svc_in(d.path(), "nas", vec![]);
+        s.ensure(false, false).unwrap();
+        let store = d.path().join("state/tls");
+        // a CA with 500 days left: inside the announce window, not yet at the switch
+        let now = rynas_tls::now();
+        let old = rynas_tls::generate_ca("nas", now - (rynas_tls::CA_DAYS - 500) * DAY_MS).unwrap();
+        std::fs::write(store.join("ca.crt"), &old.chain).unwrap();
+        std::fs::write(store.join("ca.key"), &old.key).unwrap();
+        s.ensure(false, false).unwrap();
+        let t = s.agent_trust(8443).unwrap();
+        assert_eq!(t.cas.len(), 2, "current and next");
+        assert_eq!(t.cas[0], old.chain);
+        let next = t.cas[1].clone();
+        // the agent leaf is issued by the current CA until the switch
+        let agent = std::fs::read_to_string(d.path().join("etc/rynas/tls/agent.crt")).unwrap();
+        assert_eq!(
+            rynas_tls::inspect(&agent).unwrap()[1].fingerprint_sha256,
+            rynas_tls::inspect(&old.chain).unwrap()[0].fingerprint_sha256
+        );
+        // nothing new while the next one waits
+        assert!(!s.ensure(false, false).unwrap());
+        assert_eq!(s.agent_trust(8443).unwrap().cas[1], next);
+        // the switch (less than a year left): the announced CA becomes the current one
+        let old = rynas_tls::generate_ca("nas", now - (rynas_tls::CA_DAYS - 300) * DAY_MS).unwrap();
+        std::fs::write(store.join("ca.crt"), &old.chain).unwrap();
+        std::fs::write(store.join("ca.key"), &old.key).unwrap();
+        assert!(s.ensure(false, false).unwrap());
+        let t = s.agent_trust(8443).unwrap();
+        assert_eq!(t.cas, std::slice::from_ref(&next));
+        let agent = std::fs::read_to_string(d.path().join("etc/rynas/tls/agent.crt")).unwrap();
+        assert_eq!(
+            rynas_tls::inspect(&agent).unwrap()[1].fingerprint_sha256,
+            rynas_tls::inspect(&next).unwrap()[0].fingerprint_sha256
+        );
+    }
+
+    #[test]
+    fn agent_addresses_names_first_no_loopback() {
+        let a = agent_addresses(
+            "nas.example.lan",
+            &["2001:db8::5".parse().unwrap(), "192.0.2.5".parse().unwrap(), "fe80::1".parse().unwrap()],
+            8443,
+        );
+        assert_eq!(
+            a,
+            [
+                "https://nas.example.lan:8443",
+                "https://nas:8443",
+                "https://nas.local:8443",
+                "https://192.0.2.5:8443",
+                "https://[2001:db8::5]:8443"
+            ]
+        );
     }
 }

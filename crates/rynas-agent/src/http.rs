@@ -5,6 +5,8 @@
 //!
 //! The pin is checked on the end-entity certificate and the handshake signature is verified
 //! against that certificate's key, so a copy of the certificate without its key gets nowhere.
+//! A paired PC pins the NAS' local CA and identity instead ([`Trust::Ca`], `crate::trust`):
+//! rustls' WebPKI verifier with only that CA as root and the identity as the server name.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -198,11 +200,28 @@ impl<T: Read + Write + Send> Stream for T {}
 
 type Conn = BufReader<Box<dyn Stream>>;
 
+/// What a client trusts of the NAS.
+#[derive(Clone, Debug)]
+pub enum Trust {
+    /// The certificate whose SHA-256 is this (`AA:BB…`); empty: any (only to show it before
+    /// pairing). Agents paired before the NAS' local CA was pinned, and the restore.
+    Leaf(String),
+    /// The NAS' local certificate authority: the chain must lead to one of `roots` (validity
+    /// periods checked) and the certificate must be issued for `name`, the NAS identity
+    /// ([`rynas_api_types::pcagent::agent_tls_name`]), which is also the name asked for
+    /// (SNI). Whatever host name or address the NAS has now.
+    Ca { name: String, roots: Arc<rustls::RootCertStore> },
+}
+
 pub struct Client {
-    pub ep: Endpoint,
+    /// Where the NAS may answer, tried in order from the one that worked last.
+    eps: Vec<Endpoint>,
+    cur: std::sync::atomic::AtomicUsize,
     /// Pinned fingerprint (empty: accept any, pairing only).
     verifier: Arc<Pinned>,
-    tls: Option<Arc<rustls::ClientConfig>>,
+    tls: Arc<rustls::ClientConfig>,
+    /// The name asked for and checked ([`Trust::Ca`]); `None`: the endpoint's host.
+    sni: Option<String>,
     auth: Option<String>,
     idle: Mutex<Vec<Conn>>,
 }
@@ -311,28 +330,50 @@ impl Response {
 impl Client {
     /// A client for `ep` with the certificate `pin` (`AA:BB…`; empty while pairing).
     pub fn new(ep: Endpoint, pin: &str) -> Client {
+        Client::with_trust(vec![ep], Trust::Leaf(pin.to_string()))
+    }
+
+    /// A client for the NAS at `eps` (tried in order; at least one), trusting `trust`.
+    pub fn with_trust(eps: Vec<Endpoint>, trust: Trust) -> Client {
         let p = provider();
         let verifier = Arc::new(Pinned {
-            pin: normalize_fp(pin),
+            pin: match &trust {
+                Trust::Leaf(pin) => normalize_fp(pin),
+                Trust::Ca { .. } => String::new(),
+            },
             seen: Mutex::new(None),
             algs: p.signature_verification_algorithms,
         });
-        let tls = ep.tls.then(|| {
-            let cfg = rustls::ClientConfig::builder_with_provider(p)
-                .with_safe_default_protocol_versions()
-                .expect("TLS versions")
-                .dangerous()
-                .with_custom_certificate_verifier(verifier.clone())
-                .with_no_client_auth();
-            Arc::new(cfg)
-        });
+        let builder = rustls::ClientConfig::builder_with_provider(p)
+            .with_safe_default_protocol_versions()
+            .expect("TLS versions");
+        let (cfg, sni) = match trust {
+            Trust::Leaf(_) => (
+                builder
+                    .dangerous()
+                    .with_custom_certificate_verifier(verifier.clone())
+                    .with_no_client_auth(),
+                None,
+            ),
+            // rustls' own WebPKI verifier with only the NAS' CA as root: chain, validity
+            // periods, server-auth usage and the name, as for any public certificate
+            Trust::Ca { name, roots } => (builder.with_root_certificates(roots).with_no_client_auth(), Some(name)),
+        };
         Client {
-            ep,
+            eps,
+            cur: std::sync::atomic::AtomicUsize::new(0),
             verifier,
-            tls,
+            tls: Arc::new(cfg),
+            sni,
             auth: None,
             idle: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The NAS address in use (the last one that answered).
+    pub fn ep(&self) -> Endpoint {
+        let i = self.cur.load(std::sync::atomic::Ordering::Relaxed);
+        self.eps.get(i).or(self.eps.first()).cloned().unwrap_or(Endpoint { tls: true, host: String::new(), port: 443 })
     }
 
     /// Sends `Authorization: Bearer <token>` with every request.
@@ -350,31 +391,84 @@ impl Client {
         self.connect_with(TIMEOUT)
     }
 
-    /// A new connection whose reads give up after `read` without a byte.
+    /// A new connection whose reads give up after `read` without a byte: to the address that
+    /// answered last, else to the next ones in order (the first one that answers and passes
+    /// the certificate check becomes the address in use).
     fn connect_with(&self, read: Duration) -> io::Result<Conn> {
-        let addrs = (self.ep.host.as_str(), self.ep.port).to_socket_addrs()?;
-        let mut last = io::Error::other(format!("{}: no address", self.ep.host));
+        use std::sync::atomic::Ordering;
+        let n = self.eps.len();
+        let start = self.cur.load(Ordering::Relaxed);
+        let mut first: Option<io::Error> = None;
+        for k in 0..n {
+            let i = (start + k) % n;
+            // the address in use gets the patience of a slow link; the others answer at once
+            // on a LAN or not at all
+            let patience = Duration::from_secs(if k == 0 { 15 } else { 5 });
+            match self.connect_ep(&self.eps[i], read, patience) {
+                Ok(c) => {
+                    self.cur.store(i, Ordering::Relaxed);
+                    return Ok(c);
+                }
+                Err(e) if n > 1 => {
+                    first.get_or_insert(io::Error::new(e.kind(), format!("{}: {e}", self.eps[i].url())));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(match first {
+            Some(e) => io::Error::new(e.kind(), format!("{e} (and {} other addresses of the NAS failed)", n - 1)),
+            None => io::Error::other("no NAS address"),
+        })
+    }
+
+    /// A rustls certificate error of a [`Trust::Ca`] client in words: what likely happened and
+    /// what to do. Other errors as they are.
+    fn explain(&self, e: io::Error) -> io::Error {
+        use rustls::CertificateError as C;
+        let Some(rustls::Error::InvalidCertificate(c)) = e.get_ref().and_then(|i| i.downcast_ref::<rustls::Error>()) else {
+            return e;
+        };
+        if self.sni.is_none() {
+            return e;
+        }
+        let msg = match c {
+            C::UnknownIssuer | C::BadSignature => {
+                "the NAS certificate is not from the certificate authority this PC was paired with: another machine answers at this address, or the NAS was reinstalled or renewed its authority while this PC was away for over a year (pair this PC again)"
+            }
+            C::NotValidForName | C::NotValidForNameContext { .. } => {
+                "the certificate is not the one of the NAS this PC was paired with: another NAS answers at this address, or the NAS runs a rynas version older than this pairing"
+            }
+            C::Expired | C::ExpiredContext { .. } | C::NotValidYet | C::NotValidYetContext { .. } => {
+                "the NAS certificate is outside its validity period: check the clock of this PC and of the NAS"
+            }
+            _ => return e,
+        };
+        io::Error::new(io::ErrorKind::InvalidData, format!("{msg} ({c:?})"))
+    }
+
+    fn connect_ep(&self, ep: &Endpoint, read: Duration, patience: Duration) -> io::Result<Conn> {
+        let addrs = (ep.host.as_str(), ep.port).to_socket_addrs()?;
+        let mut last = io::Error::other(format!("{}: no address", ep.host));
         for a in addrs {
-            match TcpStream::connect_timeout(&a, Duration::from_secs(15)) {
+            match TcpStream::connect_timeout(&a, patience) {
                 Ok(s) => {
                     s.set_read_timeout(Some(READ_SLICE.min(read)))?;
                     s.set_write_timeout(Some(TIMEOUT))?;
                     let _ = s.set_nodelay(true);
                     let s = Patient { s, limit: read };
-                    let stream: Box<dyn Stream> = match &self.tls {
-                        None => Box::new(s),
-                        Some(cfg) => {
-                            let name = ServerName::try_from(self.ep.host.clone())
-                                .map_err(|e| io::Error::other(e.to_string()))?;
-                            let c = rustls::ClientConnection::new(cfg.clone(), name)
-                                .map_err(|e| io::Error::other(e.to_string()))?;
-                            let mut t = rustls::StreamOwned::new(c, s);
-                            // the handshake now, so a pin mismatch is the error
-                            while t.conn.is_handshaking() {
-                                t.conn.complete_io(&mut t.sock)?;
-                            }
-                            Box::new(t)
+                    let stream: Box<dyn Stream> = if !ep.tls {
+                        Box::new(s)
+                    } else {
+                        let name = ServerName::try_from(self.sni.clone().unwrap_or_else(|| ep.host.clone()))
+                            .map_err(|e| io::Error::other(e.to_string()))?;
+                        let c = rustls::ClientConnection::new(self.tls.clone(), name)
+                            .map_err(|e| io::Error::other(e.to_string()))?;
+                        let mut t = rustls::StreamOwned::new(c, s);
+                        // the handshake now, so a pin mismatch is the error
+                        while t.conn.is_handshaking() {
+                            t.conn.complete_io(&mut t.sock).map_err(|e| self.explain(e))?;
                         }
+                        Box::new(t)
                     };
                     return Ok(BufReader::with_capacity(256 << 10, stream));
                 }
@@ -422,7 +516,7 @@ impl Client {
         let len: usize = body.iter().map(|b| b.len()).sum();
         let mut head = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: rynas-agent/{}\r\nConnection: keep-alive\r\n",
-            self.ep.host,
+            self.ep().host,
             env!("CARGO_PKG_VERSION")
         );
         if let Some(a) = &self.auth {
@@ -456,7 +550,7 @@ impl Client {
         let mut conn = self.connect_with(answer_wait)?;
         let mut head = format!(
             "POST {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: rynas-agent/{}\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n",
-            self.ep.host,
+            self.ep().host,
             env!("CARGO_PKG_VERSION")
         );
         if let Some(a) = &self.auth {
@@ -539,7 +633,7 @@ impl Client {
         let mut conn = self.connect_with(read_wait)?;
         let mut head = format!(
             "GET {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: rynas-agent/{}\r\nConnection: close\r\n",
-            self.ep.host,
+            self.ep().host,
             env!("CARGO_PKG_VERSION")
         );
         if let Some(a) = &self.auth {
@@ -627,7 +721,7 @@ impl Client {
     pub fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, String> {
         let r = self
             .request("GET", path, &[("Accept", "application/json")], &[])
-            .map_err(|e| format!("{}: {e}", self.ep.url()))?;
+            .map_err(|e| format!("{}: {e}", self.ep().url()))?;
         if !r.ok() {
             return Err(r.error_text());
         }
@@ -638,7 +732,7 @@ impl Client {
         let b = serde_json::to_vec(body).map_err(|e| e.to_string())?;
         let r = self
             .request("POST", path, &[("Content-Type", "application/json"), ("Accept", "application/json")], &[&b])
-            .map_err(|e| format!("{}: {e}", self.ep.url()))?;
+            .map_err(|e| format!("{}: {e}", self.ep().url()))?;
         if !r.ok() {
             return Err(r.error_text());
         }

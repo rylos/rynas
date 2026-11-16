@@ -23,7 +23,7 @@ pub struct NasBackend {
 
 impl std::fmt::Debug for NasBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "NasBackend({}{})", self.client.ep.url(), self.prefix)
+        write!(f, "NasBackend({}{})", self.client.ep().url(), self.prefix)
     }
 }
 
@@ -73,7 +73,7 @@ impl NasBackend {
 
 impl ReadBackend for NasBackend {
     fn location(&self) -> String {
-        format!("rynas:{}{}", self.client.ep.url(), self.prefix)
+        format!("rynas:{}{}", self.client.ep().url(), self.prefix)
     }
 
     fn list_with_size(&self, tpe: FileType) -> RusticResult<Vec<(Id, u32)>> {

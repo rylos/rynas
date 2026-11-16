@@ -1191,6 +1191,7 @@ fn main() -> std::io::Result<()> {
                 Some(opened.tls.clone()),
                 running_hostname(),
             );
+            agent.set_web_port(args.web_tls_port);
             // the btrfs method's folders: agent PCs with that method send into them
             if let Some(pb) = state.pc_backup.clone() {
                 agent.bind_btrfs(pb);

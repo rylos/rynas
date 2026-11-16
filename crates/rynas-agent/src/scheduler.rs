@@ -108,10 +108,40 @@ fn end_inhibit(r: &mut Running) {
     }
 }
 
-/// The plan, waiting up to `wait` s for a change.
-fn poll(st: &State, wait: u64) -> Result<AgentPlan, String> {
+/// The plan, waiting up to `wait` s for a change; and the NAS address that answered.
+fn poll(st: &State, wait: u64) -> Result<(AgentPlan, String), String> {
     let c = client_of(st)?;
-    c.get_json(&format!("/api/v1/pcbackup/agent/plan?rev={}&wait={wait}", st.plan.rev))
+    let plan = c.get_json(&format!("/api/v1/pcbackup/agent/plan?rev={}&wait={wait}", st.plan.rev))?;
+    Ok((plan, c.ep().url()))
+}
+
+/// The trust and addresses from the NAS (`trust::refresh`), saved; when the next refresh is
+/// due.
+fn refresh_trust(st: &mut State) -> u64 {
+    match crate::trust::refresh(st) {
+        Ok(r) => {
+            if r == crate::trust::Refreshed::Upgraded {
+                eprintln!("the NAS' certificate authority is pinned now: a new name, address or certificate of the NAS needs no pairing again");
+            }
+            if r != crate::trust::Refreshed::Same {
+                let (nas_id, cas, addresses, url, fingerprint, checked) =
+                    (st.nas_id.clone(), st.cas.clone(), st.addresses.clone(), st.url.clone(), st.fingerprint.clone(), st.trust_checked_ms);
+                let _ = State::update(|s| {
+                    s.nas_id = nas_id;
+                    s.cas = cas;
+                    s.addresses = addresses;
+                    s.url = url;
+                    s.fingerprint = fingerprint;
+                    s.trust_checked_ms = checked;
+                });
+            }
+            now_ms() + crate::trust::REFRESH_EVERY_MS
+        }
+        Err(e) => {
+            eprintln!("NAS certificate authority: {e}");
+            now_ms() + crate::trust::RETRY_MS
+        }
+    }
 }
 
 pub fn run_service() -> Result<(), String> {
@@ -122,19 +152,32 @@ pub fn run_service() -> Result<(), String> {
     eprintln!("rynas-agent {}: PC {} on {}", env!("CARGO_PKG_VERSION"), st.device, st.url);
     let mut running: Option<Running> = None;
     let mut last_poll_error: Option<Instant> = None;
+    // the trust and addresses: at the first contact, then every few hours
+    let mut trust_due = 0u64;
     while !STOP.load(Ordering::SeqCst) {
         // a short poll while a backup runs (to see Cancel), a long one otherwise
         let wait = if running.is_some() { 5 } else { 50 };
         match poll(&st, wait) {
-            Ok(plan) => {
+            Ok((plan, url)) => {
                 if plan.rev != st.plan.rev {
                     st.plan = plan.clone();
-                    let _ = st.save();
+                    let plan = plan.clone();
+                    let _ = State::update(|s| s.plan = plan);
+                }
+                // another known address answered: tried first from now on
+                if url != st.url {
+                    eprintln!("the NAS answers at {url}");
+                    st.url = url.clone();
+                    let _ = State::update(|s| s.url = url);
+                }
+                // never while a backup runs: a Cancel must not wait behind it
+                if running.is_none() && now_ms() >= trust_due {
+                    trust_due = refresh_trust(&mut st);
                 }
                 match plan.command {
                     Some(AgentCommand::BackupNow { id }) if id > st.handled_command => {
                         st.handled_command = id;
-                        let _ = st.save();
+                        let _ = State::update(|s| s.handled_command = id);
                         if running.is_none() {
                             eprintln!("back up now (from the NAS)");
                             running = start_backup().map_err(|e| eprintln!("{e}")).ok();
@@ -142,7 +185,7 @@ pub fn run_service() -> Result<(), String> {
                     }
                     Some(AgentCommand::Cancel { id }) if id > st.handled_command => {
                         st.handled_command = id;
-                        let _ = st.save();
+                        let _ = State::update(|s| s.handled_command = id);
                         if let Some(r) = &mut running {
                             eprintln!("cancel (from the NAS)");
                             stop_child(r);

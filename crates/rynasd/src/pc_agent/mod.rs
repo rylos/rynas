@@ -424,6 +424,8 @@ pub struct PcAgent {
     pub workers: Arc<tokio::sync::Semaphore>,
     pub streams: Arc<tokio::sync::Semaphore>,
     pub tls: Option<Arc<crate::tls::TlsSvc>>,
+    /// rynas-web's own HTTPS port (the addresses agents are told, [`PcAgent::trust`]).
+    web_port: std::sync::atomic::AtomicU16,
     /// This NAS' host name, followed when it changes ([`PcAgent::set_hostname`]).
     hostname: Mutex<String>,
     reg: Mutex<Registry>,
@@ -474,6 +476,7 @@ impl PcAgent {
             workers,
             streams: Arc::new(tokio::sync::Semaphore::new(MAX_STREAMS)),
             tls,
+            web_port: std::sync::atomic::AtomicU16::new(8443),
             hostname: Mutex::new(hostname),
             reg: Mutex::new(reg),
             live: Mutex::new(HashMap::new()),
@@ -579,6 +582,24 @@ impl PcAgent {
     /// The host name changed (an apply of `system.hostname`).
     pub fn set_hostname(&self, name: &str) {
         *self.hostname.lock().unwrap_or_else(|e| e.into_inner()) = name.to_string();
+    }
+
+    /// rynas-web's HTTPS port (`--web-tls-port`), for the addresses agents are told.
+    pub fn set_web_port(&self, port: u16) {
+        self.web_port.store(port, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// What agents pin of this NAS (blocking: reads the TLS store and the addresses), or
+    /// `None` without the local CA (dry systems).
+    pub fn trust(&self) -> Option<AgentTrust> {
+        let port = self.web_port.load(std::sync::atomic::Ordering::Relaxed);
+        match self.tls.as_ref()?.agent_trust(port) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!("pc backup: the agents' trust: {e}");
+                None
+            }
+        }
     }
 
     pub fn fingerprint(&self) -> Option<String> {
@@ -1004,6 +1025,7 @@ pub fn router(st: PaState) -> Router {
     let agent = Router::new()
         .route("/v1/pcbackup/agent/pair", post(pair_post))
         .route("/v1/pcbackup/agent/plan", get(plan_get))
+        .route("/v1/pcbackup/agent/trust", get(trust_get))
         .route("/v1/pcbackup/agent/status", post(status_post))
         .route("/v1/pcbackup/agent/report", post(report_post))
         .route("/v1/pcbackup/agent/btrfs/snapshots", get(btrfs_snapshots_get))
@@ -1741,12 +1763,31 @@ async fn pair_post(
     let Some((pairing, settings)) = pairing else {
         return Err(svc.failed(&source));
     };
-    let out = maint::pair(&svc, &pairing, &settings, &req).await;
+    let mut out = maint::pair(&svc, &pairing, &settings, &req).await;
     match &out {
         Ok(p) => tracing::info!(target: "rynas::audit", "pc backup: {} paired as {} in group {}", req.hostname, p.device, p.group),
         Err(e) => tracing::warn!("pc backup: pairing of {} failed: {}", req.hostname, e.2),
     }
+    if let Ok(p) = &mut out {
+        let s = svc.clone();
+        p.trust = blocking(move || s.trust()).await?;
+    }
     out.map(Json)
+}
+
+/// `GET /v1/pcbackup/agent/trust`: the local CA, identity and addresses agents pin (see
+/// [`AgentTrust`]); 404 without a local CA (dry systems).
+async fn trust_get(State(st): State<PaState>, h: HeaderMap) -> Res<Json<AgentTrust>> {
+    let svc = pa(&st)?;
+    let device = agent_device(&svc, &h)?;
+    if svc.device(&device)?.revoked {
+        return Err(Error::new(StatusCode::UNAUTHORIZED, error_codes::UNAUTHENTICATED, "revoked".into()));
+    }
+    let s = svc.clone();
+    blocking(move || s.trust())
+        .await?
+        .map(Json)
+        .ok_or_else(|| Error::not_found("this NAS has no local certificate authority"))
 }
 
 #[derive(Deserialize, Default)]

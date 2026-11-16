@@ -436,6 +436,7 @@ fn pair_btrfs(svc: &Arc<PcAgent>, p: &Pairing, target: &str, req: &PairRequest) 
         repo_password: String::new(),
         nas_name: svc.hostname(),
         plan,
+        trust: None,
     })
 }
 
@@ -561,6 +562,7 @@ pub async fn pair(svc: &Arc<PcAgent>, p: &Pairing, settings: &PcAgentSettings, r
         repo_password: pc_password,
         nas_name: svc.hostname(),
         plan,
+        trust: None,
     })
 }
 

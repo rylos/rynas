@@ -3087,7 +3087,7 @@ net.hn.keeps	Hai aperto questa pagina da {addr}: quell'indirizzo continua a funz
 net.hn.warn_title	Prima di rinominare
 net.hn.w_browser	Questa pagina passa al nuovo indirizzo: dopo il cambio riaprila da lì e accedi di nuovo (l'accesso vale per un solo indirizzo).
 net.hn.w_devices	Computer, telefoni e unità di rete che raggiungono il NAS con il vecchio nome dovranno usare quello nuovo.
-net.hn.w_agents	I PC con l'agente di backup controllano il certificato del NAS, che cambia insieme al nome: per ciascuno usa «Abbina di nuovo» (backup e impostazioni restano). I PC che inviano snapshot btrfs e gli altri NAS che fanno backup o repliche verso questo per nome vanno aggiornati con il nuovo nome.
+net.hn.w_agents	I PC con l'agente di backup si fidano dell'autorità di certificazione locale di questo NAS, non del suo nome: vanno avanti da soli finché risponde uno degli indirizzi del NAS che conoscono (altrimenti sul PC esegui rynas-agent set-server <nuovo indirizzo>). Solo gli agenti precedenti alla 0.8.13 vanno abbinati di nuovo, una volta, con «Abbina di nuovo» (backup e impostazioni restano). I PC che inviano snapshot btrfs con btrbk e gli altri NAS che fanno backup o repliche verso questo per nome vanno aggiornati con il nuovo nome.
 net.hn.w_apps	Le app installate prima mantengono il vecchio nome nelle loro impostazioni.
 net.hn.auto	Si aggiornano da soli: il certificato HTTPS, i nomi web locali (.local), il nome nella rete Windows e le notifiche.
 net.hn.save	Rinomina
@@ -5241,7 +5241,7 @@ pca.code_valid	Il codice funziona una volta, fino al {until}.
 pca.fingerprint	Certificato di questo NAS
 pca.step.install	1. Installa rynas-agent sul PC
 pca.step.pair	2. Abbinalo
-pca.step.note	Il comando contiene l'impronta del certificato: l'agente si abbina solo a questo NAS. Senza, l'agente mostra l'impronta da confrontare con quella qui sopra. Poi avvia il servizio: systemctl enable --now rynas-agent.service. I pacchetti per Arch, Debian e Fedora sono nelle release.
+pca.step.note	Il comando contiene l'impronta del certificato: l'agente si abbina solo a questo NAS. Senza, l'agente mostra l'impronta da confrontare con quella qui sopra. Una volta abbinato, l'agente si fida dell'autorità di certificazione locale di questo NAS: un nuovo nome, indirizzo o certificato del NAS non richiede di abbinarlo di nuovo. Poi avvia il servizio: systemctl enable --now rynas-agent.service. I pacchetti per Arch, Debian e Fedora sono nelle release.
 pca.f.folder	Cartella degli archivi
 pca.f.folder_help	Dentro un volume. I gruppi esistenti restano dove sono.
 pca.f.default_quota	Quota dei nuovi gruppi (GiB)

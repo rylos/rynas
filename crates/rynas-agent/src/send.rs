@@ -601,7 +601,7 @@ fn stream_to_nas(client: &Client, snap: &Path, parent: Option<&Path>, query: &st
     let mut body = Counted { inner: enc, n: 0 };
     let r = client
         .upload(query, &[("Content-Type", "application/zstd"), ("Accept", "application/json")], &mut body, ANSWER_WAIT)
-        .map_err(|e| format!("sending to {}: {e}", client.ep.url()))?;
+        .map_err(|e| format!("sending to {}: {e}", client.ep().url()))?;
     let (rawn, comp) = (raw.load(Ordering::Relaxed), body.n);
     if r.ok() {
         let got = serde_json::from_slice::<AgentBtrfsReceived>(&r.body).map_err(|e| format!("bad answer from the NAS: {e}"))?;

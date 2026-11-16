@@ -14,8 +14,26 @@ pub const STATE_DIR: &str = "/var/lib/rynas-agent";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct State {
+    /// The NAS address that answered last (tried first).
     pub url: String,
+    /// The pinned certificate (SHA-256) of agents paired before the NAS' local CA was
+    /// pinned; empty once [`State::nas_id`] and [`State::cas`] are set.
     pub fingerprint: String,
+    /// The NAS identity (`rynas_api_types::pcagent::AgentTrust`): with [`State::cas`] what
+    /// is trusted instead of [`State::fingerprint`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub nas_id: String,
+    /// The NAS' local CA certificates (PEM): the current one, and the next one ahead of a
+    /// rotation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cas: Vec<String>,
+    /// The NAS' other addresses, refreshed on each contact, tried when [`State::url`] does
+    /// not answer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
+    /// When the trust was last refreshed from the NAS (or found unsupported by it).
+    #[serde(default)]
+    pub trust_checked_ms: Option<u64>,
     pub device: String,
     pub group: String,
     pub token: String,
@@ -66,6 +84,16 @@ impl State {
             .create(&d)
             .map_err(|e| format!("{}: {e}", d.display()))?;
         write_atomic(&path(), &serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?, 0o600)
+    }
+
+    /// Loads the state written last, changes it with `f` and saves it: a process that holds
+    /// an older copy (the backup child, the service) writes only what it changed, never back
+    /// what another wrote meanwhile (an address or trust refreshed by the service).
+    pub fn update(f: impl FnOnce(&mut State)) -> Result<State, String> {
+        let mut st = State::load()?;
+        f(&mut st);
+        st.save()?;
+        Ok(st)
     }
 }
 
