@@ -4,9 +4,11 @@
 //! yearly) or an advanced systemd calendar expression or crontab line; errors inline; a live
 //! preview of the next runs in the NAS's time zone (`POST /api/v1/scheduler/preview`) with
 //! the clock changes that touch the schedule and a warning when systemd would never run it.
-//! Catch-up of missed runs and the random delay stay as they were.
+//! Catch-up of missed runs and the random delay stay as they were. The windows, weekday chips
+//! and times of the other pages that schedule something are in [`window`].
 
 pub mod draft;
+pub mod window;
 
 use std::time::Duration;
 
@@ -19,6 +21,7 @@ use rynas_schedule::recurrence::MINUTE_STEPS;
 use rynas_schedule::Nth;
 
 pub use draft::{Draft, DraftError, Preset};
+pub use window::WeekWindowEditor;
 
 use crate::api;
 use crate::form::{In, number_field, segmented, select_field, switch, text_field};
@@ -217,25 +220,7 @@ fn hours(e: ScheduleEditor) -> AnyView {
 }
 
 fn weekday_chips(e: ScheduleEditor, help: Option<&'static str>) -> AnyView {
-    let days = (0..7u8)
-        .map(|d| {
-            view! {
-                <label class="check day">
-                    <input type="checkbox" prop:checked=move || e.draft.with(|x| x.day_on(d))
-                        on:change=move |ev| { let on = event_target_checked(&ev); e.draft.update(|x| x.toggle_day(d, on)); } />
-                    {tr(DAY_KEYS[d as usize])}
-                </label>
-            }
-        })
-        .collect_view();
-    view! {
-        <fieldset class="fieldset">
-            <legend class="field-label">{tr("sch.f.weekdays")}</legend>
-            <div class="quiet-days">{days}</div>
-            {help.map(|h| view! { <span class="field-help">{tr(h)}</span> })}
-        </fieldset>
-    }
-    .into_any()
+    window::day_chips("sch.f.weekdays", help, move |d| e.draft.with(|x| x.day_on(d)), move |d, on| e.draft.update(|x| x.toggle_day(d, on)))
 }
 
 fn times(e: ScheduleEditor) -> AnyView {

@@ -16,6 +16,9 @@ use crate::form::{lens, lens_bool, number_field, save_bar, segmented, switch};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::pages::scheduler::DAY_KEYS;
+use crate::schedule::window;
+use rynas_api_types::scheduler::TaskTrigger;
+use rynas_schedule::{Recurrence, TimeOfDay, Weekdays};
 use crate::toast::{saved_applied, saved_pending, toast};
 use crate::ui::{self, Confirm, EmptyState, Remote, Tone, WidgetHead, cell, confirm, drawer, row, status, table, text};
 
@@ -467,34 +470,41 @@ fn editor(orig: Option<PowerRule>, rules: Signal<Vec<PowerRule>>, wake_ok: Signa
             let _ = busy.try_set(false);
         });
     });
-    let tid = crate::form::fid();
-    let days = (0..7usize)
-        .map(|i| {
-            let day = Weekday::ALL[i];
-            view! {
-                <label class="check day">
-                    <input type="checkbox" prop:checked=move || d.with(|r| r.days.contains(&day))
-                        on:change=move |ev| { let on = event_target_checked(&ev); d.update(|r| { r.days.retain(|x| *x != day); if on { r.days.push(day); r.days.sort(); } }); } />
-                    {tr(DAY_KEYS[i])}
-                </label>
-            }
+    // the shared weekday chips and time input (the same as the schedule editor's)
+    let days = window::day_chips(
+        "sch.f.weekdays",
+        None,
+        move |i| d.with(|r| r.days.contains(&Weekday::ALL[usize::from(i)])),
+        move |i, on| {
+            let day = Weekday::ALL[usize::from(i)];
+            d.update(|r| {
+                r.days.retain(|x| *x != day);
+                if on {
+                    r.days.push(day);
+                    r.days.sort();
+                }
+            })
+        },
+    );
+    // the next times of the rule, as the NAS computes them (its clock changes included)
+    let next = window::NextRuns::new(move || {
+        let (h, m) = parse_hhmm(&time.get())?;
+        let days: Vec<u8> = d.with(|r| r.days.iter().filter_map(|x| Weekday::ALL.iter().position(|a| a == x)).map(|i| i as u8).collect());
+        (!days.is_empty()).then(|| TaskTrigger::Recurrence {
+            recurrence: Recurrence::Daily { days: Weekdays::of(&days), times: vec![TimeOfDay::new(h, m)] },
         })
-        .collect_view();
+    });
+    let time_help = Signal::derive(move || t(if is_shutdown() { "ps.time_help_down" } else { "ps.time_help_up" }).to_string());
     let body = view! {
         <form class="form" on:submit=move |ev| { ev.prevent_default(); save.run(()); }>
             {segmented("ps.col_action", ACTIONS, action, set_action)}
             {move || (!is_shutdown() && !wake_ok.get()).then(|| view! {
                 {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("ps.wake_unsupported_help")} }.into_any())}
             })}
-            <fieldset class="fieldset">
-                <legend class="field-label">{tr("sch.f.weekdays")}</legend>
-                <div class="quiet-days">{days}</div>
-            </fieldset>
-            <div class="field">
-                <label class="field-label" for=tid.clone()>{tr("sch.f.time")}</label>
-                <input id=tid class="input tnum" type="time" required prop:value=move || time.get() on:input=move |ev| time.set(event_target_value(&ev)) />
-                <span class="field-help">{move || t(if is_shutdown() { "ps.time_help_down" } else { "ps.time_help_up" })}</span>
-            </div>
+            {days}
+            {window::time_field("sch.f.time", None, time.into(), Callback::new(move |v| time.set(v)))}
+            <p class="field-help">{time_help}</p>
+            {next.view(|| 0)}
             {switch("ps.enabled", None, enabled, set_enabled)}
             <fieldset class="fieldset" hidden=move || !is_shutdown()>
                 <legend class="field-label">{tr("ps.checks")}</legend>

@@ -421,6 +421,11 @@ fn settings_dialog(j: DedupJobView, excluded: Vec<String>, modal: RwSignal<Open>
     let first_block = j.settings.as_ref().map(|s| s.block_size);
     let d = RwSignal::new(j.settings.clone().unwrap_or_default());
     let grid = RwSignal::new(d.with_untracked(|s| s.window.clone()));
+    // the starts of the window's blocks as the NAS computes them (its clock changes included)
+    let next = crate::schedule::window::NextRuns::new(move || {
+        let w = grid.get();
+        w.contains('1').then_some(rynas_api_types::scheduler::TaskTrigger::Window { window: w, stop_at_end: true })
+    });
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let ask_off = RwSignal::new(false);
@@ -522,6 +527,7 @@ fn settings_dialog(j: DedupJobView, excluded: Vec<String>, modal: RwSignal<Open>
                     {week_grid(LEVELS, grid, "dd.window", None)}
                     <span class="field-help">{tr("dd.window_help")}</span>
                 </div>
+                {next.view(|| 0)}
                 {move || empty_window.get().then(|| view! { <p class="form-error">{tr("dd.window_empty")}</p> })}
                 {switch("dd.only_awake", Some("dd.only_awake_help"), awake, set_awake)}
                 {ui::fold(None, "dd.advanced", false, None, view! { 

@@ -13,6 +13,7 @@ use crate::docker::docker;
 use crate::form::{Draft, In, form_error, lens, lens_bool, number_field, select_field, spinner, stale_notice, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
+use crate::schedule::WeekWindowEditor;
 use crate::tasks::TaskRun;
 use crate::toast::saved_applied;
 use crate::ui::{self, Confirm, Meter, Remote, Tone, WidgetHead, kv_row};
@@ -369,9 +370,15 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
     let (full, set_full) = num_lens(d, |s| s.data_root_full_pct.to_string(), |s, v| s.data_root_full_pct = v.min(255) as u8);
     let (restarts, set_restarts) = num_lens(d, |s| s.crash_restarts.to_string(), |s, v| s.crash_restarts = v);
     let (window, set_window) = num_lens(d, |s| s.crash_window_min.to_string(), |s, v| s.crash_window_min = v);
-    let (au_hour, set_au_hour) = num_lens(d, |s| s.auto_update.hour.to_string(), |s, v| s.auto_update.hour = v.min(255) as u8);
-    let (au_minute, set_au_minute) = num_lens(d, |s| s.auto_update.minute.to_string(), |s, v| s.auto_update.minute = v.min(255) as u8);
-    let (au_len, set_au_len) = num_lens(d, |s| s.auto_update.window_min.to_string(), |s, v| s.auto_update.window_min = v.min(u32::from(u16::MAX)) as u16);
+    // the window of automatic updates: the shared editor (the same texts as system updates)
+    let win = d.with_untracked(|s| WeekWindowEditor::daily(s.auto_update.hour, s.auto_update.minute, s.auto_update.window_min));
+    let win_changed = Callback::new(move |_| {
+        d.update(|s| match win.value() {
+            Some((h, m, len)) => (s.auto_update.hour, s.auto_update.minute, s.auto_update.window_min) = (h, m, len),
+            // not a valid window: the save refuses it
+            None => s.auto_update.window_min = 0,
+        })
+    });
     let (mgr, set_mgr) = lens(
         d,
         |s| s.preferred_manager.map(|m| serde_json::to_value(m).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()).unwrap_or_default(),
@@ -381,13 +388,14 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
     let dirty = draft.dirty();
     let reset = Callback::new(move |_| {
         draft.reset();
+        d.with_untracked(|s| win.set(s.auto_update.hour, s.auto_update.minute, s.auto_update.window_min));
         error.set(None);
     });
     let applied_vol = move || settings.data.with_untracked(|s| s.as_ref().and_then(|s| s.applied.volume.clone()));
-    // stage, then apply only `docker` (A19b)
+    // stage, then apply only `docker` (A19b; its scheduler tasks are staged with it)
     let save = Callback::new(move |_: ()| {
         let body: DockerSettings = d.get_untracked();
-        if !valid_pool(&body.address_pool.base) {
+        if !valid_pool(&body.address_pool.base) || win.value().is_none() {
             error.set(Some(t("form.check").to_string()));
             return;
         }
@@ -449,11 +457,7 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
             </div>
             <h3 class="mini-title">{tr("dk.au.title")}</h3>
             <p class="field-help">{tr("dk.au.text")}</p>
-            <div class="form-row">
-                {number_field("dk.au.hour", None, au_hour, set_au_hour, 0, 23)}
-                {number_field("dk.au.minute", None, au_minute, set_au_minute, 0, 59)}
-                {number_field("dk.au.window", Some("dk.au.window_help"), au_len, set_au_len, 10, 360)}
-            </div>
+            {win.view(win_changed)}
             {stale_notice(draft.stale, reset)}
             {form_error(error)}
             <div class="sec-actions">

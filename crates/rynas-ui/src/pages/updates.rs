@@ -16,9 +16,11 @@ use leptos::task::spawn_local;
 use rynas_api_types::updates::*;
 
 use crate::api;
-use crate::form::{fid, form_error, lens, lens_bool, number_field, segmented, spinner, stale_notice, switch, Draft};
+use crate::form::{form_error, lens, lens_bool, segmented, spinner, stale_notice, switch, Draft};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
+use crate::schedule::window::{hhmm, parse_hhmm, time_field};
+use crate::schedule::WeekWindowEditor;
 use crate::tasks::TaskRun;
 use crate::toast::saved_applied;
 use crate::ui::{self, cell, confirm, row, status, table, text, Confirm, DlgKind, EmptyState, PageHeader, Remote, Tone, WidgetHead};
@@ -423,29 +425,6 @@ fn mode_key(m: AutoMode) -> String {
     .into()
 }
 
-fn hhmm(h: u8, m: u8) -> String {
-    format!("{h:02}:{m:02}")
-}
-
-fn parse_hhmm(v: &str) -> Option<(u8, u8)> {
-    let (h, m) = v.trim().split_once(':')?;
-    let (h, m) = (h.parse::<u8>().ok()?, m.get(..2)?.parse::<u8>().ok()?);
-    (h < 24 && m < 60).then_some((h, m))
-}
-
-fn time_field(label: &'static str, help: &'static str, value: Signal<String>, set: Callback<String>) -> AnyView {
-    let id = fid();
-    let hid = format!("{id}-h");
-    view! {
-        <div class="field">
-            <label class="field-label" for=id.clone()>{tr(label)}</label>
-            <input id=id class="input tnum" type="time" required aria-describedby=hid.clone() prop:value=move || value.get() on:input=move |ev| set.run(event_target_value(&ev)) />
-            <span class="field-help" id=hid>{tr(help)}</span>
-        </div>
-    }
-    .into_any()
-}
-
 fn auto_card(auto: Remote<AutoUpdatesState>) -> AnyView {
     let body = move || {
         if let Some(v) = auto.gate(6) {
@@ -482,12 +461,19 @@ fn auto_form(s: AutoUpdatesState, auto: Remote<AutoUpdatesState>) -> AnyView {
             }
         },
     );
-    let (start, set_start) = lens(d, |a| hhmm(a.hour, a.minute), |a, v| if let Some((h, m)) = parse_hhmm(&v) { (a.hour, a.minute) = (h, m) });
-    let (window, set_window) = lens(d, |a| a.window_min.to_string(), |a, v| a.window_min = v.trim().parse().unwrap_or(0));
+    // the window: the shared editor (the same texts as Docker's automatic updates)
+    let win = d.with_untracked(|a| WeekWindowEditor::daily(a.hour, a.minute, a.window_min));
+    let win_changed = Callback::new(move |_| {
+        d.update(|a| match win.value() {
+            Some((h, m, len)) => (a.hour, a.minute, a.window_min) = (h, m, len),
+            // not a valid window: the save refuses it
+            None => a.window_min = 0,
+        })
+    });
     let (reboot, set_reboot) = lens_bool(d, |a| a.reboot, |a, v| a.reboot = v);
     let (rtime, set_rtime) = lens(d, |a| hhmm(a.reboot_hour, a.reboot_minute), |a, v| if let Some((h, m)) = parse_hhmm(&v) { (a.reboot_hour, a.reboot_minute) = (h, m) });
     let off = move || d.with(|a| a.mode == AutoMode::Off);
-    let invalid = move || d.with(|a| !(10..=360).contains(&a.window_min));
+    let invalid = move || win.value().is_none();
     let pending = Signal::derive(move || auto.data.with(|s| s.as_ref().is_some_and(|s| s.pending.is_some())));
     let save = move |_| {
         if invalid() {
@@ -512,6 +498,7 @@ fn auto_form(s: AutoUpdatesState, auto: Remote<AutoUpdatesState>) -> AnyView {
     };
     let reset = Callback::new(move |_| {
         draft.reset();
+        d.with_untracked(|a| win.set(a.hour, a.minute, a.window_min));
         error.set(None);
     });
     view! {
@@ -520,10 +507,9 @@ fn auto_form(s: AutoUpdatesState, auto: Remote<AutoUpdatesState>) -> AnyView {
             {segmented("upd.mode", MODES, mode, set_mode)}
             <p class="field-help">{tr("upd.mode_help")}</p>
             <div hidden=off>
-                {time_field("upd.start", "upd.start_help", start, set_start)}
-                {number_field("upd.window", Some("upd.window_help"), window, set_window, 10, 360)}
+                {win.view(win_changed)}
                 {switch("upd.reboot", Some("upd.reboot_help"), reboot, set_reboot)}
-                <div hidden=move || !reboot.get()>{time_field("upd.reboot_time", "upd.reboot_time_help", rtime, set_rtime)}</div>
+                <div hidden=move || !reboot.get()>{time_field("upd.reboot_time", Some("upd.reboot_time_help"), rtime, set_rtime)}</div>
             </div>
             {move || pending.get().then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("upd.pending_note")}</p> })}
             {stale_notice(draft.stale, reset)}

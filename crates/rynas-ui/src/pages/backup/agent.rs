@@ -579,7 +579,9 @@ fn settings_dialog(tab: Tab) -> AnyView {
     let cur = tab.data.data.with_untracked(|d| d.as_ref().map(|d| d.settings.clone())).unwrap_or_default();
     let folder = RwSignal::new(cur.folder.clone());
     let quota = RwSignal::new(cur.default_quota_gib.to_string());
-    let hour = RwSignal::new(cur.maintenance_hour.to_string());
+    let hour = RwSignal::new(cur.maintenance_hour.min(23));
+    // the nightly maintenance is a scheduler task: its next runs as the NAS computes them
+    let next = crate::schedule::window::NextRuns::new(move || Some(crate::schedule::window::daily(hour.get(), 0)));
     let pct = RwSignal::new(if cur.maintenance_memory_pct == 0 { "40".to_string() } else { cur.maintenance_memory_pct.to_string() });
     const CHUNKING: &[(&str, &str)] = &[("auto", "pca.chunk.auto"), ("small", "pca.chunk.small"), ("large", "pca.chunk.large")];
     let chunking = RwSignal::new(
@@ -598,7 +600,7 @@ fn settings_dialog(tab: Tab) -> AnyView {
         let body = PcAgentSettings {
             folder: folder.get_untracked().trim().to_string(),
             default_quota_gib: n(quota),
-            maintenance_hour: n(hour).min(23) as u8,
+            maintenance_hour: hour.get_untracked().min(23),
             maintenance_memory_pct: n(pct).clamp(10, 80) as u8,
             chunking: match chunking.get_untracked().as_str() {
                 "small" => PcChunking::Small,
@@ -626,9 +628,10 @@ fn settings_dialog(tab: Tab) -> AnyView {
         {text_field("pca.f.folder", folder.into(), Callback::new(move |v| { folder_err.set(None); folder.set(v); }), folder_err.into(), In { mono: true, maxlength: 512, help: Some("pca.f.folder_help"), placeholder: "/volume1/pc-backup", ..In::default() })}
         {number_field("pca.f.default_quota", Some("pca.f.quota_help"), quota.into(), Callback::new(move |v| quota.set(v)), 0, 100_000)}
         <div class="form-row">
-            {number_field("pca.f.hour", Some("pca.f.hour_help"), hour.into(), Callback::new(move |v| hour.set(v)), 0, 23)}
+            {crate::schedule::window::hour_select("pca.f.hour", Some("pca.f.hour_help"), hour.into(), Callback::new(move |v| hour.set(v)))}
             {number_field("pca.f.memory", Some("pca.f.memory_help"), pct.into(), Callback::new(move |v| pct.set(v)), 10, 80)}
         </div>
+        {next.view(|| 0)}
         {select_field("pca.f.chunking", Some("pca.f.chunking_help"), CHUNKING, chunking.into(), Callback::new(move |v| chunking.set(v)))}
         {form_error(error)}
     }

@@ -179,6 +179,13 @@ impl ActionDraft {
             TaskAction::PowerShutdown { .. } => d.kind = "power_shutdown".into(),
             TaskAction::Backup { .. } => d.kind = "backup".into(),
             TaskAction::Dedup { .. } => d.kind = "dedup".into(),
+            TaskAction::UpdatesCheck
+            | TaskAction::SystemUpgrade
+            | TaskAction::DockerImageCheck
+            | TaskAction::DockerAutoUpdate
+            | TaskAction::AppsCatalog
+            | TaskAction::PcMaintenance
+            | TaskAction::PcRetention => d.kind = "system".into(),
         }
         d
     }
@@ -247,6 +254,25 @@ pub fn action_text(a: &TaskAction) -> (String, String) {
         TaskAction::PowerShutdown { rule } => (t("sch.act.power_shutdown").to_string(), rule.clone()),
         TaskAction::Backup { job } => (t("sch.act.backup").to_string(), job.clone()),
         TaskAction::Dedup { volume } => (t("sch.act.dedup").to_string(), crate::pages::storage::dedup::job_name(volume)),
+        TaskAction::UpdatesCheck => (t("sch.act.updates_check").to_string(), t("upd.title").to_string()),
+        TaskAction::SystemUpgrade => (t("sch.act.system_upgrade").to_string(), t("upd.title").to_string()),
+        TaskAction::DockerImageCheck => (t("sch.act.docker_image_check").to_string(), t("dk.title").to_string()),
+        TaskAction::DockerAutoUpdate => (t("sch.act.docker_auto_update").to_string(), t("dk.title").to_string()),
+        TaskAction::AppsCatalog => (t("sch.act.apps_catalog").to_string(), t("dk.title").to_string()),
+        TaskAction::PcMaintenance => (t("sch.act.pc_maintenance").to_string(), t("nav.backup").to_string()),
+        TaskAction::PcRetention => (t("sch.act.pc_retention").to_string(), t("nav.backup").to_string()),
+    }
+}
+
+/// The page where the feature that owns one of rynas's own jobs sets it (its schedule is
+/// read-only here), and that page's name.
+pub fn owner_page(a: &TaskAction) -> Option<(&'static str, &'static str)> {
+    match a {
+        TaskAction::UpdatesCheck | TaskAction::SystemUpgrade => Some(("/system/updates", "upd.title")),
+        TaskAction::DockerImageCheck | TaskAction::DockerAutoUpdate | TaskAction::AppsCatalog => Some(("/docker", "dk.title")),
+        TaskAction::PcMaintenance | TaskAction::PcRetention => Some(("/backup", "nav.backup")),
+        TaskAction::PowerShutdown { .. } => Some(("/hardware", "nav.hardware")),
+        _ => None,
     }
 }
 
@@ -289,6 +315,8 @@ pub fn run_status(r: &TaskRun) -> (Tone, String) {
             SkipReason::Missed => (Tone::Warn, "sch.skip.missed"),
             SkipReason::Overlap => (Tone::Unknown, "sch.skip.overlap"),
             SkipReason::Running => (Tone::Unknown, "sch.skip.running"),
+            SkipReason::Window => (Tone::Unknown, "sch.skip.window"),
+            SkipReason::NotDue => (Tone::Unknown, "sch.skip.not_due"),
         };
         return (tone, t(key).to_string());
     }
@@ -587,9 +615,14 @@ fn task_row(
     let name = if task.name.is_empty() { task.id.clone() } else { task.name.clone() };
     let deleting = st.pending == Some(PendingOp::Delete);
     // a deduplication task follows its window in Storage: read-only here
+    // the automatic system updates run on the system's own timer: listed, nothing to do here
+    let system = st.system;
     let managed = managed_href(&task.action);
-    let is_managed = managed.is_some();
-    let fixed = is_managed || matches!(task.action, TaskAction::Snapshot { .. } | TaskAction::Replicate { .. } | TaskAction::Backup { .. } | TaskAction::PowerShutdown { .. });
+    let is_managed = managed.is_some() || system;
+    let fixed = is_managed || !rynas_api_types::scheduler::TaskOwner::of_action(&task.action).is_user();
+    // the feature decides whether these are on
+    let feature_switch = system || matches!(task.action, TaskAction::DockerAutoUpdate | TaskAction::AppsCatalog);
+    let owner = owner_page(&task.action);
     let (akind, adetail) = action_text(&task.action);
     let enabled = task.enabled;
     let toggling = RwSignal::new(false);
@@ -661,17 +694,22 @@ fn task_row(
         vec![
             ui::cell("sch.col.enabled", "switch-col", view! {
                 <input type="checkbox" role="switch" class="switch" aria-label=ui::verb_name("sch.col.enabled", &n1)
-                prop:checked=enabled disabled=move || toggling.get() || deleting || is_managed
+                prop:checked=enabled disabled=move || toggling.get() || deleting || is_managed || feature_switch
                 on:change=move |ev| toggle(event_target_checked(&ev)) />
             }
             .into_any()),
             ui::cell("sch.col.task", "", view! {
                 <div class="cell-main">
-                    {match managed.clone() {
-                        Some(href) => view! { <a class="link-strong" href=href title=tr("sch.managed_storage")>{name.clone()}</a> }.into_any(),
-                        None => view! { <button class="link-strong" disabled=deleting on:click=move |_| edit.set(Some((t_edit.clone(), false)))>{name.clone()}</button> }.into_any(),
+                    {match (managed.clone(), system.then_some(owner).flatten()) {
+                        (Some(href), _) => view! { <a class="link-strong" href=href title=tr("sch.managed_storage")>{name.clone()}</a> }.into_any(),
+                        (None, Some((href, _))) => view! { <a class="link-strong" href=href>{name.clone()}</a> }.into_any(),
+                        (None, None) => view! { <button class="link-strong" disabled=deleting on:click=move |_| edit.set(Some((t_edit.clone(), false)))>{name.clone()}</button> }.into_any(),
                     }}
-                    {is_managed.then(|| view! { <span class="cell-sub">{tr("sch.managed_storage")}</span> })}
+                    {managed.is_some().then(|| view! { <span class="cell-sub">{tr("sch.managed_storage")}</span> })}
+                    {system.then(|| view! { <span class="cell-sub">{tr("sch.system_timer")}</span> })}
+                    {owner.filter(|_| managed.is_none()).map(|(href, page)| view! {
+                        <span class="cell-sub"><a href=href>{tf("sch.set_in", &[("page", t(page))])}</a></span>
+                    })}
                     <span class="cell-sub mono">{task.id.clone()}</span>
                     {(!task.description.is_empty()).then(|| view! { <span class="cell-sub">{task.description.clone()}</span> })}
                 </div>
@@ -718,7 +756,7 @@ fn task_row(
                     .into_any()
                 } else {
                     view! {
-                        <button class="icon-btn sm" title=tr("sch.history") aria-label=ui::verb_name("sch.history", &n3) on:click=move |_| history.set(Some(t_hist.clone()))>
+                        <button class="icon-btn sm" title=tr("sch.history") aria-label=ui::verb_name("sch.history", &n3) disabled=system on:click=move |_| history.set(Some(t_hist.clone()))>
                             <Icon icon=icons::HISTORY size=16 />
                         </button>
                     }
@@ -745,7 +783,7 @@ fn task_row(
                     let key = if is_paused { "sch.resume" } else { "sch.pause" };
                     view! {
                         <button class="icon-btn sm" title=tr(key) aria-label=ui::verb_name(key, &n7) aria-pressed=is_paused.to_string()
-                            disabled=deleting || !st.applied on:click=toggle_pause>
+                            disabled=deleting || !st.applied || system on:click=toggle_pause>
                             <Icon icon=icons::PAUSE size=16 />
                         </button>
                     }

@@ -2464,6 +2464,8 @@ sch.skip.missed	Пропущено: опоздание
 sch.skip.missed_detail	Не наверстано: опоздание больше {deadline}
 sch.skip.overlap	Пропущено: предыдущий запуск ещё шёл
 sch.skip.running	Пропущено: уже выполняется
+sch.skip.window	Пропущено: вне своего окна
+sch.skip.not_due	Пропущено: ещё не пора
 sch.trigger.catch_up	Наверстывание после простоя
 sch.trigger.boot	При запуске системы
 sch.trigger.manual	Запуск вручную
@@ -2492,7 +2494,7 @@ sch.retry_at	Повтор {n} из {of}: {when}
 sch.delete_title	Удалить задачу {name}?
 sch.delete_text	Её расписание будет удалено при применении изменений. История запусков сохранится.
 sch.delete_job_task	Эта задача относится к заданию снимков, репликации или резервного копирования либо к расписанию питания: измените или удалите её там.
-sch.schedule_owned	Расписание этой задачи принадлежит её заданию снимков, репликации или резервного копирования либо расписанию питания: измените его там.
+sch.schedule_owned	Расписание этой задачи принадлежит функции, которая ею управляет: измените его там.
 sch.sec.general	Общие
 sch.sec.action	Действие
 sch.sec.schedule	Расписание
@@ -2613,7 +2615,7 @@ sch.p.no_next	systemd не находит следующего запуска д
 sch.p.stops	systemd перестаёт планировать это {date} (перевод часов в полночь в часовом поясе NAS), и задача больше не запустится. Выберите другое время.
 sch.p.dst_forward	{date}: часы переводятся вперёд с {from} на {to}; запуски между ними в этот день пропускаются.
 sch.p.dst_back	{date}: часы переводятся назад с {from} на {to}; запуски между ними выполняются один раз.
-sch.trig.interval_text	Каждые {n} ч после последнего успешного запуска
+sch.trig.interval_text	Каждые {n} ч после последнего запуска
 sch.trig.window_text	В недельном окне
 sch.trig.after_text	После задачи {task}
 sch.act.command	Команда
@@ -2625,6 +2627,20 @@ sch.act.recycle_cleanup	Очистка корзины
 sch.act.power_shutdown	Выключение по расписанию
 sch.act.backup	Задание резервного копирования
 sch.act.dedup	Дедупликация
+sch.act.updates_check	Проверка обновлений
+sch.act.system_upgrade	Автоматические обновления системы
+sch.act.docker_image_check	Проверка образов Docker
+sch.act.docker_auto_update	Автоматические обновления Docker
+sch.act.apps_catalog	Обновление каталога приложений
+sch.act.pc_maintenance	Обслуживание резервных копий ПК
+sch.act.pc_retention	Хранение резервных копий ПК
+sch.set_in	Настраивается в разделе {page}
+sch.system_timer	Запускается системным таймером
+sch.win.start	Начало окна
+sch.win.length	Длительность окна (минуты)
+sch.win.help	Работа начинается в случайный момент внутри окна, а после его окончания ничего нового не начинается. Местное время NAS.
+sch.win.next	Следующие окна
+sch.win.until	до {time}
 sch.managed_storage	Управляется в разделе «Хранилище»: измените там.
 dd.title	Дедупликация
 dd.short	Дедуплицировано
@@ -3633,10 +3649,6 @@ upd.mode_help	Списки пакетов обновляются ежеднев�
 upd.mode_off	Выкл.
 upd.mode_security	Только безопасность
 upd.mode_all	Все обновления Debian
-upd.start	Начало окна
-upd.start_help	Местное время.
-upd.window	Длительность окна (минуты)
-upd.window_help	Момент начала выбирается случайно в пределах окна.
 upd.reboot	Перезагружать автоматически
 upd.reboot_help	Только если этого требует установленное обновление.
 upd.reboot_time	Время перезагрузки
@@ -3832,6 +3844,7 @@ task.docker.stack.update	Обновление стека
 task.docker.stack.rollback	Откат стека
 task.docker.stack.remove	Удаление стека
 task.docker.update-check	Проверка обновлений образов
+task.docker.auto-window	Окно автоматических обновлений
 task.docker.auto-update	Автоматическое обновление стека
 nev.docker.unhealthy.title	Контейнер {container} неисправен
 nev.docker.unhealthy.body	Проверка работоспособности не проходит. Посмотрите его журналы на странице «Docker».
@@ -4044,10 +4057,6 @@ dk.upd.stop	Остановить стек на время снимка
 dk.upd.next	следующая проверка {when}
 dk.au.title	Автоматическое обновление образов
 dk.au.text	Образы проверяются каждый день. Стеки с автоматическим обновлением обновляются по одному в пределах этого ежедневного окна: сначала снимок, затем проверка работоспособности, откат при сбое новой версии. Включается для каждого стека отдельно в разделе «Стеки», в подробностях стека.
-dk.au.hour	Начало окна (час)
-dk.au.minute	Начало окна (минута)
-dk.au.window	Длительность окна (минуты)
-dk.au.window_help	Обновления начинаются только в пределах окна.
 dk.au.chip	Автоматически
 dk.au.stack	Автоматическое обновление этого стека
 dk.au.enable	Обновлять автоматически
@@ -5352,7 +5361,7 @@ pca.f.folder	Папка репозиториев
 pca.f.folder_help	Внутри тома. Существующие группы остаются на месте.
 pca.f.default_quota	Квота новых групп (ГиБ)
 pca.f.hour	Час обслуживания
-pca.f.hour_help	0–23, каждую ночь. Если в это время NAS выключен или занят, запускается позже, в течение 12 часов.
+pca.f.hour_help	Каждую ночь в это время. Если в это время NAS выключен или занят, запускается позже, в течение 6 часов.
 pca.f.memory	Доля памяти (%)
 pca.f.memory_help	От памяти NAS, на одно обслуживание. Очистка, которой нужно больше, ждёт.
 pca.f.chunking	Размер блока новых групп
@@ -5450,6 +5459,8 @@ pca.browse_note	Файлы берутся прямо из резервной к�
 pca.browse_title	{device}: версия {id}
 task.pcbackup.revoke	Отзыв ПК
 task.pcbackup.maintenance	Обслуживание группы резервного копирования ПК
+task.pcbackup.nightly	Ночное обслуживание резервных копий ПК
+task.pcbackup.retention	Применение правил хранения резервных копий ПК
 task.pcbackup.delete-group	Удаление группы резервного копирования ПК
 nev.pcbackup.agent_late.title	Нет резервной копии с «{device}» уже {hours} ч
 nev.pcbackup.agent_late.body	Последняя успешная версия «{device}» старше {hours} ч.

@@ -2444,6 +2444,8 @@ sch.skip.missed	Saltata: persa
 sch.skip.missed_detail	Non recuperata: oltre {deadline} di ritardo
 sch.skip.overlap	Saltata: l'esecuzione precedente era in corso
 sch.skip.running	Saltata: già in esecuzione
+sch.skip.window	Saltata: fuori dalla sua finestra
+sch.skip.not_due	Saltata: non ancora dovuta
 sch.trigger.catch_up	Recupero dopo lo spegnimento
 sch.trigger.boot	All'avvio
 sch.trigger.manual	Esegui ora
@@ -2472,7 +2474,7 @@ sch.retry_at	Tentativo {n} di {of}: {when}
 sch.delete_title	Eliminare l'attività {name}?
 sch.delete_text	La sua pianificazione viene rimossa all'applicazione delle modifiche. La cronologia resta.
 sch.delete_job_task	Questa attività appartiene a un job di snapshot, replica o backup, o alla pianificazione di alimentazione: modificala o eliminala lì.
-sch.schedule_owned	La pianificazione di questa attività appartiene al suo job di snapshot, replica o backup, o alla pianificazione di alimentazione: modificala lì.
+sch.schedule_owned	La pianificazione di questa attività appartiene alla funzione che la gestisce: modificala lì.
 sch.sec.general	Generale
 sch.sec.action	Azione
 sch.sec.schedule	Pianificazione
@@ -2593,7 +2595,7 @@ sch.p.no_next	systemd non trova una prossima esecuzione per questa pianificazion
 sch.p.stops	systemd smette di pianificarla il {date} (un cambio dell'ora a mezzanotte nel fuso orario del NAS) e l'attività non partirebbe più. Scegli altri orari.
 sch.p.dst_forward	{date}: l'ora va avanti dalle {from} alle {to}; le esecuzioni in mezzo quel giorno saltano.
 sch.p.dst_back	{date}: l'ora torna indietro dalle {from} alle {to}; le esecuzioni in mezzo avvengono una volta sola.
-sch.trig.interval_text	Ogni {n} h dopo l'ultima esecuzione riuscita
+sch.trig.interval_text	Ogni {n} h dopo l'ultima esecuzione
 sch.trig.window_text	In una finestra settimanale
 sch.trig.after_text	Dopo l'attività {task}
 sch.act.command	Comando
@@ -2605,6 +2607,20 @@ sch.act.recycle_cleanup	Pulizia del cestino
 sch.act.power_shutdown	Spegnimento pianificato
 sch.act.backup	Job di backup
 sch.act.dedup	Deduplicazione
+sch.act.updates_check	Controllo aggiornamenti
+sch.act.system_upgrade	Aggiornamenti automatici del sistema
+sch.act.docker_image_check	Controllo delle immagini Docker
+sch.act.docker_auto_update	Aggiornamenti automatici di Docker
+sch.act.apps_catalog	Aggiornamento del catalogo app
+sch.act.pc_maintenance	Manutenzione dei backup dei PC
+sch.act.pc_retention	Conservazione dei backup dei PC
+sch.set_in	Si imposta in {page}
+sch.system_timer	Gira col timer del sistema
+sch.win.start	Inizio finestra
+sch.win.length	Durata finestra (minuti)
+sch.win.help	Il lavoro parte in un momento a caso dentro la finestra e, finita la finestra, non parte niente di nuovo. Ora locale del NAS.
+sch.win.next	Prossime finestre
+sch.win.until	fino alle {time}
 sch.managed_storage	Gestita in Archiviazione: modificala lì.
 dd.title	Deduplicazione
 dd.short	Deduplicata
@@ -3609,10 +3625,6 @@ upd.mode_help	Gli elenchi dei pacchetti vengono aggiornati ogni giorno in ogni m
 upd.mode_off	Disattivato
 upd.mode_security	Solo sicurezza
 upd.mode_all	Tutti gli aggiornamenti Debian
-upd.start	Inizio finestra
-upd.start_help	Ora locale.
-upd.window	Durata finestra (minuti)
-upd.window_help	L'avvio è distribuito a caso nella finestra.
 upd.reboot	Riavvia automaticamente
 upd.reboot_help	Solo quando un aggiornamento installato lo richiede.
 upd.reboot_time	Riavvia alle
@@ -3804,6 +3816,7 @@ task.docker.stack.update	Aggiornamento dello stack
 task.docker.stack.rollback	Ritorno alla versione precedente dello stack
 task.docker.stack.remove	Rimozione dello stack
 task.docker.update-check	Controllo aggiornamenti delle immagini
+task.docker.auto-window	Finestra degli aggiornamenti automatici
 task.docker.auto-update	Aggiornamento automatico dello stack
 nev.docker.unhealthy.title	Il container {container} non è in salute
 nev.docker.unhealthy.body	Il suo controllo di salute fallisce. Guarda i suoi log nella pagina Docker.
@@ -4016,10 +4029,6 @@ dk.upd.stop	Ferma lo stack durante lo snapshot
 dk.upd.next	prossimo controllo {when}
 dk.au.title	Aggiornamenti automatici delle immagini
 dk.au.text	Le immagini vengono controllate ogni giorno. Gli stack con gli aggiornamenti automatici vengono aggiornati uno alla volta dentro questa finestra giornaliera: prima lo snapshot, poi il controllo di salute, e il ritorno alla versione precedente se la nuova non funziona. Attivali per ogni stack in Stack, nei dettagli dello stack.
-dk.au.hour	Inizio della finestra (ora)
-dk.au.minute	Inizio della finestra (minuto)
-dk.au.window	Durata della finestra (minuti)
-dk.au.window_help	Gli aggiornamenti partono solo dentro la finestra.
 dk.au.chip	Automatico
 dk.au.stack	Aggiornamenti automatici di questo stack
 dk.au.enable	Aggiorna automaticamente
@@ -5337,7 +5346,7 @@ pca.f.folder	Cartella degli archivi
 pca.f.folder_help	Dentro un volume. I gruppi esistenti restano dove sono.
 pca.f.default_quota	Quota dei nuovi gruppi (GiB)
 pca.f.hour	Ora della manutenzione
-pca.f.hour_help	0–23, ogni notte. Se a quell'ora il NAS è spento o occupato, parte più tardi, entro 12 ore.
+pca.f.hour_help	Ogni notte a quest'ora. Se a quell'ora il NAS è spento o occupato, parte più tardi, entro 6 ore.
 pca.f.memory	Quota di memoria (%)
 pca.f.memory_help	Della memoria del NAS, per una manutenzione. Una pulizia che richiede di più aspetta.
 pca.f.chunking	Dimensione dei blocchi dei nuovi gruppi
@@ -5435,6 +5444,8 @@ pca.browse_note	I file arrivano direttamente dal backup; lo zip si crea mentre s
 pca.browse_title	{device}: versione {id}
 task.pcbackup.revoke	Revoca di un PC
 task.pcbackup.maintenance	Manutenzione di un gruppo di backup dei PC
+task.pcbackup.nightly	Manutenzione notturna dei backup dei PC
+task.pcbackup.retention	Applicazione della conservazione dei backup dei PC
 task.pcbackup.delete-group	Eliminazione di un gruppo di backup dei PC
 nev.pcbackup.agent_late.title	Nessun backup da {device} da {hours} ore
 nev.pcbackup.agent_late.body	L'ultima versione riuscita di {device} è più vecchia di {hours} ore.

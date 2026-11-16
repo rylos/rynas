@@ -1038,7 +1038,6 @@ const SEV_OPTS: &[(&str, &str)] = &[
 const MODES: &[(&str, &str)] = &[("all", "nt.mode.all"), ("any", "nt.mode.any")];
 const GROUP_S: &[u64] = &[0, 60, 300, 900, 3600];
 const REPEAT_S: &[u64] = &[0, 300, 900, 3600, 4 * 3600, 12 * 3600, 86400, 7 * 86400];
-const DAYS: [&str; 7] = ["day.1", "day.2", "day.3", "day.4", "day.5", "day.6", "day.7"];
 
 /// Select of a duration in seconds (0 = off); a value outside the list stays selectable.
 fn secs_select(label: &'static str, help: &'static str, opts: &'static [u64], value: Signal<u64>, set: Callback<u64>) -> AnyView {
@@ -1249,23 +1248,26 @@ fn rule_editor(init: NotifyRule, all_targets: Vec<(u64, String)>, rules: Remote<
     let quiet_rows = move || {
         (0..quiet_count.get())
             .map(|i| {
-                let days = (1..=7u8)
-                    .map(|day| {
-                        view! {
-                            <label class="check day">
-                                <input type="checkbox" prop:checked=move || d.with(|r| r.quiet_hours.get(i).is_some_and(|q| q.days.contains(&day)))
-                                    on:change=move |ev| {
-                                        let on = event_target_checked(&ev);
-                                        d.update(|r| if let Some(q) = r.quiet_hours.get_mut(i) { q.days.retain(|x| *x != day); if on { q.days.push(day); q.days.sort_unstable(); } });
-                                    } />
-                                {tr(DAYS[day as usize - 1])}
-                            </label>
-                        }
-                    })
-                    .collect_view();
+                // the shared weekday chips (quiet hours count days 1 = Monday … 7 = Sunday)
+                let days = crate::schedule::window::day_chips_group(
+                    Some("nt.f.days"),
+                    move |d0| d.with(|r| r.quiet_hours.get(i).is_some_and(|q| q.days.contains(&(d0 + 1)))),
+                    move |d0, on| {
+                        let day = d0 + 1;
+                        d.update(|r| {
+                            if let Some(q) = r.quiet_hours.get_mut(i) {
+                                q.days.retain(|x| *x != day);
+                                if on {
+                                    q.days.push(day);
+                                    q.days.sort_unstable();
+                                }
+                            }
+                        })
+                    },
+                );
                 view! {
                     <div class="quiet-row">
-                        <div class="quiet-days" role="group" aria-label=tr("nt.f.days")>{days}</div>
+                        {days}
                         <div class="secret-row">
                             <input class="input" type="time" aria-label=tr("nt.f.from_time")
                                 prop:value=move || d.with(|r| r.quiet_hours.get(i).map(|q| q.start.clone()).unwrap_or_default())
