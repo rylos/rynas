@@ -158,6 +158,10 @@ nev.net.watchdog_restored.title	Rete riportata all'ultima revisione funzionante 
 nev.net.watchdog_restored.body	Dopo l'avvio nessuna porta aveva un indirizzo instradabile; le ultime impostazioni funzionanti hanno risolto il problema.
 nev.net.rescue.title	Configurazione di rete di emergenza applicata
 nev.net.rescue.body	Dopo l'avvio nessuna porta aveva un indirizzo instradabile. Tutte le porte sono in DHCP con link-local; le impostazioni precedenti sono la revisione {revision}.
+nev.net.unreachable.title	Rete non raggiungibile dopo l'avvio; impostazioni invariate
+nev.net.unreachable.body	Nessuna porta collegata ha un indirizzo instradabile con un gateway raggiungibile. Le impostazioni funzionavano già e restano, quindi probabilmente il router o lo switch non sono ancora tornati (per esempio dopo una mancanza di corrente). rynas ricontrolla ogni 30 secondi.
+nev.net.reachable.title	Rete di nuovo raggiungibile
+nev.net.reachable.body	Una porta collegata ha di nuovo un indirizzo instradabile con un gateway raggiungibile; le impostazioni non sono state cambiate.
 nev.net.reset.title	Rete di fabbrica ripristinata con il pulsante di reset
 nev.net.reset.body	Tutte le porte sono in DHCP con link-local; bond, VLAN e bridge sono sospesi. Le impostazioni precedenti sono la revisione {revision} (Rete › Revisioni).
 theme.auto	Sistema

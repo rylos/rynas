@@ -703,6 +703,10 @@ dict! { BLOB, LENS;
     "nev.net.watchdog_restored.body" => "After boot no port had a routable address; the last known good settings fixed it.";
     "nev.net.rescue.title" => "Network rescue configuration applied";
     "nev.net.rescue.body" => "No port had a routable address after boot. Every port is on DHCP with link-local; the previous settings are revision {revision}.";
+    "nev.net.unreachable.title" => "Network unreachable after boot; settings unchanged";
+    "nev.net.unreachable.body" => "No connected port has a routable address with a reachable gateway. The settings worked before and are kept, so the router or the switch is probably not back yet (after a power cut, for example). rynas checks again every 30 seconds.";
+    "nev.net.reachable.title" => "Network reachable again";
+    "nev.net.reachable.body" => "A connected port has a routable address with a reachable gateway again; the settings were not changed.";
     "nev.net.reset.title" => "Factory network restored with the reset button";
     "nev.net.reset.body" => "Every port is on DHCP with link-local; bonds, VLANs and bridges are suspended. The previous settings are revision {revision} (Network › Revisions).";
     // theme / density / language
