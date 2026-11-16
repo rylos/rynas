@@ -433,6 +433,7 @@ fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
         // after this rynasd answers "run" without recording a skip: the start may be
         // running by the time a late answer arrives
         answer_by_ms: rynas_tasks::now_ms() + ANSWER_BY.as_millis() as u64,
+        trigger_timer_ms: env("TRIGGER_TIMER_REALTIME_USEC").parse::<u64>().map_or(0, |us| us / 1000),
     };
     let body = serde_json::to_vec(&req).unwrap_or_default();
     let answer = request_waiting(
@@ -455,8 +456,13 @@ fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
         }
         Err(e) => {
             // as before the gate, but a pause the user set still holds for timer starts
-            let by_timer = req.trigger_unit == rynas_scheduler::units::timer_name(id);
             let now = rynas_tasks::now_ms();
+            let by_timer = rynas_scheduler::gate::started_by_timer(
+                req.trigger_unit == rynas_scheduler::units::timer_name(id),
+                req.trigger_timer_ms,
+                None,
+                now,
+            );
             let skipped = if by_timer { load_pause(state).blocks(id, now) } else { None };
             let entry = SpoolEntry {
                 task_id: id.to_string(),

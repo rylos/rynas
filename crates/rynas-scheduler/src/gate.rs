@@ -66,6 +66,28 @@ pub struct GateRequest {
     /// answer decided later says "run" and records no skip: the start may already be running.
     #[serde(default)]
     pub answer_by_ms: u64,
+    /// `$TRIGGER_TIMER_REALTIME_USEC` in ms: when the timer elapsed (0: not set).
+    #[serde(default)]
+    pub trigger_timer_ms: u64,
+}
+
+/// A timer's activation details older than this are not this start's.
+pub const STALE_TRIGGER_MS: u64 = 15 * 60_000;
+
+/// The task's own timer started this start. systemd keeps a unit's activation details
+/// (`$TRIGGER_UNIT`, `$TRIGGER_TIMER_*`) across later starts that bring none, so a start
+/// rynasd asked for (`request_ms`: when) after a timer start still names the timer: the
+/// timer's elapse time tells them apart (a real timer start elapsed after the request, and
+/// moments ago). Without that time (an older systemd) a request wins.
+pub fn started_by_timer(names_timer: bool, trigger_timer_ms: u64, request_ms: Option<u64>, now_ms: u64) -> bool {
+    if !names_timer {
+        return false;
+    }
+    match (trigger_timer_ms, request_ms) {
+        (0, r) => r.is_none(),
+        (t, Some(r)) if t + 1000 < r => false,
+        (t, _) => now_ms.saturating_sub(t) <= STALE_TRIGGER_MS,
+    }
 }
 
 /// How long rynasd may take to decide before its answer counts as late
@@ -590,6 +612,23 @@ mod tests {
         // the same request on a start rynasd made (no timer) counts
         s.by_timer = false;
         assert_eq!(decide(&s), Decision::Run { trigger: RunTrigger::Retry, attempt: 2 });
+    }
+
+    #[test]
+    fn timer_starts_are_told_from_stale_activation_details() {
+        let now = 1_000_000_000;
+        // a timer start: elapsed moments ago, after any request
+        assert!(started_by_timer(true, now - 50, None, now));
+        assert!(started_by_timer(true, now - 50, Some(now - 60_000), now));
+        // a retry or run now after an earlier timer start: the details are older than the
+        // request
+        assert!(!started_by_timer(true, now - 9_000, Some(now - 2_000), now));
+        // details left from long ago, nothing asked (systemctl start by hand)
+        assert!(!started_by_timer(true, now - STALE_TRIGGER_MS - 1, None, now));
+        // an older systemd without the elapse time: a request wins
+        assert!(started_by_timer(true, 0, None, now));
+        assert!(!started_by_timer(true, 0, Some(now), now));
+        assert!(!started_by_timer(false, now, None, now));
     }
 
     #[test]

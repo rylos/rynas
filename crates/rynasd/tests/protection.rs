@@ -563,8 +563,12 @@ async fn the_gate_skips_paused_starts_and_arms_retries() {
 /// The gate's answer for a start of `id` (`timer`: started by its own timer); `by`: the
 /// deadline rynasctl sends (0: none).
 async fn gate_ask(e: &Env, id: &str, inv: &str, timer: bool, by: u64) -> rynas_scheduler::gate::GateAnswer {
-    let unit = if timer { format!("rynas-task-{id}.timer") } else { String::new() };
-    let body = json!({"invocation_id": inv, "trigger_unit": unit, "answer_by_ms": by});
+    // a timer start: the timer elapsed just now
+    let (unit, elapsed) = if timer { (format!("rynas-task-{id}.timer"), rynas_tasks::now_ms()) } else { (String::new(), 0) };
+    gate_ask_body(e, id, json!({"invocation_id": inv, "trigger_unit": unit, "answer_by_ms": by, "trigger_timer_ms": elapsed})).await
+}
+
+async fn gate_ask_body(e: &Env, id: &str, body: Value) -> rynas_scheduler::gate::GateAnswer {
     let (s, b) = call_peer(e, Some(0), "POST", &format!("/v1/scheduler/tasks/{id}/gate"), Some(body)).await;
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     serde_json::from_slice(&b).unwrap()
@@ -634,7 +638,11 @@ async fn a_retry_chain_notifies_its_failure_exactly_once() {
     retry_due_now(&e, "chain");
     rynasd::gate::tick(&e.prot);
     assert!(e.sys.state().calls.iter().any(|c| c == "run systemctl start --no-block rynas-task-chain.service"));
-    let a = gate_ask(&e, "chain", "c004", false, 0).await;
+    // systemd keeps the activation details of the last timer start: the retry still names
+    // the timer, with its old elapse time
+    let stale = json!({"invocation_id": "c004", "trigger_unit": "rynas-task-chain.timer",
+        "trigger_timer_ms": rynas_tasks::now_ms() - 30_000});
+    let a = gate_ask_body(&e, "chain", stale).await;
     assert_eq!((a.run, a.trigger), (true, RunTrigger::Retry));
     gate_end(&e, "chain", "c004", "exit-code").await;
     assert_eq!(e.prot.history.retry("chain").unwrap().unwrap().retry.attempt, 2);

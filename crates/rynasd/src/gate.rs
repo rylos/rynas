@@ -75,7 +75,8 @@ impl Lease {
 pub struct Gate {
     state: PathBuf,
     pause: Mutex<SchedulerPause>,
-    requested: Mutex<HashMap<String, (RunTrigger, u8, Instant)>>,
+    /// trigger, attempt, asked at (for the TTL), asked at in ms since the epoch
+    requested: Mutex<HashMap<String, (RunTrigger, u8, Instant, u64)>>,
     leases: Mutex<HashMap<String, Lease>>,
     /// The applied task ids at the last watch tick (a task gone since was deleted).
     known: Mutex<Option<HashSet<String>>>,
@@ -137,14 +138,15 @@ impl Gate {
         self.requested
             .lock()
             .unwrap()
-            .insert(id.to_string(), (trigger, attempt, Instant::now()));
+            .insert(id.to_string(), (trigger, attempt, Instant::now(), now_ms()));
     }
 
-    /// Takes the request of `id` (used once, whoever started the unit).
-    fn take_request(&self, id: &str) -> Option<(RunTrigger, u8)> {
+    /// Takes the request of `id` (used once, whoever started the unit), with when it was
+    /// made (ms since the epoch).
+    fn take_request(&self, id: &str) -> Option<(RunTrigger, u8, u64)> {
         let mut r = self.requested.lock().unwrap();
-        r.retain(|_, (_, _, at)| at.elapsed() < REQUEST_TTL);
-        r.remove(id).map(|(t, a, _)| (t, a))
+        r.retain(|_, (_, _, at, _)| at.elapsed() < REQUEST_TTL);
+        r.remove(id).map(|(t, a, _, ms)| (t, a, ms))
     }
 
     fn grant(&self, id: &str, invocation_id: &str, heavy: bool) {
@@ -342,9 +344,16 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
             message: format!("rynas: task {id} is not in the applied configuration; running it"),
         });
     };
-    let by_timer = req.trigger_unit == timer_name(id);
-    // used once, and dropped by a start of the timer (run now on a running task left it)
-    let requested = p.gate.take_request(id);
+    // used once, and dropped by a start of the timer (run now on a running task left it);
+    // a start rynasd asked for may still name the timer (systemd keeps activation details)
+    let asked = p.gate.take_request(id);
+    let by_timer = rynas_scheduler::gate::started_by_timer(
+        req.trigger_unit == timer_name(id),
+        req.trigger_timer_ms,
+        asked.map(|(_, _, ms)| ms),
+        now,
+    );
+    let requested = asked.map(|(t, a, _)| (t, a));
     let pause = p.gate.pause();
     let tz = TimeZone::system();
     let last_run = p.history.last_ran(id).map_err(Error::internal)?;
