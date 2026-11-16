@@ -20,7 +20,8 @@
 //!   `/usr/bin/ssh -F none` with the job's own `known_hosts` and key login only.
 //! - The job's persistent cache (`cache_dir`) keeps index and tree packs between runs.
 //! - Snapshots are scoped ([`SnapshotScope`]): `latest` resolves within the job's tag and
-//!   this NAS' host, an explicit id must carry the tag, retention groups by host and path.
+//!   this NAS' snapshots (machine tag, or host for older ones), an explicit id must carry the
+//!   tag, retention groups by host and path, a backup's parent is this NAS' own.
 //! - Cancel: SIGINT or SIGTERM end the process. A backup interrupted this way is resumed by
 //!   the next run: rustic writes the index of the packs already uploaded every 5 minutes, so
 //!   that data is not sent again.
@@ -39,7 +40,7 @@ use std::time::{Duration, Instant};
 use rustic_backend::BackendOptions;
 use rustic_core::{
     BackupOptions, CheckOptions, ConfigOptions, Credentials, Excludes, KeepOptions, KeyOptions,
-    LocalDestination, LocalSourceFilterOptions, LsOptions, OpenStatus, PathList, Progress,
+    LocalDestination, LocalSourceFilterOptions, LsOptions, OpenStatus, ParentOptions, PathList, Progress,
     ProgressBars, ProgressType, PruneOptions, ReadSubsetOption, Repository, RepositoryOptions,
     RestoreOptions, RusticProgress, SnapshotOptions,
 };
@@ -402,8 +403,30 @@ fn tag_ok(s: &SnapshotFile, scope: Option<&SnapshotScope>) -> bool {
     scope.is_none_or(|sc| s.tags.contains(&sc.tag))
 }
 
+/// Whether a snapshot is this NAS' ([`SnapshotScope::owns`]: its machine tag, or its host
+/// for snapshots written before machine tags).
 fn host_ok(s: &SnapshotFile, scope: Option<&SnapshotScope>) -> bool {
-    scope.is_none_or(|sc| sc.host.is_empty() || s.hostname == sc.host)
+    scope.is_none_or(|sc| {
+        let tags: Vec<String> = s.tags.iter().cloned().collect();
+        sc.owns(&s.hostname, &tags)
+    })
+}
+
+/// The parent of a backup of `as_path`: the latest snapshot in `scope` (the job's, this
+/// NAS') recorded with that path alone. `None`: no parent, every file is read.
+fn parent_in<'a>(all: &'a [SnapshotFile], scope: &SnapshotScope, as_path: &str) -> Option<&'a SnapshotFile> {
+    all.iter()
+        .filter(|s| tag_ok(s, Some(scope)) && host_ok(s, Some(scope)))
+        .filter(|s| s.paths.iter().eq([as_path].iter().copied()))
+        .max_by_key(|s| s.time.timestamp())
+}
+
+/// Snapshots with the job's tag and this NAS' host name that another NAS wrote (or that
+/// this one wrote before its machine tag, after a reinstall): kept apart, said once.
+fn others_named_alike(all: &[SnapshotFile], scope: &SnapshotScope) -> usize {
+    all.iter()
+        .filter(|s| tag_ok(s, Some(scope)) && s.hostname == scope.host && !host_ok(s, Some(scope)))
+        .count()
 }
 
 /// `latest` resolved within the scope; an explicit id must carry the job's tag.
@@ -523,8 +546,25 @@ fn run(req: WorkerRequest, private: &Private) -> Res<WorkerEvent> {
             tags,
             host,
             excludes,
+            scope,
         } => {
             let repo = open(&cx)?.to_indexed_ids().map_err(err)?;
+            // the parents come from this NAS' snapshots of the job only: another NAS called
+            // the same (same host and path) never lends its tree
+            let all = match &scope {
+                Some(sc) => {
+                    let all = repo.get_all_snapshots().map_err(err)?;
+                    let n = others_named_alike(&all, sc);
+                    if n > 0 {
+                        log(format!(
+                            "{n} snapshots of this job carry the host name {} but were not written by this NAS: they are left out of its parents, lists and retention",
+                            sc.host
+                        ));
+                    }
+                    all
+                }
+                None => Vec::new(),
+            };
             let mut last = None;
             for src in &sources {
                 emit(&WorkerEvent::Step {
@@ -536,9 +576,14 @@ fn run(req: WorkerRequest, private: &Private) -> Res<WorkerEvent> {
                 let source = PathList::from_iter([PathBuf::from(&src.read)])
                     .sanitize()
                     .map_err(err)?;
-                let snap = repo
-                    .backup(&backup_options(src, &excludes), &source, snap)
-                    .map_err(err)?;
+                let mut opts = backup_options(src, &excludes);
+                if let Some(sc) = &scope {
+                    opts = opts.parent_opts(match parent_in(&all, sc, &src.as_path) {
+                        Some(p) => ParentOptions::default().parents(vec![p.id.to_string()]),
+                        None => ParentOptions::default().force(true),
+                    });
+                }
+                let snap = repo.backup(&opts, &source, snap).map_err(err)?;
                 let e = entry(&snap);
                 emit(&WorkerEvent::BackedUp {
                     snapshot: e.clone(),

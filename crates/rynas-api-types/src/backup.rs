@@ -567,13 +567,50 @@ pub struct WorkerSource {
 }
 
 /// Which snapshots an operation may see: the job's tag, and (for `latest`, lists and
-/// retention) this NAS' host name. An explicit snapshot id must carry the tag.
+/// retention) this NAS' snapshots ([`SnapshotScope::owns`]). An explicit snapshot id must
+/// carry the tag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SnapshotScope {
     pub tag: String,
     /// Empty: any host.
     #[serde(default)]
     pub host: String,
+    /// The tag of the NAS that owns the snapshots ([`MACHINE_TAG_PREFIX`]`<id>`). Set: a
+    /// snapshot carrying a machine tag is in scope when it is this one, whatever its host
+    /// name; one without (written before machine tags) only when `legacy` and its host is
+    /// `host`. Empty: the host alone decides.
+    #[serde(default)]
+    pub machine: String,
+    /// Snapshots without a machine tag may be this NAS' (it backed up before machine tags).
+    #[serde(default)]
+    pub legacy: bool,
+}
+
+/// Prefix of the tag that names the NAS which wrote a snapshot: two NAS that were called
+/// the same never share retention groups, parents nor `latest`.
+pub const MACHINE_TAG_PREFIX: &str = "rynas-machine:";
+
+impl SnapshotScope {
+    /// Whether a snapshot written by `hostname` with `tags` belongs to the NAS of this scope
+    /// (the job's tag is checked apart).
+    pub fn owns(&self, hostname: &str, tags: &[String]) -> bool {
+        let host_ok = self.host.is_empty() || hostname == self.host;
+        if self.machine.is_empty() {
+            return host_ok;
+        }
+        match tags.iter().find(|t| t.starts_with(MACHINE_TAG_PREFIX)) {
+            Some(m) => *m == self.machine,
+            None => self.legacy && host_ok,
+        }
+    }
+
+    /// Every NAS' snapshots of the job (the list "of any host").
+    pub fn any_owner(mut self) -> Self {
+        self.host.clear();
+        self.machine.clear();
+        self.legacy = true;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -590,6 +627,10 @@ pub enum WorkerOp {
         host: String,
         /// Excludes of every source (each source adds its own).
         excludes: Vec<String>,
+        /// The snapshots a source's parent is taken from (its latest one in scope with the
+        /// same path); `None`: the parent restic would pick (same host and path).
+        #[serde(default)]
+        scope: Option<SnapshotScope>,
     },
     /// Removes the snapshots in `scope` that the retention does not keep (per host and path).
     Forget {
@@ -744,4 +785,45 @@ pub enum WorkerEvent {
     StreamSize { bytes: u64 },
     /// The operation failed (the last line).
     Error { message: String },
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    fn tags(t: &[&str]) -> Vec<String> {
+        t.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn snapshots_owned_by_host_or_machine() {
+        let host_only = SnapshotScope { tag: "rynas-job-docs".into(), host: "nas1".into(), ..Default::default() };
+        assert!(host_only.owns("nas1", &tags(&["rynas", "rynas-machine:b"])));
+        assert!(!host_only.owns("nas2", &[]));
+        let me = SnapshotScope {
+            tag: "rynas-job-docs".into(),
+            host: "nas1".into(),
+            machine: "rynas-machine:a".into(),
+            legacy: true,
+        };
+        // this NAS' tagged snapshots, whatever host name they carry
+        assert!(me.owns("nas1", &tags(&["rynas", "rynas-machine:a"])));
+        assert!(me.owns("renamed", &tags(&["rynas-machine:a"])));
+        // another NAS called the same is never this one
+        assert!(!me.owns("nas1", &tags(&["rynas", "rynas-machine:b"])));
+        // snapshots from before machine tags: by host, when this NAS wrote such snapshots
+        assert!(me.owns("nas1", &tags(&["rynas"])));
+        assert!(!me.owns("nas2", &tags(&["rynas"])));
+        let fresh = SnapshotScope { legacy: false, ..me.clone() };
+        assert!(!fresh.owns("nas1", &tags(&["rynas"])));
+        assert!(fresh.owns("nas1", &tags(&["rynas-machine:a"])));
+        let any = me.any_owner();
+        assert!(any.owns("x", &tags(&["rynas-machine:b"])) && any.owns("y", &[]));
+        // an older rynasd's scope (no machine fields) still reads
+        let old: SnapshotScope = serde_json::from_str(r#"{"tag":"t","host":"h"}"#).unwrap();
+        assert!(old.machine.is_empty() && !old.legacy);
+        let op: WorkerOp =
+            serde_json::from_str(r#"{"op":"backup","sources":[],"tags":[],"host":"h","excludes":[]}"#).unwrap();
+        assert!(matches!(op, WorkerOp::Backup { scope: None, .. }));
+    }
 }

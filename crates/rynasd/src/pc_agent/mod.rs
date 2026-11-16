@@ -1456,7 +1456,7 @@ async fn maintenance_post(
 pub fn scope(device: &str) -> SnapshotScope {
     SnapshotScope {
         tag: device_tag(device),
-        host: String::new(),
+        ..Default::default()
     }
 }
 

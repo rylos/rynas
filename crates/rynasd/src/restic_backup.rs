@@ -97,6 +97,10 @@ pub struct ResticSvc {
     host_keys: Mutex<HashMap<String, (String, Instant)>>,
     /// Worker operations of tasks at once ([`MAX_WORKERS`]).
     pub workers: Arc<tokio::sync::Semaphore>,
+    /// Who this NAS is in its snapshots ([`SnapshotIdentity`]).
+    identity: Mutex<SnapshotIdentity>,
+    /// The start-up look-up of [`settle_identity`] is over (or was not needed).
+    settled: tokio::sync::watch::Sender<bool>,
 }
 
 pub type RsState = Option<Arc<ResticSvc>>;
@@ -107,13 +111,20 @@ pub static SVC: OnceLock<Arc<ResticSvc>> = OnceLock::new();
 static TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl ResticSvc {
-    pub fn new(prot: Arc<Protection>, launch: Launch, dry: bool, secret_dir: PathBuf) -> Arc<Self> {
+    /// `boot_host`: the host name when rynasd started, before any apply could rename the
+    /// host: recorded as the snapshots' host when nothing is recorded yet.
+    pub fn new(prot: Arc<Protection>, launch: Launch, dry: bool, secret_dir: PathBuf, boot_host: &str) -> Arc<Self> {
         let cache_root = if dry {
             prot.state_dir.join("backup-cache")
         } else {
             PathBuf::from("/var/cache/rynas/backup")
         };
+        let machine_id = std::fs::read_to_string("/etc/machine-id").ok();
+        let identity = load_identity(&prot.state_dir, boot_host, machine_id.as_deref());
+        let (settled, _) = tokio::sync::watch::channel(identity.probe.is_empty());
         Arc::new(ResticSvc {
+            identity: Mutex::new(identity),
+            settled,
             prot,
             launch,
             dry,
@@ -124,6 +135,11 @@ impl ResticSvc {
             host_keys: Mutex::new(HashMap::new()),
             workers: Arc::new(tokio::sync::Semaphore::new(MAX_WORKERS)),
         })
+    }
+
+    /// Who this NAS is in its snapshots, now.
+    pub fn identity(&self) -> SnapshotIdentity {
+        self.identity.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// The task running for `job`, if any.
@@ -1176,41 +1192,184 @@ async fn op_in(
     r
 }
 
-fn scope_of(job: &str) -> SnapshotScope {
-    SnapshotScope {
-        tag: job_tag(job),
-        host: backup_host(),
-    }
+/// The job's snapshots as this NAS sees them: its tag, and this NAS' snapshots by machine tag
+/// or (from before machine tags) by host (review M5, M8). Waits for the start-up look-up of
+/// the hosts of an upgraded NAS ([`settle_identity`]).
+async fn scope_of(s: &ResticSvc, job: &str) -> SnapshotScope {
+    let mut rx = s.settled.subscribe();
+    let _ = rx.wait_for(|v| *v).await;
+    s.identity().scope(job)
 }
 
-/// The host the NAS backups record in their snapshots and look for in lists, `latest` and
-/// retention: the host name of this NAS when it first needed one, kept in
-/// `<state>/backup/snapshot-host`, so a renamed NAS still finds its snapshots (a new host
-/// would hide them, start every source without a parent and never prune them).
-fn backup_host() -> String {
-    match SVC.get() {
-        Some(s) => backup_host_in(&s.prot.state_dir, &hostname()),
-        None => hostname(),
-    }
+/// Who this NAS is in the snapshots of its backups, kept in
+/// `<state>/backup/snapshot-identity` (no extension: never taken for a job's status) and
+/// recorded when the service starts, before any rename can apply:
+/// - `host`: the host name its snapshots record and that `latest`, lists and retention look
+///   for in snapshots without a machine tag, so a renamed NAS still finds its snapshots (a
+///   new host would hide them, start every source without a parent and never prune them);
+/// - `machine`: its machine tag, put on every new snapshot: two NAS called the same that
+///   share a repository never share lists, parents nor retention groups;
+/// - `legacy`: it backed up before machine tags (an upgrade), so the snapshots without a
+///   machine tag and with `host` are its own; a new install leaves them to their writer;
+/// - `jobs`: a job whose earlier snapshots record another host (the NAS was renamed outside
+///   rynas before the upgrade), found in the repository at the first start.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, Deserialize)]
+pub struct SnapshotIdentity {
+    pub host: String,
+    pub machine: String,
+    #[serde(default)]
+    pub legacy: bool,
+    #[serde(default)]
+    pub jobs: std::collections::BTreeMap<String, String>,
+    /// Jobs whose snapshot host is still to be looked up in their repository.
+    #[serde(default)]
+    pub probe: Vec<String>,
 }
 
-fn backup_host_in(state_dir: &FsPath, current: &str) -> String {
-    let p = status::dir(state_dir).join("snapshot-host");
-    if let Ok(t) = std::fs::read_to_string(&p) {
-        let t = t.trim();
-        if !t.is_empty() && t.len() <= 255 && !t.chars().any(char::is_control) {
-            return t.to_string();
+const IDENTITY_FILE: &str = "snapshot-identity";
+
+impl SnapshotIdentity {
+    fn host_of(&self, job: &str) -> &str {
+        self.jobs.get(job).map(String::as_str).unwrap_or(&self.host)
+    }
+
+    fn scope(&self, job: &str) -> SnapshotScope {
+        SnapshotScope {
+            tag: job_tag(job),
+            host: self.host_of(job).to_string(),
+            machine: self.machine.clone(),
+            legacy: self.legacy,
         }
     }
-    let saved = std::fs::create_dir_all(status::dir(state_dir)).and_then(|_| {
+
+    fn save(&self, state_dir: &FsPath) -> std::io::Result<()> {
+        let dir = status::dir(state_dir);
+        std::fs::create_dir_all(&dir)?;
+        let p = dir.join(IDENTITY_FILE);
         let tmp = p.with_extension("tmp");
-        std::fs::write(&tmp, format!("{current}\n"))?;
+        std::fs::write(&tmp, serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?)?;
         std::fs::rename(&tmp, &p)
-    });
-    if let Err(e) = saved {
+    }
+}
+
+fn host_text_ok(t: &str) -> bool {
+    !t.is_empty() && t.len() <= 255 && !t.chars().any(char::is_control)
+}
+
+/// The machine tag of this NAS: derived from `/etc/machine-id` (hashed, the id itself never
+/// leaves the machine), random when there is none.
+fn machine_tag(machine_id: Option<&str>) -> String {
+    use sha2::Digest;
+    let bytes: Vec<u8> = match machine_id.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => sha2::Sha256::digest(format!("rynas snapshot owner\n{m}"))[..8].to_vec(),
+        None => {
+            let mut b = [0u8; 8];
+            let _ = getrandom::fill(&mut b);
+            b.to_vec()
+        }
+    };
+    let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{MACHINE_TAG_PREFIX}{id}")
+}
+
+/// The identity recorded in `state_dir`, or a new one recorded now with the running host
+/// name `running` (the host name of an earlier rynasd's `snapshot-host` when there is one).
+/// An install with backup jobs already (an upgrade) owns the snapshots without machine tag
+/// and looks up the host of each job that ran in its repository ([`settle_identity`]).
+pub fn load_identity(state_dir: &FsPath, running: &str, machine_id: Option<&str>) -> SnapshotIdentity {
+    let dir = status::dir(state_dir);
+    let p = dir.join(IDENTITY_FILE);
+    if let Ok(t) = std::fs::read_to_string(&p)
+        && let Ok(id) = serde_json::from_str::<SnapshotIdentity>(&t)
+        && host_text_ok(&id.host)
+        && id.machine.starts_with(MACHINE_TAG_PREFIX)
+    {
+        return id;
+    }
+    let earlier = std::fs::read_to_string(dir.join("snapshot-host"))
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| host_text_ok(t));
+    let (mut ran, mut known) = (Vec::new(), false);
+    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        let Some((job, ext)) = n.rsplit_once('.') else { continue };
+        if !rynas_backup::valid_job_name(job) {
+            continue;
+        }
+        match ext {
+            "json" => {
+                known = true;
+                ran.push(job.to_string());
+            }
+            "secrets" => known = true,
+            _ => {}
+        }
+    }
+    ran.sort();
+    let id = SnapshotIdentity {
+        // the earlier record already holds the host its snapshots carry: nothing to look up
+        probe: if earlier.is_some() { Vec::new() } else { ran },
+        legacy: earlier.is_some() || known,
+        host: earlier.unwrap_or_else(|| running.to_string()),
+        machine: machine_tag(machine_id),
+        jobs: Default::default(),
+    };
+    if let Err(e) = id.save(state_dir) {
         tracing::warn!("backup: {}: {e}", p.display());
     }
-    current.to_string()
+    id
+}
+
+/// The host to keep for a job of an upgraded NAS, from its repository's snapshots of the
+/// job's tag (`list`): the host they all carry when none carries `ours` (the NAS was renamed
+/// before machine tags), else none (ours, or several writers: left as is).
+fn adopted_host(list: &[SnapshotEntry], ours: &str) -> Option<String> {
+    let legacy: Vec<&SnapshotEntry> = list
+        .iter()
+        .filter(|s| !s.tags.iter().any(|t| t.starts_with(MACHINE_TAG_PREFIX)))
+        .collect();
+    let first = legacy.first()?;
+    (legacy.iter().all(|s| s.hostname == first.hostname) && first.hostname != ours && host_text_ok(&first.hostname))
+        .then(|| first.hostname.clone())
+}
+
+/// After the first start of an upgraded NAS: for each job that ran, the host its snapshots
+/// carry ([`adopted_host`]), read from its repository; then the scopes are released
+/// ([`scope_of`]). A repository that cannot be read keeps the recorded host.
+async fn settle_identity(s: &Arc<ResticSvc>) {
+    let probe = s.identity().probe;
+    for name in probe {
+        let found = async {
+            let (job, sec) = {
+                let (s2, n) = (s.clone(), name.clone());
+                blocking(&s.prot, move |_| applied_job(&s2, &n)).await.map_err(|e| e.2)?
+            };
+            let ours = s.identity().host;
+            let scope = SnapshotScope { tag: job_tag(&name), ..Default::default() };
+            let req = s.request(&name, repo_spec(&job.destination, &sec, job.bandwidth_kib), WorkerOp::Snapshots { scope: Some(scope) });
+            let limits = Limits { timeout: Some(READ_TIMEOUT), ..Default::default() };
+            match run_worker(&s.launch, &name, &req, &CancellationToken::new(), &limits, |_| {}).await? {
+                WorkerEvent::Snapshots { list } => Ok::<_, String>(adopted_host(&list, &ours)),
+                _ => Err("unexpected answer".into()),
+            }
+        }
+        .await;
+        let mut id = s.identity.lock().unwrap_or_else(|p| p.into_inner());
+        match found {
+            Ok(Some(h)) => {
+                tracing::warn!(target: "rynas::audit", "backup {name}: its snapshots carry the host name {h}: kept for the job");
+                id.jobs.insert(name.clone(), h);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("backup {name}: the host of its snapshots was not read: {e}"),
+        }
+        id.probe.retain(|j| *j != name);
+        if let Err(e) = id.save(&s.prot.state_dir) {
+            tracing::warn!("backup: snapshot identity: {e}");
+        }
+    }
+    s.settled.send_replace(true);
 }
 
 pub fn spawn_run(who: &str, job: &str) -> Res<String> {
@@ -1555,11 +1714,15 @@ async fn run_job(
     }
     let result: Result<(), String> = async {
         prepared?;
+        // the host recorded for this NAS (not the running name: a renamed NAS keeps finding
+        // its snapshots), its machine tag, and parents among its own snapshots only
+        let scope = scope_of(s, &job.name).await;
         let backup = WorkerOp::Backup {
             sources: sources.clone(),
-            tags: vec!["rynas".into(), job_tag(&job.name)],
-            host: backup_host(),
+            tags: vec!["rynas".into(), job_tag(&job.name), scope.machine.clone()],
+            host: scope.host.clone(),
             excludes: vec![],
+            scope: Some(scope),
         };
         let unit = matches!(s.launch, Launch::Unit { .. }).then(|| rynas_backup::runner::unit_name(&job.name));
         record_run(&state_dir, &job.name, |r| r.unit = unit.clone().map(|u| format!("{u}.service")));
@@ -1704,7 +1867,7 @@ async fn maintenance(s: &ResticSvc, job: &BackupJob, spec: &RepoSpec, ctx: &Task
         job,
         spec,
         WorkerOp::Forget {
-            scope: scope_of(&job.name),
+            scope: scope_of(s, &job.name).await,
             retention: job.retention,
             dry_run: false,
             min_age_days: 0,
@@ -1848,9 +2011,9 @@ async fn snapshots(
 ) -> Res<Json<Vec<SnapshotEntry>>> {
     let s = svc(&st)?;
     check_name(&name)?;
-    let mut scope = scope_of(&name);
+    let mut scope = scope_of(&s, &name).await;
     if q.all_hosts {
-        scope.host.clear();
+        scope = scope.any_owner();
     }
     match read_op(&s, &name, WorkerOp::Snapshots { scope: Some(scope) }).await? {
         WorkerEvent::Snapshots { list } => Ok(Json(list)),
@@ -1895,7 +2058,7 @@ async fn browse(
         WorkerOp::Ls {
             snapshot: q.snapshot,
             path: q.path,
-            scope: Some(scope_of(&name)),
+            scope: Some(scope_of(&s, &name).await),
         },
     )
     .await?
@@ -1943,7 +2106,7 @@ async fn restore(
     let (snap, paths) = (req.snapshot.clone(), req.paths.clone());
     let id = spawn_locked(&s, "backup.restore", &owner, &job.clone(), move |ctx| async move {
         let spec = repo_spec(&job.destination, &sec, job.bandwidth_kib);
-        let scope = scope_of(&job.name);
+        let scope = scope_of(&s2, &job.name).await;
         if let Some(t) = target {
             // into the system volume: its folder made ready and checked first (D-ROOTVOL),
             // never a plain folder made in its place
@@ -2257,7 +2420,7 @@ async fn download(
             out: out.display().to_string(),
             // refused by the worker before a byte is written
             max_bytes: MAX_DOWNLOAD,
-            scope: Some(scope_of(&name)),
+            scope: Some(scope_of(&s, &name).await),
         },
     )
     .await?
@@ -2344,7 +2507,7 @@ async fn preview_retention(
         &s,
         &name,
         WorkerOp::Forget {
-            scope: scope_of(&name),
+            scope: scope_of(&s, &name).await,
             retention: job.retention,
             dry_run: true,
             min_age_days: 0,
@@ -2500,6 +2663,8 @@ pub async fn recover(s: Arc<ResticSvc>) {
         sweep(&s2);
     })
     .await;
+    // an upgraded NAS: the host each job's snapshots carry, before any job uses it
+    settle_identity(&s).await;
 }
 
 #[cfg(test)]
@@ -2528,16 +2693,72 @@ mod tests {
     }
 
     #[test]
-    fn the_snapshot_host_survives_a_rename() {
+    fn the_snapshot_identity_is_recorded_at_start_and_survives_a_rename() {
+        // a new install: its own name, its machine tag, no claim on untagged snapshots
         let d = tempfile::tempdir().unwrap();
-        // the first name is kept and reused after the NAS was renamed
-        assert_eq!(backup_host_in(d.path(), "nas"), "nas");
-        assert_eq!(backup_host_in(d.path(), "store"), "nas");
-        assert_eq!(std::fs::read_to_string(d.path().join("backup/snapshot-host")).unwrap(), "nas\n");
-        // an unreadable record is replaced by the running name
-        std::fs::write(d.path().join("backup/snapshot-host"), "\n").unwrap();
-        assert_eq!(backup_host_in(d.path(), "store"), "store");
-        assert_eq!(backup_host_in(d.path(), "other"), "store");
+        let id = load_identity(d.path(), "nas", Some("0123456789abcdef\n"));
+        assert_eq!((id.host.as_str(), id.legacy), ("nas", false));
+        assert!(id.probe.is_empty() && id.machine.starts_with(MACHINE_TAG_PREFIX));
+        assert_eq!(id.machine, machine_tag(Some("0123456789abcdef")));
+        assert_ne!(id.machine, machine_tag(Some("fedcba9876543210")));
+        assert!(!id.machine.contains("0123456789abcdef"));
+        // the start after a rename finds the record: same host, same tag
+        let again = load_identity(d.path(), "store", Some("other"));
+        assert_eq!(again, id);
+        assert_eq!(again.scope("docs").host, "nas");
+        assert!(d.path().join("backup/snapshot-identity").exists());
+
+        // an upgrade: jobs ran before, their snapshots carry no machine tag
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("backup");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("docs.json"), "{}").unwrap();
+        std::fs::write(dir.join("media.secrets"), "x").unwrap();
+        let id = load_identity(d.path(), "nas", None);
+        assert!(id.legacy);
+        assert_eq!(id.probe, ["docs"]);
+        let sc = id.scope("docs");
+        assert!(sc.owns("nas", &[]) && !sc.owns("other", &[]));
+        // a job found with another host keeps it
+        let mut id = id;
+        id.jobs.insert("docs".into(), "old".into());
+        assert_eq!(id.scope("docs").host, "old");
+        assert_eq!(id.scope("media").host, "nas");
+
+        // the record of an earlier rynasd (host name alone) is kept: nothing to look up
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("backup");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("snapshot-host"), "first\n").unwrap();
+        std::fs::write(dir.join("docs.json"), "{}").unwrap();
+        let id = load_identity(d.path(), "renamed", None);
+        assert_eq!((id.host.as_str(), id.legacy), ("first", true));
+        assert!(id.probe.is_empty());
+        // an unreadable record is made again
+        std::fs::write(dir.join("snapshot-identity"), "{").unwrap();
+        assert_eq!(load_identity(d.path(), "renamed", None).host, "first");
+    }
+
+    #[test]
+    fn an_upgraded_job_keeps_the_host_of_its_snapshots() {
+        let snap = |host: &str, tags: &[&str]| SnapshotEntry {
+            id: "1".into(),
+            time_ms: 0,
+            hostname: host.into(),
+            paths: vec![],
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            files: None,
+            bytes: None,
+            added_bytes: None,
+        };
+        // renamed outside rynas before the upgrade: its snapshots carry the old name
+        assert_eq!(adopted_host(&[snap("old", &["rynas"]), snap("old", &[])], "nas"), Some("old".into()));
+        // some carry the running name, or several writers: nothing adopted
+        assert_eq!(adopted_host(&[snap("old", &[]), snap("nas", &[])], "nas"), None);
+        assert_eq!(adopted_host(&[snap("a", &[]), snap("b", &[])], "nas"), None);
+        assert_eq!(adopted_host(&[], "nas"), None);
+        // snapshots with a machine tag are not from before the upgrade
+        assert_eq!(adopted_host(&[snap("x", &["rynas-machine:1"])], "nas"), None);
     }
 
     #[test]

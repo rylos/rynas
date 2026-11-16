@@ -245,6 +245,8 @@ struct Opened {
     web_access: Arc<rynasd::web_access::WebAccessSvc>,
     /// The running host name, sent again by every apply that changes it.
     hostname: tokio::sync::watch::Receiver<String>,
+    /// The host name when rynasd started, before any apply could change it.
+    boot_hostname: String,
 }
 
 fn open_config(
@@ -325,7 +327,8 @@ fn open_config(
     }
     // a renamed host: the services that hold the name (certificate, web access, notification
     // texts, PC backup names) follow at once instead of at their next check
-    let (hostname_tx, hostname_rx) = tokio::sync::watch::channel(running_hostname());
+    let boot_hostname = running_hostname();
+    let (hostname_tx, hostname_rx) = tokio::sync::watch::channel(boot_hostname.clone());
     let hostname_domain = HostnameDomain::new().on_change(Box::new(move |h: &str| {
         hostname_tx.send_replace(h.to_string());
     }));
@@ -431,6 +434,7 @@ fn open_config(
         tls,
         web_access,
         hostname: hostname_rx,
+        boot_hostname,
     })
 }
 
@@ -973,6 +977,8 @@ fn main() -> std::io::Result<()> {
                 launch,
                 args.dry_system,
                 args.state_dir.join("notify"),
+                // the snapshots' host is recorded with the name before any rename applies
+                &opened.boot_hostname,
             );
             let _ = rynasd::restic_backup::SVC.set(svc.clone());
             // runs a stop cut short: leftover worker units, stopped stacks, temporary

@@ -63,6 +63,7 @@ fn scope(tag: &str, host: &str) -> SnapshotScope {
     SnapshotScope {
         tag: tag.into(),
         host: host.into(),
+        ..Default::default()
     }
 }
 
@@ -106,6 +107,7 @@ fn backup_restore_forget_prune_check() {
         tags: vec!["rynas".into(), "rynas-job:docs".into()],
         host: host.into(),
         excludes: vec!["*.tmp".into()],
+        scope: None,
     };
     let r = run_with(&s, backup("nas"), Some(&cache));
     assert!(r.1, "{}", r.2);
@@ -256,6 +258,92 @@ fn backup_restore_forget_prune_check() {
     assert!(!run(&s, WorkerOp::Snapshots { scope: None }).2.contains(PW));
 }
 
+/// Two NAS called the same back up the same job name into one repository: their machine
+/// tags keep lists, `latest`, parents and retention apart, and the snapshots from before
+/// machine tags stay with the NAS that wrote them (legacy), not with the newcomer.
+#[test]
+fn machine_tags_keep_namesakes_apart() {
+    let t = tempfile::tempdir().unwrap();
+    let repo = t.path().join("repo");
+    let data = t.path().join("snap");
+    std::fs::create_dir_all(&data).unwrap();
+    let s = spec(&repo, PW);
+    let r = run(&s, WorkerOp::Init);
+    assert!(r.1, "{}", r.2);
+    let tag = "rynas-job:docs";
+    let a = SnapshotScope {
+        tag: tag.into(),
+        host: "nas1".into(),
+        machine: "rynas-machine:a".into(),
+        legacy: true,
+    };
+    let b = SnapshotScope {
+        machine: "rynas-machine:b".into(),
+        legacy: false,
+        ..a.clone()
+    };
+    let backup = |text: &str, tags: &[&str], scope: Option<SnapshotScope>| {
+        std::fs::write(data.join("a.txt"), text).unwrap();
+        WorkerOp::Backup {
+            sources: vec![WorkerSource {
+                read: data.display().to_string(),
+                as_path: "/volume1/docs".into(),
+                excludes: vec![],
+            }],
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            host: "nas1".into(),
+            excludes: vec![],
+            scope,
+        }
+    };
+    // nas1 before machine tags, then after its upgrade
+    let r = run(&s, backup("a old", &["rynas", tag], None));
+    let WorkerEvent::BackedUp { snapshot: legacy } = last(&r).clone() else { panic!("{}", r.2) };
+    let r = run(&s, backup("a new", &["rynas", tag, "rynas-machine:a"], Some(a.clone())));
+    assert!(r.1, "{}", r.2);
+    assert!(!r.0.iter().any(|e| matches!(e, WorkerEvent::Log { text } if text.contains("not written by this NAS"))));
+    // a new NAS later called nas1 too: told about the namesake's snapshots
+    let r = run(&s, backup("b", &["rynas", tag, "rynas-machine:b"], Some(b.clone())));
+    assert!(r.1, "{}", r.2);
+    assert!(
+        r.0.iter().any(|e| matches!(e, WorkerEvent::Log { text } if text.starts_with("2 snapshots of this job"))),
+        "{}",
+        r.2
+    );
+    let count = |sc: SnapshotScope| match last(&run(&s, WorkerOp::Snapshots { scope: Some(sc) })) {
+        WorkerEvent::Snapshots { list } => list.len(),
+        e => panic!("{e:?}"),
+    };
+    assert_eq!(count(a.clone()), 2);
+    assert_eq!(count(b.clone()), 1);
+    assert_eq!(count(scope(tag, "nas1")), 3);
+    assert_eq!(count(a.clone().any_owner()), 3);
+    // `latest` is each NAS' own
+    let dump = |sc: SnapshotScope, out: &Path| WorkerOp::Dump {
+        snapshot: "latest".into(),
+        path: "/volume1/docs/a.txt".into(),
+        out: out.display().to_string(),
+        max_bytes: 0,
+        scope: Some(sc),
+    };
+    let (out_a, out_b) = (t.path().join("a.txt"), t.path().join("b.txt"));
+    let r = run(&s, dump(a.clone(), &out_a));
+    assert!(r.1, "{}", r.2);
+    assert_eq!(std::fs::read_to_string(&out_a).unwrap(), "a new");
+    let r = run(&s, dump(b.clone(), &out_b));
+    assert!(r.1, "{}", r.2);
+    assert_eq!(std::fs::read_to_string(&out_b).unwrap(), "b");
+    // retention: the newcomer prunes nothing of nas1's, nas1 prunes only its own
+    let keep1 = Retention { last: 1, hourly: 0, daily: 0, weekly: 0, monthly: 0, yearly: 0 };
+    let forget = |sc: SnapshotScope| WorkerOp::Forget { scope: sc, retention: keep1, dry_run: true, min_age_days: 0 };
+    let r = run(&s, forget(b));
+    assert!(matches!(last(&r), WorkerEvent::Forgot { keep, remove } if keep.len() == 1 && remove.is_empty()), "{}", r.2);
+    let r = run(&s, forget(a));
+    let WorkerEvent::Forgot { keep, remove } = last(&r) else { panic!("{}", r.2) };
+    assert_eq!((keep.len(), remove.len()), (1, 1), "{keep:?}");
+    assert_eq!(remove[0].id, legacy.id);
+}
+
 /// A PC group's repository: `init_pc`, a PC key that opens it, `index_info`, the minimum
 /// age of `forget`, `stream` of a file and of a zip (data on stdout, events on stderr), a
 /// removed key that no longer opens it.
@@ -277,6 +365,7 @@ fn pc_repository_keys_stream_and_min_age() {
         tags: vec!["rynas-pc".into(), "pc-laptop".into()],
         host: "laptop".into(),
         excludes: vec![],
+        scope: None,
     };
     let r = run(&pc, backup);
     assert!(matches!(last(&r), WorkerEvent::BackedUp { .. }), "{}", r.2);
