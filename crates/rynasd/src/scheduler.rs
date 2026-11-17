@@ -985,7 +985,16 @@ pub(crate) fn record_end(
     if !written {
         return Ok(None);
     }
-    let notify = match applied_task(p, id)? {
+    let task = applied_task(p, id)?;
+    // a long SMART test goes on in the drive after `smartctl -t long` returned: its disk
+    // stays claimed until the drive is done (S4)
+    if let Some(t) = &task
+        && let TaskAction::SmartTest { disk, test: rynas_api_types::scheduler::SmartTestKind::Long } = &t.action
+        && run.ok()
+    {
+        crate::gate::hold_disk_test(p, t, disk);
+    }
+    let notify = match task {
         Some(task) => crate::gate::after_run(p, &task, &run),
         None => true,
     };

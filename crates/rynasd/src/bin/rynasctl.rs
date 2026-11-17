@@ -56,8 +56,8 @@ use rynas_api_types::{TaskInfo, TaskStarted, TaskStatus};
 use rynas_auth::ipc::{DEFAULT_SOCKET, USER_HEADER};
 use rynas_btrfs::system::{self, SystemSnapshot, Taken};
 use rynas_scheduler::gate::{
-    ANSWER_BY, GATE_TIMEOUT, GateAnswer, GateRequest, SpoolEntry, SpoolFinished, WAIT_POLL,
-    load_pause, spool_append,
+    ANSWER_BY, GATE_TIMEOUT, GateAnswer, GateRequest, QUEUE_MAX, SpoolEntry, SpoolFinished,
+    WAIT_POLL, load_pause, spool_append,
 };
 use rynasd::jobs::{JobPlan, PlanReport};
 use rynasd::scheduler::{ExecuteRequest, TaskFinished};
@@ -427,6 +427,26 @@ fn on_stop_signals() {
     }
 }
 
+/// Waits [`WAIT_POLL`] before the next question of a queued start; `true` when the unit was
+/// stopped meanwhile: systemd is stopping it and nothing starts after this, so the gate exits
+/// 0 (any other exit, or dying by the signal, during a stop marks the unit failed on systemd
+/// 257).
+fn wait_poll() -> bool {
+    let until = std::time::Instant::now() + WAIT_POLL;
+    while std::time::Instant::now() < until {
+        if STOP.load(Ordering::SeqCst) {
+            say("rynas: stopped while waiting in the queue: nothing started");
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
+/// `rynasctl gate <id>` ([`rynas_scheduler::gate`]). Never exits with anything but 0 (run)
+/// or 1 (skip): an internal error runs the start ([`main`] turns a panic into exit 0 too).
+/// While the answer says `wait` it asks again; once queued, an unreachable rynasd keeps it
+/// waiting (up to [`QUEUE_MAX`]) instead of running it beside the work it waits for.
 fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
     let env = |k: &str| std::env::var(k).unwrap_or_default();
     let mut req = GateRequest {
@@ -437,6 +457,8 @@ fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
         // this rynasctl asks again while its start waits in the queue (S4)
         can_wait: true,
         queued_since_ms: 0,
+        queued_trigger: None,
+        queued_attempt: 0,
     };
     let mut said = String::new();
     loop {
@@ -466,16 +488,26 @@ fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
                     req.queued_since_ms = rynas_tasks::now_ms();
                     on_stop_signals();
                 }
-                let until = std::time::Instant::now() + WAIT_POLL;
-                while std::time::Instant::now() < until {
-                    if STOP.load(Ordering::SeqCst) {
-                        // stopped while it waited: systemd is stopping the unit, nothing
-                        // starts after this; exit 0, since any other exit (or dying by the
-                        // signal) during a stop marks the unit failed (systemd 257)
-                        say("rynas: stopped while waiting in the queue: nothing started");
-                        return ExitCode::SUCCESS;
-                    }
-                    std::thread::sleep(Duration::from_millis(200));
+                // how the start came about, sent back on every question (a restarted rynasd
+                // knows it from this)
+                req.queued_trigger = Some(a.trigger);
+                req.queued_attempt = a.attempt;
+                if wait_poll() {
+                    return ExitCode::SUCCESS;
+                }
+            }
+            // queued already and rynasd does not answer (restarting, an upgrade): the start
+            // keeps its place and asks again, never running beside the work it waits for; a
+            // day later it runs as before the gate
+            Err(e) if req.queued_since_ms > 0
+                && rynas_tasks::now_ms().saturating_sub(req.queued_since_ms) < QUEUE_MAX.as_millis() as u64 =>
+            {
+                if said != e {
+                    say(&format!("rynas: no answer from the scheduling gate ({e}); still waiting in the queue"));
+                    said = e.clone();
+                }
+                if wait_poll() {
+                    return ExitCode::SUCCESS;
                 }
             }
             Ok(a) => {
@@ -587,6 +619,21 @@ fn run_plan(plan: &JobPlan) -> ExitCode {
     if btrbk {
         c.stdout(Stdio::piped());
     }
+    let gave_way = || {
+        plan.yield_state.as_deref().is_some_and(|state| {
+            rynas_scheduler::gate::gave_way(std::path::Path::new(state), &std::env::var("INVOCATION_ID").unwrap_or_default())
+        })
+    };
+    // asked to give way (S4) before the command started (the signal came while rynasd planned
+    // the run, or rynasd says so): nothing to cancel, the run gave way
+    if plan.gave_way || (STOP.load(Ordering::SeqCst) && gave_way()) {
+        println!("rynas: gave way to more urgent work on the volume before it began; it resumes by itself");
+        return ExitCode::SUCCESS;
+    }
+    if STOP.load(Ordering::SeqCst) {
+        eprintln!("rynasctl: stopped before {prog} started");
+        return ExitCode::FAILURE;
+    }
     println!("$ {}", plan.argv.join(" "));
     let _ = std::io::stdout().flush();
     let mut child = match c.spawn() {
@@ -596,6 +643,14 @@ fn run_plan(plan: &JobPlan) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // a signal that came while the command was being started reaches it now (btrfs-progs
+    // cancels a scrub on SIGINT and keeps its position)
+    if STOP.load(Ordering::SeqCst) {
+        // SAFETY: kill(2) on the child's pid
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+        }
+    }
     let reader = child.stdout.take().map(|mut o| {
         std::thread::spawn(move || {
             let mut s = String::new();
@@ -640,10 +695,7 @@ fn run_plan(plan: &JobPlan) -> ExitCode {
         }
     }
     // a scrub rynasd asked to give way (S4): its cancel is not a failure
-    if code != Some(0)
-        && let Some(state) = &plan.yield_state
-        && rynas_scheduler::gate::gave_way(std::path::Path::new(state), &std::env::var("INVOCATION_ID").unwrap_or_default())
-    {
+    if code != Some(0) && gave_way() {
         println!("rynas: stopped to give way to more urgent work on the volume; it resumes by itself from where it stopped");
         return ExitCode::SUCCESS;
     }

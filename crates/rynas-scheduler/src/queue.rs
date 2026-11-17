@@ -169,14 +169,31 @@ fn ahead(w: &Waiter, me: &Waiter) -> bool {
 }
 
 /// What keeps the start `me` from going now (`None`: it goes): a holder of something it
-/// needs (a yielding scrub too, until it has stopped), or a waiter that goes before it.
-/// A deduplication run never blocks; a disk test does not block more urgent volume work.
+/// needs (a yielding scrub too, until it has stopped), or a waiter that goes before it and
+/// could start now. A deduplication run never blocks; a disk test does not block more urgent
+/// volume work.
+///
+/// Backfill: a waiter ahead that is itself held back by what other work holds (a backup of
+/// volumes A and C while C is busy) does not keep a less urgent start on a free resource (a
+/// scrub of A) waiting; once that waiter can start, it goes first again.
 pub fn blocked_by(
     me: &Waiter,
     holders: &[Holder],
     waiters: &[Waiter],
     disks: &dyn Fn(&str) -> Vec<String>,
 ) -> Option<Block> {
+    if let Some(b) = held_by(me, holders, disks) {
+        return Some(b);
+    }
+    waiters
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| w.task != me.task && ahead(w, me) && held_by(w, holders, disks).is_none())
+        .find_map(|(i, w)| meets(&me.claims, &w.claims, disks).map(|(m, _)| Block::Waiter(i, m)))
+}
+
+/// The holder that keeps the start `me` from going, waiters left aside.
+fn held_by(me: &Waiter, holders: &[Holder], disks: &dyn Fn(&str) -> Vec<String>) -> Option<Block> {
     for (i, h) in holders.iter().enumerate() {
         if h.task.as_deref() == Some(me.task.as_str()) || h.gives == Gives::Dedup {
             continue;
@@ -196,11 +213,7 @@ pub fn blocked_by(
             }
         }
     }
-    waiters
-        .iter()
-        .enumerate()
-        .filter(|(_, w)| w.task != me.task && ahead(w, me))
-        .find_map(|(i, w)| meets(&me.claims, &w.claims, disks).map(|(m, _)| Block::Waiter(i, m)))
+    None
 }
 
 /// A yielding holder (a scrub) must give way now: more urgent work holds or waits for what it
@@ -345,5 +358,24 @@ mod tests {
         assert!(queueable(&TaskAction::SmartTest { disk: "sda".into(), test: SmartTestKind::Long }));
         assert!(!queueable(&TaskAction::SmartTest { disk: "sda".into(), test: SmartTestKind::Short }));
         assert!(!queueable(&TaskAction::PowerShutdown { rule: "n".into() }));
+    }
+
+    #[test]
+    fn a_waiter_held_back_elsewhere_does_not_block_a_free_resource() {
+        // a backup of volumes 0:40 and 0:41 waits for the replica on 0:41; a scrub of 0:40
+        // (less urgent) may go meanwhile
+        let replica = holder("replica", vec![vol("0:41")], priority::TRANSFER, Gives::No);
+        let backup = waiter("backup", vec![vol("0:40"), vol("0:41")], priority::TRANSFER, 1);
+        let scrub = waiter("scrub", vec![vol("0:40")], priority::SCRUB, 2);
+        let q = [backup.clone(), scrub.clone()];
+        assert!(blocked_by(&backup, std::slice::from_ref(&replica), &q, &disks).is_some());
+        assert_eq!(blocked_by(&scrub, std::slice::from_ref(&replica), &q, &disks), None);
+        // once the backup could start, it goes first again
+        assert_eq!(blocked_by(&scrub, &[], &q, &disks), Some(Block::Waiter(0, vol("0:40"))));
+        // a waiter held back only by the scrub that yields to it still goes first: the scrub
+        // holds the volume, so the less urgent start waits for it anyway
+        let s = holder("scrub-running", vec![vol("0:40")], priority::SCRUB, Gives::Yields);
+        let pc = waiter("pc", vec![vol("0:40")], priority::PC_MAINTENANCE, 3);
+        assert!(blocked_by(&pc, std::slice::from_ref(&s), &[backup, pc.clone()], &disks).is_some());
     }
 }

@@ -629,6 +629,10 @@ async fn heavy_work_queues_per_volume_and_a_scrub_yields() {
 
     // a scrub gives way to more urgent work on its volume (a backup run started by hand)...
     let guard = rynasd::fslock::FsLocks::global().heavy_paths(&["/"], "backup.run").await;
+    // (never in the first seconds of a run: its rynasctl may not handle signals yet)
+    rynasd::gate::tick(&e.prot);
+    assert!(!e.sys.state().calls.iter().any(|c| c.contains("--signal=SIGINT")));
+    tokio::time::sleep(Duration::from_millis(3200)).await;
     rynasd::gate::tick(&e.prot);
     let cancel = "run systemctl kill --kill-whom=all --signal=SIGINT rynas-task-scrub-b.service";
     assert!(e.sys.state().calls.iter().any(|c| c == cancel), "{:?}", e.sys.state().calls);
@@ -660,8 +664,61 @@ async fn heavy_work_queues_per_volume_and_a_scrub_yields() {
     let plan: rynasd::jobs::JobPlan = serde_json::from_slice(&body).unwrap();
     assert_eq!(plan.argv, ["btrfs", "scrub", "resume", "-B", "-d", "/"]);
     assert_eq!(plan.ok_codes, [2]);
-    gate_end(&e, "scrub-b", "ab03", "success").await;
+    // the resumed run holds a normal lease: no longer shown as given way, and it gives way
+    // again when more urgent work comes
     assert!(view("scrub-b").await.status.yielded.is_none());
+    let sigints = |e: &Env| e.sys.state().calls.iter().filter(|c| c.as_str() == cancel).count();
+    let before = sigints(&e);
+    let guard = rynasd::fslock::FsLocks::global().heavy_paths(&["/"], "backup.run").await;
+    tokio::time::sleep(Duration::from_millis(3200)).await;
+    rynasd::gate::tick(&e.prot);
+    assert_eq!(sigints(&e), before + 1, "the resumed scrub gives way again");
+    assert!(rynas_scheduler::gate::gave_way(&state, "ab03"));
+    // its signal is not sent again at every turn (only after a while, until its run ends)
+    rynasd::gate::tick(&e.prot);
+    assert_eq!(sigints(&e), before + 1);
+    gate_end(&e, "scrub-b", "ab03", "success").await;
+    assert!(e.prot.history.by_invocation("ab03").unwrap().unwrap().yielded);
+    drop(guard);
+    rynasd::gate::tick(&e.prot);
+    let r = gate_ask_body(&e, "scrub-b", json!({"invocation_id": "ab05", "can_wait": true})).await;
+    assert_eq!((r.run, r.trigger), (true, RunTrigger::Resume), "{r:?}");
+    // asked to give way before its command began (the signal came while rynasd planned the
+    // run): the plan says so, nothing runs, the run gave way
+    let guard = rynasd::fslock::FsLocks::global().heavy_paths(&["/"], "backup.run").await;
+    tokio::time::sleep(Duration::from_millis(3200)).await;
+    rynasd::gate::tick(&e.prot);
+    let (s, body) = call_peer(&e, Some(0), "POST", "/v1/scheduler/tasks/scrub-b/execute", Some(json!({"plan": true}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let plan: rynasd::jobs::JobPlan = serde_json::from_slice(&body).unwrap();
+    assert!(plan.gave_way, "{plan:?}");
+    gate_end(&e, "scrub-b", "ab05", "success").await;
+    assert!(e.prot.history.by_invocation("ab05").unwrap().unwrap().yielded);
+    drop(guard);
+    rynasd::gate::tick(&e.prot);
+    let r = gate_ask_body(&e, "scrub-b", json!({"invocation_id": "ab06", "can_wait": true})).await;
+    assert_eq!(r.trigger, RunTrigger::Resume);
+    let (_, body) = call_peer(&e, Some(0), "POST", "/v1/scheduler/tasks/scrub-b/execute", Some(json!({"plan": true}))).await;
+    let plan: rynasd::jobs::JobPlan = serde_json::from_slice(&body).unwrap();
+    assert_eq!(plan.argv[2], "resume");
+    gate_end(&e, "scrub-b", "ab06", "success").await;
+    assert!(view("scrub-b").await.status.yielded.is_none());
+    // the entry cannot be written (the state folder is read-only): no signal, no yield
+    let a = ask("scrub-a", "ab07", 0).await;
+    assert!(a.run);
+    let guard = rynasd::fslock::FsLocks::global().heavy_paths(&["/"], "backup.run").await;
+    tokio::time::sleep(Duration::from_millis(3200)).await;
+    use std::os::unix::fs::PermissionsExt;
+    let sched = state.join("scheduler");
+    std::fs::set_permissions(&sched, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let before = e.sys.state().calls.len();
+    rynasd::gate::tick(&e.prot);
+    let kills = e.sys.state().calls[before..].iter().filter(|c| c.contains("rynas-task-scrub-a.service") && c.contains("SIGINT")).count();
+    std::fs::set_permissions(&sched, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(kills, 0, "no signal without its entry on disk");
+    assert!(view("scrub-a").await.status.yielded.is_none());
+    drop(guard);
+    gate_end(&e, "scrub-a", "ab07", "success").await;
     let (s, body) = call_peer(&e, Some(0), "POST", "/v1/scheduler/tasks/scrub-a/execute", Some(json!({"plan": true}))).await;
     assert_eq!(s, StatusCode::OK);
     let plan: rynasd::jobs::JobPlan = serde_json::from_slice(&body).unwrap();
@@ -707,6 +764,28 @@ async fn heavy_work_queues_per_volume_and_a_scrub_yields() {
     assert!(e.prot.history.by_invocation("cd06").unwrap().is_none());
     assert!(view("smart-c").await.status.queued.is_none());
     gate_end(&e, "smart-a", "cd01", "success").await;
+    // the long test goes on in the drive after its unit ended: the disk stays claimed (the
+    // drive says nothing here: its time is estimated)
+    let s4 = gate_ask_body(&e, "smart-c", json!({"invocation_id": "cd07", "can_wait": true})).await;
+    assert!(s4.wait && s4.message.contains("smart-a"), "{s4:?}");
+    // a start that waits keeps waiting on a late answer (rynasctl asks again)...
+    let since = rynas_tasks::now_ms() - 10_000;
+    let s4 = gate_ask_body(&e, "smart-c", json!({"invocation_id": "cd07", "can_wait": true, "queued_since_ms": since, "answer_by_ms": 1})).await;
+    assert!(s4.wait, "{s4:?}");
+    // ...is skipped once its task is turned off...
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/smart-c/disable", None).await;
+    assert!(s.is_success());
+    apply(&e);
+    let s4 = gate_ask_body(&e, "smart-c", json!({"invocation_id": "cd07", "can_wait": true, "queued_since_ms": since})).await;
+    assert!(!s4.run && !s4.wait, "{s4:?}");
+    assert!(s4.message.contains("turned off"), "{}", s4.message);
+    // ...and after a restart of rynasd (rynasd no longer knows it waits) keeps the origin
+    // rynasctl sends back: a timer start, which a pause skips
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/smart-b/pause", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let s5 = gate_ask_body(&e, "smart-b", json!({"invocation_id": "cd08", "can_wait": true, "queued_since_ms": since,
+        "queued_trigger": "timer", "queued_attempt": 0})).await;
+    assert_eq!((s5.run, s5.skipped, s5.trigger), (false, Some(SkipReason::Paused), RunTrigger::Timer), "{s5:?}");
 }
 
 /// Debian's own timers under the gate (S4): a start of `apt-daily-upgrade.service` by its

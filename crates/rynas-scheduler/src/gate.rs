@@ -84,6 +84,22 @@ pub struct GateRequest {
     /// keeps it, so the order of the queue survives a restart of rynasd.
     #[serde(default)]
     pub queued_since_ms: u64,
+    /// How the first answer said the waiting start came about (rynasctl sends it back on every
+    /// question, so a restart of rynasd while it waits keeps its origin: a timer start stays
+    /// one, paused, retried and checked as such).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_trigger: Option<RunTrigger>,
+    #[serde(default)]
+    pub queued_attempt: u8,
+}
+
+/// The unit's start timeout (`systemctl show -p TimeoutStartUSec --value`) lets its gate wait
+/// in the queue: `infinity`, or unknown (the units rynas writes since S4 have it). A finite
+/// value (a unit file written before S4, kept by hand) would kill a waiting start after it:
+/// such a start is not queued, it runs as before.
+pub fn start_timeout_lets_wait(value: &str) -> bool {
+    let v = value.trim();
+    v.is_empty() || v == "infinity"
 }
 
 /// How often `rynasctl gate` asks again while its start waits in the queue.
@@ -130,6 +146,13 @@ pub struct GateAnswer {
     /// false and nothing is recorded).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wait: bool,
+    /// The retry number of the start (rynasctl sends it back with `trigger` while it waits).
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub attempt: u8,
+}
+
+fn is_zero_u8(n: &u8) -> bool {
+    *n == 0
 }
 
 /// A gate outcome written by rynasctl while rynasd could not be reached.
@@ -623,8 +646,13 @@ pub fn retries_after(t: Option<RunTrigger>) -> bool {
 pub const QUEUE_MAX: Duration = Duration::from_secs(24 * 3600);
 
 /// How long a start of `t` may wait in the queue before it is skipped (`busy`): its catch-up
-/// deadline, else its start window, else [`QUEUE_MAX`].
+/// deadline, else its start window, else [`QUEUE_MAX`]; the md RAID check [`MD_CHECK_QUEUE`]
+/// (skipped, its month would be lost: `mdcheck_continue` only goes on with a check that
+/// started).
 pub fn queue_limit_ms(t: &ScheduledTask) -> u64 {
+    if matches!(t.action, rynas_api_types::scheduler::TaskAction::MdCheck { .. }) {
+        return MD_CHECK_QUEUE.as_millis() as u64;
+    }
     let p = t.effective_policy();
     let max = QUEUE_MAX.as_millis() as u64;
     match p.missed {
@@ -632,6 +660,39 @@ pub fn queue_limit_ms(t: &ScheduledTask) -> u64 {
         _ if p.window_min > 0 => (u64::from(p.window_min) * 60_000).min(max),
         _ => max,
     }
+}
+
+/// The md RAID check waits in the queue up to six days (its next monthly start is weeks away;
+/// a nightly continuation does not run while it waits).
+pub const MD_CHECK_QUEUE: Duration = Duration::from_secs(6 * 24 * 3600);
+
+/// When a start of `t` that began waiting at `since_ms` stops waiting (ms since the epoch):
+/// a task with a start window waits only until the window of its scheduled time ends (the
+/// latest scheduled time at or before `since_ms`), never past it; the others
+/// [`queue_limit_ms`] after `since_ms`.
+pub fn queue_deadline_ms(t: &ScheduledTask, since_ms: u64, tz: &TimeZone) -> u64 {
+    let p = t.effective_policy();
+    if p.window_min > 0
+        && let Some(expr) = t.trigger.on_calendar()
+        && let Ok(spec) = CalendarSpec::parse_with(&expr, |z| TimeZone::get(z).is_ok())
+    {
+        let w = u64::from(p.window_min) * 60_000;
+        // the latest scheduled time within one window before the first wait
+        let mut slot = None;
+        let mut at = since_ms.saturating_sub(w + u64::from(p.jitter_s) * 1000 + ON_TIME_MS);
+        while let Some(next) = ts(at).and_then(|a| spec.next_after(tz, a)) {
+            let n = next.as_millisecond().max(0) as u64;
+            if n > since_ms {
+                break;
+            }
+            slot = Some(n);
+            at = n;
+        }
+        if let Some(s) = slot {
+            return s + w;
+        }
+    }
+    since_ms + queue_limit_ms(t)
 }
 
 /// The overlap policy `replace` applies now: the task runs since `run_start_ms` and one of
@@ -900,5 +961,28 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0], e);
         assert!(spool_take(d.path()).is_empty());
+    }
+
+    #[test]
+    fn a_start_window_bounds_the_wait_in_the_queue() {
+        let tz = utc();
+        // a 90-minute window from 02:30: a start that began waiting at 03:10 waits until
+        // 04:00, the end of the window, not 90 minutes from 03:10
+        let w = task("*-*-* 02:30:00", RunPolicy { window_min: Some(90), jitter_s: Some(600), ..Default::default() });
+        assert_eq!(queue_deadline_ms(&w, at("2026-11-16T03:10:00"), &tz), at("2026-11-16T04:00:00"));
+        // without a window: a day after it began waiting
+        let d = task("*-*-* 02:30:00", RunPolicy::default());
+        assert_eq!(queue_deadline_ms(&d, at("2026-11-16T03:10:00"), &tz), at("2026-11-17T03:10:00"));
+        // the md RAID check: six days
+        let mut md = rynas_api_types::scheduler::system::md_check(false);
+        md.migrate();
+        assert_eq!(queue_limit_ms(&md), 6 * 24 * 3_600_000);
+    }
+
+    #[test]
+    fn only_units_without_a_start_timeout_wait_in_the_queue() {
+        assert!(start_timeout_lets_wait("infinity\n"));
+        assert!(start_timeout_lets_wait(""));
+        assert!(!start_timeout_lets_wait("1min 30s"));
     }
 }

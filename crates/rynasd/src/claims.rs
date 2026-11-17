@@ -116,13 +116,61 @@ fn pc_repositories(p: &Protection) -> Vec<String> {
 }
 
 /// Rynas task types of package work (one at a time with the system updates).
+/// Every rynas task that runs apt or dpkg (their lock), and the Docker and app updates.
 const PACKAGE_KINDS: &[&str] = &[
     "updates.install",
+    "updates.autoremove",
+    "updates.backports",
     "docker.install",
     "docker.auto-update",
     "apps.auto-update",
     "apps.update",
+    "tailscale.install",
+    "tailscale.uninstall",
+    "ups.install",
+    "ups.update-nut",
+    "crypt.install",
+    "dedup.install",
+    "time.apply",
 ];
+
+/// What a drive says about its self-test (`smartctl -c -l selftest`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SelfTest {
+    /// A self-test runs now (`None`: the output does not say).
+    pub in_progress: Option<bool>,
+    /// The drive's estimate of its extended self-test (minutes).
+    pub extended_min: Option<u64>,
+}
+
+/// Reads `smartctl -c -l selftest`: ATA ("Self-test execution status: ( 249) Self-test routine
+/// in progress", the status byte's high nibble 15 while one runs; "Extended self-test routine
+/// recommended polling time: ( 255) minutes") and NVMe ("Self-test status: Extended
+/// self-test in progress (12% completed)", "No self-test in progress").
+pub fn parse_self_test(out: &str) -> SelfTest {
+    let paren = |l: &str| -> Option<u64> {
+        let a = l.find('(')?;
+        let b = l[a..].find(')')? + a;
+        l[a + 1..b].trim().parse().ok()
+    };
+    let mut st = SelfTest::default();
+    let mut lines = out.lines().peekable();
+    while let Some(l) = lines.next() {
+        let t = l.trim();
+        if t.starts_with("Self-test execution status:") {
+            st.in_progress = match paren(t) {
+                Some(v) => Some(v >> 4 == 0xF),
+                None => Some(t.contains("in progress")),
+            };
+        } else if t.starts_with("Self-test status:") || t.starts_with("No self-test in progress") {
+            st.in_progress = Some(t.contains("in progress") && !t.starts_with("No self-test"));
+        } else if t.starts_with("Extended self-test routine") {
+            let next = if t.contains("polling time") { Some(t) } else { lines.peek().copied() };
+            st.extended_min = next.and_then(paren);
+        }
+    }
+    st
+}
 
 /// Maintenance work automatic updates wait for.
 const MAINTENANCE_KINDS: &[&str] = &[
@@ -290,6 +338,8 @@ pub enum Source {
     Raid { text: String },
     /// A task unit running without a lease.
     Unit { unit: String },
+    /// A SMART long test running in its drive after its unit ended.
+    DiskTest,
 }
 
 /// The lock table at one moment.
@@ -398,6 +448,17 @@ fn table_in(
         holders.push(h);
         leased_units.push(l.unit.clone());
         sources.push(Source::Lease { unit: l.unit.clone() });
+    }
+    for d in gate.map(|g| g.disk_tests()).unwrap_or_default() {
+        holders.push(Holder {
+            task: Some(d.task.clone()),
+            name: d.name.clone(),
+            kind: None,
+            claims: vec![Claim::Disk(d.disk.clone())],
+            priority: priority::DISK_TEST,
+            gives: Gives::Throttles,
+        });
+        sources.push(Source::DiskTest);
     }
     for (key, id, what, dedup) in crate::fslock::FsLocks::global().holders() {
         if guard_ids.contains(&id) {
@@ -593,5 +654,27 @@ md127 : active raid5 nvme0n1p2[0] nvme1n1p2[1] sdc[2](F)\n      2000 blocks [3/2
         let quiet = table_in(None, &tasks, "", &[], "", Path::new("/nonexistent"));
         assert_eq!(docker_busy(&quiet), None);
         assert!(power_busy(&quiet, true, true, "", "").is_empty());
+    }
+
+    #[test]
+    fn drives_tell_whether_their_long_test_runs() {
+        let ata = "General SMART Values:\nOffline data collection status:  (0x00)\tOffline data collection activity\n\
+Self-test execution status:      ( 249)\tSelf-test routine in progress...\n\t\t\t\t\t90% of test remaining.\n\
+Short self-test routine \nrecommended polling time: \t (   2) minutes.\nExtended self-test routine\nrecommended polling time: \t ( 255) minutes.\n";
+        assert_eq!(parse_self_test(ata), SelfTest { in_progress: Some(true), extended_min: Some(255) });
+        let done = ata.replace("( 249)\tSelf-test routine in progress...", "(   0)\tThe previous self-test routine completed");
+        assert_eq!(parse_self_test(&done).in_progress, Some(false));
+        let nvme = "Self-test status: Extended self-test in progress (12% completed)\n";
+        assert_eq!(parse_self_test(nvme).in_progress, Some(true));
+        assert_eq!(parse_self_test("No self-test in progress\n").in_progress, Some(false));
+        assert_eq!(parse_self_test(""), SelfTest::default());
+    }
+
+    #[test]
+    fn every_apt_and_dpkg_user_holds_the_package_system() {
+        for k in ["updates.install", "updates.autoremove", "updates.backports", "tailscale.install", "ups.update-nut", "dedup.install", "crypt.install"] {
+            assert!(starts(k, PACKAGE_KINDS), "{k}");
+        }
+        assert!(!starts("updates.check", PACKAGE_KINDS));
     }
 }

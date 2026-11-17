@@ -260,12 +260,33 @@ api POST /scheduler/tasks/backup-qb/run '{}'; expect 204 "run backup-qb"
 wait_rows qscrub-a '.yielded and .ok' 1 120
 wait_rows backup-qb '.ok and .queued_ms > 0' 1 240
 wait_journal qscrub-a "$T" 'btrfs scrub resume -B -d /srv/qvol' 240
-wait_rows qscrub-a '.trigger == "resume" and .ok and (.yielded | not)' 1 240
+echo "--- the resumed scrub gives way again to the next backup"
+api GET /scheduler/tasks/qscrub-a; [ "$(echo "$BODY" | jq -c .status.yielded)" = null ] || fail "qscrub-a: resumed but still shown as given way: $BODY"
+api POST /scheduler/tasks/backup-qb/run '{}'; expect 204 "run backup-qb again"
+wait_rows qscrub-a '.yielded and .ok' 2 120
+wait_rows backup-qb '.ok' 2 240
+wait_rows qscrub-a '.trigger == "resume" and .ok and (.yielded | not)' 1 300
 ! systemctl is-failed -q rynas-task-qscrub-a.service || fail "qscrub-a: unit failed"
 api GET /scheduler/tasks/qscrub-a; [ "$(echo "$BODY" | jq -c .status.yielded)" = null ] || fail "qscrub-a: still marked: $BODY"
 btrfs scrub status /srv/qvol | grep -Eq 'finished|Status:[[:space:]]+finished' || { btrfs scrub status /srv/qvol; fail "the scrub did not finish"; }
 api GET '/notifications?key=scheduler:task:qscrub-a&limit=10'
 [ "$(echo "$BODY" | jq 'length')" = 0 ] || fail "qscrub-a: giving way notified: $BODY"
+echo "--- a yield decided just before rynasd went away is sent again by the next rynasd"
+n0=$(rows qscrub-a '.yielded')
+T=$(date +%s)
+api POST /scheduler/tasks/qscrub-a/run; expect 204 "run qscrub-a again"
+wait_journal qscrub-a "$T" 'btrfs scrub start -B -d /srv/qvol'
+INV=$(systemctl show -P InvocationID rynas-task-qscrub-a.service)
+systemctl stop rynasd.service
+# what rynasd wrote before its signal (rynas_scheduler::gate::YieldEntry)
+printf '{"qscrub-a":{"filesystem":"/srv/qvol","invocation_id":"%s","since_ms":%s000,"stopped":false}}' "$INV" "$(date +%s)" \
+    > /var/lib/rynas/scheduler/yield.json
+chmod 600 /var/lib/rynas/scheduler/yield.json
+systemctl start rynasd.service; sleep 2; relogin
+wait_rows qscrub-a '.yielded' $((n0 + 1)) 120
+! systemctl is-failed -q rynas-task-qscrub-a.service || fail "qscrub-a: failed after giving way"
+wait_journal qscrub-a "$T" 'btrfs scrub resume -B -d /srv/qvol' 120
+wait_rows qscrub-a '.trigger == "resume" and .ok and (.yielded | not)' 2 300
 qclean; trap - EXIT
 
 echo "--- Debian's apt-daily-upgrade under the gate: pause all skips its timer's start"

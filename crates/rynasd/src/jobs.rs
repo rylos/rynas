@@ -112,6 +112,10 @@ pub struct JobPlan {
     /// failed exit of a run listed there gave way, and the unit ends as a success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yield_state: Option<String>,
+    /// The run was asked to give way before its command started: nothing runs, the unit ends
+    /// as a run that gave way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gave_way: bool,
 }
 
 /// What the unit prints of the command's output.
@@ -136,8 +140,26 @@ pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>
                 .heavy_paths(&[filesystem], "btrfs.scrub")
                 .await;
             p.gate.attach_guard(&t.id, || crate::gate::holder_of(p, t), guard);
-            // a scrub that gave way to more urgent work goes on from where it stopped (S4)
-            let resume = p.gate.yields().get(&t.id).is_some_and(|e| e.filesystem == *filesystem);
+            let inv = p.gate.lease_invocation(&t.id);
+            // asked to give way before it began: it gives way now, nothing to cancel (the
+            // signal may have come before the command existed)
+            if p.gate.yield_pending(&t.id, &inv) {
+                return Ok(Some(JobPlan {
+                    argv: vec!["true".into()],
+                    env: Vec::new(),
+                    timeout_s: 60,
+                    report: PlanReport::Plain,
+                    ok_codes: Vec::new(),
+                    yield_state: Some(p.state_dir.display().to_string()),
+                    gave_way: true,
+                }));
+            }
+            // a scrub that gave way to more urgent work goes on from where it stopped (S4);
+            // its entry goes now, so this run holds a normal lease that can give way again
+            let resume = p.gate.yields().get(&t.id).is_some_and(|e| e.filesystem == *filesystem && e.invocation_id != inv);
+            if resume {
+                p.gate.drop_yield(&t.id);
+            }
             let verb = if resume { "resume" } else { "start" };
             Ok(Some(JobPlan {
                 argv: ["btrfs", "scrub", verb, "-B", "-d"]
@@ -150,6 +172,7 @@ pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>
                 report: PlanReport::Plain,
                 ok_codes: if resume { vec![2] } else { Vec::new() },
                 yield_state: Some(p.state_dir.display().to_string()),
+                gave_way: false,
             }))
         }
         TaskAction::SmartTest { disk, test } => {
@@ -164,6 +187,7 @@ pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>
                 report: PlanReport::Plain,
                 ok_codes: Vec::new(),
                 yield_state: None,
+                gave_way: false,
             }))
         }
         TaskAction::Snapshot { job } => {
@@ -196,6 +220,7 @@ pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>
                 report: PlanReport::Btrbk,
                 ok_codes: Vec::new(),
                 yield_state: None,
+                gave_way: false,
             }))
         }
         _ => Ok(None),

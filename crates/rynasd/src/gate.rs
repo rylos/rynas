@@ -55,8 +55,8 @@ use rynas_notify::event::{code, field, oneshot};
 use rynas_notify::{NewEvent, NotifyCategory, NotifySeverity};
 use rynas_scheduler::gate::{
     Decision, GateAnswer, GateRequest, Start, WAITER_STALE, YIELD_FILE, YieldEntry, decide,
-    load_pause, load_yields, next_retry, queue_limit_ms, replace_due, retries_after, save_pause,
-    save_yields, spool_take,
+    load_pause, load_yields, next_retry, queue_deadline_ms, replace_due, retries_after, save_pause,
+    save_yields, spool_take, start_timeout_lets_wait,
 };
 use rynas_scheduler::history::{ArmedRetry, GateNote, NewRun};
 use rynas_scheduler::queue::{Block, Claim, Gives, Holder, Waiter, blocked_by, priority_of, yield_to};
@@ -119,6 +119,8 @@ pub struct LeaseView {
     pub guard: Option<u64>,
     pub kind: Option<&'static str>,
     pub unit: String,
+    /// How long ago it was granted.
+    pub age: Duration,
 }
 
 /// A start waiting in the queue (S4): what its first answer decided, and when rynasctl last
@@ -132,6 +134,77 @@ struct WaitEntry {
     attempt: u8,
     /// Run now (confirmed by the user) came while it waited: it goes at its next question.
     skip: bool,
+}
+
+/// A SMART long test that goes on in the drive after its unit ended (`smartctl -t long`
+/// returns at once): its disk stays claimed until the drive says it is done, or its
+/// estimated time has passed.
+#[derive(Debug, Clone)]
+pub struct DiskTest {
+    pub task: String,
+    pub name: String,
+    pub disk: String,
+    pub until_ms: u64,
+    checked: Instant,
+}
+
+/// How often the watch loop asks a drive whether its long test still runs.
+const DISK_TEST_CHECK: Duration = Duration::from_secs(300);
+/// The test time assumed when the drive does not say (minutes).
+const DISK_TEST_DEFAULT_MIN: u64 = 120;
+
+/// Asks the drive about its self-test (`smartctl -c -l selftest`).
+fn self_test(p: &Protection, disk: &str) -> crate::claims::SelfTest {
+    let dev = format!("/dev/{disk}");
+    match p.ops.config.system().run(&Cmd::new("smartctl").args(["-c", "-l", "selftest", &dev]).env_clear()) {
+        // smartctl's exit code is a bit mask of disk states: read the output whatever it is
+        Ok(o) => crate::claims::parse_self_test(&o.stdout),
+        Err(e) => {
+            tracing::debug!("smartctl -c {dev}: {e}");
+            crate::claims::SelfTest::default()
+        }
+    }
+}
+
+/// After the unit of a SMART long test of `disk` ended: keep its disk claimed while the drive
+/// runs the test (unless the drive says it is not running).
+pub fn hold_disk_test(p: &Protection, task: &ScheduledTask, disk: &str) {
+    let st = self_test(p, disk);
+    if st.in_progress == Some(false) {
+        return;
+    }
+    let min = st.extended_min.unwrap_or(DISK_TEST_DEFAULT_MIN);
+    let until_ms = now_ms() + min * 60_000 + 10 * 60_000;
+    tracing::info!("scheduler: task {}: the long SMART test of {disk} runs in the drive: disk {disk} claimed up to {min} min", task.id);
+    p.gate.disk_tests.lock().unwrap().insert(
+        disk.to_string(),
+        DiskTest { task: task.id.clone(), name: task.name.clone(), disk: disk.to_string(), until_ms, checked: Instant::now() },
+    );
+    p.invalidate();
+}
+
+/// The watch loop's turn for the drives' long tests: released when the drive says it is done
+/// or its time has passed.
+fn disk_tests_tick(p: &Protection, now: u64) {
+    let due: Vec<DiskTest> = p
+        .gate
+        .disk_tests
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|d| d.until_ms <= now || d.checked.elapsed() >= DISK_TEST_CHECK)
+        .cloned()
+        .collect();
+    for d in due {
+        let done = d.until_ms <= now || self_test(p, &d.disk).in_progress == Some(false);
+        let mut m = p.gate.disk_tests.lock().unwrap();
+        if done {
+            m.remove(&d.disk);
+            tracing::info!("scheduler: the long SMART test of {} ended: disk free", d.disk);
+        } else if let Some(x) = m.get_mut(&d.disk) {
+            x.checked = Instant::now();
+        }
+    }
 }
 
 /// What a task's run holds: its claims, priority and how it gives way.
@@ -159,6 +232,13 @@ pub struct Gate {
     yields: Mutex<BTreeMap<String, YieldEntry>>,
     /// When a scrub's cancel last failed (tried again a minute later).
     yield_failed: Mutex<HashMap<String, Instant>>,
+    /// When the SIGINT of a scrub asked to give way was last sent (sent again until its run
+    /// ends: a signal that came before the command started, or a restart of rynasd between
+    /// the entry and the signal, loses nothing).
+    yield_sent: Mutex<HashMap<String, Instant>>,
+    /// Disks whose SMART long test still runs in the drive after its unit ended (S4): task,
+    /// name, disk, until when at the latest, when last checked.
+    disk_tests: Mutex<HashMap<String, DiskTest>>,
     /// The applied task ids at the last watch tick (a task gone since was deleted).
     known: Mutex<Option<HashSet<String>>>,
     /// When the watch loop last started each interval task that was due (it never starts
@@ -190,6 +270,8 @@ impl Gate {
             waiting: Mutex::new(HashMap::new()),
             yields: Mutex::new(yields),
             yield_failed: Mutex::new(HashMap::new()),
+            yield_sent: Mutex::new(HashMap::new()),
+            disk_tests: Mutex::new(HashMap::new()),
             known: Mutex::new(None),
             interval_started: Mutex::new(HashMap::new()),
         }
@@ -356,12 +438,18 @@ impl Gate {
         self.yields.lock().unwrap().clone()
     }
 
-    fn change_yields(&self, f: impl FnOnce(&mut BTreeMap<String, YieldEntry>)) {
+    fn change_yields(&self, f: impl FnOnce(&mut BTreeMap<String, YieldEntry>)) -> std::io::Result<()> {
         let mut m = self.yields.lock().unwrap();
-        f(&mut m);
-        if let Err(e) = save_yields(&self.state, &m) {
+        let mut next = m.clone();
+        f(&mut next);
+        // kept in memory only once on disk: the unit reads the file to tell a scrub that gave
+        // way from one that failed
+        if let Err(e) = save_yields(&self.state, &next) {
             tracing::warn!("scheduler: {}: {e}", YIELD_FILE);
+            return Err(e);
         }
+        *m = next;
+        Ok(())
     }
 
     /// The run `invocation_id` of `id` ended: `true` when it is the run that gave way (it
@@ -373,7 +461,7 @@ impl Gate {
         if !known {
             return false;
         }
-        self.change_yields(|m| match m.get_mut(id) {
+        let _ = self.change_yields(|m| match m.get_mut(id) {
             Some(e) if e.invocation_id == invocation_id => {
                 e.stopped = true;
                 gave_way = true;
@@ -386,13 +474,38 @@ impl Gate {
         gave_way
     }
 
-    /// Forgets the yield of `id` (the task is gone or off).
-    fn drop_yield(&self, id: &str) {
+    /// Forgets the yield of `id` (the task is gone or off, or its run resumes it now).
+    pub fn drop_yield(&self, id: &str) {
         if self.yields.lock().unwrap().contains_key(id) {
-            self.change_yields(|m| {
+            let _ = self.change_yields(|m| {
                 m.remove(id);
             });
+            self.yield_sent.lock().unwrap().remove(id);
         }
+    }
+
+    /// The run of `id` that is asked to give way, if it is `invocation_id` (it has not stopped
+    /// yet): such a run that has not begun its work gives way at once ([`crate::jobs::plan`]).
+    pub fn yield_pending(&self, id: &str, invocation_id: &str) -> bool {
+        !invocation_id.is_empty()
+            && self
+                .yields
+                .lock()
+                .unwrap()
+                .get(id)
+                .is_some_and(|e| e.invocation_id == invocation_id && !e.stopped)
+    }
+
+    /// The long SMART tests still running in their drive.
+    pub fn disk_tests(&self) -> Vec<DiskTest> {
+        let mut v: Vec<DiskTest> = self.disk_tests.lock().unwrap().values().cloned().collect();
+        v.sort_by(|a, b| a.disk.cmp(&b.disk));
+        v
+    }
+
+    /// The invocation of the current run of `id` (its lease), empty without one.
+    pub fn lease_invocation(&self, id: &str) -> String {
+        self.leases.lock().unwrap().get(id).map(|l| l.invocation_id.clone()).unwrap_or_default()
     }
 
     /// The watch loop may start the interval task `id` now; records the start when it may. A
@@ -464,6 +577,7 @@ impl Gate {
                 guard: l._guard.as_ref().map(HeavyGuard::id),
                 kind: l.kind,
                 unit: l.unit.clone(),
+                age: l.since.elapsed(),
             })
             .collect();
         v.sort_by(|a, b| a.holder.task.cmp(&b.holder.task));
@@ -565,6 +679,24 @@ impl Gate {
             }
             tracing::info!("scheduler: task {} runs ({inv}): lease rebuilt", t.id);
         }
+        // long SMART tests still running in their drive keep their disk
+        let p3 = p.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let applied = p3
+                .ops
+                .config
+                .applied(rynas_scheduler::SCHEDULER_KEY)
+                .map(|v| rynas_scheduler::domain::tasks_of(v.as_ref()))
+                .unwrap_or_default();
+            for t in applied {
+                if let TaskAction::SmartTest { disk, test: rynas_api_types::scheduler::SmartTestKind::Long } = &t.action
+                    && self_test(&p3, disk).in_progress == Some(true)
+                {
+                    hold_disk_test(&p3, &t, disk);
+                }
+            }
+        })
+        .await;
     }
 }
 
@@ -661,13 +793,29 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
             skipped: Some(SkipReason::NotDue),
             message: format!("rynas: task {id} is not in the configuration: start skipped"),
             wait: false,
+            attempt: 0,
         });
     };
     let pause = p.gate.pause();
     let late = req.answer_by_ms > 0 && now_ms() > req.answer_by_ms;
-    // a start waiting in the queue already: its first answer decided how it came about; a
-    // pause set meanwhile still skips it (unless the user asked for it)
-    if let Some((trigger, attempt, skip)) = p.gate.waiting_as(id, &req.invocation_id) {
+    // a start waiting in the queue already: its first answer decided how it came about (kept
+    // by rynasd, or sent back by rynasctl after a restart of rynasd); a pause set meanwhile
+    // still skips it (unless the user asked for it), and so does turning the task off
+    let waiting = p.gate.waiting_as(id, &req.invocation_id).or_else(|| {
+        req.queued_trigger.filter(|_| req.queued_since_ms > 0).map(|t| (t, req.queued_attempt, false))
+    });
+    if let Some((trigger, attempt, skip)) = waiting {
+        if !task.enabled {
+            p.gate.unwait(id);
+            return Ok(GateAnswer {
+                run: false,
+                trigger,
+                skipped: Some(SkipReason::NotDue),
+                message: "rynas: the task was turned off while it waited in the queue: start skipped".into(),
+                wait: false,
+                attempt,
+            });
+        }
         if skip {
             return queue_or_run(p, &task, req, trigger, attempt, true, late, now);
         }
@@ -737,6 +885,7 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
                 skipped: Some(SkipReason::NotDue),
                 message: String::new(),
                 wait: false,
+                attempt: 0,
             });
         }
         Decision::Skip { trigger, reason, detail } => {
@@ -778,7 +927,7 @@ fn skipped(
     if let Some(d) = detail {
         message.push_str(&format!(" ({d})"));
     }
-    Ok(GateAnswer { run: false, trigger, skipped: Some(reason), message, wait: false })
+    Ok(GateAnswer { run: false, trigger, skipped: Some(reason), message, wait: false, attempt: 0 })
 }
 
 /// The lock table now, for the gate's questions.
@@ -818,6 +967,18 @@ fn task_name(p: &Protection, id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The task's unit may wait in its gate: its start timeout is infinite (systemd's own value,
+/// with drop-ins; unknown counts as yes, see [`start_timeout_lets_wait`]).
+fn unit_can_wait(p: &Protection, id: &str) -> bool {
+    let unit = rynas_scheduler::units::service_of(id);
+    match p.ops.config.system().run(
+        &Cmd::new("systemctl").args(["show", "--no-pager", "--value", "-p", "TimeoutStartUSec", "--", &unit]),
+    ) {
+        Ok(o) if o.success() => start_timeout_lets_wait(&o.stdout),
+        _ => true,
+    }
+}
+
 /// A start the gate lets through, unless what it claims is busy: then it waits in the queue
 /// (S4), or is skipped once it has waited past its deadline. `skip_queue`: run now that the
 /// user confirmed. An older rynasctl (`can_wait` false) and a late answer never wait.
@@ -834,9 +995,12 @@ fn queue_or_run(
 ) -> Res<GateAnswer> {
     let id = task.id.as_str();
     let holder = holder_of(p, task);
-    // a shutdown waits by its own policy (it holds what it claims at once)
+    // a shutdown waits by its own policy (it holds what it claims at once); a late answer
+    // runs a first start (rynasctl may have run it already) but never takes a start that
+    // already waits out of the queue (rynasctl keeps waiting until its turn)
+    let queued = req.queued_since_ms > 0 || p.gate.is_waiting(id);
     let can_queue = req.can_wait
-        && !late
+        && (!late || queued)
         && !skip_queue
         && holder.claims.iter().any(|c| !matches!(c, Claim::Power));
     let since = if req.queued_since_ms > 0 { req.queued_since_ms.min(now) } else { now };
@@ -855,16 +1019,22 @@ fn queue_or_run(
                     resource: table.resource(c),
                 },
             };
-            if now.saturating_sub(since) > queue_limit_ms(task) {
+            if now > queue_deadline_ms(task, since, &TimeZone::system()) {
                 p.gate.unwait(id);
                 return skipped(p, task, req, now, trigger, SkipReason::Busy, Some(blocker_text(&blocker)));
             }
-            let message = format!("rynas: queued: waiting for {}", blocker_text(&blocker));
-            if p.gate.wait(id, &req.invocation_id, me, blocker, trigger, attempt) {
-                tracing::info!("scheduler: task {id}: {}", message.trim_start_matches("rynas: "));
-                p.invalidate();
+            // a unit kept from before S4 (a start timeout of 90 s) would be killed while it
+            // waits: it runs as before the queue
+            if !queued && !unit_can_wait(p, id) {
+                tracing::warn!("scheduler: task {id}: its unit has a start timeout (written before rynas 0.8.18?): not queued");
+            } else {
+                let message = format!("rynas: queued: waiting for {}", blocker_text(&blocker));
+                if p.gate.wait(id, &req.invocation_id, me, blocker, trigger, attempt) {
+                    tracing::info!("scheduler: task {id}: {}", message.trim_start_matches("rynas: "));
+                    p.invalidate();
+                }
+                return Ok(GateAnswer { run: false, trigger, skipped: None, message, wait: true, attempt });
             }
-            return Ok(GateAnswer { run: false, trigger, skipped: None, message, wait: true });
         }
     }
     let waited = p.gate.unwait(id);
@@ -903,7 +1073,7 @@ fn queue_or_run(
         _ if skip_queue => "rynas: run now, ahead of the queue".into(),
         _ => String::new(),
     };
-    Ok(GateAnswer { run: true, trigger, skipped: None, message, wait: false })
+    Ok(GateAnswer { run: true, trigger, skipped: None, message, wait: false, attempt })
 }
 
 fn missed_event(task: &ScheduledTask) -> NewEvent {
@@ -1172,6 +1342,37 @@ const YIELD_RETRY: Duration = Duration::from_secs(60);
 /// (rynasd was away when it ended).
 const YIELD_LOST_MS: u64 = 120_000;
 
+/// A run is asked to give way only this long after its lease was granted.
+const YIELD_SETTLE: Duration = Duration::from_secs(3);
+
+/// A scrub asked to give way gets its signal again after this long while its run goes on.
+const YIELD_RESEND: Duration = Duration::from_secs(30);
+
+/// SIGINT to the processes of the unit of `id`: `btrfs scrub start -B` cancels its scrub and
+/// records the position for `btrfs scrub resume` itself (its own SIGINT handler), inside the
+/// unit, which sees the volume as it is; rynasctl, the main process, waits for it (and gives
+/// way at once when the command has not started yet). `false` when systemd refused.
+fn send_yield(p: &Protection, id: &str) -> bool {
+    let unit = service_name(id);
+    let r = p
+        .ops
+        .config
+        .system()
+        .run(&Cmd::new("systemctl").args(["kill", "--kill-whom=all", "--signal=SIGINT", &unit]));
+    p.gate.yield_sent.lock().unwrap().insert(id.to_string(), Instant::now());
+    match r {
+        Ok(o) if o.success() => true,
+        Ok(o) => {
+            tracing::warn!("scheduler: task {id}: stopping the scrub: exit code {:?}: {}", o.code, o.stderr.trim());
+            false
+        }
+        Err(e) => {
+            tracing::warn!("scheduler: task {id}: stopping the scrub: {e}");
+            false
+        }
+    }
+}
+
 /// The queue's turn of the watch loop (S4): a running scrub gives way to more urgent work on
 /// its volume (SIGINT to its unit: btrfs-progs cancels and keeps its position), and a scrub
 /// that gave way resumes
@@ -1187,10 +1388,28 @@ fn queue_tick(p: &Protection, applied: &[ScheduledTask], now: u64) {
     let disks = |k: &str| table.disks(k);
     for l in leases.iter().filter(|l| l.holder.gives == Gives::Yields) {
         let Some(id) = l.holder.task.as_deref() else { continue };
-        if yields.contains_key(id)
-            || l.invocation_id.is_empty()
-            || p.gate.yield_failed.lock().unwrap().get(id).is_some_and(|at| at.elapsed() < YIELD_RETRY)
-        {
+        // (a run granted moments ago: its rynasctl may not handle signals yet; the plan it
+        // asks for says "give way" when asked meanwhile)
+        if l.invocation_id.is_empty() || l.age < YIELD_SETTLE {
+            continue;
+        }
+        match yields.get(id) {
+            // asked to give way and still running: the signal again, now and then (one that
+            // came before btrfs started, or a restart of rynasd between the entry and the
+            // signal, is not lost; btrfs takes a second SIGINT as the first)
+            Some(e) if e.invocation_id == l.invocation_id && !e.stopped => {
+                let resend = p.gate.yield_sent.lock().unwrap().get(id).is_none_or(|at| at.elapsed() >= YIELD_RESEND);
+                if resend {
+                    send_yield(p, id);
+                }
+                continue;
+            }
+            // this run gave way and is ending
+            Some(e) if e.invocation_id == l.invocation_id => continue,
+            // none, or an earlier run's (this run resumes it): this run may be asked
+            _ => {}
+        }
+        if p.gate.yield_failed.lock().unwrap().get(id).is_some_and(|at| at.elapsed() < YIELD_RETRY) {
             continue;
         }
         let Some(block) = yield_to(&l.holder, &table.holders, &waiters, &disks) else { continue };
@@ -1215,23 +1434,16 @@ fn queue_tick(p: &Protection, applied: &[ScheduledTask], now: u64) {
             to: Some(to),
             stopped: false,
         };
-        p.gate.change_yields(|m| {
+        // no entry on disk, no signal: the unit could not tell its end from a failure
+        if p.gate.change_yields(|m| {
             m.insert(id.to_string(), entry);
-        });
-        // SIGINT to the unit's processes: `btrfs scrub start -B` cancels its scrub and records
-        // the position for `btrfs scrub resume` itself (its own SIGINT handler), inside the
-        // unit, which sees the volume as it is; rynasctl, the main process, waits for it
-        let unit = service_name(id);
-        let r = p.ops.config.system().run(
-            &Cmd::new("systemctl").args(["kill", "--kill-whom=all", "--signal=SIGINT", &unit]),
-        );
-        let ok = matches!(&r, Ok(o) if o.success());
-        if !ok {
-            let why = match r {
-                Ok(o) => format!("exit code {:?}: {}", o.code, o.stderr.trim()),
-                Err(e) => e.to_string(),
-            };
-            tracing::warn!("scheduler: task {id}: stopping the scrub of {filesystem}: {why}");
+        })
+        .is_err()
+        {
+            p.gate.yield_failed.lock().unwrap().insert(id.to_string(), Instant::now());
+            continue;
+        }
+        if !send_yield(p, id) {
             p.gate.yield_failed.lock().unwrap().insert(id.to_string(), Instant::now());
             p.gate.drop_yield(id);
         }
@@ -1255,7 +1467,7 @@ fn queue_tick(p: &Protection, applied: &[ScheduledTask], now: u64) {
         if !e.stopped {
             // asked to give way, its end never reported (rynasd was away): stopped
             if !leased && !running.contains(&unit) && now.saturating_sub(e.since_ms) > YIELD_LOST_MS {
-                p.gate.change_yields(|m| {
+                let _ = p.gate.change_yields(|m| {
                     if let Some(x) = m.get_mut(&id) {
                         x.stopped = true;
                     }
@@ -1305,6 +1517,7 @@ pub fn tick(p: &Protection) {
     {
         p.gate.sweep(&running);
     }
+    disk_tests_tick(p, now);
     queue_tick(p, &applied, now);
     let retries = p.history.retries().unwrap_or_default();
     let replacing: Vec<&ScheduledTask> = applied
