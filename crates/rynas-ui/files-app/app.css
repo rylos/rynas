@@ -466,8 +466,15 @@ dialog.dlg.wide { max-width: min(94vw, 760px); }
 .rename-dlg .ren-head, .rename-dlg .ren-item { display: grid; grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr); gap: 6px; align-items: baseline; }
 .rename-dlg .ren-head { margin-top: 10px; font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; padding: 0 10px; }
 .rename-dlg .ren-list { max-height: 34vh; min-height: 80px; overflow-y: auto; overflow-x: hidden; margin: 4px 0 6px; padding: 4px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); font: 12px var(--mono); }
-.rename-dlg .ren-item { padding: 2px 0; }
-.rename-dlg .ren-item > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* wide enough to read long names whole; still the phone's width on a phone */
+dialog.dlg.rename-dlg { max-width: min(96vw, 1180px); }
+.rename-dlg .ren-item { padding: 3px 0; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.rename-dlg .ren-item:first-child { border-top: 0; }
+/* whole names, wrapped: the end of a name is often the part that changes */
+.rename-dlg .ren-item > span { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+.rename-dlg .ren-item del { color: var(--crit); background: var(--crit-soft); text-decoration: line-through; border-radius: 3px; }
+.rename-dlg .ren-item ins { color: inherit; background: var(--accent-soft); text-decoration: none; border-radius: 3px; }
+.rename-dlg .ren-item .gap { display: inline-block; width: 2px; height: 1em; margin: 0 1px; vertical-align: -2px; background: var(--crit); border-radius: 1px; }
 .rename-dlg .ren-item > span:nth-child(2) { color: var(--faint); text-align: center; }
 .rename-dlg .ren-item > span:last-child { color: var(--accent); }
 /* the reason of a refused name is read whole, on a phone too */

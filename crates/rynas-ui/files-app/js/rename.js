@@ -23,6 +23,23 @@ const MAX_BATCH = 10000;
 const pad = (n, d) => String(n).padStart(d, "0");
 const bytes = (s) => new TextEncoder().encode(s).length;
 
+/**
+ * `name` as HTML with what differs from `other` marked: the common start and end plain, the
+ * part in between in `<del>` (the old name) or `<ins>` (the new one), or a small `.gap` mark
+ * where the other name has text this one has not. Everything escaped: names are user data.
+ */
+export function marked(name, other, tag) {
+  if (name === other) return esc(name);
+  const [a, b] = [[...name], [...other]];
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const mid = a.slice(pre, a.length - suf).join("");
+  const part = mid ? `<${tag}>${esc(mid)}</${tag}>` : `<span class="gap" aria-hidden="true"></span>`;
+  return esc(a.slice(0, pre).join("")) + part + esc(a.slice(a.length - suf).join(""));
+}
+
 /** [stem, extension] of an item's name; a folder or a dot file has no extension. */
 function splitName(e) {
   const i = e.name.lastIndexOf(".");
@@ -223,7 +240,12 @@ export function batchRename(app, pane, list) {
     });
     const shown = plan.slice(0, PREVIEW);
     listEl.innerHTML =
-      shown.map((p) => `<div class="ren-item ${p.problem ? "bad" : p.same ? "same" : ""}" title="${esc(p.problem)}"><span>${esc(p.e.name)}</span><span>→</span><span>${esc(p.name)}${p.problem ? ` <em>${esc(p.problem)}</em>` : ""}</span></div>`).join("") +
+      shown
+        .map(
+          (p) =>
+            `<div class="ren-item ${p.problem ? "bad" : p.same ? "same" : ""}"><span title="${esc(p.e.name)}">${marked(p.e.name, p.name, "del")}</span><span>→</span><span title="${esc(p.problem ? `${p.name} · ${p.problem}` : p.name)}">${marked(p.name, p.e.name, "ins")}${p.problem ? ` <em>${esc(p.problem)}</em>` : ""}</span></div>`,
+        )
+        .join("") +
       (plan.length > shown.length ? `<div class="ren-item same"><span>… ${esc(t("files.common.n_more", { n: int(plan.length - shown.length) }))}</span></div>` : "");
     // one folder renames up to MAX_BATCH items at once
     const perDir = new Map();

@@ -119,7 +119,7 @@ export function syncFolders(app, paneA, paneB) {
           (p, i) => `<label class="sync-item act-${p.act || "none"}" title="${esc(t(WHAT[p.d.what]))}">
         <input type="checkbox" data-i="${i}"${p.on ? " checked" : ""}${p.act ? "" : " disabled"}>
         <span class="sync-arrow" aria-label="${esc(t(WHAT[p.d.what]))}">${ARROW[p.act]}</span>
-        <span class="sync-path">${esc(p.d.path)}${p.d.dir ? "/" : ""}</span>
+        <span class="sync-path" title="${esc(p.d.path)}${p.d.dir ? "/" : ""}">${esc(p.d.path)}${p.d.dir ? "/" : ""}</span>
         <span class="sync-side">${esc(side(p.d.a, p.d.dir))}</span><span class="sync-side">${esc(side(p.d.b, p.d.dir))}</span></label>`,
         )
         .join("") + (plan.length > shown.length ? `<div class="hint">${esc(t("files.common.n_more", { n: int(plan.length - shown.length) }))}</div>` : "");
