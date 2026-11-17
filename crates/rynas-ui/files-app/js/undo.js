@@ -68,39 +68,59 @@ export function recordNewFolder(path) {
   });
 }
 
+/** Whether another step on the stack already counts `name` in `dest` as made by its job. */
+const claimed = (dest, name) => stack.some((s) => s.claims?.has(`${dest}\n${name}`));
+
 /**
  * A move or a copy just started as job `id`. `fresh`: the names the
- * destination did not hold before (only those are undone: an item that was
- * already there, replaced or kept, is never moved back or thrown away).
+ * destination did not hold before. Only those are undone, and only while
+ * each is still the very item the job left there (its inode, size and date
+ * recorded when the job ended: `jobFinished`): an item that was already
+ * there, replaced or kept, or put there since by someone else, is never
+ * moved back or thrown away. Two transfers into one folder never both
+ * claim a name.
  */
 export function recordTransfer(id, op, sources, dest, fresh) {
   if (id == null || !fresh) return;
-  const items = sources.filter((p) => fresh.has(baseName(p))).map((p) => [p, joinPath(dest, baseName(p))]);
+  const items = sources.filter((p) => fresh.has(baseName(p)) && !claimed(dest, baseName(p))).map((p) => [p, joinPath(dest, baseName(p))]);
   if (!items.length) return;
   const n = count(items.length, "files.common.count.items", int);
   const d = baseName(dest) || dest;
-  push({
+  const names = items.map(([, now]) => baseName(now));
+  const step = {
     label: op === "move" ? t("files.undo.move_n_d", { n, d }) : t("files.undo.copy_n_d", { n, d }),
+    claims: new Set(names.map((name) => `${dest}\n${name}`)),
+    job: id,
+    // name -> {ino, size, mtime, dir} of what the job left, once it ended
+    made: null,
+    record: () =>
+      (step.made ??= api.exists(dest, names).then(
+        (r) => new Map(r.taken.map((x) => [x.name, x])),
+        () => null,
+      )),
     run: async () => {
       const running = transfers.all().find((j) => j.id === id);
       if (running && !transfers.finished(running)) throw notYet(t("files.undo.transfer_still_running"));
-      // what the job left in the destination (a failed or skipped item is not there)
-      const there = new Set((await api.exists(dest, items.map(([, now]) => baseName(now)))).taken.map((x) => x.name));
-      const left = items.filter(([, now]) => there.has(baseName(now)));
+      const made = await (step.made || Promise.resolve(null));
+      if (!made) throw new Error(t("files.undo.not_recorded"));
+      // what is still exactly what the job left (a failed or skipped item was never there)
+      const now = new Map((await api.exists(dest, names)).taken.map((x) => [x.name, x]));
+      const same = (a, b) => a && b && a.ino === b.ino && a.dir === b.dir && (a.dir || (a.size === b.size && a.mtime === b.mtime));
+      const left = items.filter(([, p]) => same(made.get(baseName(p)), now.get(baseName(p))));
       if (!left.length) throw new Error(t("files.undo.nothing_left_n", { n: d }));
       if (op === "move") {
         // back where each came from, one move per folder of origin
         const byParent = new Map();
-        for (const [from, now] of left) {
+        for (const [from, p] of left) {
           const parent = parentOf(from);
           if (!byParent.has(parent)) byParent.set(parent, []);
-          byParent.get(parent).push(now);
+          byParent.get(parent).push(p);
         }
         for (const [parent, list] of byParent) await job({ op: "move", sources: list, dest: parent });
         return;
       }
       // a copy: its new items go to the recycle bin, after asking
-      const copies = left.map(([, now]) => now);
+      const copies = left.map(([, p]) => p);
       const recycle = !!(await api.list(dest)).recycle;
       const many = count(copies.length, "files.common.count.items", int);
       const ok = await confirmBox({
@@ -114,9 +134,23 @@ export function recordTransfer(id, op, sources, dest, fresh) {
         icon: "trash",
       });
       if (!ok) throw DECLINED;
-      await job({ op: "delete", sources: copies, permanent: !recycle });
+      // the NAS checks once more that each is still as recorded before it deletes
+      const expect = copies.map((p) => {
+        const m = made.get(baseName(p));
+        return { path: p, seen: { size: m.size, mtime: m.mtime, dir: m.dir } };
+      });
+      await job({ op: "delete", sources: copies, permanent: !recycle, expect });
     },
-  });
+  };
+  push(step);
+  // a quick job may have ended already, before its step was kept
+  const ended = transfers.all().find((j) => j.id === id);
+  if (ended && transfers.finished(ended)) step.record();
+}
+
+/** A transfer job ended (main.js refreshAfter): its step records what it left, once. */
+export function jobFinished(job) {
+  for (const step of stack) if (step.job === job.id && step.record) step.record();
 }
 
 /** Undoes the last step. */

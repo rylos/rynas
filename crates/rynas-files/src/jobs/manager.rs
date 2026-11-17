@@ -746,6 +746,7 @@ impl Manager {
                     if job.spec.op != Op::Delete && job.spec.dest.is_some() {
                         job.cleaning = true;
                         let mut clean = job.spec.clone();
+                        clean.cleanup_of = Some(clean.cleanup_of.unwrap_or(clean.op));
                         clean.op = Op::Cleanup;
                         cleanup = Some((id, job.user.clone(), clean));
                     }
@@ -793,6 +794,7 @@ impl Manager {
             let needs_cleanup = e.spec.op != Op::Delete && e.spec.dest.is_some();
             if needs_cleanup {
                 let mut clean = e.spec.clone();
+                clean.cleanup_of = Some(clean.cleanup_of.unwrap_or(clean.op));
                 clean.op = Op::Cleanup;
                 cleanups.push((e.id, e.user.clone(), clean));
             } else {

@@ -14,9 +14,19 @@ import * as transfers from "./transfers.js";
 const SHOWN = 2000;
 let lastMode = "update";
 
+/**
+ * Whether an action is ticked at once: a mirror also offers to copy over what is newer on
+ * the right or the same date with another size, but leaves those for the user to tick.
+ */
+export function preset(d, mode) {
+  const act = action(d, mode);
+  if (!act) return false;
+  return !(mode === "mirror" && (d.what === "newer_b" || d.what === "size"));
+}
+
 /** What a mode does with a difference: "a2b", "b2a", "del" (from b), or "" (left alone, for the user). */
 export function action(d, mode) {
-  if (d.what === "kind") return "";
+  if (d.what === "kind" || d.what === "unreadable") return "";
   if (mode === "update") return d.what === "a" || d.what === "newer_a" ? "a2b" : "";
   if (mode === "mirror") return d.what === "b" ? "del" : "a2b";
   // both ways: the newer wins; the same date with another size is for the user to decide
@@ -87,7 +97,7 @@ export function syncFolders(app, paneA, paneB) {
   const ARROW = { a2b: "→", b2a: "←", del: "✕", "": "·" };
   const WHAT = {
     a: "files.sync.only_left", b: "files.sync.only_right", newer_a: "files.sync.newer_left", newer_b: "files.sync.newer_right",
-    size: "files.sync.same_date_other_size", kind: "files.sync.file_and_folder",
+    size: "files.sync.same_date_other_size", kind: "files.sync.file_and_folder", unreadable: "files.sync.unreadable",
   };
   const side = (s, dir) => (s ? `${dir ? t("files.common.folder") : size(s.size)} · ${dateTime(s.mtime)}` : "—");
   const updateFoot = () => {
@@ -101,7 +111,7 @@ export function syncFolders(app, paneA, paneB) {
     q(".s-run").disabled = !on.length;
   };
   const build = () => {
-    plan = diffs.map((d) => ({ d, act: action(d, mode), on: !!action(d, mode) }));
+    plan = diffs.map((d) => ({ d, act: action(d, mode), on: preset(d, mode) }));
     const shown = plan.slice(0, SHOWN);
     q(".sync-list").innerHTML =
       shown
@@ -160,44 +170,68 @@ export function syncFolders(app, paneA, paneB) {
     diffs = result.diffs;
     q(".sync-res").hidden = false;
     q(".sync-sum").textContent = diffs.length ? count(diffs.length, "files.sync.count.differences", int) + (result.more ? " · " + t("files.sync.first_only") : "") : t("files.sync.folders_same");
+    const notes = [];
+    const unreadable = diffs.filter((d) => d.what === "unreadable").length;
+    if (unreadable) notes.push(t("files.sync.n_unreadable", { n: int(unreadable) }));
+    if (result.skipped) notes.push(t("files.dupes.n_odd_names_skipped", { n: int(result.skipped) }));
+    if (notes.length) q(".sync-sum").textContent += " · " + notes.join(" · ");
     build();
   };
 
   q(".s-run").onclick = async () => {
     const on = plan.filter((p) => p.on);
-    const pick = (k) => on.filter((p) => p.act === k).map((p) => p.d.path);
+    const pick = (k) => on.filter((p) => p.act === k).map((p) => p.d);
     const toB = pick("a2b");
     const toA = pick("b2a");
     const del = pick("del");
-    if (del.length) {
-      // the right side's bin, asked now: a share without one loses them for good
-      let bin = false;
-      try {
-        bin = !!(await api.list(b)).recycle;
-      } catch (err) {
-        return errorToast(err);
-      }
-      const n = count(del.length, "files.common.count.items", int);
+    if (!toB.length && !toA.length && !del.length) return toast(t("files.sync.nothing_to_do"));
+    // the bins of both sides, asked now: a share without one loses what is replaced or removed
+    let binA = false;
+    let binB = false;
+    try {
+      [binA, binB] = await Promise.all([toA.length ? api.list(a).then((r) => !!r.recycle) : false, toB.length || del.length ? api.list(b).then((r) => !!r.recycle) : false]);
+    } catch (err) {
+      return errorToast(err);
+    }
+    // files replaced on each side: their old content goes to that side's bin, or is lost
+    const overB = toB.filter((d) => d.b && !d.dir);
+    const overA = toA.filter((d) => d.a && !d.dir);
+    const lost = [...(binB ? [] : overB), ...(binA ? [] : overA)];
+    const binned = [...(binB ? overB : []), ...(binA ? overA : [])];
+    if (del.length || overB.length || overA.length) {
+      const items = (n) => count(n, "files.common.count.items", int);
+      const lines = [];
+      if (binned.length) lines.push(esc(t("files.sync.n_replaced_go_recycle", { n: items(binned.length) })));
+      if (del.length && binB) lines.push(esc(t("files.sync.n_extra_go_recycle", { n: items(del.length) })));
+      const danger = lost.length > 0 || (del.length > 0 && !binB);
+      if (lost.length) lines.push(`<b style="color:var(--crit)">${esc(t("files.sync.n_replaced_lost", { n: items(lost.length) }))}</b>`);
+      if (del.length && !binB) lines.push(`<b style="color:var(--crit)">${esc(t("files.actions.n_deleted_permanently_cannot_restored", { n: items(del.length) }))}</b>`);
+      if (danger) lines.push(esc(t("files.actions.recycle_bin_shared_folder_off")));
       const ok = await confirmBox({
-        title: bin ? t("files.actions.move_recycle_bin") : t("files.actions.delete_permanently"),
-        message: bin
-          ? esc(t("files.sync.n_extra_go_recycle", { n }))
-          : `<b style="color:var(--crit)">${esc(t("files.actions.n_deleted_permanently_cannot_restored", { n }))}</b><br>${esc(t("files.actions.recycle_bin_shared_folder_off"))}`,
-        items: del.map(esc),
-        ok: bin ? t("files.common.move_recycle_bin") : t("files.common.delete"),
-        danger: !bin,
-        icon: "trash",
+        title: t("files.sync.sync_ask"),
+        message: lines.join("<br>"),
+        items: [...del, ...overB, ...overA].map((d) => esc(d.path)),
+        ok: t("files.sync.synchronize"),
+        danger,
+        icon: "refresh",
       });
       if (!ok) return;
-      dlg.close();
-      if (toB.length) await transfers.start({ op: "sync", sources: [a], dest: b, members: toB, conflict: "overwrite" });
-      if (toA.length) await transfers.start({ op: "sync", sources: [b], dest: a, members: toA, conflict: "overwrite" });
-      await transfers.start({ op: "delete", sources: del.map((p) => joinPath(b, p)), permanent: !bin });
-      return;
     }
     dlg.close();
-    if (toB.length) await transfers.start({ op: "sync", sources: [a], dest: b, members: toB, conflict: "overwrite" });
-    if (toA.length) await transfers.start({ op: "sync", sources: [b], dest: a, members: toA, conflict: "overwrite" });
-    if (!toB.length && !toA.length) toast(t("files.sync.nothing_to_do"));
+    // what the comparison saw of both sides: the NAS leaves alone what changed since
+    const sideOf = (s, dir) => (s ? { size: s.size, mtime: s.mtime, dir } : null);
+    const job = (list, src, dest, from, to, bin) => ({
+      op: "sync",
+      sources: [src],
+      dest,
+      members: list.map((d) => d.path),
+      conflict: "overwrite",
+      permanent: !bin,
+      expect: list.map((d) => ({ path: d.path, seen: sideOf(d[from], d.dir) })),
+      expect_dest: list.map((d) => ({ path: d.path, seen: sideOf(d[to], d.dir) })),
+    });
+    if (toB.length) await transfers.start(job(toB, a, b, "a", "b", binB));
+    if (toA.length) await transfers.start(job(toA, b, a, "b", "a", binA));
+    if (del.length) await transfers.start({ op: "delete", sources: del.map((d) => joinPath(b, d.path)), permanent: !binB, expect: del.map((d) => ({ path: joinPath(b, d.path), seen: sideOf(d.b, d.dir) })) });
   };
 }

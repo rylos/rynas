@@ -19,6 +19,7 @@ use crate::wire::ApiError;
 pub fn is_system_name(name: &str) -> bool {
     name == "@eaDir"
         || name.starts_with(".rynas-x-")
+        || name.starts_with(PARK_PREFIX)
         || name.ends_with(".rynas-part")
         || name.ends_with(".rynas-upload")
         || name.ends_with(".rynas-edit")
@@ -260,7 +261,9 @@ pub fn mkdir(path: &Path) -> Result<(), ApiError> {
 }
 
 /// Renames without ever replacing: renameat2 with RENAME_NOREPLACE, and a
-/// plain check where the filesystem lacks it.
+/// plain check where the filesystem lacks it. A rename that changes only the
+/// case of a name on a case-insensitive filesystem (exFAT, FAT, casefolded
+/// ext4: the new name is the same item) goes through.
 pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     let (Ok(a), Ok(b)) = (CString::new(from.as_os_str().as_bytes()), CString::new(to.as_os_str().as_bytes())) else {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
@@ -280,8 +283,16 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
             }
             fs::rename(from, to)
         }
+        // the "existing" name is the item itself, spelled with another case
+        Some(libc::EEXIST) if case_only(from, to) && same_file(from, to) => fs::rename(from, to),
         _ => Err(e),
     }
+}
+
+/// Two paths of one folder whose names differ in case only.
+fn case_only(a: &Path, b: &Path) -> bool {
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    a.parent() == b.parent() && a != b && name(a) == name(b)
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -307,44 +318,135 @@ pub struct Renamed {
     /// the rynas error code of the failure (`error_codes`), for the interface to translate
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<&'static str>,
+    /// a failed item that could not go back under its own name: the name it has now (a
+    /// "(restored)" one, or its parked name when even that failed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept_as: Option<String>,
 }
 
-/// The tag of the hidden names a batch parks its items under (`.{name}.rynas-ren-<pid>`):
-/// a dot file, so one left by a crash is still there to see with the hidden files shown.
-fn park_tag() -> String {
-    format!("rynas-ren-{}", std::process::id())
+/// The prefix of the names a batch rename parks its items under: `.rynas-ren-<pid>.<name>`,
+/// the worker's pid and the whole original name, so an orphan (a worker killed half-way) is
+/// put back by the next batch in its folder ([`recover_parked`]). Never listed
+/// ([`is_system_name`]).
+pub const PARK_PREFIX: &str = ".rynas-ren-";
+
+/// Most items one batch rename takes: the interface refuses more before asking.
+pub const MAX_RENAMES: usize = 10_000;
+
+/// The parked name of `name` for the worker `pid`, or `None` when it would pass the 255
+/// bytes a name may have (such an item is not swapped: it fails alone, before anything
+/// moves).
+fn park_name(name: &str, pid: u32) -> Option<String> {
+    let parked = format!("{PARK_PREFIX}{pid}.{name}");
+    (parked.len() <= 255).then_some(parked)
+}
+
+/// The pid and the original name of a parked name.
+fn parked_parts(parked: &str) -> Option<(u32, &str)> {
+    let rest = parked.strip_prefix(PARK_PREFIX)?;
+    let (pid, name) = rest.split_once('.')?;
+    let pid = pid.parse().ok()?;
+    crate::shares::valid_name(name).is_ok().then_some((pid, name))
+}
+
+/// Whether the process `pid` still runs (a parked item of a live batch, the extraction
+/// folder of a live job, is never touched).
+pub fn alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    // SAFETY: signal 0 only checks
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Puts a parked item back under `name`, or, when that name is taken by now, under the first
+/// free "name (restored).ext", "name (restored 2).ext"… Answers the name it got; an error
+/// leaves it parked.
+fn unpark(dir: &Path, parked: &Path, name: &str) -> io::Result<String> {
+    match rename_noreplace(parked, &dir.join(name)) {
+        Ok(()) => return Ok(name.to_string()),
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+        Err(_) => {}
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    for n in 1..=100 {
+        let other = if n == 1 { format!("{stem} (restored){ext}") } else { format!("{stem} (restored {n}){ext}") };
+        if other.len() > 255 {
+            break;
+        }
+        match rename_noreplace(parked, &dir.join(&other)) {
+            Ok(()) => return Ok(other),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::from(io::ErrorKind::AlreadyExists))
+}
+
+/// The items an earlier batch left parked in `dir` (its worker killed half-way: a client
+/// gone, a timeout), put back: under their own name when free, else as "(restored)". Items
+/// of a batch still running are left alone. Answers [parked name, name it got, or the error].
+pub fn recover_parked(dir: &Path) -> Vec<(String, Result<String, String>)> {
+    let mut out = Vec::new();
+    let me = std::process::id();
+    let Ok(rd) = crate::confine::read_dir(dir) else { return out };
+    for item in rd.flatten() {
+        let parked = item.file_name().to_string_lossy().into_owned();
+        let Some((pid, name)) = parked_parts(&parked) else { continue };
+        if pid == me || alive(pid) {
+            continue;
+        }
+        let got = unpark(dir, &dir.join(&parked), name).map_err(|e| describe(&e));
+        out.push((parked.clone(), got));
+    }
+    out
 }
 
 /// Renames several items of `dir` at once. A new name may be the old name of another item
 /// of the batch (a swap, a shift of numbers 1→2→3→4): those items are parked under a hidden
-/// temporary name first. A new name taken by something outside the batch fails that item
-/// alone; nothing is ever overwritten. `guard` may refuse an item (its real path) with a
-/// reason: a read-only snapshot, a PC's backup folder.
-pub fn rename_many(dir: &Path, pairs: &[(String, String)], guard: impl Fn(&Path) -> Result<(), ApiError>) -> Vec<Renamed> {
+/// name first ([`PARK_PREFIX`]). A new name taken by something outside the batch fails that
+/// item alone; nothing is ever overwritten. `guard` may refuse an item (its real path) with a
+/// reason: a read-only snapshot, a PC's backup folder. `progress(done, total)` hears of
+/// every item renamed.
+///
+/// Any failure after an item was parked puts it back (under its own name, or a
+/// "(restored)" one when that is taken by now: [`Renamed::kept_as`]); a whole item chain
+/// that depends on a failed item fails with it before anything of it moves.
+pub fn rename_many(dir: &Path, pairs: &[(String, String)], guard: impl Fn(&Path) -> Result<(), ApiError>, mut progress: impl FnMut(usize, usize)) -> Vec<Renamed> {
     use rynas_api_types::error_codes as c;
     use std::collections::{HashMap, HashSet};
     let taken = || (Some(t!("an item with this name already exists")), Some(c::ALREADY_EXISTS));
+    let failed = |e: &io::Error| {
+        if e.kind() == io::ErrorKind::AlreadyExists { taken() } else { (Some(describe(e)), Some(io_code(e))) }
+    };
+    let pid = std::process::id();
     let olds: HashSet<&str> = pairs.iter().map(|(a, _)| a.as_str()).collect();
     let mut seen: HashMap<&str, usize> = HashMap::new();
-    for (_, b) in pairs {
-        *seen.entry(b.as_str()).or_default() += 1;
-    }
     let mut from_seen: HashMap<&str, usize> = HashMap::new();
-    for (a, _) in pairs {
+    for (a, b) in pairs {
+        *seen.entry(b.as_str()).or_default() += 1;
         *from_seen.entry(a.as_str()).or_default() += 1;
     }
-    let mut out: Vec<Renamed> = pairs.iter().map(|(a, b)| Renamed { from: a.clone(), to: b.clone(), error: None, code: None }).collect();
+    let mut out: Vec<Renamed> = pairs.iter().map(|(a, b)| Renamed { from: a.clone(), to: b.clone(), error: None, code: None, kept_as: None }).collect();
+    let wanted_all: HashSet<&str> = pairs.iter().filter(|(a, b)| a != b).map(|(_, b)| b.as_str()).collect();
     for r in out.iter_mut() {
+        let from = dir.join(&r.from);
         // the names are single components: never a path, `..` or a NUL
-        let (error, code) = if crate::shares::valid_name(&r.from).is_err() || crate::shares::valid_name(&r.to).is_err() {
+        let (error, code) = if crate::shares::valid_name(&r.from).is_err() || crate::shares::valid_name(&r.to).is_err() || r.from.starts_with(PARK_PREFIX) || r.to.starts_with(PARK_PREFIX) {
             (Some(t!("invalid name")), Some(c::INVALID_VALUE))
         } else if seen[r.to.as_str()] > 1 || from_seen[r.from.as_str()] > 1 {
             (Some(t!("two items would get the same name")), Some(c::INVALID_VALUE))
-        } else if let Err(e) = fs::symlink_metadata(dir.join(&r.from)) {
-            (Some(describe(&e)), Some(io_code(&e)))
-        } else if r.from != r.to && !olds.contains(r.to.as_str()) && fs::symlink_metadata(dir.join(&r.to)).is_ok() {
+        } else if let Err(e) = fs::symlink_metadata(&from) {
+            failed(&e)
+        } else if r.from != r.to && !olds.contains(r.to.as_str()) && fs::symlink_metadata(dir.join(&r.to)).is_ok() && !same_file(&from, &dir.join(&r.to)) {
+            // taken by something else (a case-only change on a case-insensitive volume is
+            // the item itself)
             taken()
-        } else if let Err(e) = guard(&dir.join(&r.from)) {
+        } else if r.from != r.to && wanted_all.contains(r.from.as_str()) && park_name(&r.from, pid).is_none() {
+            (Some(t!("the name is too long to be swapped with another item's")), Some(c::INVALID_VALUE))
+        } else if let Err(e) = guard(&from) {
             (Some(e.message), Some(e.code))
         } else {
             (None, None)
@@ -352,9 +454,9 @@ pub fn rename_many(dir: &Path, pairs: &[(String, String)], guard: impl Fn(&Path)
         r.error = error;
         r.code = code;
     }
-    // a name that stays taken (its item fails or keeps its name) cannot be given away; one
-    // pass may free none, so it is repeated until nothing changes (a chain onto a failure)
-    loop {
+    // a name that stays taken (its item fails or keeps it) cannot be given away, along a
+    // whole chain: repeated until nothing changes
+    let settle = |out: &mut Vec<Renamed>| loop {
         let staying: HashSet<String> = out.iter().filter(|r| r.error.is_some() || r.from == r.to).map(|r| r.from.clone()).collect();
         let mut changed = false;
         for r in out.iter_mut().filter(|r| r.error.is_none() && r.from != r.to && staying.contains(&r.to)) {
@@ -364,36 +466,53 @@ pub fn rename_many(dir: &Path, pairs: &[(String, String)], guard: impl Fn(&Path)
         if !changed {
             break;
         }
-    }
-    let tag = park_tag();
+    };
+    settle(&mut out);
+    // 1. out of the way: the items whose name another item of the batch is to take
     let wanted: HashSet<String> = out.iter().filter(|r| r.error.is_none() && r.from != r.to).map(|r| r.to.clone()).collect();
-    // first out of the way: the items whose name another item of the batch is to take
     let mut parked: HashMap<String, PathBuf> = HashMap::new();
     for r in out.iter_mut().filter(|r| r.error.is_none() && r.from != r.to && wanted.contains(&r.from)) {
-        let temp = dir.join(crate::names::part_name(&r.from, &tag));
+        let Some(name) = park_name(&r.from, pid) else { continue };
+        let temp = dir.join(name);
         match rename_noreplace(&dir.join(&r.from), &temp) {
             Ok(()) => {
                 parked.insert(r.from.clone(), temp);
             }
-            Err(e) => (r.error, r.code) = (Some(describe(&e)), Some(io_code(&e))),
+            Err(e) => (r.error, r.code) = failed(&e),
         }
     }
-    // an item whose parking failed keeps its name: whoever wanted it fails too
-    let stuck: HashSet<String> = out.iter().filter(|r| r.error.is_some() && wanted.contains(&r.from)).map(|r| r.from.clone()).collect();
-    for r in out.iter_mut().filter(|r| r.error.is_none() && stuck.contains(&r.to)) {
-        (r.error, r.code) = taken();
+    // an item that could not be parked keeps its name: whoever wanted it fails, and so on
+    settle(&mut out);
+    let restore = |r: &mut Renamed, parked: &mut HashMap<String, PathBuf>| {
+        if let Some(temp) = parked.remove(&r.from) {
+            match unpark(dir, &temp, &r.from) {
+                Ok(name) if name == r.from => {}
+                Ok(name) => r.kept_as = Some(name),
+                Err(_) => r.kept_as = temp.file_name().map(|n| n.to_string_lossy().into_owned()),
+            }
+        }
+    };
+    // parked, then failed through the chain: back at once, before any name is given
+    for r in out.iter_mut().filter(|r| r.error.is_some()) {
+        restore(r, &mut parked);
     }
-    for r in out.iter_mut().filter(|r| r.from != r.to) {
+    // 2. the new names
+    let total = out.iter().filter(|r| r.error.is_none() && r.from != r.to).count();
+    let mut done = 0;
+    for r in out.iter_mut().filter(|r| r.error.is_none() && r.from != r.to) {
         let src = parked.get(&r.from).cloned().unwrap_or_else(|| dir.join(&r.from));
-        if r.error.is_none()
-            && let Err(e) = rename_noreplace(&src, &dir.join(&r.to))
-        {
-            (r.error, r.code) = if e.kind() == io::ErrorKind::AlreadyExists { taken() } else { (Some(describe(&e)), Some(io_code(&e))) };
+        match rename_noreplace(&src, &dir.join(&r.to)) {
+            Ok(()) => {
+                parked.remove(&r.from);
+            }
+            Err(e) => {
+                // a name too long for this volume, a race: back under its own name
+                (r.error, r.code) = failed(&e);
+                restore(r, &mut parked);
+            }
         }
-        // a parked item that did not get its new name goes back under its own, if still free
-        if r.error.is_some() && parked.contains_key(&r.from) {
-            let _ = rename_noreplace(&src, &dir.join(&r.from));
-        }
+        done += 1;
+        progress(done, total);
     }
     out
 }
@@ -745,8 +864,11 @@ mod tests {
         }
         let p = |a: &str, b: &str| (a.to_string(), b.to_string());
         let ok = |_: &Path| Ok(());
+        let quiet = |_: usize, _: usize| {};
         // a⇄b, 1→2→3→4, x onto a name outside the batch
-        let out = rename_many(&dir, &[p("a", "b"), p("b", "a"), p("1", "2"), p("2", "3"), p("3", "4"), p("x", "taken")], ok);
+        let mut ticks = Vec::new();
+        let out = rename_many(&dir, &[p("a", "b"), p("b", "a"), p("1", "2"), p("2", "3"), p("3", "4"), p("x", "taken")], ok, |d, t| ticks.push((d, t)));
+        assert_eq!(ticks.last(), Some(&(5, 5)));
         let read = |n: &str| fs::read_to_string(dir.join(n)).unwrap();
         assert_eq!((read("a"), read("b")), ("b".into(), "a".into()));
         assert_eq!((read("2"), read("3"), read("4")), ("1".into(), "2".into(), "3".into()));
@@ -755,25 +877,64 @@ mod tests {
         let failed: Vec<&str> = out.iter().filter(|r| r.error.is_some()).map(|r| r.from.as_str()).collect();
         assert_eq!(failed, ["x"]);
         // two onto one name: neither goes
-        let out = rename_many(&dir, &[p("a", "z"), p("b", "z")], ok);
+        let out = rename_many(&dir, &[p("a", "z"), p("b", "z")], ok, quiet);
         assert!(out.iter().all(|r| r.error.is_some()));
         assert!(dir.join("a").exists() && dir.join("b").exists());
         // a name a refused item keeps is not given away, along a whole chain
         let guard = |path: &Path| if path.ends_with("keep") { Err(ApiError::read_only("no")) } else { Ok(()) };
-        let out = rename_many(&dir, &[p("keep", "k2"), p("y", "keep"), p("a", "y")], guard);
+        let out = rename_many(&dir, &[p("keep", "k2"), p("y", "keep"), p("a", "y")], guard, quiet);
         assert!(out.iter().all(|r| r.error.is_some()), "{out:?}");
         assert_eq!((read("keep"), read("y")), ("keep".into(), "y".into()));
-        // never a path, a parent or a NUL
-        for bad in ["../out", "sub/x", "..", "a\0b", ""] {
-            let out = rename_many(&dir, &[p("a", bad)], ok);
+        // never a path, a parent, a NUL or a parked name
+        for bad in ["../out", "sub/x", "..", "a\0b", "", ".rynas-ren-1.a"] {
+            let out = rename_many(&dir, &[p("a", bad)], ok, quiet);
             assert!(out[0].error.is_some(), "{bad:?}");
-            let out = rename_many(&dir, &[p(bad, "fine")], ok);
+            let out = rename_many(&dir, &[p(bad, "fine")], ok, quiet);
             assert!(out[0].error.is_some(), "{bad:?}");
         }
         assert!(!dir.join("fine").exists() && !dir.parent().unwrap().join("out").exists());
+        // a name too long to be parked is not swapped, and its chain fails with it
+        let long = "l".repeat(250);
+        fs::write(dir.join(&long), "long").unwrap();
+        let out = rename_many(&dir, &[p(&long, "a"), p("a", &long)], ok, quiet);
+        assert!(out.iter().all(|r| r.error.is_some()), "{out:?}");
+        assert_eq!((read(&long), read("a")), ("long".into(), "b".into()));
+        // a phase 2 failure (here: a name the volume refuses) puts the parked item back
+        let huge = "h".repeat(300);
+        let out = rename_many(&dir, &[p("a", "b"), p("b", &huge)], ok, quiet);
+        assert!(out.iter().any(|r| r.error.is_some()));
+        assert!(dir.join("b").exists() || dir.join("a").exists());
         // nothing hidden left behind
-        assert!(fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with('.')));
+        assert!(fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with('.')), "{:?}", fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect::<Vec<_>>());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphans_of_a_killed_batch_come_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        // a pid no process has (above any pid_max)
+        let dead = 999_999_999u32;
+        fs::write(dir.join(format!(".rynas-ren-{dead}.free.txt")), "1").unwrap();
+        fs::write(dir.join(format!(".rynas-ren-{dead}.taken.txt")), "2").unwrap();
+        fs::write(dir.join("taken.txt"), "other").unwrap();
+        // one of a batch still running (this very process) stays parked
+        fs::write(dir.join(format!(".rynas-ren-{}.mine", std::process::id())), "3").unwrap();
+        let mut got = recover_parked(dir);
+        got.sort();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(fs::read_to_string(dir.join("free.txt")).unwrap(), "1");
+        assert_eq!(fs::read_to_string(dir.join("taken (restored).txt")).unwrap(), "2");
+        assert_eq!(fs::read_to_string(dir.join("taken.txt")).unwrap(), "other");
+        assert!(dir.join(format!(".rynas-ren-{}.mine", std::process::id())).exists());
+        assert!(is_system_name(&format!(".rynas-ren-{dead}.x")));
+    }
+
+    #[test]
+    fn case_only_names_are_the_item_itself() {
+        assert!(case_only(Path::new("/d/a.jpg"), Path::new("/d/A.JPG")));
+        assert!(!case_only(Path::new("/d/a.jpg"), Path::new("/d/b.jpg")));
+        assert!(!case_only(Path::new("/d/a.jpg"), Path::new("/e/A.JPG")));
     }
 
     #[test]

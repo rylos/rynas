@@ -105,6 +105,65 @@ pub struct Spec {
     /// `None` for anyone else
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pc_roots: Option<Vec<crate::confine::PcRoot>>,
+    /// what the interface saw of each item before asking, re-checked by the worker right
+    /// before it acts: a deletion's sources (real paths), a synchronization's members
+    /// (relative paths, the source side). An item that changed since is left alone and
+    /// reported
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expect: Vec<Expected>,
+    /// sync: the destination side of each member as the comparison saw it (`seen: None`:
+    /// absent then); a member whose destination changed since is left alone
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expect_dest: Vec<Expected>,
+    /// delete (the duplicate finder): the groups of copies alike, every member with what
+    /// was seen (real paths). The worker never removes the last copy of a group still as
+    /// seen, whatever the sources say
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keep: Vec<Vec<Expected>>,
+    /// a clean-up: the operation of the job it cleans after (a synchronization's members
+    /// tell where it wrote; nothing else uses them)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_of: Option<Op>,
+}
+
+/// An item as the interface saw it: its path and its kind, size and date (`None`: not
+/// there).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Expected {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub seen: Option<Seen>,
+}
+
+/// What a file or folder was: a folder's size and date are not compared.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Seen {
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub mtime: i64,
+    #[serde(default)]
+    pub dir: bool,
+}
+
+impl Seen {
+    /// What `meta` (not followed) is, as the interface sees it.
+    pub fn of(meta: &std::fs::Metadata) -> Seen {
+        use std::os::unix::fs::MetadataExt;
+        Seen { size: meta.len(), mtime: meta.mtime(), dir: meta.is_dir() }
+    }
+
+    /// Whether the item at `path` (a last link not followed) is still what was seen.
+    pub fn still(expected: Option<&Seen>, path: &std::path::Path) -> bool {
+        match (expected, std::fs::symlink_metadata(path)) {
+            (None, Err(e)) => e.kind() == std::io::ErrorKind::NotFound,
+            (None, Ok(_)) | (Some(_), Err(_)) => false,
+            (Some(seen), Ok(meta)) => {
+                let now = Seen::of(&meta);
+                if seen.dir || now.dir { seen.dir == now.dir } else { now == *seen }
+            }
+        }
+    }
 }
 
 impl Spec {
@@ -258,6 +317,10 @@ mod tests {
             write_roots: Vec::new(),
             private_roots: Vec::new(),
             pc_roots: None,
+            expect: Vec::new(),
+            expect_dest: Vec::new(),
+            keep: Vec::new(),
+            cleanup_of: None,
         };
         let clean = spec.without_secrets();
         let text = serde_json::to_string(&clean).unwrap();

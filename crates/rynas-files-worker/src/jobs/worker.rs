@@ -19,7 +19,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rynas_files::confine::{self, Jail};
-use rynas_files::jobs::protocol::{Command, ConflictInfo, Event, Op, Policy, Progress, RecycleRoot, Side, Spec, Status};
+use rynas_files::jobs::protocol::{Command, ConflictInfo, Event, Expected, Op, Policy, Progress, RecycleRoot, Seen, Side, Spec, Status};
 use crate::fsops::{describe, rename_noreplace};
 use crate::jobs::writeback::WriteBehind;
 use rynas_api_types::error_codes as c;
@@ -234,6 +234,15 @@ fn confine_spec(mut spec: Spec) -> io::Result<(Spec, Vec<(PathBuf, io::Error)>)>
         }
     }
     spec.sources = sources;
+    // a deletion's checks name its sources and their groups: resolved the same way, so they
+    // match (one that does not resolve matches nothing, and its source stays)
+    if spec.op == Op::Delete {
+        for e in spec.expect.iter_mut().chain(spec.keep.iter_mut().flatten()) {
+            if let Ok(real) = resolve(&e.path, false) {
+                e.path = real;
+            }
+        }
+    }
     if let Some(dest) = spec.dest.take() {
         spec.dest = Some(if crate::remote::is_remote(&dest) { dest } else { resolve(&dest, true)? });
     }
@@ -474,7 +483,9 @@ impl Engine {
                 *seen += 1;
                 let name = item.file_name();
                 let Ok(kind) = item.file_type() else { continue };
-                if leftover(&name, &kind, || item.metadata().ok(), std::time::SystemTime::now()) {
+                // a temporary file a live job is writing (another job into the same folder)
+                // is never taken away: held ones and live workers' folders stay
+                if leftover(&name, &kind, || item.metadata().ok(), std::time::SystemTime::now()) && !in_use(&item.path(), &name) {
                     let _ = if kind.is_dir() { fs::remove_dir_all(item.path()) } else { fs::remove_file(item.path()) };
                 } else if deep && kind.is_dir() {
                     stack.push(item.path());
@@ -490,10 +501,11 @@ impl Engine {
                 stack.push(dest.join(name));
             }
         }
-        // the clean-up of a synchronization (its op is Cleanup by now, its members kept):
-        // it wrote at its members' paths, deep in dest — their folders at their top level,
-        // the folders it was copying in full (only leftovers ever go, see `leftover`)
-        {
+        // the clean-up of a synchronization (its members kept, `cleanup_of` says it was one;
+        // an extraction's members are paths inside its archive, never walked here): it wrote
+        // at its members' paths, deep in dest — their folders at their top level, the
+        // folders it was copying in full (only leftovers not in use ever go)
+        if self.spec.cleanup_of == Some(Op::Sync) {
             let rels: Vec<PathBuf> = self.spec.members.iter().filter_map(|m| plain_rel(m)).collect();
             let mut dirs: Vec<PathBuf> = rels.iter().filter_map(|r| r.parent().map(|p| dest.join(p))).collect();
             dirs.sort();
@@ -655,8 +667,28 @@ impl Engine {
             return Ok(());
         }
         self.p.phase = "copy".into();
+        // what the comparison saw of both sides, by member
+        let seen_src: std::collections::HashMap<PathBuf, Option<Seen>> = self.spec.expect.iter().map(|e| (e.path.clone(), e.seen)).collect();
+        let seen_dest: std::collections::HashMap<PathBuf, Option<Seen>> = self.spec.expect_dest.iter().map(|e| (e.path.clone(), e.seen)).collect();
+        let checked = !seen_src.is_empty();
+        let recycle = self.spec.recycle.clone();
         for (rel, src) in items {
             let Some(name) = rel.file_name().map(OsStr::to_os_string) else { continue };
+            // either side changed since the comparison: left alone (the choice was made on
+            // what it was)
+            if checked {
+                let src_ok = seen_src.get(&rel).is_some_and(|was| Seen::still(was.as_ref(), &src));
+                let dest_ok = seen_dest.get(&rel).is_none_or(|was| Seen::still(was.as_ref(), &dest.join(&rel)));
+                if !src_ok || !dest_ok {
+                    self.error_msg(&src, t!("changed since the comparison: not synchronized"));
+                    match fs::symlink_metadata(&src) {
+                        Ok(meta) if meta.is_dir() => self.skip_tree(&src),
+                        Ok(meta) => self.skip(&meta),
+                        Err(_) => {}
+                    }
+                    continue;
+                }
+            }
             let made = match rel.parent() {
                 Some(parent) if !parent.as_os_str().is_empty() => sync_dir(&dest, parent),
                 _ => Ok(dest.clone()),
@@ -673,6 +705,25 @@ impl Engine {
                     continue;
                 }
             };
+            // a file about to be replaced goes to the destination's recycle bin first (asked
+            // for when the share has one: never replaced for good then)
+            let target = dest_dir.join(&name);
+            if !recycle.is_empty() && fs::symlink_metadata(&target).is_ok_and(|m| !m.is_dir()) {
+                let binned = match recycle_target(&recycle, &target) {
+                    Bin::Recycle(root, rel_in) => to_recycle(&root, &rel_in, &target),
+                    Bin::Permanent => Ok(()),
+                    Bin::Missing => Err(t!("the recycle bin cannot take the file it would replace: not replaced")),
+                };
+                if let Err(why) = binned {
+                    self.error_msg(&src, why);
+                    match fs::symlink_metadata(&src) {
+                        Ok(meta) if meta.is_dir() => self.skip_tree(&src),
+                        Ok(meta) => self.skip(&meta),
+                        Err(_) => {}
+                    }
+                    continue;
+                }
+            }
             self.item(&src, &dest_dir, &name, false, false)?;
         }
         self.p.current.clear();
@@ -1036,6 +1087,7 @@ impl Engine {
         let _ = fs::remove_file(&part);
         let output = OpenOptions::new().write(true).create_new(true).mode(0o666).open(&part)?;
         confine::check_made(&output, &part)?;
+        hold(&output);
         // out of a private place (a PC's backup): before a byte is written, no more mode bits
         // than the source has, but the owner's reading and writing while it fills and is read
         // back (a verified copy of a 0000 file), narrowed fully once it is whole
@@ -1223,6 +1275,7 @@ impl Engine {
             .mode(0o666)
             .open(&part)
             .and_then(|f| confine::check_made(&f, &part).map(|()| f))
+            .inspect(hold)
             .and_then(|f| if private { keep_private(&f, 0o600, None, 0).map(|()| f) } else { Ok(f) })
         {
             Ok(f) => f,
@@ -1688,7 +1741,13 @@ impl Engine {
         let mut permanent = Vec::new();
         self.p.phase = "delete".into();
         self.p.files_total = sources.len() as u64;
+        let refused = delete_guard(&sources, &self.spec.expect, &self.spec.keep);
         for src in sources {
+            if let Some(why) = refused.get(&src) {
+                self.error_msg(&src, why.clone());
+                self.p.files_done += 1;
+                continue;
+            }
             if self.snapshot_refused(&src) {
                 continue;
             }
@@ -2184,6 +2243,61 @@ pub fn archive_stem(name: &str) -> &str {
 }
 
 /// Hidden name a copy is written under before the rename into place.
+/// The sources a deletion leaves alone, with the reason: with checks (`expect`), every
+/// source must still be what the interface saw (a source without a check, or changed since,
+/// stays); with groups of copies alike (`keep`, the duplicate finder), the last copy of a
+/// group still as seen never goes, whatever was picked.
+fn delete_guard(sources: &[PathBuf], expect: &[Expected], keep: &[Vec<Expected>]) -> std::collections::HashMap<PathBuf, String> {
+    use std::collections::{HashMap, HashSet};
+    let mut refused = HashMap::new();
+    if !expect.is_empty() {
+        let seen: HashMap<&Path, Option<&Seen>> = expect.iter().map(|e| (e.path.as_path(), e.seen.as_ref())).collect();
+        for src in sources {
+            match seen.get(src.as_path()) {
+                Some(was) if Seen::still(*was, src) => {}
+                _ => {
+                    refused.insert(src.clone(), t!("changed since it was looked at: not deleted"));
+                }
+            }
+        }
+    }
+    let mut going: HashSet<&Path> = sources.iter().filter(|s| !refused.contains_key(*s)).map(PathBuf::as_path).collect();
+    for group in keep {
+        let survivors = group.iter().filter(|m| !going.contains(m.path.as_path()) && Seen::still(m.seen.as_ref(), &m.path)).count();
+        if survivors == 0
+            && let Some(spare) = group.iter().find(|m| going.contains(m.path.as_path()))
+        {
+            going.remove(spare.path.as_path());
+            refused.insert(spare.path.clone(), t!("the last copy of its group stays: not deleted"));
+        }
+    }
+    refused
+}
+
+/// Marks a temporary file as this live job's: an exclusive lock held as long as the file
+/// is open, so the clean-up of another job ([`in_use`]) leaves it alone.
+fn hold(file: &File) {
+    // SAFETY: a valid descriptor; a filesystem without locks just leaves it unmarked
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+}
+
+/// Whether a leftover belongs to a job still running: a temporary file another worker
+/// holds ([`hold`]), or the extraction folder (`.rynas-x-<pid>`) of a worker still alive.
+fn in_use(path: &Path, name: &OsStr) -> bool {
+    let b = name.as_bytes();
+    if let Some(pid) = b.strip_prefix(b".rynas-x-") {
+        let digits: Vec<u8> = pid.iter().copied().take_while(u8::is_ascii_digit).collect();
+        return std::str::from_utf8(&digits).ok().and_then(|d| d.parse().ok()).is_some_and(crate::fsops::alive);
+    }
+    let Ok(file) = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) else { return false };
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    // SAFETY: a valid descriptor; the lock (if taken) goes with the descriptor
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    rc != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
+}
+
 /// The admitted share root that holds `real`; outside a jail (tests), a root at `fallback`.
 fn share_of(real: &Path, fallback: &Path) -> io::Result<Arc<confine::Root>> {
     match confine::root_of(real) {
@@ -2454,6 +2568,74 @@ mod tests {
         let mut e = engine(spec);
         assert!(e.sync().is_ok());
         assert!(!a.join("sub/top.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn syncs_only_what_is_still_as_compared_and_bins_what_it_replaces() {
+        let dir = scratch("sync-checks");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        for (n, t) in [("same", "new"), ("changed", "new"), ("dest-changed", "new")] {
+            fs::write(a.join(n), t).unwrap();
+            fs::write(b.join(n), "old").unwrap();
+        }
+        let seen = |p: &Path| Some(Seen::of(&fs::symlink_metadata(p).unwrap()));
+        let expect: Vec<_> = ["same", "changed", "dest-changed"].iter().map(|n| serde_json::json!({ "path": n, "seen": seen(&a.join(n)) })).collect();
+        let expect_dest: Vec<_> = ["same", "changed", "dest-changed"].iter().map(|n| serde_json::json!({ "path": n, "seen": seen(&b.join(n)) })).collect();
+        // after the comparison: a source and a destination change
+        fs::write(a.join("changed"), "newer still").unwrap();
+        fs::write(b.join("dest-changed"), "edited on the right").unwrap();
+        let recycle = [RecycleRoot { name: "B".into(), path: b.clone() }];
+        let spec: Spec = serde_json::from_value(serde_json::json!({ "op": "sync", "sources": [&a], "dest": &b, "members": ["same", "changed", "dest-changed"], "conflict": "overwrite", "recycle": recycle, "expect": expect, "expect_dest": expect_dest })).unwrap();
+        let mut e = engine(spec);
+        assert!(e.sync().is_ok());
+        assert_eq!(fs::read_to_string(b.join("same")).unwrap(), "new");
+        // the file it replaced is in the bin, not lost
+        assert_eq!(fs::read_to_string(b.join("#recycle/same")).unwrap(), "old");
+        assert_eq!(fs::read_to_string(b.join("changed")).unwrap(), "old");
+        assert_eq!(fs::read_to_string(b.join("dest-changed")).unwrap(), "edited on the right");
+        assert_eq!(e.p.errors, 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_last_copy_of_a_group_and_changed_files_stay() {
+        let dir = scratch("keep");
+        let p: Vec<PathBuf> = ["a", "b", "c"].iter().map(|n| dir.join(n)).collect();
+        for f in &p {
+            fs::write(f, "same").unwrap();
+        }
+        let ex = |f: &Path| Expected { path: f.to_path_buf(), seen: Some(Seen::of(&fs::symlink_metadata(f).unwrap())) };
+        let expect: Vec<Expected> = p.iter().map(|f| ex(f)).collect();
+        let group = vec![expect.clone()];
+        // all three picked: one stays
+        let refused = delete_guard(&p, &expect, &group);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        // two picked, the third changed since: the group would be gone, one picked stays
+        fs::write(&p[2], "edited").unwrap();
+        let refused = delete_guard(&p[..2], &expect[..2], &group);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        // a source changed since it was looked at stays, a source without a check too
+        let refused = delete_guard(&p, &expect, &[]);
+        assert!(refused.contains_key(&p[2]) && refused.len() == 1);
+        let refused = delete_guard(&p, &expect[..1], &[]);
+        assert_eq!(refused.len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_held_temporary_file_is_in_use() {
+        let dir = scratch("held");
+        let part = dir.join(".a.rynas-part");
+        let f = OpenOptions::new().write(true).create_new(true).open(&part).unwrap();
+        hold(&f);
+        assert!(in_use(&part, OsStr::new(".a.rynas-part")));
+        drop(f);
+        assert!(!in_use(&part, OsStr::new(".a.rynas-part")));
+        assert!(in_use(&dir, OsStr::new(&format!(".rynas-x-{}", std::process::id()))));
+        assert!(!in_use(&dir, OsStr::new(".rynas-x-999999999")));
         let _ = fs::remove_dir_all(&dir);
     }
 

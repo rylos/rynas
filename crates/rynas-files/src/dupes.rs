@@ -21,13 +21,62 @@ use crate::wire::{self as cgi, ApiError};
 const EDGE: u64 = 64 * 1024;
 /// Groups answered at most (the ones with the most room wasted).
 const MAX_GROUPS: usize = 5000;
+/// Files looked at at most: past this the search stops and says so (`more`). The worker
+/// keeps one small entry per size (a first pass) and the candidates only (a second).
+const MAX_FILES: u64 = 500_000;
 const TICK: Duration = Duration::from_millis(500);
 
+/// A candidate: its path below the root and what it was when seen.
 struct Found {
-    rel: String,
+    rel: Box<str>,
     size: u64,
     mtime: i64,
-    path: PathBuf,
+}
+
+/// What a walk of the tree hands its visitor: a file's path below the root, its name, its
+/// metadata.
+struct Seen<'a> {
+    rel: &'a Path,
+    name: &'a str,
+    meta: &'a std::fs::Metadata,
+}
+
+/// The walk of both passes: regular files below `root`, never through a link, the NAS's
+/// bookkeeping and the file manager's own names skipped, at most [`MAX_FILES`]. A name that
+/// is not UTF-8 cannot be named back to the interface: skipped and counted. Answers
+/// (files seen, names skipped, whether it stopped at the limit).
+fn walk(root: &Path, mut visit: impl FnMut(Seen) -> io::Result<()>) -> io::Result<(u64, u64, bool)> {
+    let (mut files, mut skipped) = (0u64, 0u64);
+    let mut stack = vec![PathBuf::new()];
+    while let Some(rel) = stack.pop() {
+        let Ok(rd) = crate::confine::read_dir(&root.join(&rel)) else { continue };
+        for item in rd.flatten() {
+            let raw = item.file_name();
+            let Some(name) = raw.to_str() else {
+                skipped += 1;
+                continue;
+            };
+            if crate::fsops::is_system_name(name) || name == crate::shares::RECYCLE || name == "#snapshot" {
+                continue;
+            }
+            let Ok(kind) = item.file_type() else { continue };
+            if kind.is_dir() {
+                stack.push(rel.join(name));
+                continue;
+            }
+            // a link is not followed, a device or a pipe is not read
+            if !kind.is_file() {
+                continue;
+            }
+            let Ok(meta) = item.metadata() else { continue };
+            if files >= MAX_FILES {
+                return Ok((files, skipped, true));
+            }
+            files += 1;
+            visit(Seen { rel: &rel, name, meta: &meta })?;
+        }
+    }
+    Ok((files, skipped, false))
 }
 
 #[derive(Serialize)]
@@ -79,7 +128,8 @@ pub fn send(out: &mut impl Write, root: &Path, by: &str, min: u64) -> Result<(),
     let result = find(root, by_name, min.max(1), &mut report);
     let out = report.out;
     let line = match result {
-        Ok((groups, scanned, more)) => json!({ "groups": groups, "scanned": scanned, "more": more }),
+        // skipped: names that are not UTF-8, never acted on
+        Ok((groups, scanned, skipped, more)) => json!({ "groups": groups, "scanned": scanned, "skipped": skipped, "more": more }),
         // the client went away
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
         Err(e) => {
@@ -92,46 +142,54 @@ pub fn send(out: &mut impl Write, root: &Path, by: &str, min: u64) -> Result<(),
     Ok(())
 }
 
-fn find<W: Write>(root: &Path, by_name: bool, min: u64, report: &mut Report<W>) -> io::Result<(Vec<Group>, u64, bool)> {
-    // 1. every file, once per inode
-    let mut by_size: HashMap<(u64, String), Vec<Found>> = HashMap::new();
-    let mut inodes = HashSet::new();
-    let mut scanned = 0u64;
-    let mut stack = vec![PathBuf::new()];
-    while let Some(rel) = stack.pop() {
-        let Ok(rd) = crate::confine::read_dir(&root.join(&rel)) else { continue };
-        for item in rd.flatten() {
-            let name = item.file_name().to_string_lossy().into_owned();
-            if crate::fsops::is_system_name(&name) || name == crate::shares::RECYCLE || name == "#snapshot" {
-                continue;
-            }
-            let Ok(kind) = item.file_type() else { continue };
-            if kind.is_dir() {
-                stack.push(rel.join(&name));
-                continue;
-            }
-            // a link is not followed, a device or a pipe is not read
-            if !kind.is_file() {
-                continue;
-            }
-            let Ok(meta) = item.metadata() else { continue };
-            scanned += 1;
-            report.tick(|| json!({ "phase": "scan", "files": scanned }))?;
-            if meta.len() < min || !inodes.insert((meta.dev(), meta.ino())) {
-                continue;
-            }
-            let key = (meta.len(), if by_name { name.to_lowercase() } else { String::new() });
-            by_size.entry(key).or_default().push(Found { rel: rel.join(&name).to_string_lossy().into_owned(), size: meta.len(), mtime: meta.mtime(), path: item.path() });
+/// The groups, with what [`Found`] needs: (groups, files looked at, names skipped, more).
+fn find<W: Write>(root: &Path, by_name: bool, min: u64, report: &mut Report<W>) -> io::Result<(Vec<Group>, u64, u64, bool)> {
+    use std::hash::{Hash, Hasher};
+    // the key of a file: its size, and by name a hash of its name in lower case
+    let key = |s: &Seen| -> (u64, u64) {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        if by_name {
+            s.name.to_lowercase().hash(&mut h);
         }
+        (s.meta.len(), if by_name { h.finish() } else { 0 })
+    };
+    // 1. how many files share each key, once per inode (a hard link is the same file)
+    let mut counts: HashMap<(u64, u64), u32> = HashMap::new();
+    let mut inodes: HashSet<(u64, u64)> = HashSet::new();
+    let mut scanned = 0u64;
+    let (_, skipped, more_files) = walk(root, |s| {
+        scanned += 1;
+        report.tick(|| json!({ "phase": "scan", "files": scanned }))?;
+        if s.meta.len() >= min && inodes.insert((s.meta.dev(), s.meta.ino())) {
+            *counts.entry(key(&s)).or_default() += 1;
+        }
+        Ok(())
+    })?;
+    counts.retain(|_, n| *n > 1);
+    inodes.clear();
+    inodes.shrink_to_fit();
+    // 2. the candidates only: the files whose key another file has
+    let mut by_key: HashMap<(u64, u64, Box<str>), Vec<Found>> = HashMap::new();
+    if !counts.is_empty() {
+        walk(root, |s| {
+            let k = key(&s);
+            if s.meta.len() >= min && counts.contains_key(&k) && inodes.insert((s.meta.dev(), s.meta.ino())) {
+                // by name the group is the exact name in lower case (the hash only narrowed it)
+                let name: Box<str> = if by_name { s.name.to_lowercase().into() } else { "".into() };
+                by_key.entry((k.0, k.1, name)).or_default().push(Found { rel: s.rel.join(s.name).to_string_lossy().into(), size: s.meta.len(), mtime: s.meta.mtime() });
+            }
+            Ok(())
+        })?;
     }
-    let mut candidates: Vec<Vec<Found>> = by_size.into_values().filter(|v| v.len() > 1).collect();
+    drop(counts);
+    let mut candidates: Vec<Vec<Found>> = by_key.into_values().filter(|v| v.len() > 1).collect();
     if !by_name {
-        // 2. the edges, then 3. the whole of what is still alike
+        // 3. the edges, then 4. the whole of what is still alike
         let total: u64 = candidates.iter().flatten().map(|f| f.size).sum();
         let mut done = 0u64;
         let mut next = Vec::new();
         for group in candidates {
-            for g in split(group, |f| edges(&f.path, f.size))? {
+            for g in split(group, |f| edges(&root.join(&*f.rel), f.size))? {
                 let bytes = g.iter().map(|f| f.size).sum::<u64>();
                 if g.len() < 2 || g[0].size <= 2 * EDGE {
                     // alone, or the edges were the whole file
@@ -141,10 +199,12 @@ fn find<W: Write>(root: &Path, by_name: bool, min: u64, report: &mut Report<W>) 
                     }
                     continue;
                 }
-                let mut whole = |f: &Found| full(&f.path, &mut |n| {
-                    done += n;
-                    report.tick(|| json!({ "phase": "hash", "done": done, "total": total }))
-                });
+                let mut whole = |f: &Found| {
+                    full(&root.join(&*f.rel), &mut |n| {
+                        done += n;
+                        report.tick(|| json!({ "phase": "hash", "done": done, "total": total }))
+                    })
+                };
                 next.extend(split(g, &mut whole)?.into_iter().filter(|g| g.len() > 1));
             }
             report.tick(|| json!({ "phase": "hash", "done": done, "total": total }))?;
@@ -153,16 +213,16 @@ fn find<W: Write>(root: &Path, by_name: bool, min: u64, report: &mut Report<W>) 
     }
     // the most room wasted first
     candidates.sort_by_key(|g| std::cmp::Reverse(g[0].size.saturating_mul(g.len() as u64 - 1)));
-    let more = candidates.len() > MAX_GROUPS;
+    let more = more_files || candidates.len() > MAX_GROUPS;
     let groups = candidates
         .into_iter()
         .take(MAX_GROUPS)
         .map(|mut g| {
             g.sort_by(|a, b| a.rel.cmp(&b.rel));
-            Group { size: g[0].size, items: g.into_iter().map(|f| Item { path: f.rel, mtime: f.mtime }).collect() }
+            Group { size: g[0].size, items: g.into_iter().map(|f| Item { path: f.rel.into(), mtime: f.mtime }).collect() }
         })
         .collect();
-    Ok((groups, scanned, more))
+    Ok((groups, scanned, skipped, more))
 }
 
 /// Splits a group by a key; a file that cannot be read drops out.
@@ -222,9 +282,24 @@ mod tests {
     fn run(dir: &Path, by_name: bool) -> (Vec<Vec<String>>, u64) {
         let mut sink = Vec::new();
         let mut report = Report { out: &mut sink, at: None };
-        let (groups, scanned, more) = find(dir, by_name, 1, &mut report).unwrap();
+        let (groups, scanned, skipped, more) = find(dir, by_name, 1, &mut report).unwrap();
         assert!(!more);
+        assert_eq!(skipped, 0);
         (groups.iter().map(|g| g.items.iter().map(|i| i.path.clone()).collect()).collect(), scanned)
+    }
+
+    #[test]
+    fn names_that_are_not_utf8_are_skipped_and_counted() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let odd = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
+        fs::write(dir.path().join(odd), "same").unwrap();
+        fs::write(dir.path().join("cafe.txt"), "same").unwrap();
+        let mut sink = Vec::new();
+        let mut report = Report { out: &mut sink, at: None };
+        let (groups, scanned, skipped, _) = find(dir.path(), false, 1, &mut report).unwrap();
+        assert!(groups.is_empty(), "a lossy path is never offered for deletion");
+        assert_eq!((scanned, skipped), (1, 1));
     }
 
     #[test]

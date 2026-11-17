@@ -17,6 +17,8 @@ const DEFAULTS = { name: "[N]", ext: "[E]", find: "", repl: "", regex: false, ma
 let last = { ...DEFAULTS };
 // rows of the preview drawn at most
 const PREVIEW = 500;
+// items one folder renames at once at most (the NAS's own limit, fsops::MAX_RENAMES)
+const MAX_BATCH = 10000;
 
 const pad = (n, d) => String(n).padStart(d, "0");
 const bytes = (s) => new TextEncoder().encode(s).length;
@@ -74,6 +76,7 @@ export function newNames(list, o) {
 export async function renameMany(pairs) {
   const done = [];
   const errors = [];
+  const recovered = [];
   const byDir = new Map();
   for (const [path, name] of pairs) {
     const dir = parentOf(path);
@@ -93,11 +96,19 @@ export async function renameMany(pairs) {
       continue;
     }
     try {
-      const { results } = await api.renames(dir, list.map(([p, n]) => [baseName(p), n]));
-      for (const r of results) {
-        if (r.error) errors.push(`${r.from}: ${errText(r.code) || r.error}`);
+      let answer = null;
+      await api.renames(dir, list.map(([p, n]) => [baseName(p), n]), (line) => {
+        if (line.results) answer = line;
+      });
+      if (!answer) throw new Error(t("files.pane.incomplete_answer"));
+      for (const r of answer.results) {
+        // a failed item that could not go back under its own name says where it is
+        const where = r.kept_as ? ` (${t("files.rename.kept_as_n", { n: r.kept_as })})` : "";
+        if (r.error) errors.push(`${r.from}: ${errText(r.code) || r.error}${where}`);
         else done.push([joinPath(dir, r.from), r.to]);
       }
+      // items an earlier interrupted batch had left hidden, put back
+      for (const r of answer.recovered || []) if (r.name && r.name !== r.parked) recovered.push(r.name);
     } catch (err) {
       errors.push(err.message);
     }
@@ -106,6 +117,7 @@ export async function renameMany(pairs) {
     moveFolderIcons(path, joinPath(parentOf(path), name));
     appChanged(path);
   }
+  if (recovered.length) toast(t("files.rename.recovered_n", { n: recovered.slice(0, 3).join(", ") + (recovered.length > 3 ? "…" : "") }), { timeout: 8000 });
   return { done, errors };
 }
 
@@ -210,6 +222,15 @@ export function batchRename(app, pane, list) {
     listEl.innerHTML =
       shown.map((p) => `<div class="ren-item ${p.problem ? "bad" : p.same ? "same" : ""}" title="${esc(p.problem)}"><span>${esc(p.e.name)}</span><span>→</span><span>${esc(p.name)}${p.problem ? ` <em>${esc(p.problem)}</em>` : ""}</span></div>`).join("") +
       (plan.length > shown.length ? `<div class="ren-item same"><span>… ${esc(t("files.common.n_more", { n: int(plan.length - shown.length) }))}</span></div>` : "");
+    // one folder renames up to MAX_BATCH items at once
+    const perDir = new Map();
+    for (const e of list) perDir.set(parentOf(e.path), (perDir.get(parentOf(e.path)) || 0) + 1);
+    if ([...perDir.values()].some((n) => n > MAX_BATCH)) {
+      sum.textContent = t("files.rename.too_many_n", { n: int(MAX_BATCH) });
+      sum.classList.add("err");
+      ok.disabled = true;
+      return;
+    }
     const bad = plan.filter((p) => p.problem).length;
     const changing = plan.filter((p) => !p.same && !p.problem).length;
     sum.textContent = bad ? t("files.rename.n_to_fix", { n: int(bad) }) : changing ? count(changing, "files.rename.count.changes", int) : t("files.rename.nothing_changes");

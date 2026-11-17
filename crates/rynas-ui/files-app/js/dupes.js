@@ -45,6 +45,8 @@ export function findDuplicates(app, root) {
   q(".d-min").value = last.min;
   let controller = null;
   let groups = [];
+  // compared by name and size only: listed, never picked for deletion (nothing was read)
+  let listOnly = false;
   const picked = new Set();
   dlg.addEventListener("close", () => controller?.abort());
   q(".d-close").onclick = () => dlg.close();
@@ -53,7 +55,8 @@ export function findDuplicates(app, root) {
   const selBytes = () => groups.reduce((a, g) => a + g.size * g.items.filter((i) => picked.has(i.path)).length, 0);
   const updateFoot = () => {
     q(".dup-sel").textContent = picked.size ? t("files.dupes.n_selected_s", { n: int(picked.size), s: size(selBytes()) }) : "";
-    q(".d-del").disabled = !picked.size;
+    q(".d-del").disabled = !picked.size || listOnly;
+    q(".d-del").hidden = listOnly;
   };
   const render = () => {
     const shown = groups.slice(0, SHOWN);
@@ -61,7 +64,7 @@ export function findDuplicates(app, root) {
       shown
         .map(
           (g, gi) => `<div class="dup-group"><div class="dup-gh">${esc(t("files.dupes.n_copies_of_s", { n: int(g.items.length), s: size(g.size) }))}</div>
-      ${g.items.map((it) => `<label class="dup-item" data-g="${gi}" title="${esc(app.displayPath(full(it.path)))}"><input type="checkbox" data-p="${esc(it.path)}"${picked.has(it.path) ? " checked" : ""}><span class="dup-path">${esc(app.displayPath(full(it.path)))}</span><span class="dup-date">${esc(dateTime(it.mtime))}</span><button type="button" class="icon-btn dup-show" title="${esc(t("files.dupes.show_in_folder"))}" aria-label="${esc(t("files.dupes.show_in_folder"))}">${svg("forward")}</button></label>`).join("")}</div>`,
+      ${g.items.map((it) => `<label class="dup-item" data-g="${gi}" title="${esc(app.displayPath(full(it.path)))}"><input type="checkbox" data-p="${esc(it.path)}"${picked.has(it.path) ? " checked" : ""}${listOnly ? " hidden disabled" : ""}><span class="dup-path">${esc(app.displayPath(full(it.path)))}</span><span class="dup-date">${esc(dateTime(it.mtime))}</span><button type="button" class="icon-btn dup-show" title="${esc(t("files.dupes.show_in_folder"))}" aria-label="${esc(t("files.dupes.show_in_folder"))}">${svg("forward")}</button></label>`).join("")}</div>`,
         )
         .join("") + (groups.length > SHOWN ? `<div class="hint">${esc(t("files.common.n_more", { n: int(groups.length - SHOWN) }))}</div>` : "");
     updateFoot();
@@ -91,13 +94,14 @@ export function findDuplicates(app, root) {
     (b) =>
       (b.onclick = () => {
         picked.clear();
-        if (b.dataset.pick !== "none") {
+        if (b.dataset.pick !== "none" && !listOnly) {
           const order = {
             old: (x, y) => x.mtime - y.mtime,
             new: (x, y) => y.mtime - x.mtime,
             short: (x, y) => x.path.length - y.path.length || x.path.localeCompare(y.path),
           }[b.dataset.pick];
-          for (const g of groups) {
+          // the groups shown only: what is not on screen is never picked unseen
+          for (const g of groups.slice(0, SHOWN)) {
             const keep = [...g.items].sort(order)[0];
             for (const it of g.items) if (it !== keep) picked.add(it.path);
           }
@@ -127,7 +131,17 @@ export function findDuplicates(app, root) {
     });
     if (!ok) return;
     dlg.close();
-    transfers.start({ op: "delete", sources: list.map(full), permanent: !bin });
+    // the NAS checks again before it deletes: each file still as found, and never the last
+    // copy of its group still as found
+    const seen = (it, g) => ({ size: g.size, mtime: it.mtime });
+    const touched = groups.filter((g) => g.items.some((it) => picked.has(it.path)));
+    transfers.start({
+      op: "delete",
+      sources: list.map(full),
+      permanent: !bin,
+      expect: touched.flatMap((g) => g.items.filter((it) => picked.has(it.path)).map((it) => ({ path: full(it.path), seen: seen(it, g) }))),
+      keep: touched.map((g) => g.items.map((it) => ({ path: full(it.path), seen: seen(it, g) }))),
+    });
   };
 
   q(".d-go").onclick = async () => {
@@ -175,11 +189,17 @@ export function findDuplicates(app, root) {
     }
     if (!result || !dlg.open) return;
     groups = result.groups;
+    listOnly = last.by === "name";
     const wasted = groups.reduce((a, g) => a + g.size * (g.items.length - 1), 0);
     q(".dup-res").hidden = false;
     q(".dup-sum").textContent = groups.length
       ? t("files.dupes.groups_g_files_n_s", { g: count(groups.length, "files.dupes.count.groups", int), n: int(result.scanned), s: size(wasted) }) + (result.more ? " · " + t("files.dupes.biggest_only") : "")
       : t("files.dupes.none_among_n", { n: int(result.scanned) });
+    const notes = [];
+    if (listOnly && groups.length) notes.push(t("files.dupes.by_name_list_only"));
+    if (result.skipped) notes.push(t("files.dupes.n_odd_names_skipped", { n: int(result.skipped) }));
+    if (notes.length) q(".dup-sum").textContent += " · " + notes.join(" · ");
+    q(".dup-bar").hidden = listOnly;
     dlg.querySelectorAll("[data-pick]").forEach((b) => (b.disabled = !groups.length));
     render();
   };

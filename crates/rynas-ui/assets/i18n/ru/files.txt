@@ -764,3 +764,14 @@ files.sync.nothing_to_do	Нечего делать
 files.transfers.syncing	Синхронизация
 files.transfers.sync_complete	Синхронизация завершена
 files.transfers.op.sync	Синхронизация
+files.rename.kept_as_n	теперь называется «{n}»
+files.rename.recovered_n	Восстановлены после прерванного переименования: {n}
+files.rename.too_many_n	За раз можно переименовать не более {n} элементов одной папки
+files.dupes.by_name_list_only	сравнение по имени и размеру: только список, отсюда ничего не удаляется
+files.dupes.n_odd_names_skipped	Пропущено имён не в UTF-8: {n}
+files.sync.unreadable	не удалось прочитать: оставлено как есть
+files.sync.n_unreadable	Не удалось прочитать: {n}, оставлено как есть
+files.sync.n_replaced_go_recycle	Будут заменены: {n}. Текущая версия уйдёт в корзину, откуда её можно восстановить.
+files.sync.n_replaced_lost	Будут заменены безвозвратно: {n}. Текущую версию восстановить нельзя.
+files.sync.sync_ask	Синхронизировать папки?
+files.undo.not_recorded	Результат передачи не был записан: отменить нельзя

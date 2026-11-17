@@ -118,14 +118,20 @@ export async function call(route, opts = {}) {
 
 /**
  * A call whose answer is JSON lines arriving over time (`application/x-ndjson`):
- * each goes to `onLine` as it comes. Errors before the stream starts throw as
+ * each goes to `onLine` as it comes; with a `body`, a POST of it as JSON. Errors before the stream starts throw as
  * `call`'s; a line `{"error", "code"}` is the server's error mid-way and is
  * handed over like the others.
  */
-export async function stream(route, params, onLine, signal) {
+export async function stream(route, params, onLine, signal, body) {
   let res;
+  const verb = body === undefined ? "GET" : "POST";
+  const options = { method: verb, credentials: "same-origin", headers: headers(verb), signal };
+  if (body !== undefined) {
+    options.body = JSON.stringify(body);
+    options.headers["Content-Type"] = "application/json";
+  }
   try {
-    res = await fetch(url(route, params), { credentials: "same-origin", headers: headers("GET"), signal });
+    res = await fetch(url(route, params), options);
   } catch (e) {
     if (e?.name === "AbortError") throw e;
     throw new ApiError(0, t("files.common.nas_unreachable"), "network");
@@ -172,7 +178,8 @@ export const api = {
   space: (path) => call("space", { params: { path } }),
   mkdir: (path, name, parents) => call("mkdir", { params: { path, name, parents: parents ? 1 : undefined }, body: {} }),
   rename: (path, name) => call("rename", { params: { path, name }, body: {} }),
-  renames: (path, pairs) => call("renames", { params: { path }, body: { pairs } }),
+  // JSON lines: {done, total} while it runs, then {results, recovered}
+  renames: (path, pairs, onLine) => stream("renames", { path }, onLine, undefined, { pairs }),
   search: (path, q, signal, extra = {}) => call("search", { params: { path, q, ...extra }, signal }),
   text: (path) => call("text", { params: { path } }),
   editOpen: (path) => call("edit", { params: { path } }),

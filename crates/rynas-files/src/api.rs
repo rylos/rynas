@@ -346,7 +346,29 @@ pub struct NewJob {
     /// extract: only these items (paths inside the archive), each into dest
     #[serde(default)]
     pub members: Vec<String>,
+    /// what the interface saw before asking (`Spec::expect`): a deletion's sources (the same
+    /// virtual paths), a synchronization's members
+    #[serde(default)]
+    pub expect: Vec<ExpectedIn>,
+    /// sync: the destination side of each member as compared (`Spec::expect_dest`)
+    #[serde(default)]
+    pub expect_dest: Vec<ExpectedIn>,
+    /// delete: the duplicate groups, every member as seen (`Spec::keep`)
+    #[serde(default)]
+    pub keep: Vec<Vec<ExpectedIn>>,
 }
+
+/// An item of [`NewJob::expect`]: a virtual path (or a member's relative path) and what was
+/// seen of it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExpectedIn {
+    pub path: String,
+    #[serde(default)]
+    pub seen: Option<crate::jobs::protocol::Seen>,
+}
+
+/// Most entries the checks of a job may carry ([`NewJob::expect`] and [`NewJob::keep`]).
+const MAX_EXPECTED: usize = 100_000;
 
 /// The worker's job from the interface's request: virtual paths resolved against the
 /// user's shares, remote ones kept as they are (the worker connects), the recycle bins of
@@ -450,6 +472,10 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
             let r = shares::resolve(shares, d)?;
             // nothing is copied, moved, extracted or compressed into a read-only share
             r.share.refuse_writes()?;
+            // a synchronization replaces files: the old ones go to the destination's bin
+            if body.op == Op::Sync && !body.permanent && r.share.recycle {
+                recycle.push(RecycleRoot { name: r.share.name.clone(), path: r.share.path.clone() });
+            }
             add_root(r.share);
             writes_in(r.share);
             if r.share.app.is_some() {
@@ -489,6 +515,7 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
     if body.op == Op::Extract && sources.len() != 1 {
         return Err(ApiError::invalid("sources", t!("one archive at a time")));
     }
+    let (expect, expect_dest, keep) = expectations(shares, body)?;
     Ok(Spec {
         op: body.op,
         sources,
@@ -512,7 +539,52 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
         private_roots,
         // set by the manager when an administrator's job starts
         pc_roots: None,
+        expect,
+        expect_dest,
+        keep,
+        cleanup_of: None,
     })
+}
+
+/// The checks of a job ([`Spec::expect`], [`Spec::expect_dest`], [`Spec::keep`]) as real
+/// paths: a deletion's paths resolved against the user's shares like its sources (a path of
+/// a share the user cannot see is refused), a synchronization's as plain relative members.
+type Expectations = (Vec<crate::jobs::protocol::Expected>, Vec<crate::jobs::protocol::Expected>, Vec<Vec<crate::jobs::protocol::Expected>>);
+
+fn expectations(shares: &[Share], body: &NewJob) -> Result<Expectations, ApiError> {
+    use crate::jobs::protocol::Expected;
+    let entries = body.expect.len() + body.expect_dest.len() + body.keep.iter().map(Vec::len).sum::<usize>();
+    if entries > MAX_EXPECTED {
+        return Err(ApiError::new(413, t!("too many items at once")));
+    }
+    let real = |e: &ExpectedIn| -> Result<Expected, ApiError> {
+        if crate::conns::split(&e.path).is_some() {
+            return Err(ApiError::invalid("expect", t!("checks are for folders of the NAS")));
+        }
+        Ok(Expected { path: shares::resolve(shares, &e.path)?.real, seen: e.seen })
+    };
+    let member = |e: &ExpectedIn| -> Result<Expected, ApiError> { Ok(Expected { path: PathBuf::from(valid_member(&e.path)?), seen: e.seen }) };
+    match body.op {
+        Op::Delete => {
+            // only the job's own sources are checked
+            if body.expect.iter().any(|e| !body.sources.contains(&e.path)) || !body.expect_dest.is_empty() {
+                return Err(ApiError::invalid("expect", t!("checks name items of the job only")));
+            }
+            let expect = body.expect.iter().map(real).collect::<Result<_, _>>()?;
+            let keep = body.keep.iter().map(|g| g.iter().map(real).collect::<Result<Vec<_>, _>>()).collect::<Result<_, _>>()?;
+            Ok((expect, Vec::new(), keep))
+        }
+        Op::Sync => {
+            if !body.keep.is_empty() {
+                return Err(ApiError::invalid("keep", t!("groups are for deletions")));
+            }
+            let expect = body.expect.iter().map(member).collect::<Result<_, _>>()?;
+            let expect_dest = body.expect_dest.iter().map(member).collect::<Result<_, _>>()?;
+            Ok((expect, expect_dest, Vec::new()))
+        }
+        _ if entries == 0 => Ok((Vec::new(), Vec::new(), Vec::new())),
+        _ => Err(ApiError::invalid("expect", t!("checks are for deletions and synchronizations"))),
+    }
 }
 
 /// A path inside an archive, as the client sends it: plain components only.
@@ -724,15 +796,38 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
                 return Err(ApiError::read_only(t!("inside an archive it is read-only")));
             }
             let body: Renames = req.json()?;
-            if body.pairs.len() > 100_000 {
-                return Err(ApiError::new(413, t!("too many items at once")));
+            if body.pairs.len() > fsops::MAX_RENAMES {
+                return Err(ApiError::new(413, t!("too many items at once ({} at most)", fsops::MAX_RENAMES)));
             }
             let guard = |item: &Path| -> Result<(), ApiError> {
                 fsops::refuse_snapshot(item)?;
                 crate::confine::refuse_pc_write(item, true)?;
                 Ok(())
             };
-            reply(out, &json!({ "results": fsops::rename_many(&dir, &body.pairs, guard) }))
+            // JSON lines: the head at once and a progress line every half second, so a long
+            // batch is never cut for answering late; a client gone changes nothing here (the
+            // writes fail quietly, the batch ends whole)
+            cgi::head(out, 200, &[("Content-Type", "application/x-ndjson"), ("X-Accel-Buffering", "no")])?;
+            let _ = out.flush();
+            // what an earlier batch killed half-way left parked here goes back first
+            let recovered: Vec<Value> = fsops::recover_parked(&dir)
+                .into_iter()
+                .map(|(parked, got)| match got {
+                    Ok(name) => json!({ "parked": parked, "name": name }),
+                    Err(error) => json!({ "parked": parked, "error": error }),
+                })
+                .collect();
+            let mut told = std::time::Instant::now();
+            let results = fsops::rename_many(&dir, &body.pairs, guard, |done, total| {
+                if told.elapsed() >= Duration::from_millis(500) {
+                    told = std::time::Instant::now();
+                    let _ = writeln!(out, "{}", json!({ "done": done, "total": total }));
+                    let _ = out.flush();
+                }
+            });
+            let _ = writeln!(out, "{}", json!({ "results": results, "recovered": recovered }));
+            let _ = out.flush();
+            Ok(())
         }
         "search" => {
             let r = shares::resolve(shares, req.require("path")?)?;
@@ -870,7 +965,9 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
                 .filter_map(|n| {
                     let m = std::fs::symlink_metadata(dir.join(n)).ok()?;
                     use std::os::unix::fs::MetadataExt;
-                    Some(json!({ "name": n, "size": m.len(), "mtime": m.mtime(), "dir": m.is_dir() }))
+                    // ino: which item it is (the undo of a copy or a move takes back only
+                    // the items the job made, not one put there since under the same name)
+                    Some(json!({ "name": n, "size": m.len(), "mtime": m.mtime(), "dir": m.is_dir(), "ino": m.ino() }))
                 })
                 .collect();
             reply(out, &json!({ "taken": taken }))
@@ -971,6 +1068,19 @@ mod tests {
         assert!(sync(&["/Photos"], "/Photos/sub", &["a"]).is_err());
         assert!(sync(&["/Photos/sub"], "/Photos", &["a"]).is_err());
         assert!(sync(&["/Photos"], "/:abc/share", &["a"]).is_err());
+        // the checks: members for a synchronization, the job's own sources for a deletion,
+        // groups resolved in the user's shares
+        let with = |v: serde_json::Value| job_spec(&shares, &[], &serde_json::from_value::<NewJob>(v).unwrap());
+        let seen = json!({ "size": 1, "mtime": 2 });
+        let spec = with(json!({ "op": "sync", "sources": ["/Photos"], "dest": "/Docs", "members": ["a"], "expect": [{ "path": "a", "seen": seen }], "expect_dest": [{ "path": "a" }] })).unwrap();
+        assert_eq!(spec.expect[0].path, PathBuf::from("a"));
+        assert_eq!(spec.expect_dest[0].seen, None);
+        assert!(with(json!({ "op": "sync", "sources": ["/Photos"], "dest": "/Docs", "members": ["a"], "expect": [{ "path": "../a", "seen": seen }] })).is_err());
+        let spec = with(json!({ "op": "delete", "sources": ["/Photos/a"], "expect": [{ "path": "/Photos/a", "seen": seen }], "keep": [[{ "path": "/Photos/a", "seen": seen }, { "path": "/Docs/b", "seen": seen }]] })).unwrap();
+        assert_eq!(spec.keep[0][1].path, PathBuf::from("/srv/vol2/Docs/b"));
+        assert!(with(json!({ "op": "delete", "sources": ["/Photos/a"], "expect": [{ "path": "/Photos/other", "seen": seen }] })).is_err());
+        assert!(with(json!({ "op": "delete", "sources": ["/Photos/a"], "keep": [[{ "path": "/Nope/b", "seen": seen }]] })).is_err());
+        assert!(with(json!({ "op": "copy", "sources": ["/Photos/a"], "dest": "/Docs", "expect": [{ "path": "/Photos/a" }] })).is_err());
     }
 
     #[test]

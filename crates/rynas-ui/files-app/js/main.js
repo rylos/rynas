@@ -11,7 +11,7 @@ import { baseName, parentOf, joinPath } from "./format.js";
 import { svg } from "./icons.js";
 import { $, toast } from "./ui.js";
 import * as transfers from "./transfers.js";
-import { initUndo } from "./undo.js";
+import { initUndo, jobFinished } from "./undo.js";
 import { openSettings } from "./settings.js";
 import { moveFolderIcons } from "./iconpick.js";
 import { tabMethods } from "./tabs.js";
@@ -212,6 +212,8 @@ class App {
   }
 
   refreshAfter(job) {
+    // a copy or a move Ctrl+Z may undo records what it left
+    jobFinished(job);
     if (job.op === "move" && job.state === "done" && !job.progress.errors) for (const p of job.info.sources) moveFolderIcons(p, joinPath(job.info.dest, baseName(p)));
     const dirs = new Set(job.info.sources.map(parentOf));
     // a deletion fills or empties a bin: the share's top shows which
