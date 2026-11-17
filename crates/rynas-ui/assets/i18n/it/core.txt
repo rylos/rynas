@@ -5149,7 +5149,7 @@ bkpc.first_run_intro	Il PC è configurato quando è arrivato il primo snapshot d
 bkpc.first_run_ok	Ricevuto
 bkpc.first_run_wait	In attesa
 bkpc.bm.not_ready	Non pronto
-bkpc.bm.title	L'intero PC (su un disco vuoto)
+bkpc.bm.title	Ripristino completo (anche su un disco nuovo)
 bkpc.bm.manifest	Struttura dei dischi
 bkpc.bm.loader	Caricatore di avvio
 bkpc.bm.subvolumes	Sottovolumi necessari

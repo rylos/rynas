@@ -5829,7 +5829,7 @@ dict! { BLOB, LENS;
     "bkpc.first_run_ok" => "Received";
     "bkpc.first_run_wait" => "Waiting";
     "bkpc.bm.not_ready" => "Not ready";
-    "bkpc.bm.title" => "The whole PC (on an empty disk)";
+    "bkpc.bm.title" => "Full restore (even onto a new disk)";
     "bkpc.bm.manifest" => "Disk layout";
     "bkpc.bm.loader" => "Boot loader";
     "bkpc.bm.subvolumes" => "Subvolumes needed";

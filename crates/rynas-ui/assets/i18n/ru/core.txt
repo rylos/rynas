@@ -5183,7 +5183,7 @@ bkpc.first_run_intro	ПК считается настроенным, когда 
 bkpc.first_run_ok	Принят
 bkpc.first_run_wait	Ожидание
 bkpc.bm.not_ready	Не готово
-bkpc.bm.title	Весь ПК (на пустой диск)
+bkpc.bm.title	Полное восстановление (даже на новый диск)
 bkpc.bm.manifest	Разметка дисков
 bkpc.bm.loader	Загрузчик
 bkpc.bm.subvolumes	Необходимые подтома
