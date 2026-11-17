@@ -93,7 +93,7 @@ export function newNames(list, o) {
  * swaps and shifts included; on a remote server one by one. Resolves the
  * pairs done and the errors ("name: reason").
  */
-export async function renameMany(pairs) {
+export async function renameMany(pairs, { shallowFirst = false } = {}) {
   const done = [];
   const errors = [];
   const recovered = [];
@@ -103,7 +103,11 @@ export async function renameMany(pairs) {
     if (!byDir.has(dir)) byDir.set(dir, []);
     byDir.get(dir).push([path, name]);
   }
-  for (const [dir, list] of byDir) {
+  // the deepest folders first, so a folder renamed with things inside it does not move them
+  // away first; an undo (shallowFirst) the other way round, a folder takes its name back first
+  const depth = (p) => p.split("/").length;
+  const dirs = [...byDir].sort(([a], [b]) => (shallowFirst ? depth(a) - depth(b) : depth(b) - depth(a)));
+  for (const [dir, list] of dirs) {
     if (isRemote(dir)) {
       for (const [path, name] of list) {
         try {
@@ -239,11 +243,15 @@ export function batchRename(app, pane, list) {
       return { e, name: n, problem, same: n === e.name };
     });
     const shown = plan.slice(0, PREVIEW);
+    // items of several folders (opened in place): each says which folder it is in
+    const spread = new Set(list.map((e) => parentOf(e.path))).size > 1;
+    const relDir = (e) => (parentOf(e.path) === pane.path ? "." : parentOf(e.path).slice(pane.path === "/" ? 1 : pane.path.length + 1));
+    const where = (e) => (spread ? `<span class="ren-dir">${esc(relDir(e))}/</span>` : "");
     listEl.innerHTML =
       shown
         .map(
           (p) =>
-            `<div class="ren-item ${p.problem ? "bad" : p.same ? "same" : ""}"><span title="${esc(p.e.name)}">${marked(p.e.name, p.name, "del")}</span><span>→</span><span title="${esc(p.problem ? `${p.name} · ${p.problem}` : p.name)}">${marked(p.name, p.e.name, "ins")}${p.problem ? ` <em>${esc(p.problem)}</em>` : ""}</span></div>`,
+            `<div class="ren-item ${p.problem ? "bad" : p.same ? "same" : ""}"><span title="${esc(p.e.path)}">${where(p.e)}${marked(p.e.name, p.name, "del")}</span><span>→</span><span title="${esc(p.problem ? `${p.name} · ${p.problem}` : p.name)}">${marked(p.name, p.e.name, "ins")}${p.problem ? ` <em>${esc(p.problem)}</em>` : ""}</span></div>`,
         )
         .join("") +
       (plan.length > shown.length ? `<div class="ren-item same"><span>… ${esc(t("files.common.n_more", { n: int(plan.length - shown.length) }))}</span></div>` : "");
@@ -291,6 +299,7 @@ export function batchRename(app, pane, list) {
     const { done, errors } = await renameMany(pairs);
     dlg.close();
     if (done.length) recordRename(done, t("files.rename.rename_n", { n: count(done.length, "files.common.count.items", int) }));
+    app.renamedPaths(done);
     app.refreshFolders([...new Set(pairs.map(([p]) => parentOf(p)))]);
     if (pane.search) pane.reload();
     if (errors.length) errorToast(new Error(t("files.rename.n_not_renamed", { n: int(errors.length), e: errors.slice(0, 3).join("; ") + (errors.length > 3 ? "…" : "") })));

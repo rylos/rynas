@@ -773,4 +773,9 @@ export default {
   "files.sync.nested": "One folder is inside the other: choose two separate ones",
   "files.dupes.nas_folder_only": "Duplicates are looked for in a folder of the NAS: not at the top, in archives, on remote servers or in a PC's whole backup",
   "files.select.open_dual_pane": "Open the dual pane (F3) to compare the two folders",
+  "files.actions.two_items_named_n": "Two items are named “{n}”: in one folder one would take the other's place",
+  "files.settings.expand_folders": "Expandable folders",
+  "files.settings.expand_folders_hint": "In the list view an arrow opens the folder in place (→ opens, ← closes)",
+  "files.pane.expand_folder": "Expand",
+  "files.pane.collapse_folder": "Collapse",
 };

@@ -61,6 +61,7 @@ function body(section) {
     case "list":
       return (
         row("files.common.folders_first", "files.settings.like_eza_group_directories_first", sw("foldersFirst")) +
+        row("files.settings.expand_folders", "files.settings.expand_folders_hint", sw("expandFolders")) +
         row("files.common.show_hidden_files", "files.settings.those_starting_dot_ctrl_h", sw("showHidden")) +
         row("files.settings.hidden_files_last", "files.settings.shown_after_others", sw("hiddenLast")) +
         row("files.settings.show_favorites", "files.settings.favorites_section_sidebar_stay_saved", sw("showFavorites")) +

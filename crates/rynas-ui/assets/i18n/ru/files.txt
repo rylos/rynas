@@ -805,3 +805,8 @@ files.sync.same_folder	Обе панели показывают одну и ту
 files.sync.nested	Одна папка находится внутри другой: выберите две отдельные
 files.dupes.nas_folder_only	Дубликаты ищутся в папке NAS: не на верхнем уровне, не в архивах, не на удалённых серверах и не во всей резервной копии ПК
 files.select.open_dual_pane	Откройте двойную панель (F3), чтобы сравнить две папки
+files.actions.two_items_named_n	Два элемента называются «{n}»: в одной папке один занял бы место другого
+files.settings.expand_folders	Раскрываемые папки
+files.settings.expand_folders_hint	В виде списка стрелка раскрывает папку на месте (→ раскрывает, ← сворачивает)
+files.pane.expand_folder	Раскрыть
+files.pane.collapse_folder	Свернуть

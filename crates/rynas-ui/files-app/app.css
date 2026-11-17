@@ -474,6 +474,7 @@ dialog.dlg.rename-dlg { max-width: min(96vw, 1180px); }
 .rename-dlg .ren-item > span { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
 .rename-dlg .ren-item del { color: var(--crit); background: var(--crit-soft); text-decoration: line-through; border-radius: 3px; }
 .rename-dlg .ren-item ins { color: inherit; background: var(--accent-soft); text-decoration: none; border-radius: 3px; }
+.rename-dlg .ren-dir { color: var(--muted); }
 .rename-dlg .ren-item .gap { display: inline-block; width: 2px; height: 1em; margin: 0 1px; vertical-align: -2px; background: var(--crit); border-radius: 1px; }
 .rename-dlg .ren-item > span:nth-child(2) { color: var(--faint); text-align: center; }
 .rename-dlg .ren-item > span:last-child { color: var(--accent); }
@@ -909,6 +910,13 @@ dialog.dlg.space { max-width: min(96vw, 940px); }
 
 /* remote connections */
 .side-item .gi svg { width: 15px; height: 15px; vertical-align: -2px; }
+/* details view: the arrow that opens a folder in place */
+.name-cell .twisty { flex: none; width: 16px; height: 16px; margin-right: -4px; display: grid; place-items: center; color: var(--faint); border-radius: 4px; cursor: pointer; }
+.name-cell .twisty svg { width: 12px; height: 12px; transition: transform .12s; }
+.name-cell .twisty.open svg { transform: rotate(90deg); }
+.name-cell .twisty.wait { opacity: .45; }
+.name-cell .twisty:hover { color: var(--text); background: var(--surface-3); }
+.name-cell .twisty.leaf { cursor: default; background: none; }
 .side-item .si-tree { flex: none; width: 14px; height: 14px; margin: 0 -5px 0 -6px; display: grid; place-items: center; color: var(--faint); border-radius: 4px; cursor: pointer; }
 .side-item .si-tree svg { width: 11px; height: 11px; transition: transform .12s; }
 .side-item .si-tree.open svg { transform: rotate(90deg); }

@@ -767,3 +767,8 @@ files.sync.same_folder	I due pannelli mostrano la stessa cartella
 files.sync.nested	Una cartella è dentro l'altra: scegline due separate
 files.dupes.nas_folder_only	I duplicati si cercano in una cartella del NAS: non in cima, negli archivi, sui server remoti o nel backup intero di un PC
 files.select.open_dual_pane	Apri il doppio pannello (F3) per confrontare le due cartelle
+files.actions.two_items_named_n	Due elementi si chiamano «{n}»: nella stessa cartella uno prenderebbe il posto dell'altro
+files.settings.expand_folders	Cartelle espandibili
+files.settings.expand_folders_hint	Nella vista elenco una freccia apre la cartella sul posto (→ apre, ← chiude)
+files.pane.expand_folder	Espandi
+files.pane.collapse_folder	Comprimi

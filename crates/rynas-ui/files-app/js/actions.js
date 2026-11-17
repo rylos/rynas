@@ -21,6 +21,20 @@ import { isReadOnly, readOnlyHere, atBackups, backupsToast, isBackupTop, isWhole
 import { recordRename, recordNewFolder, recordTransfer } from "./undo.js";
 import { batchRename } from "./rename.js";
 
+/** Items from different folders (opened in place) with one name would land on each other. */
+function sameNames(paths) {
+  const seen = new Set();
+  for (const p of paths) {
+    const n = baseName(p);
+    if (seen.has(n)) {
+      toast(t("files.actions.two_items_named_n", { n }), { kind: "error" });
+      return true;
+    }
+    seen.add(n);
+  }
+  return false;
+}
+
 export const actionMethods = {
   /** A text file the editor opens: not in an archive nor a read-only folder, 8 MB at most. */
   editable(pane, entry) {
@@ -82,7 +96,7 @@ export const actionMethods = {
   compress(pane) {
     if (isReadOnly(pane)) return readOnlyHere(pane);
     const list = pane.targets().filter((e) => !e.share);
-    if (!list.length || pane.path === "/") return;
+    if (!list.length || pane.path === "/" || sameNames(list.map((e) => e.path))) return;
     const base = list.length === 1 ? (isDirLike(list[0]) ? list[0].name : archiveStem(list[0].name)) : baseName(pane.path) || t("files.common.archive");
     // zip opens anywhere; tar.zst (zstd levels 1, 3, 9 on the NAS) is faster and smaller
     // and keeps permissions and links
@@ -184,7 +198,7 @@ export const actionMethods = {
   paste(pane = this.pane, dest = pane.path, verify = false) {
     const cb = this.clipboard;
     if (!cb || dest === "/") return;
-    if (cb.op === "cut" && cb.from === dest) return toast(t("files.actions.items_already_in_folder"));
+    if (cb.op === "cut" && cb.paths.every((p) => parentOf(p) === dest)) return toast(t("files.actions.items_already_in_folder"));
     this.transfer(cb.op === "cut" ? "move" : "copy", cb.paths, dest, verify);
     if (cb.op === "cut") this.clipboard = null;
     this.allPanes().forEach((p) => p.paint());
@@ -204,6 +218,7 @@ export const actionMethods = {
     }
     if (paths.some((p) => dest === p || dest.startsWith(p + "/"))) return toast(t("files.actions.folder_cannot_go_inside_itself"), { kind: "error" });
     if (op === "move" && paths.every((p) => parentOf(p) === dest)) return;
+    if (sameNames(paths)) return;
     // for Ctrl+Z: only the names the destination did not hold yet are undone
     let fresh = null;
     try {
@@ -281,6 +296,11 @@ export const actionMethods = {
     if (ok) transfers.start({ op: "delete", sources: entries.map((e) => joinPath(bin, e.name)), permanent: true });
   },
 
+  /** Renamed items keep their place in every pane: opened folders, selection. */
+  renamedPaths(done) {
+    for (const p of this.allPanes()) p.renamedPaths(done);
+  },
+
   /** Several items: the batch rename dialog. */
   renameMany(pane, list) {
     if (isReadOnly(pane)) return readOnlyHere(pane);
@@ -307,10 +327,11 @@ export const actionMethods = {
     try {
       await api.rename(e.path, name);
       recordRename([[e.path, name]]);
+      this.renamedPaths([[e.path, name]]);
       if (isDirLike(e)) moveFolderIcons(e.path, joinPath(parentOf(e.path), name));
       await pane.reload();
       pane.selectPath(joinPath(parentOf(e.path), name));
-      this.refreshFolders([pane.path]);
+      this.refreshFolders([parentOf(e.path)]);
       appChanged(e.path);
     } catch (err) {
       errorToast(err);

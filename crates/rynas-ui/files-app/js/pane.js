@@ -100,6 +100,9 @@ export class Pane {
     this.searchMode = false;
     this.search = null; // {query, results, partial, controller}; flat: true for the flat view
     this.flat = false; // the flat view: every file below this folder (setFlat)
+    // details view: the folders opened in place, path → their items (null while read)
+    this.tree = new Map();
+    this.depth = null; // path → level, for the items under an opened folder
     this.loading = false;
     this.error = null;
     this.writable = false;
@@ -245,6 +248,7 @@ export class Pane {
       this.sort = { ...(own?.sort || prefs.sort) };
     }
     this.flat = false;
+    this.tree.clear();
     this.clearFilter(false);
     this.sel.clear();
     this.cursor = 0;
@@ -281,6 +285,7 @@ export class Pane {
     const cursorPath = this.visible[this.cursor]?.path;
     await this.load();
     if (this.flat) await this.runFlat();
+    await this.reloadTree();
     this.sel = new Set([...keep].filter((p) => this.visible.some((e) => e.path === p)));
     const i = this.visible.findIndex((e) => e.path === cursorPath);
     if (i >= 0) this.cursor = i;
@@ -348,6 +353,8 @@ export class Pane {
     // a snapshot's own bookkeeping (local snapshots, the manifest) never shows
     let list = (prefs.showHidden ? src : src.filter((e) => !isHidden(e))).filter((e) => !isBackupInternal(e));
     const query = this.filter.trim();
+    const tree = this.treeOn() && this.tree.size > 0;
+    this.depth = null;
     this.matches = new Map();
     if (query && this.searchMode) {
       // search results: mark the words the NAS matched
@@ -367,8 +374,9 @@ export class Pane {
         const m = fuzzy(query, e.name);
         if (m) this.matches.set(e.path, m);
       }
-      list = list.filter((e) => this.matches.has(e.path));
-      if (this.sort.key === "name" && this.sort.dir === 1) {
+      // with folders opened in place, a folder stays when something inside it matches
+      if (!tree) list = list.filter((e) => this.matches.has(e.path));
+      if (!tree && this.sort.key === "name" && this.sort.dir === 1) {
         // a click on a column header sorts the usual way instead
         this.visible = [...list].sort((a, b) => this.matches.get(b.path).score - this.matches.get(a.path).score || collator.compare(a.name, b.name));
         if (this.cursor >= this.visible.length) this.cursor = Math.max(0, this.visible.length - 1);
@@ -387,17 +395,50 @@ export class Pane {
       mode: (a, b) => a.mode - b.mode || collator.compare(a.name, b.name),
       dir: (a, b) => collator.compare(a.dir || "", b.dir || "") || collator.compare(a.name, b.name),
     }[key] || ((a, b) => collator.compare(a.name, b.name));
-    list = [...list].sort((a, b) => {
-      if (prefs.foldersFirst) {
-        const d = (isDirLike(b) ? 1 : 0) - (isDirLike(a) ? 1 : 0);
-        if (d) return d;
-      }
-      if (prefs.hiddenLast) {
-        const d = (isHidden(a) ? 1 : 0) - (isHidden(b) ? 1 : 0);
-        if (d) return d;
-      }
-      return cmp(a, b) * dir;
-    });
+    const sorted = (items) =>
+      [...items].sort((a, b) => {
+        if (prefs.foldersFirst) {
+          const d = (isDirLike(b) ? 1 : 0) - (isDirLike(a) ? 1 : 0);
+          if (d) return d;
+        }
+        if (prefs.hiddenLast) {
+          const d = (isHidden(a) ? 1 : 0) - (isHidden(b) ? 1 : 0);
+          if (d) return d;
+        }
+        return cmp(a, b) * dir;
+      });
+    list = sorted(list);
+    if (tree) {
+      // each opened folder's items right under it, one level further in
+      const fuzzyFilter = query && !this.searchMode;
+      const depth = new Map();
+      const out = [];
+      const walk = (items, d) => {
+        for (const e of items) {
+          const start = out.length;
+          out.push(e);
+          if (d) depth.set(e.path, d);
+          const kids = isDirLike(e) ? this.tree.get(e.path) : undefined;
+          if (Array.isArray(kids)) {
+            const shown = (prefs.showHidden ? kids : kids.filter((k) => !isHidden(k))).filter((k) => !isBackupInternal(k));
+            if (fuzzyFilter)
+              for (const k of shown) {
+                const m = fuzzy(query, k.name);
+                if (m) this.matches.set(k.path, m);
+              }
+            walk(sorted(shown), d + 1);
+          }
+          // filtered: a folder stays only when it, or something inside it, matches
+          if (fuzzyFilter && !this.matches.has(e.path) && out.length === start + 1) {
+            out.length = start;
+            depth.delete(e.path);
+          }
+        }
+      };
+      walk(list, 0);
+      list = out;
+      this.depth = depth;
+    }
     this.visible = list;
     if (this.cursor >= list.length) this.cursor = Math.max(0, list.length - 1);
   }
@@ -416,7 +457,14 @@ export class Pane {
   setView(view) {
     // the columns view is a folder at a time: the flat view goes
     if (view === "columns" && this.flat) this.setFlat(false);
+    const cur = this.visible[this.cursor]?.path;
     this.view = view;
+    // the folders opened in place show in the details view only
+    if (this.tree.size) {
+      this.refilter();
+      const i = this.visible.findIndex((e) => e.path === cur);
+      this.cursor = i >= 0 ? i : Math.min(this.cursor, Math.max(0, this.visible.length - 1));
+    }
     $(".empty-state", this.el)?.remove();
     this.app.rememberView(view, this);
     this.render();
@@ -434,6 +482,115 @@ export class Pane {
     this.cursor = 0;
     this.sel.clear();
     this.render();
+  }
+
+  // ---------- folders opened in place (details view) ----------
+  treeOn() {
+    return prefs.expandFolders !== false && this.view === "list" && !this.search;
+  }
+
+  /** A folder that opens in place: a folder (or a link to one) the list route can read. */
+  canOpen(e) {
+    return !!e && this.treeOn() && isDirLike(e) && e.full === undefined && !isWholeBackup(e.path);
+  }
+
+  /** Redraws after the tree changed, the cursor staying on its item (or on `at`). */
+  retree(at) {
+    const cur = at || this.visible[this.cursor]?.path;
+    this.refilter();
+    const i = this.visible.findIndex((e) => e.path === cur);
+    if (i >= 0) this.cursor = i;
+    this.sel = new Set([...this.sel].filter((p) => this.visible.some((e) => e.path === p)));
+    this.render();
+    this.ensureVisible();
+    this.app.selectionChanged(this);
+  }
+
+  /** Opens or closes a folder in place; its items are read (as the user, the list route) the first time. */
+  async toggleOpen(e, on = !this.tree.has(e.path)) {
+    if (!this.canOpen(e)) return;
+    if (!on) {
+      if (!this.tree.has(e.path)) return;
+      // closed with everything under it: nothing hidden stays selected or under the cursor
+      const under = e.path + "/";
+      for (const p of [...this.tree.keys()]) if (p === e.path || p.startsWith(under)) this.tree.delete(p);
+      const cur = this.visible[this.cursor]?.path || "";
+      return this.retree(cur.startsWith(under) ? e.path : cur);
+    }
+    if (this.tree.has(e.path)) return;
+    this.tree.set(e.path, null);
+    this.paint(true);
+    try {
+      const data = await api.list(e.path);
+      if (!this.tree.has(e.path)) return;
+      this.tree.set(e.path, data.entries.map((x) => ({ ...x, path: joinPath(e.path, x.name) })));
+    } catch (err) {
+      this.tree.delete(e.path);
+      errorToast(err);
+    }
+    this.retree();
+  }
+
+  /** On reload: every opened folder is read again; one that is gone closes. */
+  async reloadTree() {
+    if (!this.tree.size) return;
+    const paths = [...this.tree.keys()];
+    const lists = await Promise.all(paths.map((p) => api.list(p).then((d) => d.entries, () => null)));
+    paths.forEach((p, k) => {
+      if (lists[k]) this.tree.set(p, lists[k].map((x) => ({ ...x, path: joinPath(p, x.name) })));
+      else this.tree.delete(p);
+    });
+    this.refilter();
+  }
+
+  /** Right: opens the folder, or goes into it; left: closes it, or goes to the one it is in. */
+  treeKey(right) {
+    const e = this.visible[this.cursor];
+    if (!this.treeOn() || !e) return false;
+    const open = Array.isArray(this.tree.get(e.path));
+    if (right) {
+      if (!this.canOpen(e)) return false;
+      if (!this.tree.has(e.path)) this.toggleOpen(e, true);
+      else if (open && this.depthOf(this.visible[this.cursor + 1]) > this.depthOf(e)) this.moveCursor(this.cursor + 1);
+      return true;
+    }
+    if (this.tree.has(e.path)) {
+      this.toggleOpen(e, false);
+      return true;
+    }
+    if (!this.depthOf(e)) return false;
+    const up = this.visible.findIndex((x) => x.path === parentOf(e.path));
+    if (up >= 0) this.moveCursor(up);
+    return true;
+  }
+
+  /** After renames ([old path, new name], in the order done): the opened folders and the
+   * selection follow the new paths, those under a renamed folder too. */
+  renamedPaths(done) {
+    const move = (p) => {
+      for (const [from, name] of done) {
+        const to = joinPath(parentOf(from), name);
+        if (p === from) p = to;
+        else if (p.startsWith(from + "/")) p = to + p.slice(from.length);
+      }
+      return p;
+    };
+    if (this.tree.size) this.tree = new Map([...this.tree].map(([p, v]) => [move(p), v]));
+    this.sel = new Set([...this.sel].map(move));
+  }
+
+  depthOf(e) {
+    return (e && this.depth?.get(e.path)) || 0;
+  }
+
+  /** The items listed, less those inside a folder that is listed too: its copy carries them already. */
+  outermost(list) {
+    if (!this.depth?.size) return list;
+    const dirs = new Set(list.filter(isDirLike).map((e) => e.path));
+    return list.filter((e) => {
+      for (let p = parentOf(e.path); p !== "/" && p !== this.path; p = parentOf(p)) if (dirs.has(p)) return false;
+      return true;
+    });
   }
 
   /** The flat view: every file below this folder in one list, with the folder each is in. */
@@ -578,7 +735,7 @@ export class Pane {
 
   // ---------- selection ----------
   selected() {
-    const list = this.visible.filter((e) => this.sel.has(e.path));
+    const list = this.outermost(this.visible.filter((e) => this.sel.has(e.path)));
     if (list.length) return list;
     const cur = this.visible[this.cursor];
     return cur && this.sel.size === 0 && this.cursorShown ? [cur] : [];
@@ -586,7 +743,7 @@ export class Pane {
 
   /** What an action applies to: the selection, or the item under the cursor. */
   targets() {
-    const list = this.visible.filter((e) => this.sel.has(e.path));
+    const list = this.outermost(this.visible.filter((e) => this.sel.has(e.path)));
     if (list.length) return list;
     const cur = this.visible[this.cursor];
     return cur ? [cur] : [];
@@ -953,7 +1110,7 @@ export class Pane {
         // a PC's snapshot: its subvolume, then its short date (the real name in the tooltip)
         const parts = !m && entryParts(e);
         if (parts) return `<div class="cell name-cell" title="${esc(e.name)}">${iconHTML(e)}<span class="nm ${colorClass(e)}"><strong>${esc(parts.what)}</strong> <span class="nm-when">${esc(parts.when)}</span></span></div>`;
-        return `<div class="cell name-cell">${iconHTML(e)}<span class="nm ${colorClass(e)}">${m ? highlight(e.name, m.positions, esc) : esc(e.name)}</span>${link}${share}</div>`;
+        return `<div class="cell name-cell">${this.twisty(e)}${iconHTML(e)}<span class="nm ${colorClass(e)}">${m ? highlight(e.name, m.positions, esc) : esc(e.name)}</span>${link}${share}</div>`;
       }
       case "dir":
         return `<div class="cell" style="color:var(--muted)" title="${esc(e.dir)}">${esc(e.dir)}</div>`;
@@ -976,6 +1133,18 @@ export class Pane {
         return `<div class="cell" style="color:var(--muted)">${esc(kindLabel(e))}</div>`;
     }
     return "";
+  }
+
+  /** The arrow that opens a folder in place, indented by its level (details view). */
+  twisty(e) {
+    if (!this.treeOn()) return "";
+    // indented by level, never more than 6 levels: deep trees ellipsize their names instead
+    const pad = Math.min(this.depthOf(e), 6) * 16;
+    const style = pad ? ` style="margin-left:${pad}px"` : "";
+    if (!this.canOpen(e)) return `<span class="twisty leaf"${style}></span>`;
+    const state = this.tree.has(e.path) ? (this.tree.get(e.path) ? "open" : "open wait") : "";
+    const label = esc(t(this.tree.has(e.path) ? "files.pane.collapse_folder" : "files.pane.expand_folder"));
+    return `<span class="twisty ${state}" data-twisty role="button" aria-expanded="${this.tree.has(e.path)}" aria-label="${label}" title="${label}"${style}>${svg("chev")}</span>`;
   }
 
   modeHTML(e) {
@@ -1066,7 +1235,7 @@ export class Pane {
     const hidden = (this.search ? this.search.results : this.entries).filter(isHidden).length;
     if (!prefs.showHidden && hidden) html += `<span>${t("files.pane.n_hidden", { n: int(hidden) })}</span>`;
     if (selList.length) {
-      const bytes = selList.reduce((a, e) => a + (isDirLike(e) ? this.dirSizes.get(e.path)?.bytes || 0 : e.size), 0);
+      const bytes = this.outermost(selList).reduce((a, e) => a + (isDirLike(e) ? this.dirSizes.get(e.path)?.bytes || 0 : e.size), 0);
       html += `<span><b>${count(selList.length, "files.pane.count.selected", int)}</b> · ${size(bytes)}</span>`;
     }
     if (this.search?.flat) {
@@ -1454,6 +1623,8 @@ export class Pane {
     s.addEventListener("click", (ev) => {
       const i = this.indexAt(ev.target);
       if (i < 0) return;
+      // the arrow opens or closes the folder in place, the selection stays as it is
+      if (ev.target.closest("[data-twisty]")) return this.toggleOpen(this.visible[i]);
       if (ev.shiftKey) this.moveCursor(i, { extend: true });
       else if (ev.ctrlKey || ev.metaKey) {
         this.cursor = i;
@@ -1465,6 +1636,7 @@ export class Pane {
       }
     });
     s.addEventListener("dblclick", (ev) => {
+      if (ev.target.closest("[data-twisty]")) return;
       const i = this.indexAt(ev.target);
       if (i >= 0 && !prefs.singleClick) this.app.open(this, this.visible[i]);
     });
@@ -1590,7 +1762,9 @@ export class Pane {
 
   // ---------- inline rename ----------
   rename() {
-    const many = this.targets().filter((x) => !x.share);
+    // a folder and things inside it (opened in place) are all renamed, the deepest first
+    const chosen = this.visible.filter((e) => this.sel.has(e.path));
+    const many = (chosen.length ? chosen : this.targets()).filter((x) => !x.share);
     if (many.length > 1) return this.app.renameMany(this, many);
     const e = this.visible[this.cursor];
     if (!e || e.share) return;

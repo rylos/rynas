@@ -15,6 +15,8 @@ export const DEFAULTS = {
   size: "normal", // small, normal, large
   density: "normal", // compact, normal
   foldersFirst: true,
+  // details view: an arrow opens a folder in place
+  expandFolders: true,
   showHidden: false,
   binarySizes: true,
   relativeDates: false,
