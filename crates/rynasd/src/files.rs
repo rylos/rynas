@@ -65,12 +65,74 @@ pub struct Files {
     /// thumbnails together; each worker counts against rynasd's cgroup limits). The
     /// others wait their turn.
     slots: Arc<tokio::sync::Semaphore>,
+    /// The long scans ([`LONG_SCANS`]: a checksum, a comparison, a duplicate search) run in a
+    /// pool of their own, so minutes of reading never take the slots of the listings and
+    /// thumbnails: [`MAX_SCANS`] at once, one per user ([`Files::scanners`]).
+    scans: Arc<tokio::sync::Semaphore>,
+    /// The users with a long scan running.
+    scanners: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Removable drives (see [`RemovableDrives`]).
     drives: Arc<dyn RemovableDrives>,
 }
 
 /// See [`Files::slots`].
 const MAX_WORKERS: usize = 12;
+/// See [`Files::scans`].
+const MAX_SCANS: usize = 2;
+/// How long a long scan waits for a place in its pool before it is refused as busy.
+const SCAN_WAIT: Duration = Duration::from_secs(10);
+/// Routes that read for minutes and answer with streamed progress (JSON lines).
+const LONG_SCANS: &[&str] = &["checksum", "compare", "duplicates"];
+
+/// A worker's place, given back when its answer ends: a slot of the shared pool, or one of
+/// the long scans' pool with the user's mark.
+// the fields are held, never read: dropping them gives the place back
+#[allow(dead_code)]
+enum Slot {
+    Shared(tokio::sync::OwnedSemaphorePermit),
+    Scan(tokio::sync::OwnedSemaphorePermit, ScanMark),
+}
+
+/// The user's mark in [`Files::scanners`], taken away when dropped.
+struct ScanMark {
+    scanners: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    user: String,
+}
+
+impl Drop for ScanMark {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.scanners.lock() {
+            set.remove(&self.user);
+        }
+    }
+}
+
+impl Files {
+    /// The place a request's worker runs in ([`Slot`]): the long scans' pool, one per user, for
+    /// [`LONG_SCANS`]; the shared pool for everything else.
+    async fn slot(&self, route: &str, user: &str) -> Res<Slot> {
+        let busy = |msg: &str| Error::new(StatusCode::SERVICE_UNAVAILABLE, error_codes::BUSY, msg.into());
+        if !LONG_SCANS.contains(&route) {
+            let permit = tokio::time::timeout(HEAD_DEADLINE, self.slots.clone().acquire_owned())
+                .await
+                .map_err(|_| busy("the file manager is busy: try again"))?
+                .map_err(Error::internal)?;
+            return Ok(Slot::Shared(permit));
+        }
+        let mark = {
+            let mut set = self.scanners.lock().map_err(|_| Error::internal("scanners lock"))?;
+            if !set.insert(user.to_string()) {
+                return Err(busy("another long scan of yours is running: wait for it or stop it"));
+            }
+            ScanMark { scanners: self.scanners.clone(), user: user.to_string() }
+        };
+        let permit = tokio::time::timeout(SCAN_WAIT, self.scans.clone().acquire_owned())
+            .await
+            .map_err(|_| busy("other long scans are running: try again shortly"))?
+            .map_err(Error::internal)?;
+        Ok(Slot::Scan(permit, mark))
+    }
+}
 
 impl Files {
     /// `state` = `/var/lib/rynas/files`, `cache` = `/var/cache/rynas/files`.
@@ -86,7 +148,7 @@ impl Files {
         });
         let manager = Manager::new(JobsConfig { worker: worker.clone(), journal: state.join("journal"), hooks });
         let _ = manager_cell.set(manager.clone());
-        Self { ops, manager, worker, thumbs: cache.join("thumbs"), slots: Arc::new(tokio::sync::Semaphore::new(MAX_WORKERS)), drives: Arc::new(NoDrives) }
+        Self { ops, manager, worker, thumbs: cache.join("thumbs"), slots: Arc::new(tokio::sync::Semaphore::new(MAX_WORKERS)), scans: Arc::new(tokio::sync::Semaphore::new(MAX_SCANS)), scanners: Arc::default(), drives: Arc::new(NoDrives) }
     }
 
     /// Wires the removable-drives module (shares on removable drives, `eject`).
@@ -739,8 +801,8 @@ fn parse_head(text: &str) -> Res<(StatusCode, HeaderMap)> {
 struct WorkerBody {
     stream: tokio_util::io::ReaderStream<BufReader<ChildStdout>>,
     child: Child,
-    /// the worker's slot, given back when the answer ends
-    _slot: tokio::sync::OwnedSemaphorePermit,
+    /// the worker's place, given back when the answer ends
+    _slot: Slot,
 }
 
 impl Stream for WorkerBody {
@@ -759,10 +821,7 @@ impl Stream for WorkerBody {
 /// Starts a worker as the request's user, sends it the request line and the body, and
 /// streams its answer back.
 async fn run_worker(files: &Files, wr: WorkerRequest, body: Body, deadline: Duration, app_roots: &[PathBuf], share_roots: Option<&[PathBuf]>) -> Res<Response> {
-    let slot = tokio::time::timeout(HEAD_DEADLINE, files.slots.clone().acquire_owned())
-        .await
-        .map_err(|_| Error::new(StatusCode::SERVICE_UNAVAILABLE, error_codes::BUSY, "the file manager is busy: try again".into()))?
-        .map_err(Error::internal)?;
+    let slot = files.slot(&wr.route, &wr.ctx.user.name).await?;
     let std_cmd = rynas_files::jobs::manager::worker_command(&files.worker, &wr.ctx.user, wr.ctx.admin, app_roots, share_roots).map_err(Error::internal)?;
     let mut cmd = tokio::process::Command::from(std_cmd);
     cmd.arg("serve").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()).kill_on_drop(true);
