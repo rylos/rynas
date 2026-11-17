@@ -70,6 +70,7 @@ function body(section) {
         row("files.settings.highlight_today_dates", "files.settings.in_modified_column", sw("todayHighlight")) +
         row("files.settings.binary_sizes", "files.settings.kib_mib_gib_1024_instead", sw("binarySizes")) +
         row("files.settings.relative_dates", "files.settings.relative_dates_hint", sw("relativeDates")) +
+        row("files.settings.full_dates", "files.settings.full_dates_hint", sw("fullDates")) +
         row("files.settings.permissions_column", "", sw("columns.mode")) +
         row("files.settings.size_column", "", sw("columns.size")) +
         row("files.settings.modified_column", "", sw("columns.mtime")) +

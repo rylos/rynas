@@ -87,15 +87,19 @@ export function speed(bps) {
 /** "X of Y": a part of a whole (core: i18n::of). */
 export const of = (part, total) => t("files.fmt.of", { part, total });
 
-/** The date column: day, month and time this half year, day, month and year before. */
-export function ezaDate(sec) {
+/**
+ * The date column: day, month and time this half year, day, month and year before;
+ * with `full`, day, month, year and time for every date.
+ */
+export function ezaDate(sec, full = false) {
   if (!sec) return "-";
   const d = new Date(sec * 1000);
-  const recent = Math.abs(Date.now() - d) < 180 * 86400 * 1000;
   // in columns, as eza lines them up: the day padded to two places, the month name to the
   // longest one ("Sept"), an older date's year to the end of a recent date's time; the cell
   // keeps the spaces (white-space: pre, a monospace font)
-  const s = ezaParts(d, recent);
+  if (full) return ezaParts(d, FULL);
+  const recent = Math.abs(Date.now() - d) < 180 * 86400 * 1000;
+  const s = ezaParts(d, recent ? RECENT : OLDER);
   if (recent) return s;
   const want = recentWidth();
   const year = s.search(/\d{4}/);
@@ -104,11 +108,12 @@ export function ezaDate(sec) {
 
 const RECENT = { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" };
 const OLDER = { day: "numeric", month: "short", year: "numeric" };
+const FULL = { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" };
 
 /** A date's parts in the locale, the day padded to two places and the month name to the
  * longest one (the padding after the punctuation that follows it: "3 Nov, " not "3 Nov ,"). */
-function ezaParts(d, recent) {
-  const parts = dateFormat(recent ? RECENT : OLDER).formatToParts(d);
+function ezaParts(d, opts) {
+  const parts = dateFormat(opts).formatToParts(d);
   let out = "";
   let owed = 0;
   for (const p of parts) {
@@ -143,7 +148,7 @@ function month(i) {
 /** How wide a recent date is (every one is, once padded). */
 function recentWidth() {
   const m = intl();
-  m.recentWidth ??= [...ezaParts(new Date(2001, 0, 15, 23, 58), true)].length;
+  m.recentWidth ??= [...ezaParts(new Date(2001, 0, 15, 23, 58), RECENT)].length;
   return m.recentWidth;
 }
 
@@ -170,12 +175,13 @@ export function approx(secs) {
 /** "5 min ago" (core: i18n::ago). */
 export const ago = (secs) => t("files.fmt.ago", { time: approx(secs) });
 
-export function relative(sec) {
+/** "just now", "5 min ago" this week, the date column's date (ezaDate) before. */
+export function relative(sec, full = false) {
   if (!sec) return "-";
   const diff = Date.now() / 1000 - sec;
   if (diff < 60) return t("files.format.just_now");
   if (diff < 86400 * 7) return ago(diff);
-  return ezaDate(sec);
+  return ezaDate(sec, full);
 }
 
 /** 1 h 02 min, 3 min 05 s, 42 s (core: i18n::elapsed). */

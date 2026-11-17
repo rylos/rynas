@@ -23,6 +23,26 @@ const COLS = {
   kind: { label: "files.common.type", width: "130px", cls: "" },
 };
 
+// the Modified column with "Always full dates" (the year and the time on every row): as wide
+// as such a date in the locale and the rows' font, measured once for each
+let fullDate = { key: "", w: 0 };
+function fullDateWidth(pane) {
+  // every date is as wide once padded (ezaDate): any one will do
+  const sample = ezaDate(Date.UTC(2026, 8, 28, 23, 58) / 1000, true);
+  const key = `${sample}|${prefs.size}|${prefs.density}`;
+  if (fullDate.key === key) return fullDate.w;
+  const probe = h(`<div class="cell mono dt" style="position:absolute;visibility:hidden;left:0;top:0">${esc(sample)}</div>`);
+  pane.rowsEl.append(probe);
+  const w = Math.ceil(probe.getBoundingClientRect().width);
+  probe.remove();
+  // not laid out yet (a hidden tab): a guess, measured again next time
+  if (!w) return 176;
+  fullDate = { key, w: Math.max(128, w + 2) };
+  return fullDate.w;
+}
+/** A column's default width in px (before a saved one). */
+const colDefault = (key, pane) => (key === "mtime" && prefs.fullDates ? fullDateWidth(pane) : parseInt(COLS[key].width, 10));
+
 const isHidden = (e) => e.name.startsWith(".");
 const isToday = (sec) => sec > 0 && new Date(sec * 1000).toDateString() === new Date().toDateString();
 // pictures a grid draws from the original file, when the NAS has no thumbnail
@@ -208,10 +228,10 @@ export class Pane {
     });
     this.el.addEventListener("mousedown", () => this.app.activate(this), true);
     this.scroller.addEventListener("scroll", () => this.paint());
-    // a new width changes the room the saved column widths may take: the header follows
+    // a new width (the window, the info panel) changes which columns have room: the header follows
     new ResizeObserver(() => {
-      const cw = this.el.clientWidth;
-      if (cw !== this.headW && this.view === "list" && Object.keys(prefs.colWidths || {}).length) {
+      const cw = this.viewEl.clientWidth;
+      if (cw !== this.headW && this.view === "list") {
         this.headW = cw;
         this.renderHead();
         this.paint(true);
@@ -923,47 +943,62 @@ export class Pane {
 
   columns() {
     if (this.view === "columns") return [{ key: "name", label: "files.common.name", width: "minmax(0, 1fr)" }];
-    // a search or the flat view adds the Folder column: it gives way first, Name next
-    const cols = [{ key: "name", label: "files.common.name", width: this.search ? "minmax(120px, 1fr)" : "minmax(160px, 1fr)" }];
+    // a search or the flat view adds the Folder column: it gives way first, Name next; on a
+    // phone Name gives up 40 px more
+    const width = this.listWidth();
+    const nameMin = (this.search ? 120 : 160) - (width && width < 480 ? 40 : 0);
+    const cols = [{ key: "name", label: "files.common.name", width: `minmax(${nameMin}px, 1fr)` }];
     if (this.search) cols.push({ key: "dir", label: "files.common.folder", width: "minmax(70px, .6fr)", cls: "" });
     // a PC's snapshots on a narrow screen: the room goes to their names, not to permissions
     const narrowPc = isPcFolder(this.path) && this.el.clientWidth > 0 && this.el.clientWidth < 600;
-    for (const [key, c] of Object.entries(COLS)) {
-      if (!prefs.columns[key] || (narrowPc && key === "mode")) continue;
-      const w = prefs.colWidths?.[key];
-      // a saved width is narrowed on a small screen, never below the column's default
-      const fit = w ? Math.min(w, Math.max(this.colMax(key), parseInt(c.width, 10))) : 0;
-      // never wider than the row: on a narrow pane the column narrows (its text ellipsized)
-      // instead of pushing the last columns out of sight
-      cols.push({ key, ...c, width: `minmax(0, ${fit ? `${fit}px` : c.width})`, resizable: true });
+    const wanted = Object.keys(COLS).filter((key) => prefs.columns[key] && !(narrowPc && key === "mode"));
+    // Every column shown whole, never cut nor scrolled sideways: what the list has room for
+    // once Name (and Folder) have their minimum, at the columns' default widths, the Modified
+    // column first, then Size, Type and Permissions.
+    let left = width ? width - nameMin - (this.search ? 70 + 12 : 0) : Infinity;
+    // a column narrowed by hand keeps its width; one widened by hand takes what is left
+    const base = (key) => Math.min(prefs.colWidths?.[key] || Infinity, colDefault(key, this));
+    const shown = new Set();
+    for (const key of ["mtime", "size", "kind", "mode"]) {
+      if (!wanted.includes(key) || base(key) + 12 > left) continue;
+      shown.add(key);
+      left -= base(key) + 12;
     }
+    for (const key of wanted) {
+      if (!shown.has(key)) continue;
+      let w = base(key);
+      const saved = prefs.colWidths?.[key];
+      if (saved > w) {
+        const more = Math.min(saved - w, Math.max(0, Math.min(480 - w, left)));
+        w += more;
+        left -= more;
+      }
+      // minmax(0, …): should the sums be off by a pixel, a cell is ellipsized, the row never wider
+      cols.push({ key, ...COLS[key], width: `minmax(0, ${w}px)`, resizable: true });
+    }
+    this.colLeft = left;
     return cols;
   }
 
+  /** The list's room for its columns: the view (the info panel is beside it) less the rows' padding and the scrollbar; 0 before it is laid out. */
+  listWidth() {
+    const w = this.viewEl.clientWidth;
+    return w ? w - 34 - (this.scroller.offsetWidth - this.scroller.clientWidth) : 0;
+  }
+
   /**
-   * The widest the resizable column `key` may be: saved widths follow the user to every screen,
-   * and on a narrow one they must not squeeze the Name column below its minimum (160 px). The
-   * room is what the header has left once Name, the Folder column of a search and the other
-   * shown columns (at their saved or default width) have theirs.
+   * The widest a resizable column now `w` px wide may be: saved widths follow the user to
+   * every screen, and must not squeeze the Name column below its minimum nor push a column out.
    */
-  colMax(key) {
-    const w = this.el.clientWidth;
-    if (!w) return 480;
-    // 34 px: the header's padding; 12 px: the gap before each column after Name
-    let room = w - 34 - 160 - 12;
-    if (this.search) room -= 100 + 12;
-    for (const [k, c] of Object.entries(COLS)) {
-      if (k === key || !prefs.columns[k]) continue;
-      room -= (prefs.colWidths?.[k] || parseInt(c.width, 10)) + 12;
-    }
-    return Math.max(48, Math.min(480, room));
+  colMax(w) {
+    return Math.max(48, Math.min(480, w + (Number.isFinite(this.colLeft) ? this.colLeft : 480)));
   }
 
   renderHead() {
     this.barWidth = null;
     const grid = this.view === "list";
     this.headEl.hidden = !grid;
-    const cols = this.columns();
+    const cols = (this.cols = this.columns());
     this.template = cols.map((c) => c.width).join(" ");
     if (!grid) return;
     this.headEl.style.gridTemplateColumns = this.template;
@@ -992,7 +1027,7 @@ export class Pane {
     const key = grip.dataset.r;
     let w = Math.round(grip.parentElement.getBoundingClientRect().width);
     // widening stops at the room left; a column already wider is never snapped narrower
-    const max = Math.max(this.colMax(key), w);
+    const max = Math.max(this.colMax(w), w);
     grip.setAttribute("aria-valuemax", max);
     grip.setAttribute("aria-valuenow", w);
     const resize = (nw) => {
@@ -1087,7 +1122,7 @@ export class Pane {
     if (!full && key === this.paintKey && list === this.paintList) return this.refreshMarks();
     this.paintKey = key;
     this.paintList = list;
-    const cols = this.columns();
+    const cols = this.cols || this.columns();
     const cut = this.app.cutPaths();
     let html = "";
     for (let i = first; i < last; i++) {
@@ -1127,7 +1162,7 @@ export class Pane {
         // a PC's snapshot: when the PC took it (the name's time), not when it arrived
         const taken = entryTime(e);
         if (taken) return `<div class="cell ${c.cls}" title="${esc(taken)}">${esc(entryTime(e, true))}</div>`;
-        return `<div class="cell ${c.cls}${prefs.todayHighlight && isToday(e.mtime) ? " today" : ""}" title="${esc(dateTime(e.mtime))}">${esc(prefs.relativeDates ? relative(e.mtime) : ezaDate(e.mtime))}</div>`;
+        return `<div class="cell ${c.cls}${prefs.todayHighlight && isToday(e.mtime) ? " today" : ""}" title="${esc(dateTime(e.mtime))}">${esc(prefs.relativeDates ? relative(e.mtime, prefs.fullDates) : ezaDate(e.mtime, prefs.fullDates))}</div>`;
       }
       case "kind":
         return `<div class="cell" style="color:var(--muted)">${esc(kindLabel(e))}</div>`;

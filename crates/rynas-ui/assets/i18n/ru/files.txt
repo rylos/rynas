@@ -384,6 +384,8 @@ files.settings.binary_sizes	Двоичные размеры
 files.settings.kib_mib_gib_1024_instead	КиБ, МиБ, ГиБ (1024) вместо КБ, МБ, ГБ (1000)
 files.settings.relative_dates	Относительные даты
 files.settings.relative_dates_hint	«3 ч назад» вместо «29 окт 21:45»
+files.settings.full_dates	Всегда полные даты
+files.settings.full_dates_hint	День, месяц, год и время для каждого файла, а не время для последних шести месяцев и год для более старых
 files.settings.permissions_column	Столбец «Права доступа»
 files.settings.size_column	Столбец «Размер»
 files.settings.modified_column	Столбец «Изменён»

@@ -374,6 +374,8 @@ export default {
   "files.settings.kib_mib_gib_1024_instead": "KiB, MiB, GiB (1024) instead of kB, MB, GB (1000)",
   "files.settings.relative_dates": "Relative dates",
   "files.settings.relative_dates_hint": "“3 h ago” instead of “29 Oct 21:45”",
+  "files.settings.full_dates": "Always full dates",
+  "files.settings.full_dates_hint": "Day, month, year and time for every file, instead of the time for the last six months and the year for older ones",
   "files.settings.permissions_column": "Permissions column",
   "files.settings.size_column": "Size column",
   "files.settings.modified_column": "Modified column",

@@ -20,6 +20,8 @@ export const DEFAULTS = {
   showHidden: false,
   binarySizes: true,
   relativeDates: false,
+  // the Modified column: day, month, year and time for every item
+  fullDates: false,
   columns: { mode: true, size: true, mtime: true, kind: false },
   colWidths: {}, // key → px, set by dragging a column's left edge in the list header
   singleClick: false,

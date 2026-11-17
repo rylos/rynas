@@ -368,6 +368,8 @@ files.settings.binary_sizes	Dimensioni binarie
 files.settings.kib_mib_gib_1024_instead	KiB, MiB, GiB (1024) invece di kB, MB, GB (1000)
 files.settings.relative_dates	Date relative
 files.settings.relative_dates_hint	«3 h fa» invece di «29 ott 21:45»
+files.settings.full_dates	Date sempre complete
+files.settings.full_dates_hint	Giorno, mese, anno e ora per ogni file, invece dell'ora per gli ultimi sei mesi e dell'anno per quelli più vecchi
 files.settings.permissions_column	Colonna Permessi
 files.settings.size_column	Colonna Dimensione
 files.settings.modified_column	Colonna Modificato
