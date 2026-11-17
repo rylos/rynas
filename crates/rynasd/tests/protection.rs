@@ -560,6 +560,15 @@ async fn the_gate_skips_paused_starts_and_arms_retries() {
     assert_eq!(status, Some(rynas_api_types::TaskStatus::Cancelled));
 }
 
+/// A start of a unit rynas does not know (left behind) is skipped, not run: rynasd answered.
+#[tokio::test]
+async fn the_gate_skips_a_task_it_does_not_know() {
+    let e = env();
+    let a = gate_ask(&e, "ghost", "dd01", true, 0).await;
+    assert!(!a.run, "{a:?}");
+    assert!(e.prot.history.by_invocation("dd01").unwrap().is_none(), "no row");
+}
+
 /// The gate's answer for a start of `id` (`timer`: started by its own timer); `by`: the
 /// deadline rynasctl sends (0: none).
 async fn gate_ask(e: &Env, id: &str, inv: &str, timer: bool, by: u64) -> rynas_scheduler::gate::GateAnswer {

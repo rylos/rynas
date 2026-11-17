@@ -2,14 +2,19 @@
 # Install the rynas .deb in a Debian 13 container booted with systemd and check that the
 # maintainer scripts enable and start the units, that the hardened units work, that the
 # scheduling gate of the Task Scheduler (ExecCondition=, docs/research/scheduling.md S2)
-# behaves with the trixie systemd, and that remove/purge clean up. Needs a privileged
+# behaves with the trixie systemd, and that remove/purge clean up. Then, in a second
+# container, an upgrade from the release $UPGRADE_FROM (downloaded from GitHub, checked
+# against its SHA256SUMS): the jobs that became scheduler tasks (S3) are created without a
+# failed or extra run. Needs a privileged
 # container (systemd as PID 1; container=docker and masked gettys keep it off the host's
 # consoles).
 #
 #   packaging/test-deb-systemd.sh [path/to/rynas_*.deb]
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-DEB=${1:-$(ls -t "$ROOT"/target/debian/rynas_*_amd64.deb | head -1)}
+DEB=$(realpath "${1:-$(ls -t "$ROOT"/target/debian/rynas_*_amd64.deb | head -1)}")
+# the release the upgrade test starts from (UPGRADE_FROM= skips it)
+UPGRADE_FROM=${UPGRADE_FROM-0.8.15}
 IMAGE=rynas-test-systemd:trixie-3
 NAME=rynas-test-systemd-$$
 
@@ -253,3 +258,67 @@ apt-get purge -y -qq rynas >/dev/null 2>&1
 journalctl -b --no-pager | grep -E 'rynas.*(refusing|Failed)' | grep -v 'rynas-task-' && fail "unit errors in journal" || true
 echo "ALL CHECKS PASSED"
 TEST
+
+[ -n "$UPGRADE_FROM" ] || exit 0
+echo "=== upgrade from $UPGRADE_FROM"
+CACHE=$ROOT/target/release-debs/$UPGRADE_FROM
+OLD=$CACHE/rynas_${UPGRADE_FROM}-1_amd64.deb
+mkdir -p "$CACHE"
+if [ ! -s "$OLD" ]; then
+    URL=https://github.com/rylos/rynas/releases/download/v$UPGRADE_FROM
+    curl -fsSL -o "$CACHE/SHA256SUMS" "$URL/SHA256SUMS"
+    curl -fsSL -o "$OLD" "$URL/rynas_${UPGRADE_FROM}-1_amd64.deb"
+fi
+(cd "$CACHE" && grep " rynas_${UPGRADE_FROM}-1_amd64.deb\$" SHA256SUMS | sha256sum -c --quiet) || { echo "FAIL: checksum of $OLD" >&2; exit 1; }
+docker rm -f "$NAME" >/dev/null
+docker run -d --name "$NAME" -e container=docker --privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock \
+    --tmpfs /tmp -v "$DEB:/tmp/rynas.deb:ro" -v "$OLD:/tmp/rynas-old.deb:ro" "$IMAGE" >/dev/null
+sleep 3
+docker exec -i -e DEBIAN_FRONTEND=noninteractive "$NAME" bash -s <<'UPGRADE'
+set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
+B=http://127.0.0.1:8080/api/v1
+apt-get update -qq
+apt-get install -y -qq /tmp/rynas-old.deb >/dev/null 2>&1
+useradd -m -G rynas-admin alice; echo 'alice:Al1ce-test-pw' | chpasswd
+sleep 2
+systemctl is-active -q rynasd.service || fail "old release not running"
+# the online catalog was checked an hour ago (the next automatic check is due in about a day);
+# the machine booted long ago (a container sees the host's uptime): every OnBootSec= is past
+systemctl stop rynasd.service rynasd.socket
+mkdir -p /var/lib/rynas/catalog
+echo "{\"last_check\": $(( $(date +%s) - 3600 ))}" > /var/lib/rynas/catalog/state.json
+systemctl start rynasd.socket rynasd.service
+T=$(date +%s)
+apt-get install -y -qq /tmp/rynas.deb >/dev/null 2>&1
+# the tasks are created at rynasd's start; their timers start at once
+for _ in $(seq 120); do
+    [ -e /etc/systemd/system/rynas-task-updates-check.timer ] && break
+    sleep 0.5
+done
+[ -e /etc/systemd/system/rynas-task-updates-check.timer ] || fail "the jobs' tasks were not created"
+sleep 30
+curl -s -c /tmp/j -H 'Content-Type: application/json' -o /tmp/session.json \
+    -d '{"username":"alice","password":"Al1ce-test-pw"}' "$B/auth/login"
+hist() { curl -s -b /tmp/j "$B/scheduler/tasks/$1/history?limit=100"; }
+for id in updates-check docker-update-check apps-catalog-refresh pcbackup-retention; do
+    h=$(hist "$id")
+    # no run: none of them is due yet (10, 5 and 2 minutes after rynasd's start; the catalog a
+    # day after its last check), and nothing failed
+    [ "$(echo "$h" | jq '[.[] | select(.skipped == null)] | length')" = 0 ] || fail "$id ran right after the upgrade: $h"
+    ! systemctl is-failed -q "rynas-task-$id.service" || fail "$id: unit failed"
+    systemctl is-active -q "rynas-task-$id.timer" || fail "$id: timer not active"
+done
+! journalctl --since "@$T" --no-pager -o cat | grep -E 'not in the (applied )?configuration|answered 404' \
+    || fail "a timer started before its task was known"
+[ -z "$(systemctl list-units --failed --plain --no-legend 'rynas-task-*')" ] || fail "failed task units: $(systemctl list-units --failed --plain --no-legend)"
+echo "--- the retention (2 min after rynasd's start) then runs"
+for _ in $(seq 200); do
+    n=$(hist pcbackup-retention | jq '[.[] | select(.ok)] | length')
+    [ "$n" -ge 1 ] && break
+    sleep 1
+done
+[ "$n" -ge 1 ] || fail "pcbackup-retention did not run when due"
+[ "$(hist apps-catalog-refresh | jq 'length')" = 0 ] || fail "the catalog was refreshed although checked an hour ago"
+echo "UPGRADE CHECKS PASSED"
+UPGRADE

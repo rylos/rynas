@@ -964,6 +964,8 @@ fn main() -> std::io::Result<()> {
         state.protection = Some(protection.clone());
         // the scheduling gate: leases of the task units running now, then retries and the
         // overlap policy `replace` every few seconds
+        // interval tasks never run count their delay from now (as the loops did after a start)
+        let _ = rynasd::gate::started_ms();
         tokio::spawn(rynasd::gate::watch(protection.clone()));
         // backups (D-BACKUP): the worker in a transient unit of its own; --dry-system or
         // RYNAS_BACKUP_WORKER (development, the UI audit) start it as a plain child

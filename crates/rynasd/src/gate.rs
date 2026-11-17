@@ -390,13 +390,16 @@ pub fn import_spool(p: &Protection) {
 /// on purpose (the spool is imported by the watch loop, not here).
 pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
     let now = now_ms();
+    // (a task an apply in progress adds is found: [`crate::scheduler::applied_task`] reads the
+    // value being applied)
     let Some(task) = crate::scheduler::applied_task(p, id)? else {
-        // a unit left by an apply in progress: as before the gate
+        // rynasd answers, and the task is not rynas's: a unit left behind, nothing to run
+        // (skipped, not failed; only an unreachable rynasd runs the start as before the gate)
         return Ok(GateAnswer {
-            run: true,
+            run: false,
             trigger: RunTrigger::Other,
-            skipped: None,
-            message: format!("rynas: task {id} is not in the applied configuration; running it"),
+            skipped: Some(SkipReason::NotDue),
+            message: format!("rynas: task {id} is not in the configuration: start skipped"),
         });
     };
     // used once, and dropped by a start of the timer (run now on a running task left it);

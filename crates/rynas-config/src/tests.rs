@@ -81,6 +81,52 @@ fn hostname(h: &str) -> serde_json::Value {
     json!({ "hostname": h })
 }
 
+/// What a reload starts at once (a timer that fires and asks rynas for its task) sees the
+/// value being applied, before the revision is saved; after the apply, nothing is applying.
+#[test]
+fn the_value_being_applied_is_visible_during_its_reloads() {
+    type Seen = Arc<Mutex<Option<Option<serde_json::Value>>>>;
+    struct Probe {
+        cfg: Arc<std::sync::OnceLock<std::sync::Weak<Config>>>,
+        seen: Seen,
+    }
+    impl Applier for Probe {
+        fn key(&self) -> &str {
+            "t.probe"
+        }
+        fn validate(&self, v: serde_json::Value) -> std::result::Result<serde_json::Value, Invalid> {
+            Ok(v)
+        }
+        fn render(&self, v: &serde_json::Value, _: &ApplyCtx) -> std::result::Result<Vec<ManagedFile>, String> {
+            Ok(vec![ManagedFile::whole("/etc/probe.conf", v.to_string(), true)])
+        }
+        fn reconcile(&self, _: Option<&serde_json::Value>, _: Option<&serde_json::Value>, _: &ApplyCtx) -> std::result::Result<(), String> {
+            let cfg = self.cfg.get().and_then(std::sync::Weak::upgrade).unwrap();
+            // the applied value is still the old one, the value being applied the new one
+            assert_eq!(cfg.applied("t.probe").unwrap(), None);
+            *self.seen.lock().unwrap() = cfg.applying("t.probe");
+            Ok(())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let slot = Arc::new(std::sync::OnceLock::new());
+    let seen: Seen = Arc::new(Mutex::new(None));
+    let cfg = Arc::new(
+        Config::open(
+            ConfigOptions::new(dir.path().join("state"), dir.path()),
+            Arc::new(MemorySystem::new("nas")),
+            vec![Arc::new(Probe { cfg: slot.clone(), seen: seen.clone() })],
+        )
+        .unwrap(),
+    );
+    slot.set(Arc::downgrade(&cfg)).unwrap();
+    cfg.stage("admin", "t.probe", Some(json!({"n": 1}))).unwrap();
+    cfg.apply("admin", "admin", "", &|_| {}, &|| false).unwrap();
+    assert_eq!(*seen.lock().unwrap(), Some(Some(json!({"n": 1}))));
+    assert_eq!(cfg.applying("t.probe"), None);
+    assert_eq!(cfg.applied("t.probe").unwrap(), Some(json!({"n": 1})));
+}
+
 #[test]
 fn current_value_is_imported_from_the_system() {
     let e = env();

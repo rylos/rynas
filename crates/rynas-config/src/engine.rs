@@ -238,6 +238,9 @@ pub struct Config {
     opts: ConfigOptions,
     /// One apply at a time.
     apply_lock: Mutex<()>,
+    /// The values an apply in progress is putting in place, from its first written file to its
+    /// commit (or rollback): see [`Config::applying`].
+    applying: Mutex<BTreeMap<String, Option<Value>>>,
     /// Bumped whenever a changeset may look different: a stage, a discard, an apply (which
     /// also changes the `conflict` flags of the other users' changesets).
     pending_gen: AtomicU64,
@@ -275,6 +278,7 @@ impl Config {
             system,
             opts,
             apply_lock: Mutex::new(()),
+            applying: Mutex::new(BTreeMap::new()),
             pending_gen: AtomicU64::new(0),
             pending_listener: OnceLock::new(),
         })
@@ -350,6 +354,15 @@ impl Config {
             })
             .optional()?;
         from_json(s)
+    }
+
+    /// The value an apply in progress is putting in place for `key` (`Some(None)`: removing
+    /// it), from before its files are written and its services reloaded until its revision is
+    /// saved; `None` when no apply of `key` runs. For what those reloads start right away and
+    /// asks rynas about (a timer that fires at once and asks for its task): the new value is
+    /// the one it belongs to. An apply that fails rolls its files back.
+    pub fn applying(&self, key: &str) -> Option<Option<Value>> {
+        self.applying.lock().unwrap().get(key).cloned()
     }
 
     /// The applied value, or what the system has when the key was never applied.
@@ -838,14 +851,25 @@ impl Config {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
-        let (written, restore) = match self.run_pipeline(&steps, &backup_dir, log, cancelled) {
+        // what the reloads start (a timer that fires at once) may ask for the new value before
+        // the revision is saved: it is visible as the value being applied until then
+        *self.applying.lock().unwrap() = steps
+            .iter()
+            .filter(|s| !s.follow)
+            .map(|s| (s.key.clone(), s.new.clone()))
+            .collect();
+        let piped = self.run_pipeline(&steps, &backup_dir, log, cancelled);
+        let (written, restore) = match piped {
             Ok(r) => r,
             Err(e) => {
+                self.applying.lock().unwrap().clear();
                 let _ = std::fs::remove_dir_all(&backup_dir);
                 return Err(e);
             }
         };
-        if let Err(e) = self.commit(rev, owner, author, comment, restored_from, &steps, &written) {
+        let committed = self.commit(rev, owner, author, comment, restored_from, &steps, &written);
+        self.applying.lock().unwrap().clear();
+        if let Err(e) = committed {
             log(&format!("saving the revision failed: {e}; rolling back"));
             self.rollback(&steps, &restore, steps.len(), log);
             let _ = std::fs::remove_dir_all(&backup_dir);

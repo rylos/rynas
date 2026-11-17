@@ -539,10 +539,19 @@ async fn disable(
     set_enabled(st, h, id, false).await
 }
 
-/// The applied task `id`.
+/// The applied task `id`, or the one an apply in progress is putting in place: its timer may
+/// start (and ask the gate, and run) before the revision is saved.
 pub(crate) fn applied_task(p: &Protection, id: &str) -> Res<Option<ScheduledTask>> {
-    let doc: SchedulerConfig = crate::services::from_value(p.ops.config.applied(SCHEDULER_KEY)?)?;
-    Ok(doc.tasks.into_iter().find(|t| t.id == id))
+    let value = match p.ops.config.applying(SCHEDULER_KEY) {
+        Some(v) => v,
+        None => p.ops.config.applied(SCHEDULER_KEY)?,
+    };
+    let doc: SchedulerConfig = crate::services::from_value(value)?;
+    let mut t = doc.tasks.into_iter().find(|t| t.id == id);
+    if let Some(t) = &mut t {
+        t.migrate();
+    }
+    Ok(t)
 }
 
 /// Run now: starts the applied unit (same environment as a scheduled run); 409
