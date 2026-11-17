@@ -799,3 +799,9 @@ files.dupes.count.selected_s.other	Выделено {n} · {s}
 files.dupes.groups_left_g_s	Осталось: {g} · можно освободить {s}
 files.dupes.none_left	Дубликатов не осталось
 files.menus.checksum	Контрольная сумма…
+files.sync.open_dual_pane	Откройте двойную панель (F3) с двумя папками для синхронизации
+files.sync.only_nas_folders	Синхронизировать можно только две папки NAS с правом записи: не удалённые серверы, архивы или резервную копию ПК
+files.sync.same_folder	Обе панели показывают одну и ту же папку
+files.sync.nested	Одна папка находится внутри другой: выберите две отдельные
+files.dupes.nas_folder_only	Дубликаты ищутся в папке NAS: не на верхнем уровне, не в архивах, не на удалённых серверах и не во всей резервной копии ПК
+files.select.open_dual_pane	Откройте двойную панель (F3), чтобы сравнить две папки

@@ -767,4 +767,10 @@ export default {
   "files.dupes.groups_left_g_s": "{g} still to handle · {s} to free",
   "files.dupes.none_left": "No duplicates left",
   "files.menus.checksum": "Checksum…",
+  "files.sync.open_dual_pane": "Open the dual pane (F3) with the two folders to synchronize",
+  "files.sync.only_nas_folders": "Only two folders of the NAS you can write to can be synchronized: not remote servers, archives or a PC's backup",
+  "files.sync.same_folder": "Both panes show the same folder",
+  "files.sync.nested": "One folder is inside the other: choose two separate ones",
+  "files.dupes.nas_folder_only": "Duplicates are looked for in a folder of the NAS: not at the top, in archives, on remote servers or in a PC's whole backup",
+  "files.select.open_dual_pane": "Open the dual pane (F3) to compare the two folders",
 };

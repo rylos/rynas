@@ -761,3 +761,9 @@ files.dupes.count.selected_s.other	{n} selezionati · {s}
 files.dupes.groups_left_g_s	{g} ancora da sistemare · {s} recuperabili
 files.dupes.none_left	Non restano duplicati
 files.menus.checksum	Checksum…
+files.sync.open_dual_pane	Apri il doppio pannello (F3) con le due cartelle da sincronizzare
+files.sync.only_nas_folders	Si sincronizzano solo due cartelle del NAS in cui puoi scrivere: non server remoti, archivi o il backup di un PC
+files.sync.same_folder	I due pannelli mostrano la stessa cartella
+files.sync.nested	Una cartella è dentro l'altra: scegline due separate
+files.dupes.nas_folder_only	I duplicati si cercano in una cartella del NAS: non in cima, negli archivi, sui server remoti o nel backup intero di un PC
+files.select.open_dual_pane	Apri il doppio pannello (F3) per confrontare le due cartelle

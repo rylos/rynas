@@ -7,7 +7,7 @@ import { t, count } from "./i18n.js";
 import { int, parentOf, baseName, isDirLike } from "./format.js";
 import { isArchive, archiveStem, isProtectedFolder } from "./icons.js";
 import { isBrowsable } from "./archive.js";
-import { openMenu, copyText } from "./ui.js";
+import { openMenu, copyText, toast } from "./ui.js";
 import { openSettings } from "./settings.js";
 import { isRemote } from "./conns.js";
 import { isReadOnly, isBackupTop, hasNoSmbPath } from "./backups.js";
@@ -39,7 +39,7 @@ export const menuMethods = {
         { label: prefs.showHidden ? t("files.menus.hide_hidden_files") : t("files.common.show_hidden_files"), icon: prefs.showHidden ? "eyeOff" : "eye", key: "Ctrl+H", action: () => this.toggleHidden() },
         !isBackupTop(pane.path) && { label: t("files.menus.compute_folder_sizes"), icon: "drive", action: () => this.computeSizes(pane, pane.visible) },
       pane.flatAllowed() && { label: t("files.dupes.find_duplicates"), icon: "copy", action: () => findDuplicates(this, pane.path) },
-      this.canSync() && { label: t("files.sync.sync_folders_menu"), icon: "refresh", action: () => syncFolders(this, ...this.current.panes) },
+      this.isSplit() && { label: t("files.sync.sync_folders_menu"), icon: "refresh", action: () => this.startSync() },
       pane.path !== "/" && !pane.archive && !remote && !isBackupTop(pane.path) && { label: t("files.common.space_analysis"), icon: "pie", action: () => this.analyseSpace(pane.path) },
         "-",
         !atRoot && { label: t("files.menus.copy_folder_path"), icon: "link", action: () => copyText(this.copyPath(pane.path)) },
@@ -124,13 +124,38 @@ export const menuMethods = {
     ]);
   },
 
-  /** Both panes on folders of the NAS one may write in, neither inside the other. */
-  canSync() {
+  /**
+   * Why the two panes cannot be synchronized (the text to show), or "" when they can: both
+   * on folders of the NAS one may write in, neither inside the other.
+   */
+  syncProblem() {
     const other = this.other();
-    if (!this.isSplit() || !other) return false;
+    if (!this.isSplit() || !other) return t("files.sync.open_dual_pane");
     const ok = (p) => p.path !== "/" && !p.archive && !isRemote(p.path) && !isReadOnly(p) && !isBackupTop(p.path);
+    if (!ok(this.pane) || !ok(other)) return t("files.sync.only_nas_folders");
     const [a, b] = [this.pane.path, other.path];
-    return ok(this.pane) && ok(other) && a !== b && !a.startsWith(b + "/") && !b.startsWith(a + "/");
+    if (a === b) return t("files.sync.same_folder");
+    if (a.startsWith(b + "/") || b.startsWith(a + "/")) return t("files.sync.nested");
+    return "";
+  },
+
+  /** The synchronization dialog, or why it cannot open (never an entry that just vanishes). */
+  startSync() {
+    const why = this.syncProblem();
+    if (why) return toast(why);
+    syncFolders(this, ...this.current.panes);
+  },
+
+  /** The duplicate finder for `path`, or why it does not look there. */
+  startDuplicates(pane, path = pane.path) {
+    if (!pane.flatAllowed() || isBackupTop(path)) return toast(t("files.dupes.nas_folder_only"));
+    findDuplicates(this, path);
+  },
+
+  /** The differences between the two panes, or how to get a second pane. */
+  startDifferences() {
+    if (!this.isSplit()) return toast(t("files.select.open_dual_pane"));
+    selectDifferences(...this.current.panes);
   },
 
   moreMenu(pane, anchor) {
@@ -144,8 +169,8 @@ export const menuMethods = {
       { label: t("files.common.invert_selection"), key: "Ctrl+Shift+I", action: () => pane.invertSelection() },
       { label: t("files.select.select_pattern_menu"), icon: "filter", key: "+", action: () => selectByPattern(pane, "add") },
       { label: t("files.select.deselect_pattern_menu"), key: "−", action: () => selectByPattern(pane, "remove") },
-      this.isSplit() && { label: t("files.select.select_differences"), icon: "split", key: "Ctrl+Shift+D", action: () => selectDifferences(...this.current.panes) },
-      this.canSync() && { label: t("files.sync.sync_folders_menu"), icon: "refresh", action: () => syncFolders(this, ...this.current.panes) },
+      { label: t("files.select.select_differences"), icon: "split", key: "Ctrl+Shift+D", action: () => this.startDifferences() },
+      { label: t("files.sync.sync_folders_menu"), icon: "refresh", action: () => this.startSync() },
       this.clipboard && !isReadOnly(pane) && { label: t("files.common.paste"), icon: "paste", key: "Ctrl+V", action: () => this.paste(pane) },
       this.clipboard && !isReadOnly(pane) && { label: t("files.common.paste_verification"), icon: "shield", key: "Ctrl+Shift+V", action: () => this.paste(pane, pane.path, true) },
       "-",
@@ -155,7 +180,7 @@ export const menuMethods = {
         action: () => pane.setSort(k),
       })),
       { label: (prefs.foldersFirst ? "✓ " : "") + t("files.common.folders_first"), action: () => save({ foldersFirst: !prefs.foldersFirst }) },
-      pane.flatAllowed() && { label: t("files.dupes.find_duplicates"), icon: "copy", action: () => findDuplicates(this, pane.path) },
+      { label: t("files.dupes.find_duplicates"), icon: "copy", action: () => this.startDuplicates(pane) },
       "-",
       { label: (prefs.sidebar ? "✓ " : "") + t("files.common.sidebar"), icon: "sidebar", key: "Ctrl+B", action: () => save({ sidebar: !prefs.sidebar }) },
       !isBackupTop(pane.path) && { label: t("files.menus.compute_folder_sizes"), icon: "drive", action: () => this.computeSizes(pane, pane.visible) },

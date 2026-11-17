@@ -694,6 +694,8 @@ export class Pane {
     flatBtn.classList.toggle("on", this.flat);
     flatBtn.setAttribute("aria-pressed", String(this.flat));
     flatBtn.disabled = !this.flatAllowed();
+    // a button that cannot be pressed says why
+    flatBtn.title = flatBtn.disabled ? t("files.pane.flat_view_nas_folders") : `${t("files.menus.flat_view")} (Ctrl+Shift+F)`;
     const hb = $(".b-hidden", this.el);
     hb.classList.toggle("on", prefs.showHidden);
     hb.innerHTML = svg(prefs.showHidden ? "eye" : "eyeOff");
