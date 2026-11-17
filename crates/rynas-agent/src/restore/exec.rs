@@ -206,13 +206,13 @@ fn in_target(p: &str) -> PathBuf {
     resolve_in_root(Path::new(TARGET), p).unwrap_or_else(|_| Path::new(TARGET).join(".rynas-restore-symlink-loop"))
 }
 
-/// The progress line of the data step.
 fn print_progress(done: u64, total: u64) {
+    // never failing: the terminal may have closed (`hangup`)
     if total > 0 && done <= total {
-        eprint!("\r  {} / {} MiB ({}%)   ", done >> 20, total >> 20, done * 100 / total);
+        super::hangup::err_part(&format!("\r  {} / {} MiB ({}%)   ", done >> 20, total >> 20, done * 100 / total));
     } else if done > 0 {
         // the size is not known (btrfs snapshots without quota data): what came so far
-        eprint!("\r  {} MiB received   ", done >> 20);
+        super::hangup::err_part(&format!("\r  {} MiB received   ", done >> 20));
     }
 }
 
@@ -676,7 +676,7 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
     if src.fill() == Fill::MountedTree {
         log.line(format!("restoring the files of version {} ({} files, {} MiB)", v.id, v.files, v.bytes >> 20));
         src.fill_tree(v, Path::new(TARGET), &print_progress)?;
-        eprintln!();
+        super::hangup::err("");
         log.line("files restored");
     }
     // the boot filesystems a pool restore leaves empty (the ESP): the PC's own copy inside

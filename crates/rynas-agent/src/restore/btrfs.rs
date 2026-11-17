@@ -675,7 +675,7 @@ impl RestoreSource for BtrfsSource {
             }
             Ok(())
         })();
-        eprintln!();
+        super::hangup::err("");
         if let Err(e) = r {
             // the received copies of this run go (the writable subvolumes made stay)
             for (dir, _) in &received {
@@ -727,7 +727,7 @@ impl RestoreSource for BtrfsSource {
     fn report(&mut self, v: &Version, ok: bool, message: &str, log: &str) {
         let r = RestoreReport { device: self.dev.device.clone(), version: format!("btrfs {}", v.id), ok, message: message.to_string(), log: log.to_string() };
         if let Err(e) = self.client.post_json::<_, serde_json::Value>("/api/v1/pcbackup/agent/restore/report", &r) {
-            eprintln!("report to the NAS: {e}");
+            super::hangup::err(&format!("report to the NAS: {e}"));
         }
     }
 

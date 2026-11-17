@@ -22,6 +22,7 @@
 pub mod btrfs;
 pub mod exec;
 pub mod fstab;
+pub mod hangup;
 pub mod legacy;
 pub mod lvm;
 pub mod paths;
@@ -320,7 +321,8 @@ fn run_execute(args: &[String], src: &mut dyn RestoreSource, v: &source::Version
         Some(f) => Some(std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?.trim_end_matches('\n').to_string()),
         None => None,
     };
-    let mut log = exec::Log::new(Box::new(|s| eprintln!("{s}")));
+    let _writing = hangup::writing();
+    let mut log = exec::Log::new(Box::new(hangup::err));
     let r = exec::execute(src, v, m, p, &exec::Options { passphrase: pass.as_deref(), nvram: exec::Nvram::from_args(args) }, &mut log);
     finish(src, v, r, &log)
 }
@@ -337,9 +339,9 @@ fn finish(src: &mut dyn RestoreSource, v: &source::Version, r: Result<(), String
     }
     r?;
     if !log.problems.is_empty() {
-        eprintln!("restored, but check this before rebooting:");
+        hangup::err("restored, but check this before rebooting:");
         for p in &log.problems {
-            eprintln!("  - {p}");
+            hangup::err(&format!("  - {p}"));
         }
     }
     Ok(())
@@ -382,7 +384,8 @@ fn run_btrfs(args: &[String], client: Arc<Client>, dev: RestoreDevice) -> Result
         if opt(args, "--confirm").as_deref() != Some(name.as_str()) {
             return Err(format!("--confirm {name} is needed: subvolumes are added to that filesystem"));
         }
-        let mut log = exec::Log::new(Box::new(|s| eprintln!("{s}")));
+        let _writing = hangup::writing();
+        let mut log = exec::Log::new(Box::new(hangup::err));
         let r = exec::execute_add(&mut src, &v, &m, &device, &restored, other_ok, &mut log);
         return finish(&mut src, &v, r, &log);
     }

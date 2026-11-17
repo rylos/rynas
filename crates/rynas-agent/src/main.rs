@@ -495,6 +495,8 @@ fn main() {
         // hidden, tests: the btrfs restore's pool step into a mounted throwaway filesystem
         "btrfs-restore-pool" => root_only().and_then(|_| restore::pool_test(&args)),
         "restore" => root_only().and_then(|_| restore::main(&args)),
+        // hidden, tests: a restore's writing phase when the terminal closes (restore::hangup)
+        "hangup-test" => restore::hangup::test_command(&args),
         _ => Err(USAGE.into()),
     };
     if let Err(e) = r {

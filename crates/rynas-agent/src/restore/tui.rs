@@ -203,28 +203,35 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let Some(job) = r? else {
         return Ok(());
     };
-    // the work itself, with a plain log
-    let mut log = exec::Log::new(Box::new(|s| println!("{s}")));
+    // the work itself, with a plain log; from here a closed terminal no longer stops it
+    // (`hangup`: the output goes on into the log file)
+    let writing = super::hangup::writing();
+    let mut log = exec::Log::new(Box::new(super::hangup::out));
     let format = matches!(job, Job::Format { .. });
     match job {
         Job::Format { mut src, v, m, p, pass, nvram } => {
-            println!("Restoring {} ({}) version {} …", src.device(), src.kind(), v.short_id());
+            super::hangup::out(&format!("Restoring {} ({}) version {} …", src.device(), src.kind(), v.short_id()));
             let r = exec::execute(src.as_mut(), &v, &m, &p, &exec::Options { passphrase: pass.as_deref(), nvram }, &mut log);
             super::finish(src.as_mut(), &v, r, &log)?;
         }
         Job::Add { mut src, v, m, device, restored } => {
-            println!("Adding {} to {device} …", restored.join(", "));
+            super::hangup::out(&format!("Adding {} to {device} …", restored.join(", ")));
             let r = exec::execute_add(src.as_mut(), &v, &m, &device, &restored, false, &mut log);
             super::finish(src.as_mut(), &v, r, &log)?;
-            println!("\nThe subvolumes were added.");
+            super::hangup::out("\nThe subvolumes were added.");
             return Ok(());
         }
     }
     if format && !log.problems.is_empty() {
-        println!("\nThe data is restored, but do not reboot yet: check what is listed above.");
+        super::hangup::out("\nThe data is restored, but do not reboot yet: check what is listed above.");
         return Ok(());
     }
-    println!("\nThe PC is restored. Remove the live medium and reboot.");
+    super::hangup::out("\nThe PC is restored. Remove the live medium and reboot.");
+    drop(writing);
+    // nobody to answer: never rebooted without the user
+    if super::hangup::hung() {
+        return Ok(());
+    }
     eprint!("Reboot now? [y/N] ");
     let mut a = String::new();
     let _ = std::io::stdin().read_line(&mut a);

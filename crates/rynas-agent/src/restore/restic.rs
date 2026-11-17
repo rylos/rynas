@@ -197,7 +197,7 @@ impl RestoreSource for ResticSource {
             log: log.to_string(),
         };
         if let Err(e) = self.client.post_json::<_, serde_json::Value>("/api/v1/pcbackup/agent/restore/report", &r) {
-            eprintln!("report to the NAS: {e}");
+            super::hangup::err(&format!("report to the NAS: {e}"));
         }
     }
 }
