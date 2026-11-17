@@ -1208,7 +1208,7 @@ mod tests {
 
     #[test]
     fn a_silent_failure_says_how_it_ended() {
-        let o = Command::new("sh").args(["-c", "echo one; echo two; kill -ILL $$"]).output().unwrap();
+        let o = Command::new("sh").args(["-c", "ulimit -c 0; echo one; echo two; kill -ILL $$"]).output().unwrap();
         let m = failed("chroot", &o);
         assert!(m.contains("killed by signal 4 (SIGILL"), "{m}");
         assert!(m.ends_with("last output: one | two"), "{m}");
