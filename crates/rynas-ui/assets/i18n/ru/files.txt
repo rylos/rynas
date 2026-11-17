@@ -658,3 +658,43 @@ files.undo.rename_a_b	Переименование «{a}» в «{b}»
 files.undo.transfer_still_running	Передача ещё выполняется
 files.undo.folder_n_not_empty	Папка «{n}» уже не пуста
 files.undo.nothing_left_n	Ни одного из этих элементов больше нет в «{n}»
+files.rename.rename_n	Переименовать: {n}
+files.rename.rename_n_menu	Переименовать: {n}…
+files.rename.extension	Расширение
+files.rename.tok_name	имя
+files.rename.tok_chars	символы 1–3 имени
+files.rename.tok_ext	расширение
+files.rename.tok_counter	счётчик
+files.rename.tok_date	дата
+files.rename.tok_time	время
+files.rename.tok_folder	папка
+files.rename.find	Найти
+files.rename.replace_with	Заменить на
+files.rename.match_case	Учитывать регистр
+files.rename.case	Регистр
+files.rename.case_keep	как есть
+files.rename.case_lower	строчные
+files.rename.case_upper	ПРОПИСНЫЕ
+files.rename.case_title	Каждое Слово С Прописной
+files.rename.counter_from	Счётчик с
+files.rename.step	шаг
+files.rename.digits	цифр
+files.rename.before	До
+files.rename.after	После
+files.rename.reset	Сбросить
+files.rename.invalid_name	Недопустимое имя
+files.rename.too_long	Слишком длинное имя
+files.rename.duplicate	Повторяющееся имя
+files.rename.exists	Уже существует
+files.rename.remote_swap	На удалённом сервере имена нельзя поменять местами
+files.rename.n_to_fix	Исправьте перед переименованием: {n}
+files.rename.count.changes.one	Изменится {n} имя
+files.rename.count.changes.few	Изменятся {n} имени
+files.rename.count.changes.many	Изменятся {n} имён
+files.rename.count.changes.other	Изменятся {n} имени
+files.rename.nothing_changes	Ни одно имя не меняется
+files.rename.n_not_renamed	Не переименовано: {n}. {e}
+files.rename.count.renamed.one	Переименован {n} элемент
+files.rename.count.renamed.few	Переименовано {n} элемента
+files.rename.count.renamed.many	Переименовано {n} элементов
+files.rename.count.renamed.other	Переименовано {n} элемента

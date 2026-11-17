@@ -7,8 +7,7 @@ import { t, count } from "./i18n.js";
 import { int, esc, baseName, parentOf, joinPath } from "./format.js";
 import { toast, errorToast, confirmBox } from "./ui.js";
 import * as transfers from "./transfers.js";
-import { moveFolderIcons } from "./iconpick.js";
-import { changed as appChanged } from "./appdata.js";
+import { renameMany } from "./rename.js";
 
 const MAX = 30;
 const stack = [];
@@ -41,26 +40,17 @@ async function job(request) {
   return id;
 }
 
-/** `pairs`: [old path, new name] of items just renamed, all in one step. */
-export function recordRename(pairs) {
+/** `pairs`: [old path, new name] of items just renamed, all in one step (`label`: its name in the menu). */
+export function recordRename(pairs, label) {
   if (!pairs.length) return;
   const done = pairs.map(([from, name]) => [joinPath(parentOf(from), name), baseName(from)]);
   push({
-    label: t("files.undo.rename_a_b", { a: baseName(pairs[0][0]), b: pairs[0][1] }),
+    label: label || t("files.undo.rename_a_b", { a: baseName(pairs[0][0]), b: pairs[0][1] }),
     run: async () => {
-      // the other way round: a chain a→b, b→c is undone from its end
-      const failed = [];
-      for (const [path, name] of [...done].reverse()) {
-        try {
-          await api.rename(path, name);
-          moveFolderIcons(path, joinPath(parentOf(path), name));
-          appChanged(path);
-        } catch (err) {
-          failed.push(err);
-        }
-      }
+      // all back at once: swaps and shifts of names undo as they were done
+      const { errors } = await renameMany(done);
       app.refreshFolders([...new Set(done.map(([p]) => parentOf(p)))]);
-      if (failed.length) throw failed[0];
+      if (errors.length) throw new Error(errors.slice(0, 3).join("; "));
     },
   });
 }

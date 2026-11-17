@@ -64,7 +64,7 @@ fn method(req: &Request, want: &str) -> Result<(), ApiError> {
 
 /// Routes that change files (all POST); every other route only reads. rynasd decides the
 /// powers of a request's worker from this list too.
-pub const WRITING_ROUTES: &[&str] = &["mkdir", "rename", "edit/save", "upload", "upload/abort"];
+pub const WRITING_ROUTES: &[&str] = &["mkdir", "rename", "renames", "edit/save", "upload", "upload/abort"];
 
 /// Refuses a writing route ([`WRITING_ROUTES`]) whose `path` or `dir` lies in a read-only
 /// share ([`Share::read_only`]: a PC's backup, or a share that holds one). Paths that do not
@@ -537,6 +537,12 @@ struct Paths {
     paths: Vec<String>,
 }
 
+/// The body of `renames`: [old name, new name] of items of the folder `path`.
+#[derive(Deserialize)]
+struct Renames {
+    pairs: Vec<(String, String)>,
+}
+
 fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remote) -> Result<(), ApiError> {
     let (shares, conns) = (&ctx.shares[..], &ctx.conns[..]);
     // the real path of a parameter, every link followed (inside its share)
@@ -670,6 +676,24 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
             fsops::refuse_snapshot(&real)?;
             fsops::rename(&real, &real.with_file_name(name))?;
             reply(out, &json!({ "ok": true }))
+        }
+        "renames" => {
+            // several items of one folder at once (the batch rename): names only, no paths
+            method(req, "POST")?;
+            let dir = path_param("path")?;
+            if archive::locate(&dir).is_some() {
+                return Err(ApiError::read_only(t!("inside an archive it is read-only")));
+            }
+            let body: Renames = req.json()?;
+            if body.pairs.len() > 100_000 {
+                return Err(ApiError::new(413, t!("too many items at once")));
+            }
+            let guard = |item: &Path| -> Result<(), ApiError> {
+                fsops::refuse_snapshot(item)?;
+                crate::confine::refuse_pc_write(item, true)?;
+                Ok(())
+            };
+            reply(out, &json!({ "results": fsops::rename_many(&dir, &body.pairs, guard) }))
         }
         "search" => {
             let r = shares::resolve(shares, req.require("path")?)?;

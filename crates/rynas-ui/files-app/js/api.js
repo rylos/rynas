@@ -170,6 +170,7 @@ export const api = {
   space: (path) => call("space", { params: { path } }),
   mkdir: (path, name, parents) => call("mkdir", { params: { path, name, parents: parents ? 1 : undefined }, body: {} }),
   rename: (path, name) => call("rename", { params: { path, name }, body: {} }),
+  renames: (path, pairs) => call("renames", { params: { path }, body: { pairs } }),
   search: (path, q, signal) => call("search", { params: { path, q }, signal }),
   text: (path) => call("text", { params: { path } }),
   editOpen: (path) => call("edit", { params: { path } }),

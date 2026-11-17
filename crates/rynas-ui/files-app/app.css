@@ -451,6 +451,27 @@ dialog.dlg.wide { max-width: min(94vw, 760px); }
 .select-dlg .seg button { flex: 1 1 auto; padding: 6px 10px; min-width: 0; white-space: normal; }
 .select-dlg .found { margin-top: 8px; }
 .select-dlg .found.err { color: var(--crit); }
+.rename-dlg .ren-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 0 12px; }
+.rename-dlg .ren-grid .field { margin: 6px 0; min-width: 0; }
+.rename-dlg .ren-tokens { display: flex; flex-wrap: wrap; gap: 5px; margin: 2px 0 6px; }
+.chip-btn { border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); border-radius: 6px; padding: 2px 7px; font: 11.5px var(--mono); cursor: pointer; }
+.chip-btn:hover, .chip-btn:focus-visible { color: var(--text); border-color: var(--accent); }
+.rename-dlg .ren-row { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
+.field.inline { display: flex; flex-direction: row; align-items: center; gap: 6px; margin: 4px 0; min-width: 0; }
+.field.inline select, .field.inline input[type="number"] { padding: 3px 6px; min-width: 0; }
+.field.inline input[type="number"] { width: 58px; }
+.rename-dlg .ren-head, .rename-dlg .ren-item { display: grid; grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr); gap: 6px; align-items: baseline; }
+.rename-dlg .ren-head { margin-top: 10px; font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; padding: 0 10px; }
+.rename-dlg .ren-list { max-height: 34vh; min-height: 80px; overflow-y: auto; overflow-x: hidden; margin: 4px 0 6px; padding: 4px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); font: 12px var(--mono); }
+.rename-dlg .ren-item { padding: 2px 0; }
+.rename-dlg .ren-item > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rename-dlg .ren-item > span:nth-child(2) { color: var(--faint); text-align: center; }
+.rename-dlg .ren-item > span:last-child { color: var(--accent); }
+.rename-dlg .ren-item.same > span:last-child { color: var(--muted); }
+.rename-dlg .ren-item.bad > span:last-child { color: var(--crit); }
+.rename-dlg .ren-item em { font-style: normal; font-size: 11px; }
+.rename-dlg .ren-sum.err { color: var(--crit); }
+@media (max-width: 600px) { .rename-dlg .ren-grid { grid-template-columns: minmax(0, 1fr); } }
 .dlg-icon { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
 .dlg-icon.danger { background: var(--crit-soft); color: var(--crit); }
 .dlg-icon svg { width: 19px; height: 19px; }

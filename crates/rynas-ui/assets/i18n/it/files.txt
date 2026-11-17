@@ -640,3 +640,39 @@ files.undo.rename_a_b	Rinomina «{a}» in «{b}»
 files.undo.transfer_still_running	Il trasferimento è ancora in corso
 files.undo.folder_n_not_empty	La cartella «{n}» non è più vuota
 files.undo.nothing_left_n	Nessuno di questi elementi è più in «{n}»
+files.rename.rename_n	Rinomina {n}
+files.rename.rename_n_menu	Rinomina {n}…
+files.rename.extension	Estensione
+files.rename.tok_name	nome
+files.rename.tok_chars	caratteri 1–3 del nome
+files.rename.tok_ext	estensione
+files.rename.tok_counter	contatore
+files.rename.tok_date	data
+files.rename.tok_time	ora
+files.rename.tok_folder	cartella
+files.rename.find	Cerca
+files.rename.replace_with	Sostituisci con
+files.rename.match_case	Distingui maiuscole
+files.rename.case	Maiuscole
+files.rename.case_keep	come sono
+files.rename.case_lower	minuscole
+files.rename.case_upper	MAIUSCOLE
+files.rename.case_title	Iniziali Maiuscole
+files.rename.counter_from	Contatore da
+files.rename.step	passo
+files.rename.digits	cifre
+files.rename.before	Prima
+files.rename.after	Dopo
+files.rename.reset	Ripristina
+files.rename.invalid_name	Nome non valido
+files.rename.too_long	Nome troppo lungo
+files.rename.duplicate	Nome doppio
+files.rename.exists	Esiste già
+files.rename.remote_swap	Su un server remoto i nomi non si scambiano
+files.rename.n_to_fix	{n} da sistemare prima di rinominare
+files.rename.count.changes.one	{n} nome cambia
+files.rename.count.changes.other	{n} nomi cambiano
+files.rename.nothing_changes	Nessun nome cambia
+files.rename.n_not_renamed	{n} non rinominati: {e}
+files.rename.count.renamed.one	{n} elemento rinominato
+files.rename.count.renamed.other	{n} elementi rinominati

@@ -87,6 +87,7 @@ export const menuMethods = {
       !share && other && { label: t("files.menus.choose_folder"), icon: "move", action: () => this.copyTo(pane, "copy") },
       "-",
       !many && !share && !ro && !fixed && { label: t("files.common.rename"), icon: "rename", key: "F2", action: () => this.renamePrompt(pane, entry) },
+      many && !share && !ro && !fixed && !bin && { label: t("files.rename.rename_n_menu", { n: count(list.length, "files.common.count.items", int) }), icon: "rename", key: "F2", action: () => this.renameMany(pane, list) },
       !share && !bin && !ro && !fixed && { label: pane.recycle && !pane.path.includes("#recycle") ? t("files.common.move_recycle_bin") : t("files.common.delete"), icon: "trash", key: "Del", danger: true, action: () => this.remove(pane) },
       !share && !bin && !ro && !fixed && pane.recycle && { label: t("files.common.delete_permanently"), icon: "trash", key: "Shift+Del", danger: true, action: () => this.remove(pane, true) },
       !many && entry.full !== undefined && !ro && !remote && { label: t("files.common.empty_recycle_bin"), icon: "trash", danger: true, action: () => this.emptyBin(entry.path) },

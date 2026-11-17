@@ -297,6 +297,107 @@ pub fn rename(from: &Path, to: &Path) -> Result<(), ApiError> {
     })
 }
 
+/// One rename of a batch ([`rename_many`]): the old name, the new one, why it failed.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Renamed {
+    pub from: String,
+    pub to: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// the rynas error code of the failure (`error_codes`), for the interface to translate
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
+}
+
+/// The tag of the hidden names a batch parks its items under (`.{name}.rynas-ren-<pid>`):
+/// a dot file, so one left by a crash is still there to see with the hidden files shown.
+fn park_tag() -> String {
+    format!("rynas-ren-{}", std::process::id())
+}
+
+/// Renames several items of `dir` at once. A new name may be the old name of another item
+/// of the batch (a swap, a shift of numbers 1→2→3→4): those items are parked under a hidden
+/// temporary name first. A new name taken by something outside the batch fails that item
+/// alone; nothing is ever overwritten. `guard` may refuse an item (its real path) with a
+/// reason: a read-only snapshot, a PC's backup folder.
+pub fn rename_many(dir: &Path, pairs: &[(String, String)], guard: impl Fn(&Path) -> Result<(), ApiError>) -> Vec<Renamed> {
+    use rynas_api_types::error_codes as c;
+    use std::collections::{HashMap, HashSet};
+    let taken = || (Some(t!("an item with this name already exists")), Some(c::ALREADY_EXISTS));
+    let olds: HashSet<&str> = pairs.iter().map(|(a, _)| a.as_str()).collect();
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    for (_, b) in pairs {
+        *seen.entry(b.as_str()).or_default() += 1;
+    }
+    let mut from_seen: HashMap<&str, usize> = HashMap::new();
+    for (a, _) in pairs {
+        *from_seen.entry(a.as_str()).or_default() += 1;
+    }
+    let mut out: Vec<Renamed> = pairs.iter().map(|(a, b)| Renamed { from: a.clone(), to: b.clone(), error: None, code: None }).collect();
+    for r in out.iter_mut() {
+        // the names are single components: never a path, `..` or a NUL
+        let (error, code) = if crate::shares::valid_name(&r.from).is_err() || crate::shares::valid_name(&r.to).is_err() {
+            (Some(t!("invalid name")), Some(c::INVALID_VALUE))
+        } else if seen[r.to.as_str()] > 1 || from_seen[r.from.as_str()] > 1 {
+            (Some(t!("two items would get the same name")), Some(c::INVALID_VALUE))
+        } else if let Err(e) = fs::symlink_metadata(dir.join(&r.from)) {
+            (Some(describe(&e)), Some(io_code(&e)))
+        } else if r.from != r.to && !olds.contains(r.to.as_str()) && fs::symlink_metadata(dir.join(&r.to)).is_ok() {
+            taken()
+        } else if let Err(e) = guard(&dir.join(&r.from)) {
+            (Some(e.message), Some(e.code))
+        } else {
+            (None, None)
+        };
+        r.error = error;
+        r.code = code;
+    }
+    // a name that stays taken (its item fails or keeps its name) cannot be given away; one
+    // pass may free none, so it is repeated until nothing changes (a chain onto a failure)
+    loop {
+        let staying: HashSet<String> = out.iter().filter(|r| r.error.is_some() || r.from == r.to).map(|r| r.from.clone()).collect();
+        let mut changed = false;
+        for r in out.iter_mut().filter(|r| r.error.is_none() && r.from != r.to && staying.contains(&r.to)) {
+            (r.error, r.code) = taken();
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+    let tag = park_tag();
+    let wanted: HashSet<String> = out.iter().filter(|r| r.error.is_none() && r.from != r.to).map(|r| r.to.clone()).collect();
+    // first out of the way: the items whose name another item of the batch is to take
+    let mut parked: HashMap<String, PathBuf> = HashMap::new();
+    for r in out.iter_mut().filter(|r| r.error.is_none() && r.from != r.to && wanted.contains(&r.from)) {
+        let temp = dir.join(crate::names::part_name(&r.from, &tag));
+        match rename_noreplace(&dir.join(&r.from), &temp) {
+            Ok(()) => {
+                parked.insert(r.from.clone(), temp);
+            }
+            Err(e) => (r.error, r.code) = (Some(describe(&e)), Some(io_code(&e))),
+        }
+    }
+    // an item whose parking failed keeps its name: whoever wanted it fails too
+    let stuck: HashSet<String> = out.iter().filter(|r| r.error.is_some() && wanted.contains(&r.from)).map(|r| r.from.clone()).collect();
+    for r in out.iter_mut().filter(|r| r.error.is_none() && stuck.contains(&r.to)) {
+        (r.error, r.code) = taken();
+    }
+    for r in out.iter_mut().filter(|r| r.from != r.to) {
+        let src = parked.get(&r.from).cloned().unwrap_or_else(|| dir.join(&r.from));
+        if r.error.is_none()
+            && let Err(e) = rename_noreplace(&src, &dir.join(&r.to))
+        {
+            (r.error, r.code) = if e.kind() == io::ErrorKind::AlreadyExists { taken() } else { (Some(describe(&e)), Some(io_code(&e))) };
+        }
+        // a parked item that did not get its new name goes back under its own, if still free
+        if r.error.is_some() && parked.contains_key(&r.from) {
+            let _ = rename_noreplace(&src, &dir.join(&r.from));
+        }
+    }
+    out
+}
+
 #[derive(Serialize, Default)]
 pub struct Usage {
     pub bytes: u64,
@@ -631,5 +732,46 @@ mod tests {
         rename_noreplace(&dir.join("a"), &dir.join("c")).unwrap();
         assert_eq!(fs::read_to_string(dir.join("c")).unwrap(), "a");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn renames_many_with_swaps_and_shifts() {
+        let dir = std::env::temp_dir().join(format!("rynas-files-many-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for n in ["a", "b", "1", "2", "3", "x", "taken", "keep", "y"] {
+            fs::write(dir.join(n), n).unwrap();
+        }
+        let p = |a: &str, b: &str| (a.to_string(), b.to_string());
+        let ok = |_: &Path| Ok(());
+        // a⇄b, 1→2→3→4, x onto a name outside the batch
+        let out = rename_many(&dir, &[p("a", "b"), p("b", "a"), p("1", "2"), p("2", "3"), p("3", "4"), p("x", "taken")], ok);
+        let read = |n: &str| fs::read_to_string(dir.join(n)).unwrap();
+        assert_eq!((read("a"), read("b")), ("b".into(), "a".into()));
+        assert_eq!((read("2"), read("3"), read("4")), ("1".into(), "2".into(), "3".into()));
+        assert!(!dir.join("1").exists());
+        assert_eq!((read("x"), read("taken")), ("x".into(), "taken".into()));
+        let failed: Vec<&str> = out.iter().filter(|r| r.error.is_some()).map(|r| r.from.as_str()).collect();
+        assert_eq!(failed, ["x"]);
+        // two onto one name: neither goes
+        let out = rename_many(&dir, &[p("a", "z"), p("b", "z")], ok);
+        assert!(out.iter().all(|r| r.error.is_some()));
+        assert!(dir.join("a").exists() && dir.join("b").exists());
+        // a name a refused item keeps is not given away, along a whole chain
+        let guard = |path: &Path| if path.ends_with("keep") { Err(ApiError::read_only("no")) } else { Ok(()) };
+        let out = rename_many(&dir, &[p("keep", "k2"), p("y", "keep"), p("a", "y")], guard);
+        assert!(out.iter().all(|r| r.error.is_some()), "{out:?}");
+        assert_eq!((read("keep"), read("y")), ("keep".into(), "y".into()));
+        // never a path, a parent or a NUL
+        for bad in ["../out", "sub/x", "..", "a\0b", ""] {
+            let out = rename_many(&dir, &[p("a", bad)], ok);
+            assert!(out[0].error.is_some(), "{bad:?}");
+            let out = rename_many(&dir, &[p(bad, "fine")], ok);
+            assert!(out[0].error.is_some(), "{bad:?}");
+        }
+        assert!(!dir.join("fine").exists() && !dir.parent().unwrap().join("out").exists());
+        // nothing hidden left behind
+        assert!(fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with('.')));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

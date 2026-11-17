@@ -19,6 +19,7 @@ import { serverAddress } from "./conns.js";
 import { changed as appChanged } from "./appdata.js";
 import { isReadOnly, readOnlyHere, atBackups, backupsToast, isBackupTop, isWholeBackup } from "./backups.js";
 import { recordRename, recordNewFolder, recordTransfer } from "./undo.js";
+import { batchRename } from "./rename.js";
 
 export const actionMethods = {
   /** A text file the editor opens: not in an archive nor a read-only folder, 8 MB at most. */
@@ -278,6 +279,14 @@ export const actionMethods = {
       icon: "trash",
     });
     if (ok) transfers.start({ op: "delete", sources: entries.map((e) => joinPath(bin, e.name)), permanent: true });
+  },
+
+  /** Several items: the batch rename dialog. */
+  renameMany(pane, list) {
+    if (isReadOnly(pane)) return readOnlyHere(pane);
+    list = list.filter((e) => !e.share && !e.readonly && !isProtectedFolder(e));
+    if (!list.length || pane.writable === false) return;
+    batchRename(this, pane, list);
   },
 
   async renamePrompt(pane, e) {

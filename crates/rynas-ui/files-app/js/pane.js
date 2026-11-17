@@ -1472,6 +1472,8 @@ export class Pane {
 
   // ---------- inline rename ----------
   rename() {
+    const many = this.targets().filter((x) => !x.share);
+    if (many.length > 1) return this.app.renameMany(this, many);
     const e = this.visible[this.cursor];
     if (!e || e.share) return;
     this.app.renamePrompt(this, e);
