@@ -51,7 +51,9 @@ pub(crate) fn overview_of(p: &Protection, owner: &str, rt: &Runtime, from: u64, 
     let estimates = p.history.estimates(ESTIMATE_RUNS).map_err(Error::internal)?;
     let table = crate::gate::table_now(p);
     let mut jobs: Vec<JobInput> = Vec::new();
-    for v in views.into_iter().filter(|v| v.status.applied) {
+    // what runs: the applied tasks, and the system timers rynas gates (they run on the
+    // system's schedule even when rynas never applied their settings)
+    for v in views.into_iter().filter(|v| v.status.applied || v.status.system) {
         let t = v.task;
         let claims = crate::claims::claims_of(p, &t);
         let resources: Vec<_> = claims.iter().map(|c| table.resource(c)).collect();
