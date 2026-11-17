@@ -606,4 +606,11 @@ export default {
   "files.appdata.restarting_s": "Restarting {s}",
   "files.transfers.interrupted_restart_nas": "Interrupted by a restart of the NAS",
   "files.transfers.transfer_speed_chart": "Transfer speed chart",
+  "files.pane.checksum": "Checksum",
+  "files.pane.algorithm": "Algorithm",
+  "files.pane.checksum_copied": "Checksum copied",
+  "files.pane.paste_checksum_compare": "Paste a checksum to compare",
+  "files.pane.checksum_match": "Match",
+  "files.pane.checksum_different": "Different",
+  "files.pane.incomplete_answer": "Incomplete answer",
 };

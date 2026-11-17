@@ -609,6 +609,15 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
             }
             reply(out, &crate::media::describe(&real))
         }
+        "checksum" => {
+            // read like a download: the user's own permissions decide (the worker runs as them)
+            let real = path_param("path")?;
+            // the archive itself is a file like any other; what is inside it is not
+            if archive::locate(&real).is_some_and(|(_, inner)| !inner.is_empty()) {
+                return Err(ApiError::read_only(t!("a checksum is not computed inside an archive")));
+            }
+            crate::checksum::send(out, &real, req.require("algo")?)
+        }
         "usage" => {
             method(req, "POST")?;
             let body: Paths = req.json()?;

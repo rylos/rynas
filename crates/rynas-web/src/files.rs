@@ -31,9 +31,11 @@ pub fn routes() -> Router<AppState> {
 const REQUEST_HEADERS: [HeaderName; 3] = [header::CONTENT_TYPE, header::CONTENT_LENGTH, header::RANGE];
 
 /// Headers of the answer that reach the client: what downloads, previews with ranges and
-/// thumbnails need.
-fn answer_headers() -> [HeaderName; 8] {
+/// thumbnails need, and `X-Accel-Buffering: no` of the streamed answers (a reverse proxy in
+/// front, nginx-style, then passes them on as they come).
+fn answer_headers() -> [HeaderName; 9] {
     [
+        HeaderName::from_static("x-accel-buffering"),
         header::CONTENT_TYPE,
         header::CONTENT_LENGTH,
         header::CONTENT_DISPOSITION,
@@ -85,6 +87,31 @@ impl tower_http::compression::Predicate for NotFileContent {
         B: axum::body::HttpBody,
     {
         let h = response.headers();
-        !(h.contains_key(header::CONTENT_DISPOSITION) || h.contains_key(header::ACCEPT_RANGES) || h.contains_key(header::CONTENT_RANGE))
+        // answers streamed as JSON lines (a checksum's progress) go out line by line: an
+        // encoder would hold them back until its buffer fills
+        let lines = h.get(header::CONTENT_TYPE).is_some_and(|v| v.as_bytes().starts_with(b"application/x-ndjson"));
+        !(lines || h.contains_key(header::CONTENT_DISPOSITION) || h.contains_key(header::ACCEPT_RANGES) || h.contains_key(header::CONTENT_RANGE))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower_http::compression::Predicate;
+
+    fn compressed(headers: &[(HeaderName, &str)]) -> bool {
+        let mut r = axum::http::Response::new(Body::empty());
+        for (n, v) in headers {
+            r.headers_mut().insert(n.clone(), v.parse().unwrap());
+        }
+        NotFileContent.should_compress(&r)
+    }
+
+    #[test]
+    fn json_lines_and_file_contents_are_not_compressed() {
+        assert!(compressed(&[(header::CONTENT_TYPE, "application/json")]));
+        assert!(!compressed(&[(header::CONTENT_TYPE, "application/x-ndjson")]));
+        assert!(!compressed(&[(header::CONTENT_DISPOSITION, "attachment")]));
+        assert!(!compressed(&[(header::ACCEPT_RANGES, "bytes")]));
     }
 }

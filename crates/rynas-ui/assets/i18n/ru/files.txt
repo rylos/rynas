@@ -616,3 +616,10 @@ files.appdata.restart	Перезапустить
 files.appdata.restarting_s	Перезапуск {s}
 files.transfers.interrupted_restart_nas	Прервано перезапуском NAS
 files.transfers.transfer_speed_chart	График скорости передачи
+files.pane.checksum	Контрольная сумма
+files.pane.algorithm	Алгоритм
+files.pane.checksum_copied	Контрольная сумма скопирована
+files.pane.paste_checksum_compare	Вставьте контрольную сумму для сравнения
+files.pane.checksum_match	Совпадает
+files.pane.checksum_different	Не совпадает
+files.pane.incomplete_answer	Неполный ответ

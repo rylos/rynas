@@ -600,3 +600,10 @@ files.appdata.restart	Riavvia
 files.appdata.restarting_s	Riavvio di {s} avviato
 files.transfers.interrupted_restart_nas	Interrotto da un riavvio del NAS
 files.transfers.transfer_speed_chart	Grafico della velocità del trasferimento
+files.pane.checksum	Checksum
+files.pane.algorithm	Algoritmo
+files.pane.checksum_copied	Checksum copiato
+files.pane.paste_checksum_compare	Incolla un checksum da confrontare
+files.pane.checksum_match	Uguale
+files.pane.checksum_different	Diverso
+files.pane.incomplete_answer	Risposta incompleta

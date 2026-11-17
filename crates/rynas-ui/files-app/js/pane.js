@@ -3,11 +3,11 @@
 
 import { api } from "./api.js";
 import { prefs, save } from "./prefs.js";
-import { t, count, LOCALE } from "./i18n.js";
+import { t, count, LOCALE, errText } from "./i18n.js";
 import { esc, size, sizeParts, ezaDate, relative, dateTime, duration, modeString, collator, joinPath, parentOf, baseName, int, isDirLike } from "./format.js";
 import { svg, iconHTML, glyph, colorClass, kindLabel, previewKind, shareGlyph, isProtectedFolder } from "./icons.js";
 import { pickIcon } from "./iconpick.js";
-import { h, $, errorToast, toast } from "./ui.js";
+import { h, $, errorToast, toast, copyText } from "./ui.js";
 import { fuzzy, highlight } from "./fuzzy.js";
 import { isHeic, HEIC_LIMIT, fillHeic } from "./heic.js";
 import { rememberArchive } from "./archive.js";
@@ -31,6 +31,10 @@ const GRID_IMAGE_MAX = 8 * 1024 * 1024;
 const GRID_IMAGE_MAX_SLOW = 2 * 1024 * 1024;
 // the info panel waits for the selection to settle before reading the item
 const INFO_DELAY = 120;
+// [value, label]: the names of the algorithms are not translated
+const SUM_ALGOS = [["sha256", "SHA-256"], ["sha1", "SHA-1"], ["md5", "MD5"], ["xxh128", "XXH128"]];
+// the algorithm last chosen, for the next file
+let sumAlgo = "sha256";
 
 // camera RAW files: not shown as pictures, but their EXIF is worth reading
 const RAW_EXT = /\.(cr2|cr3|nef|nrw|arw|srf|sr2|dng|raf|orf|rw2|pef|srw|iiq|3fr|x3f)$/i;
@@ -85,6 +89,10 @@ export class Pane {
     this.entries = [];
     this.visible = [];
     this.sel = new Set();
+    // checksums computed in the info panel, by path, size, date and algorithm
+    this.sums = new Map();
+    // the checksum being computed: {key, path, pct, controller, refresh}
+    this.sumRun = null;
     this.cursor = 0;
     this.cursorShown = false; // the cursor stays unseen on opening a folder, until moved
     this.anchor = 0;
@@ -1004,6 +1012,8 @@ export class Pane {
     if (!prefs.info) return;
     // a folder just opened shows itself, not its first item
     const list = this.selected();
+    // a checksum being computed goes on only while its file is shown
+    if (this.sumRun && !(list.length === 1 && list[0].path === this.sumRun.path)) this.sumRun.controller.abort();
     if (!list.length) {
       const name = (this.path.split("/").length === 2 && isRemote(this.path) ? this.app.connName(this.path) : baseName(this.path)) || t("files.common.shared_folders");
       const dirEntry = { name, kind: "d", mode: 0o755, path: this.path };
@@ -1054,8 +1064,12 @@ export class Pane {
         ${isDirLike(e) ? "" : `<button class="btn small dl">${svg("download")} ${t("files.common.download")}</button><button class="btn small info-preview">${svg("eye")} ${t("files.common.preview")}</button>`}
         ${this.app.editable(this, e) ? `<button class="btn small info-edit">${svg("rename")} ${t("files.common.edit")}</button>` : ""}
         <button class="btn small cp">${svg("link")} ${t("files.common.copy_path")}</button>
-      </div>`;
+      </div>
+      ${this.summable(e) ? `<div class="checksum"><div class="sum-row"><span class="sum-k">${t("files.pane.checksum")}</span>
+        <select class="input sum-algo" aria-label="${esc(t("files.pane.algorithm"))}">${SUM_ALGOS.map(([v, l]) => `<option value="${v}"${v === sumAlgo ? " selected" : ""}>${l}</option>`).join("")}</select>
+        <button class="btn small sum-go">${t("files.pane.compute")}</button></div><div class="sum-out"></div></div>` : ""}`;
     $(".calc", this.infoEl)?.addEventListener("click", () => this.app.computeSizes(this, [e]));
+    if ($(".checksum", this.infoEl)) this.bindChecksum(e);
     if (pickable) $(".preview-box", this.infoEl).onclick = (ev) => pickIcon(ev.currentTarget, e.path);
     $(".dl", this.infoEl)?.addEventListener("click", () => this.app.download([e]));
     $(".info-preview", this.infoEl)?.addEventListener("click", () => this.app.quickLook(this));
@@ -1087,6 +1101,92 @@ export class Pane {
     } finally {
       if (this.infoAbort === controller) this.infoAbort = null;
     }
+  }
+
+  /** A file the NAS can hash: on the NAS (not a remote server), not inside an archive. */
+  summable(e) {
+    return e.kind === "f" && !e.share && !isRemote(e.path) && !this.archive;
+  }
+
+  /**
+   * The info panel's checksum: computed on the NAS when asked (a big file
+   * takes a while, with a bar), kept for the file as long as it does not
+   * change, copied with a click, compared with a pasted one.
+   */
+  bindChecksum(e) {
+    const box = $(".checksum", this.infoEl);
+    const algoSel = $(".sum-algo", box);
+    const go = $(".sum-go", box);
+    const out = $(".sum-out", box);
+    const key = () => `${e.path}\n${e.size}\n${e.mtime}\n${algoSel.value}`;
+    const show = (hash) => {
+      if ($(".sum-hash", out)?.dataset.hash === hash) return;
+      out.innerHTML = `<button type="button" class="sum-hash" data-hash="${esc(hash)}" title="${esc(t("files.common.copy"))}">${esc(hash)}</button>
+        <input class="input sum-cmp" placeholder="${esc(t("files.pane.paste_checksum_compare"))}" aria-label="${esc(t("files.pane.paste_checksum_compare"))}" spellcheck="false" autocomplete="off"><div class="sum-verdict" role="status"></div>`;
+      $(".sum-hash", out).onclick = () => copyText(hash).then(() => toast(t("files.pane.checksum_copied")));
+      const cmp = $(".sum-cmp", out);
+      cmp.oninput = () => {
+        // "hash  name" as the *sum tools print it: the first word
+        const v = cmp.value.trim().toLowerCase().split(/\s/)[0];
+        const verdict = $(".sum-verdict", out);
+        verdict.className = "sum-verdict" + (v ? (v === hash ? " ok" : " bad") : "");
+        verdict.textContent = v ? (v === hash ? t("files.pane.checksum_match") : t("files.pane.checksum_different")) : "";
+      };
+    };
+    // the panel is drawn again often: what it shows comes from the pane's state
+    const refresh = () => {
+      if (!box.isConnected) return;
+      const known = this.sums.get(key());
+      const run = this.sumRun?.key === key() ? this.sumRun : null;
+      go.hidden = !!(known || run);
+      if (known) show(known);
+      else if (run) {
+        if (!$(".sum-prog", out)) {
+          out.innerHTML = `<div class="sum-prog"><div class="pbar thin"><div class="fill"></div></div><button type="button" class="icon-btn sum-stop" title="${esc(t("files.common.cancel"))}" aria-label="${esc(t("files.common.cancel"))}">${svg("stop")}</button></div>`;
+          $(".sum-stop", out).onclick = () => run.controller.abort();
+        }
+        $(".pbar", out).style.setProperty("--p", `${run.pct}%`);
+      } else out.innerHTML = "";
+    };
+    algoSel.onchange = () => {
+      sumAlgo = algoSel.value;
+      this.sumRun?.controller.abort();
+      refresh();
+    };
+    go.onclick = async () => {
+      this.sumRun?.controller.abort();
+      const run = (this.sumRun = { key: key(), path: e.path, pct: 0, controller: new AbortController(), refresh });
+      refresh();
+      try {
+        let hash = null;
+        let failed = null;
+        await api.checksum(
+          e.path,
+          algoSel.value,
+          (line) => {
+            if (line.size) {
+              run.pct = Math.min(100, (line.done / line.size) * 100);
+              run.refresh();
+            }
+            if (line.hash) hash = line.hash;
+            if (line.error) failed = errText(line.code) || line.error;
+          },
+          run.controller.signal,
+        );
+        if (failed) throw new Error(failed);
+        if (!hash) throw new Error(t("files.pane.incomplete_answer"));
+        this.sums.set(run.key, hash);
+        if (this.sums.size > 200) this.sums.delete(this.sums.keys().next().value);
+      } catch (err) {
+        if (!run.controller.signal.aborted) errorToast(err);
+      } finally {
+        if (this.sumRun === run) this.sumRun = null;
+      }
+      run.refresh();
+    };
+    // a run started before this drawing reports to it from now on
+    if (this.sumRun?.key === key()) this.sumRun.refresh = refresh;
+    refresh();
   }
 
   // ---------- pointer ----------

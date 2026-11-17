@@ -15,6 +15,7 @@ SynoFile is MIT and by the same author; its Rust code was moved, not rewritten.
 | Feature | In rynas |
 |---|---|
 | Browse shares, `home`, details, media info (EXIF, MP4/MOV/MKV tags; codecs, bitrate, duration with ffmpeg when installed) | `list`, `stat`, `media`, `init`/`shares` |
+| Checksum in the info panel (SHA-256, SHA-1, MD5, XXH128 printed as `xxhsum -H2`): progress bar with stop, kept per file while it does not change, click to copy, paste one to compare; files on the NAS only (an archive file yes, what is inside it no; not on remote servers) | `checksum` (JSON lines) |
 | Copy / move / delete with `.name.rynas-part` + rename, btrfs reflink in one filesystem, rename for moves, xxHash3 verify on request (no global setting since 2026-11-12: "Copy / Move with verification to…", Shift+F5 / Shift+F6, "Paste with verification" Ctrl+Shift+V, the Alt-drop menu; plain copy and move do not verify; a verified move deletes the originals only after the check), conflicts (ask / overwrite / skip / keep both / newer), pause, cancel, live speed limit, speed series, current file, error list | transfer jobs = rynas tasks (`files.copy`, `files.move`, `files.delete`, `files.compress`, `files.extract`) |
 | Transfers that survive the browser; after a rynasd restart the partial files are cleaned and the job comes back interrupted with Retry | journal in `/var/lib/rynas/files/journal/` (no secrets) |
 | Recycle bin | own `#recycle` per share, Samba `vfs_recycle` layout (see below) |
@@ -486,6 +487,7 @@ administrators sign in). Route names, query parameters and JSON bodies are SynoF
 | GET | `list` | `path` | `{entries: [Entry], writable, space: {free,total}\|null, recycle}`; in an archive `{entries, writable: false, space: null, recycle: false, inner, total}`; remote `{…, remote: {kind, top}}` | worker |
 | GET | `stat` | `path` | `Details` (`name, kind, size, mtime, atime, ctime, mode, owner, group, inode, links, target, outside, readable, writable, device`) | worker |
 | GET | `media` | `path` | EXIF/track facts, `{}` when none | worker |
+| GET | `checksum` | `path`, `algo` = `sha256`\|`sha1`\|`md5`\|`xxh128` | `application/x-ndjson`, `X-Accel-Buffering: no`: `{done, size}` every 500 ms, then `{hash}` (lowercase hex; xxh128 big-endian as `xxhsum -H2`) or `{error, code}`; 400 for a folder or an unknown algorithm, 409 `read_only` inside an archive; the worker dies with the request when the client goes away. rynas-web neither compresses nor buffers it (no total timeout) | worker |
 | POST | `usage` | `{paths}` | `{bytes, files, dirs, unreadable, partial}` (25 s budget) | worker |
 | GET | `space` | `path` | rings (40 s budget) | worker |
 | POST | `mkdir` | `path`, `name`, `parents=1` (a relative path for folder uploads) | `{ok}`; 409 `already_exists` | worker |

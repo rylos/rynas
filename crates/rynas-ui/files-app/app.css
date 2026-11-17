@@ -389,6 +389,21 @@ svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-widt
 .facts.media dd { word-break: normal; overflow-wrap: anywhere; }
 .facts a { color: var(--accent); text-decoration: none; }
 .facts a:hover { text-decoration: underline; }
+.checksum { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 12.5px; }
+.checksum .sum-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.checksum .sum-k { color: var(--faint); margin-right: auto; }
+.checksum .sum-algo { padding: 3px 6px; font-size: 12px; min-width: 0; }
+.checksum .sum-out:empty { display: none; }
+.checksum .sum-out { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.checksum .sum-hash { all: unset; box-sizing: border-box; cursor: copy; font-family: var(--mono); font-size: 11.5px; word-break: break-all; padding: 6px 8px; border-radius: 7px; background: var(--surface-2); border: 1px solid var(--border); }
+.checksum .sum-hash:hover, .checksum .sum-hash:focus-visible { border-color: var(--accent); }
+.checksum .sum-cmp { font-family: var(--mono); font-size: 11.5px; padding: 5px 8px; width: 100%; min-width: 0; box-sizing: border-box; }
+.checksum .sum-verdict:empty { display: none; }
+.checksum .sum-verdict { font-weight: 650; }
+.checksum .sum-verdict.ok { color: var(--ok); }
+.checksum .sum-verdict.bad { color: var(--crit); }
+.checksum .sum-prog { display: flex; align-items: center; gap: 8px; }
+.checksum .sum-prog .pbar { flex: 1; min-width: 0; }
 .info .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
 
 /* ---------- context menu ---------- */

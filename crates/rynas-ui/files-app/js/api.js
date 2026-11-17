@@ -116,6 +116,48 @@ export async function call(route, opts = {}) {
   return data;
 }
 
+/**
+ * A call whose answer is JSON lines arriving over time (`application/x-ndjson`):
+ * each goes to `onLine` as it comes. Errors before the stream starts throw as
+ * `call`'s; a line `{"error", "code"}` is the server's error mid-way and is
+ * handed over like the others.
+ */
+export async function stream(route, params, onLine, signal) {
+  let res;
+  try {
+    res = await fetch(url(route, params), { credentials: "same-origin", headers: headers("GET"), signal });
+  } catch (e) {
+    if (e?.name === "AbortError") throw e;
+    throw new ApiError(0, t("files.common.nas_unreachable"), "network");
+  }
+  const status = statusOf(res);
+  if (!res.ok) {
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+    if (status === 401) notifyUnauth();
+    throw errorOf(status, data);
+  }
+  sessionBack();
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let rest = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    rest += value;
+    let nl;
+    while ((nl = rest.indexOf("\n")) >= 0) {
+      const line = rest.slice(0, nl).trim();
+      rest = rest.slice(nl + 1);
+      if (line) onLine(JSON.parse(line));
+    }
+  }
+  if (rest.trim()) onLine(JSON.parse(rest));
+}
+
 export const api = {
   init: () => call("init"),
   whoami: () => call("whoami"),
@@ -123,6 +165,7 @@ export const api = {
   list: (path) => call("list", { params: { path } }),
   stat: (path, signal) => call("stat", { params: { path }, signal }),
   media: (path, signal) => call("media", { params: { path }, signal }),
+  checksum: (path, algo, onLine, signal) => stream("checksum", { path, algo }, onLine, signal),
   usage: (paths) => call("usage", { body: { paths } }),
   space: (path) => call("space", { params: { path } }),
   mkdir: (path, name, parents) => call("mkdir", { params: { path, name, parents: parents ? 1 : undefined }, body: {} }),
