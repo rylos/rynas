@@ -106,8 +106,14 @@ fn at_text(ms: u64) -> String {
     i18n::date_with(ms as f64, &[("weekday", "short"), ("hour", "2-digit"), ("minute", "2-digit")])
 }
 
+/// A usual length in words: "25 min", "1 h 12 min", "9 h" (whole hours from 3 h up).
+fn length_text(ms: u64) -> String {
+    let s = ms / 1000;
+    if s >= 3 * 3600 { i18n::approx(s + 1800) } else { i18n::duration(s) }
+}
+
 fn est_text(j: &OverviewJob) -> String {
-    j.estimate_ms.map(|d| format!(" ({})", tf("sv.about", &[("d", &i18n::duration(d / 1000))]))).unwrap_or_default()
+    j.estimate_ms.map(|d| format!(" ({})", tf("sv.about", &[("d", &length_text(d))]))).unwrap_or_default()
 }
 
 /// The conflict's sentence in the interface's language.
@@ -505,12 +511,7 @@ fn week_part(o: &SchedulerOverview, shown: &[OverviewJob], open: Callback<String
         .iter()
         .map(|&(ds, de)| {
             let label = i18n::date_with(ds as f64, &[("weekday", "long"), ("day", "numeric"), ("month", "short")]);
-            let items: Vec<AnyView> = o
-                .runs
-                .iter()
-                .filter(|r| r.start_ms >= ds && r.start_ms < de)
-                .filter_map(|r| shown.iter().find(|j| j.id == r.job).map(|j| run_item(r, j, o, open)))
-                .collect();
+            let items = listed(o, shown, |r| r.start_ms >= ds && r.start_ms < de, open);
             let empty = items.is_empty();
             view! {
                 <section class="sv-list-day">
@@ -532,13 +533,41 @@ fn week_part(o: &SchedulerOverview, shown: &[OverviewJob], open: Callback<String
     .into_any()
 }
 
+/// The starts of a list: a job that starts more than 6 times in it (snapshots every hour)
+/// and has no conflict there is listed once, at its first start, with how many starts it has.
+fn listed<'a>(o: &'a SchedulerOverview, shown: &'a [OverviewJob], keep: impl Fn(&OverviewRun) -> bool, open: Callback<String>) -> Vec<AnyView> {
+    let runs: Vec<&OverviewRun> = o.runs.iter().filter(|r| keep(r)).filter(|r| shown.iter().any(|j| j.id == r.job)).collect();
+    let count = |id: &str| runs.iter().filter(|r| r.job == id).count();
+    let calm = |id: &str| runs.iter().filter(|r| r.job == id).all(|r| conflicts_of(r, o).is_empty());
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out = Vec::new();
+    for r in &runs {
+        let Some(j) = shown.iter().find(|j| j.id == r.job) else { continue };
+        let n = count(&r.job);
+        if n > 6 && calm(&r.job) {
+            if seen.contains(&r.job.as_str()) {
+                continue;
+            }
+            seen.push(&r.job);
+            out.push(run_item(r, j, o, open, n));
+        } else {
+            out.push(run_item(r, j, o, open, 1));
+        }
+    }
+    out
+}
+
 /// One start in a list: time, the job (opens where it is set), owner, usual length, what it
 /// claims, its conflicts.
-fn run_item(r: &OverviewRun, j: &OverviewJob, o: &SchedulerOverview, open: Callback<String>) -> AnyView {
+fn run_item(r: &OverviewRun, j: &OverviewJob, o: &SchedulerOverview, open: Callback<String>, starts: usize) -> AnyView {
     let cs = conflicts_of(r, o);
-    let when = format!("{}–{}", i18n::time_hm(r.start_ms as f64), i18n::time_hm(r.end_ms as f64));
+    let when = if starts > 1 {
+        format!("{} · {}", i18n::time_hm(r.start_ms as f64), i18n::tn("sv.starts", starts as u64, &[]))
+    } else {
+        format!("{}–{}", i18n::time_hm(r.start_ms as f64), i18n::time_hm(r.end_ms as f64))
+    };
     let est = match (j.estimate_ms, r.estimated) {
-        (Some(d), true) => tf("sv.usual", &[("d", &i18n::duration(d / 1000))]),
+        (Some(d), true) => tf("sv.usual", &[("d", &length_text(d))]),
         _ => t("sv.no_estimate").to_string(),
     };
     let res: Vec<String> = j.resources.iter().map(resource_words).collect();
@@ -575,12 +604,7 @@ fn run_item(r: &OverviewRun, j: &OverviewJob, o: &SchedulerOverview, open: Callb
 /// The next 24 hours as a timeline list.
 fn next_part(o: &SchedulerOverview, shown: &[OverviewJob], open: Callback<String>) -> AnyView {
     let now = from_now();
-    let items: Vec<AnyView> = o
-        .runs
-        .iter()
-        .filter(|r| r.end_ms > now && r.start_ms < now + DAY_MS)
-        .filter_map(|r| shown.iter().find(|j| j.id == r.job).map(|j| run_item(r, j, o, open)))
-        .collect();
+    let items = listed(o, shown, |r| r.end_ms > now && r.start_ms < now + DAY_MS, open);
     if items.is_empty() {
         return view! { <p class="muted table-none">{tr("sv.nothing_24h")}</p> }.into_any();
     }

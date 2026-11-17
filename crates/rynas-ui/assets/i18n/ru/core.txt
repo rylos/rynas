@@ -2490,7 +2490,7 @@ sch.run_queue	Поставить в очередь
 sch.queued_toast	{name} ждёт в очереди
 sch.act.md_check	Проверка RAID
 sch.act.md_check_continue	Проверка RAID (продолжение)
-sch.skip.maintenance	Пропущено: вне окна обслуживания
+sch.skip.maintenance	Пропущено: вне часов обслуживания
 sch.q.window	Ждёт окна обслуживания ({when})
 sch.col.owner	Владелец
 sch.own.snapshots	Снимки
@@ -2546,6 +2546,10 @@ sv.nothing_24h	В ближайшие 24 часа ничего не заплан�
 sv.usual	обычно длится {d}
 sv.no_estimate	длительность пока неизвестна
 sv.every_h	Каждые {h} ч
+sv.starts.one	{n} запуск
+sv.starts.few	{n} запуска
+sv.starts.many	{n} запусков
+sv.starts.other	{n} запуска
 sv.uses	Использует {res}
 sv.h.outcome	Результат
 sv.h.all	Все

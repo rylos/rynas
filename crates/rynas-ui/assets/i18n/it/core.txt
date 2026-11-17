@@ -2470,7 +2470,7 @@ sch.run_queue	Metti in coda
 sch.queued_toast	{name} attende in coda
 sch.act.md_check	Controllo RAID
 sch.act.md_check_continue	Controllo RAID (continuazione)
-sch.skip.maintenance	Saltata: fuori dalla finestra di manutenzione
+sch.skip.maintenance	Saltata: fuori orario di manutenzione
 sch.q.window	In attesa della finestra di manutenzione ({when})
 sch.col.owner	Proprietario
 sch.own.snapshots	Snapshot
@@ -2522,6 +2522,8 @@ sv.nothing_24h	Niente di pianificato nelle prossime 24 ore.
 sv.usual	di solito dura {d}
 sv.no_estimate	durata non ancora nota
 sv.every_h	Ogni {h} h
+sv.starts.one	{n} avvio
+sv.starts.other	{n} avvii
 sv.uses	Usa {res}
 sv.h.outcome	Esito
 sv.h.all	Tutti
