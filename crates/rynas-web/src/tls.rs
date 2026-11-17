@@ -104,6 +104,42 @@ fn stamp_of(paths: [&PathBuf; 2]) -> Option<Stamp> {
     Some([one(paths[0])?, one(paths[1])?])
 }
 
+/// The CPU encrypts AES in hardware (AES-NI / ARMv8 AES). Without it AES-GCM runs in
+/// software and is several times slower than ChaCha20-Poly1305: on a small NAS the HTTPS
+/// of a PC backup is then bound by this process's CPU, not by the network.
+fn aes_in_hardware() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("aes") && std::arch::is_x86_feature_detected!("pclmulqdq")
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("aes") && std::arch::is_aarch64_feature_detected!("pmull")
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        false
+    }
+}
+
+/// The ring provider, with the ChaCha20-Poly1305 suites first when the CPU has no AES
+/// hardware (the listener then also prefers its own order, see [`CertReloader::server_config`]).
+fn tls_provider(aes_hw: bool) -> CryptoProvider {
+    let mut p = rustls::crypto::ring::default_provider();
+    if !aes_hw {
+        // stable: the AES suites keep their order behind the ChaCha ones
+        p.cipher_suites.sort_by_key(|s| {
+            !matches!(
+                s.suite(),
+                rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+                    | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+                    | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+            )
+        });
+    }
+    p
+}
+
 /// Loads the certificate files into the [`Resolver`] and keeps them current.
 pub struct CertReloader {
     cert: PathBuf,
@@ -127,7 +163,7 @@ impl CertReloader {
             resolver: Arc::default(),
             stamp: Mutex::new(None),
             agent_stamp: Mutex::new(None),
-            provider: Arc::new(rustls::crypto::ring::default_provider()),
+            provider: Arc::new(tls_provider(aes_in_hardware())),
         })
     }
 
@@ -238,6 +274,9 @@ impl CertReloader {
             .with_no_client_auth()
             .with_cert_resolver(self.resolver.clone());
         c.alpn_protocols = vec![b"http/1.1".to_vec()];
+        // without AES hardware our order (ChaCha20 first) wins over the client's, which
+        // prefers AES when it has the hardware itself
+        c.ignore_client_order = !aes_in_hardware();
         Arc::new(c)
     }
 }
@@ -544,6 +583,26 @@ mod tests {
         ] {
             assert_eq!(location(bad, 8443, "/"), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn chacha_first_only_without_aes_hardware() {
+        let chacha = |s: &rustls::SupportedCipherSuite| {
+            matches!(
+                s.suite(),
+                rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+                    | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+                    | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+            )
+        };
+        let soft = tls_provider(false).cipher_suites;
+        let n = soft.iter().filter(|s| chacha(s)).count();
+        assert!(n >= 2);
+        assert!(soft[..n].iter().all(chacha), "ChaCha suites lead");
+        assert_eq!(soft.len(), rustls::crypto::ring::default_provider().cipher_suites.len());
+        let hw: Vec<_> = tls_provider(true).cipher_suites.iter().map(|s| s.suite()).collect();
+        let def: Vec<_> = rustls::crypto::ring::default_provider().cipher_suites.iter().map(|s| s.suite()).collect();
+        assert_eq!(hw, def, "with AES hardware the default order stays");
     }
 
     #[test]
