@@ -474,6 +474,7 @@ files.settings.choose	Scegli…
 files.settings.use_folder	Usa questa cartella
 files.sidebar.default_order	Ordine predefinito
 files.settings.volume_names	Nomi dei volumi
+files.settings.volume_names_hint	Quelli dati ai volumi (es. «HDD»), altrimenti «Volume 1»
 files.settings.show_favorites	Mostra i preferiti
 files.settings.favorites_section_sidebar_stay_saved	La sezione Preferiti della barra laterale; restano salvati anche se nascosti
 files.conns.load_file	Carica da file…

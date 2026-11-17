@@ -490,6 +490,7 @@ files.settings.choose	Выбрать…
 files.settings.use_folder	Использовать эту папку
 files.sidebar.default_order	Порядок по умолчанию
 files.settings.volume_names	Имена томов
+files.settings.volume_names_hint	Имена, заданные томам (например, «HDD»), иначе «Том 1»
 files.settings.show_favorites	Показывать избранное
 files.settings.favorites_section_sidebar_stay_saved	Раздел «Избранное» на боковой панели; пока он скрыт, элементы остаются сохранёнными
 files.conns.load_file	Загрузить из файла…

@@ -65,7 +65,7 @@ function body(section) {
         row("files.common.show_hidden_files", "files.settings.those_starting_dot_ctrl_h", sw("showHidden")) +
         row("files.settings.hidden_files_last", "files.settings.shown_after_others", sw("hiddenLast")) +
         row("files.settings.show_favorites", "files.settings.favorites_section_sidebar_stay_saved", sw("showFavorites")) +
-        row("files.settings.volume_names", "Quelli dati ai volumi (es. «HDD»), altrimenti «Volume 1»", sw("volumeNames")) +
+        row("files.settings.volume_names", "files.settings.volume_names_hint", sw("volumeNames")) +
         row("files.settings.remember_view_sort_each_folder", "files.settings.otherwise_last_ones_used_apply", sw("perFolder")) +
         row("files.settings.highlight_today_dates", "files.settings.in_modified_column", sw("todayHighlight")) +
         row("files.settings.binary_sizes", "files.settings.kib_mib_gib_1024_instead", sw("binarySizes")) +

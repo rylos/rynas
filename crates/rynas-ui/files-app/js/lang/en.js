@@ -480,6 +480,7 @@ export default {
   "files.settings.use_folder": "Use this folder",
   "files.sidebar.default_order": "Default order",
   "files.settings.volume_names": "Volume names",
+  "files.settings.volume_names_hint": "The names given to the volumes (e.g. “HDD”), otherwise “Volume 1”",
   "files.settings.show_favorites": "Show favorites",
   "files.settings.favorites_section_sidebar_stay_saved": "The Favorites section of the sidebar; they stay saved while hidden",
   "files.conns.load_file": "Load from file…",
