@@ -2446,7 +2446,7 @@ sch.skip.missed_detail	Non recuperata: oltre {deadline} di ritardo
 sch.skip.overlap	Saltata: l'esecuzione precedente era in corso
 sch.skip.running	Saltata: già in esecuzione
 sch.skip.window	Saltata: fuori dalla sua finestra
-sch.skip.allowed	In attesa: in scadenza fuori dalla finestra consentita
+sch.skip.allowed	In attesa della finestra consentita
 sch.allowed.switch	Avvia solo dentro una finestra consentita
 sch.allowed.help	Un backup che scade fuori dalla finestra aspetta che si apra. Un backup ancora in corso quando la finestra si chiude prosegue fino alla fine.
 sch.allowed.title	Finestra consentita

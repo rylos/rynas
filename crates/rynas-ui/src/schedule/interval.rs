@@ -12,7 +12,7 @@ use rynas_api_types::scheduler::{SchedulePreviewRequest, TaskTrigger, week_windo
 use super::window::NextRuns;
 use crate::form::{number_field, select_field, switch};
 use crate::i18n::{t, tf, tr};
-use crate::week_grid::{GridLevel, GridTone, summary_text, week_grid};
+use crate::week_grid::{GridLevel, GridTone, week_grid};
 
 /// The grid's two levels: no backup starts / backups may start.
 const LEVELS: &[GridLevel] = &[
@@ -109,7 +109,6 @@ impl IntervalEditor {
                 <div class="field">
                     {week_grid(LEVELS, e.grid, "sch.allowed.title", None)}
                     <span class="field-help">{tr("sch.allowed.grid_help")}</span>
-                    <span class="field-help">{move || summary_text(&e.grid.get(), LEVELS)}</span>
                     {old_agent.then(|| view! { <p class="field-help warn-text">{e.agent.with_value(|v| tf("sch.allowed.old_agent", &[("version", v)]))}</p> })}
                 </div>
             </Show>

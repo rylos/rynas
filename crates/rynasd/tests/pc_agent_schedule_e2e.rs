@@ -193,7 +193,6 @@ async fn an_agent_with_a_window_starts_only_inside_it() {
     let r: Vec<TaskRun> = rows();
     assert_eq!(r.len(), 1, "{r:?}");
     assert_eq!(r[0].skipped, Some(SkipReason::Window));
-    assert!(r[0].detail.as_deref().is_some_and(|d| d.contains("waits until it opens")), "{:?}", r[0].detail);
     assert!(agent.device("laptop").unwrap().last_ok_ms.is_none());
 
     // 2. the window open now: it starts at once; the run is in the history (trigger timer)

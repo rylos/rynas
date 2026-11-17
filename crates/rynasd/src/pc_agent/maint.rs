@@ -811,19 +811,8 @@ fn record_skip(svc: &PcAgent, device: &str, run: &PcRun, reason: rynas_api_types
     let (reason, detail) = match reason {
         SkipReason::Paused | SkipReason::PausedAll if svc.paused_all() => (SkipReason::PausedAll, None),
         SkipReason::Paused | SkipReason::PausedAll => (SkipReason::Paused, None),
-        SkipReason::Window => {
-            let tz = rynas_power::system_tz();
-            let opens = svc
-                .device(device)
-                .ok()
-                .and_then(|d| d.settings.plan.window)
-                .and_then(|w| rynas_schedule::window::opens_at(&w, &tz, at));
-            let detail = match opens {
-                Some(o) => format!("due outside the allowed window: waits until it opens ({})", rynas_scheduler::maintenance::wall_clock(&tz, o)),
-                None => "due outside the allowed window: waits until it opens".to_string(),
-            };
-            (SkipReason::Window, Some(detail))
-        }
+        // the interface names it (the row's task says it is a PC's backup)
+        SkipReason::Window => (SkipReason::Window, None),
         // nothing else is a reason an agent gives
         _ => return,
     };

@@ -379,6 +379,8 @@ pub fn run_status(r: &TaskRun) -> (Tone, String) {
     let text = match r.result.as_str() {
         "timeout" => t("sch.run.timeout").to_string(),
         "signal" | "core-dump" => tf("sch.run.signal", &[("sig", r.signal.as_deref().unwrap_or("?"))]),
+        // a PC's backup run (S6): failed, its error in the detail
+        "failed" => t("sch.run.failed").to_string(),
         _ => match r.exit_code {
             Some(c) => tf("sch.run.exit", &[("code", &c.to_string())]),
             None => format!("{} ({})", t("sch.run.failed"), r.result),

@@ -3108,7 +3108,7 @@ dict! { BLOB, LENS;
     "sch.skip.overlap" => "Skipped: previous run still going";
     "sch.skip.running" => "Skipped: already running";
     "sch.skip.window" => "Skipped: past its window";
-    "sch.skip.allowed" => "Waiting: due outside its allowed window";
+    "sch.skip.allowed" => "Waiting for its allowed window";
     "sch.allowed.switch" => "Start only inside an allowed window";
     "sch.allowed.help" => "A backup that comes due outside the window waits for it to open. A backup still running when the window closes goes on to its end.";
     "sch.allowed.title" => "Allowed window";
