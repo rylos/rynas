@@ -554,6 +554,13 @@ pub(crate) fn applied_task(p: &Protection, id: &str) -> Res<Option<ScheduledTask
     Ok(t)
 }
 
+/// The task `id` of the saved revision only (not one an apply in progress is adding: its unit
+/// may not exist yet), for what a user starts.
+fn committed_task(p: &Protection, id: &str) -> Res<Option<ScheduledTask>> {
+    let doc: SchedulerConfig = crate::services::from_value(p.ops.config.applied(SCHEDULER_KEY)?)?;
+    Ok(doc.tasks.into_iter().find(|t| t.id == id))
+}
+
 /// Run now: starts the applied unit (same environment as a scheduled run); 409
 /// `not_applied` for a task that is only staged.
 async fn run_now(
@@ -564,7 +571,7 @@ async fn run_now(
     let (p, who) = (prot(&st)?, user(&h)?);
     check_id(&id)?;
     blocking(&p, move |p| {
-        let Some(t) = applied_task(p, &id)? else {
+        let Some(t) = committed_task(p, &id)? else {
             return Err(conflict(
                 error_codes::NOT_APPLIED,
                 format!("task {id} is not applied yet: apply the pending changes first"),

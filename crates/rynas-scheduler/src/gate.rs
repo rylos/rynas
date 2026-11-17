@@ -318,6 +318,7 @@ pub fn classify(s: &Start) -> RunTrigger {
     }
 }
 
+/// The gate's decision for a start.
 pub fn decide(s: &Start) -> Decision {
     let mut trigger = classify(s);
     let attempt = requested(s).map_or(0, |(_, a)| a);

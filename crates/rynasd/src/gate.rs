@@ -430,7 +430,7 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
         by_timer,
         requested,
         last_run,
-        not_before_ms: interval_not_before(&task, now),
+        not_before_ms: if interval && last_run.is_none() { interval_not_before(p, &task, now) } else { 0 },
         pause: &pause,
         running_elsewhere: p.gate.running_elsewhere(id, &req.invocation_id, &p.ops.tasks),
         tz: &tz,
@@ -645,6 +645,12 @@ fn boot_ms(now: u64) -> u64 {
     now.saturating_sub((up * 1000.0) as u64)
 }
 
+/// The interval tasks that are due now: their interval (and random part) has passed since
+/// their last run (or the feature's own last check), or, never run, their delay after the
+/// boot or rynasd's start has. Not while paused, a retry chain waits, or a start rynasd asked
+/// for is on its way. Their timer's own starts go through the gate, which skips those that
+/// are not due; this is what starts them at the right time after such a skip. Also keeps the
+/// Docker page's next check.
 fn due_intervals<'a>(
     p: &Protection,
     applied: &'a [ScheduledTask],
@@ -656,7 +662,7 @@ fn due_intervals<'a>(
     for t in applied.iter().filter(|t| matches!(t.trigger, TaskTrigger::Interval { .. })) {
         // a history that cannot be read: nothing is started (no extra runs)
         let Ok(last) = interval_last(p, t) else { continue };
-        let due = interval_due(t, last, now);
+        let due = interval_due(p, t, last, now);
         // the Docker page shows the next check: the same time the loop starts it at
         if matches!(t.action, TaskAction::DockerImageCheck)
             && let Some(d) = p.ops.docker.get()
@@ -711,20 +717,52 @@ pub fn interval_last(p: &Protection, t: &ScheduledTask) -> Result<Option<(u64, u
 }
 
 /// An interval task that never ran is not due before its delay after the later of the boot
-/// and the start of rynasd.
-pub fn interval_not_before(t: &ScheduledTask, now: u64) -> u64 {
+/// and the start of rynasd that first saw it (as the loops counted after a start). That time
+/// is kept in `<state>/scheduler/first-due.json`, so a later restart of rynasd does not push
+/// it back again; it no longer matters once the task has run.
+pub fn interval_not_before(p: &Protection, t: &ScheduledTask, now: u64) -> u64 {
     let TaskTrigger::Interval { after_boot_min, .. } = t.trigger else {
         return 0;
     };
-    boot_ms(now).max(started_ms()) + u64::from(after_boot_min) * 60_000
+    first_due(&p.state_dir.join(FIRST_DUE_FILE), &t.id, || {
+        boot_ms(now).max(started_ms()) + u64::from(after_boot_min) * 60_000
+    })
 }
+
+/// The time stored for `id` in the file `path`, or `compute()` stored there now.
+fn first_due(path: &std::path::Path, id: &str, compute: impl FnOnce() -> u64) -> u64 {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _g = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut map: std::collections::BTreeMap<String, u64> = std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    if let Some(at) = map.get(id) {
+        return *at;
+    }
+    let at = compute();
+    map.insert(id.to_string(), at);
+    let tmp = path.with_extension("json.tmp");
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|_| std::fs::write(&tmp, serde_json::to_vec(&map).unwrap_or_default()))
+        .and_then(|_| std::fs::rename(&tmp, path));
+    if let Err(e) = written {
+        tracing::warn!("scheduler: {}: {e}", path.display());
+    }
+    at
+}
+
+/// The first due time of the interval tasks that never ran ([`interval_not_before`]).
+pub const FIRST_DUE_FILE: &str = "scheduler/first-due.json";
 
 /// When an interval task is due ([`rynas_scheduler::gate::interval_due_ms`] from its last
 /// run, else [`interval_not_before`]).
-fn interval_due(t: &ScheduledTask, last: Option<(u64, u64)>, now: u64) -> u64 {
+fn interval_due(p: &Protection, t: &ScheduledTask, last: Option<(u64, u64)>, now: u64) -> u64 {
     match last {
         Some((_, end)) => rynas_scheduler::gate::interval_due_ms(t, end).unwrap_or(u64::MAX),
-        None => interval_not_before(t, now),
+        None => interval_not_before(p, t, now),
     }
 }
 
@@ -858,5 +896,17 @@ mod tests {
         assert!(g.interval_may_start(&t.id, Some(1), &t));
         // a run happened: at once again
         assert!(g.interval_may_start(&t.id, Some(2), &t));
+    }
+
+    /// The first due time of a never-run interval task is kept: a restart of rynasd (another
+    /// computed time) does not push it back.
+    #[test]
+    fn first_due_survives_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FIRST_DUE_FILE);
+        assert_eq!(first_due(&path, "updates-check", || 1000), 1000);
+        assert_eq!(first_due(&path, "updates-check", || 9000), 1000, "after a restart");
+        assert_eq!(first_due(&path, "pcbackup-retention", || 5000), 5000);
+        assert_eq!(first_due(&path, "updates-check", || 9000), 1000);
     }
 }

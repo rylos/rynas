@@ -82,10 +82,11 @@ fn hostname(h: &str) -> serde_json::Value {
 }
 
 /// What a reload starts at once (a timer that fires and asks rynas for its task) sees the
-/// value being applied, before the revision is saved; after the apply, nothing is applying.
+/// value being applied, before the revision is saved; a rollback's reloads see the applied
+/// value again; after the apply (a failure, a panic included) nothing is applying.
 #[test]
 fn the_value_being_applied_is_visible_during_its_reloads() {
-    type Seen = Arc<Mutex<Option<Option<serde_json::Value>>>>;
+    type Seen = Arc<Mutex<Vec<(Option<serde_json::Value>, Option<Option<serde_json::Value>>)>>>;
     struct Probe {
         cfg: Arc<std::sync::OnceLock<std::sync::Weak<Config>>>,
         seen: Seen,
@@ -100,17 +101,21 @@ fn the_value_being_applied_is_visible_during_its_reloads() {
         fn render(&self, v: &serde_json::Value, _: &ApplyCtx) -> std::result::Result<Vec<ManagedFile>, String> {
             Ok(vec![ManagedFile::whole("/etc/probe.conf", v.to_string(), true)])
         }
-        fn reconcile(&self, _: Option<&serde_json::Value>, _: Option<&serde_json::Value>, _: &ApplyCtx) -> std::result::Result<(), String> {
+        fn reconcile(&self, _: Option<&serde_json::Value>, to: Option<&serde_json::Value>, _: &ApplyCtx) -> std::result::Result<(), String> {
             let cfg = self.cfg.get().and_then(std::sync::Weak::upgrade).unwrap();
-            // the applied value is still the old one, the value being applied the new one
-            assert_eq!(cfg.applied("t.probe").unwrap(), None);
-            *self.seen.lock().unwrap() = cfg.applying("t.probe");
+            if to.is_some_and(|v| v["n"] == 3) {
+                panic!("a domain that panics");
+            }
+            self.seen.lock().unwrap().push((to.cloned(), cfg.applying("t.probe")));
             Ok(())
+        }
+        fn health(&self, v: Option<&serde_json::Value>, _: &ApplyCtx) -> std::result::Result<(), String> {
+            if v.is_some_and(|v| v["n"] == 2) { Err("unhealthy".into()) } else { Ok(()) }
         }
     }
     let dir = tempfile::tempdir().unwrap();
     let slot = Arc::new(std::sync::OnceLock::new());
-    let seen: Seen = Arc::new(Mutex::new(None));
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
     let cfg = Arc::new(
         Config::open(
             ConfigOptions::new(dir.path().join("state"), dir.path()),
@@ -120,11 +125,32 @@ fn the_value_being_applied_is_visible_during_its_reloads() {
         .unwrap(),
     );
     slot.set(Arc::downgrade(&cfg)).unwrap();
-    cfg.stage("admin", "t.probe", Some(json!({"n": 1}))).unwrap();
-    cfg.apply("admin", "admin", "", &|_| {}, &|| false).unwrap();
-    assert_eq!(*seen.lock().unwrap(), Some(Some(json!({"n": 1}))));
+    let apply = |n: i64| {
+        cfg.stage("admin", "t.probe", Some(json!({ "n": n }))).unwrap();
+        cfg.apply("admin", "admin", "", &|_| {}, &|| false)
+    };
+    // the reload sees the new value while the applied one is still the old one
+    apply(1).unwrap();
+    assert_eq!(seen.lock().unwrap().clone(), [(Some(json!({"n": 1})), Some(Some(json!({"n": 1}))))]);
     assert_eq!(cfg.applying("t.probe"), None);
     assert_eq!(cfg.applied("t.probe").unwrap(), Some(json!({"n": 1})));
+    // a failed apply: the rollback's reload belongs to the applied value again
+    seen.lock().unwrap().clear();
+    assert!(apply(2).is_err());
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        [(Some(json!({"n": 2})), Some(Some(json!({"n": 2})))), (Some(json!({"n": 1})), None)]
+    );
+    assert_eq!(cfg.applying("t.probe"), None);
+    // a domain that panics leaves nothing behind
+    cfg.discard("admin").unwrap();
+    let c2 = cfg.clone();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        c2.stage("admin", "t.probe", Some(json!({"n": 3}))).unwrap();
+        c2.apply("admin", "admin", "", &|_| {}, &|| false)
+    }));
+    assert!(r.is_err());
+    assert_eq!(cfg.applying("t.probe"), None);
 }
 
 #[test]

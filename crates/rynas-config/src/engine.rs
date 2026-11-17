@@ -248,6 +248,23 @@ pub struct Config {
     pending_listener: OnceLock<PendingListener>,
 }
 
+/// The values of an apply in progress ([`Config::applying`]) while it lives: cleared when it
+/// goes, however the apply ends (an error, a panic in a domain).
+struct Applying<'a>(&'a Mutex<BTreeMap<String, Option<Value>>>);
+
+impl<'a> Applying<'a> {
+    fn set(m: &'a Mutex<BTreeMap<String, Option<Value>>>, values: BTreeMap<String, Option<Value>>) -> Self {
+        *m.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = values;
+        Applying(m)
+    }
+}
+
+impl Drop for Applying<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    }
+}
+
 /// See [`Config::on_pending_change`].
 pub type PendingListener = Box<dyn Fn(u64) + Send + Sync>;
 
@@ -362,7 +379,7 @@ impl Config {
     /// asks rynas about (a timer that fires at once and asks for its task): the new value is
     /// the one it belongs to. An apply that fails rolls its files back.
     pub fn applying(&self, key: &str) -> Option<Option<Value>> {
-        self.applying.lock().unwrap().get(key).cloned()
+        self.applying.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(key).cloned()
     }
 
     /// The applied value, or what the system has when the key was never applied.
@@ -853,22 +870,22 @@ impl Config {
         ));
         // what the reloads start (a timer that fires at once) may ask for the new value before
         // the revision is saved: it is visible as the value being applied until then
-        *self.applying.lock().unwrap() = steps
-            .iter()
-            .filter(|s| !s.follow)
-            .map(|s| (s.key.clone(), s.new.clone()))
-            .collect();
+        // (cleared on every way out, a panic included; a rollback clears it first)
+        let applying = Applying::set(
+            &self.applying,
+            steps.iter().filter(|s| !s.follow).map(|s| (s.key.clone(), s.new.clone())).collect(),
+        );
         let piped = self.run_pipeline(&steps, &backup_dir, log, cancelled);
         let (written, restore) = match piped {
             Ok(r) => r,
             Err(e) => {
-                self.applying.lock().unwrap().clear();
+                drop(applying);
                 let _ = std::fs::remove_dir_all(&backup_dir);
                 return Err(e);
             }
         };
         let committed = self.commit(rev, owner, author, comment, restored_from, &steps, &written);
-        self.applying.lock().unwrap().clear();
+        drop(applying);
         if let Err(e) = committed {
             log(&format!("saving the revision failed: {e}; rolling back"));
             self.rollback(&steps, &restore, steps.len(), log);
@@ -1123,6 +1140,8 @@ impl Config {
     /// values. Best effort: failures are logged.
     fn rollback(&self, steps: &[Step], restore: &[Restore], reloaded: usize, log: &dyn Fn(&str)) {
         log("rolling back");
+        // what the rollback's reloads start belongs to the applied value again
+        self.applying.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
         let mut ctx = self.ctx_logging(log);
         ctx.rolling_back = true;
         // the apply renamed the host (its files, its services) and the previous name goes
