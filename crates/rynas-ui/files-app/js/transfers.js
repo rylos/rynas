@@ -187,8 +187,7 @@ export function stats(job) {
   const rate = smooth || avg;
   const remaining = Math.max(0, totalWork - doneWork);
   const eta = job.state === "running" && rate > 0 && !p.scanning ? (remaining / rate) * 1000 : null;
-  const filesRate = elapsed > 1000 ? (p.files_done / elapsed) * 1000 : 0;
-  return { pct, now, avg, peak, eta, elapsed, byBytes, verify, verified, filesRate, totalWork, doneWork };
+  return { pct, now, avg, peak, eta, elapsed, byBytes, verify, verified, totalWork, doneWork };
 }
 
 function merge(update) {
@@ -640,6 +639,7 @@ class JobDialog {
         <div class="xf-current"></div>
         <div class="xf-conflict" hidden></div>
         <details class="xf-errors" hidden><summary></summary><ul></ul></details>
+        <details class="xf-queue" hidden><summary></summary><ul></ul></details>
         <div class="xf-summary" role="status" hidden></div>
       </div>
       <div class="xf-foot">
@@ -661,6 +661,12 @@ class JobDialog {
     $(".b-close", this.dlg).onclick = () => this.dlg.close();
     $(".b-cancel", this.dlg).onclick = () => control(this.job, "cancel");
     $(".b-start", this.dlg).onclick = () => control(this.job, "start");
+    // the jobs waiting for this one: started at once, or called off
+    $(".xf-queue ul", this.dlg).onclick = (e) => {
+      const b = e.target.closest("button[data-a]");
+      const other = b && jobs.get(+b.dataset.id);
+      if (other) control(other, b.dataset.a);
+    };
     $(".b-pause", this.dlg).onclick = () => control(this.job, this.job.state === "paused" ? "resume" : "pause");
     $(".b-retry", this.dlg).onclick = () => {
       // the same job again
@@ -915,16 +921,13 @@ class JobDialog {
     // stats
     const running = job.state === "running";
     const end = st.eta != null ? Date.now() + st.eta : null;
-    const methods = methodLabels();
     const cells = [
       [t("files.transfers.speed"), !running ? "—" : st.byBytes ? speed(st.now) : t("files.transfers.n_s", { n: perSecond(st.now) }), true],
       [t("files.transfers.average"), st.byBytes ? speed(st.avg) : "—"],
       [t("files.transfers.peak"), st.byBytes ? speed(st.peak) : "—"],
-      [t("files.transfers.files_per_second"), st.filesRate ? perSecond(st.filesRate) : "—"],
       [t("files.transfers.elapsed"), duration(st.elapsed)],
       [t("files.transfers.remaining"), finished(job) ? "—" : st.eta != null ? "~ " + duration(st.eta) : p.scanning ? t("files.transfers.estimating") : "—", true],
       [t("files.transfers.expected_end"), end ? clock(end) : finished(job) && job.finished ? clock(job.finished) : "—"],
-      [t("files.transfers.method"), methods[p.method] || "—"],
     ];
     setHTML($(".xf-stats", d), cells.map(([k, v, hl]) => `<div class="stat ${hl ? "hl" : ""}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join(""));
 
@@ -943,6 +946,7 @@ class JobDialog {
     if (!tickOnly) {
       this.renderConflict(job);
       this.renderErrors(job);
+      this.renderQueue(job);
     }
 
     // the end
@@ -1067,6 +1071,23 @@ class JobDialog {
     this.errorsKey = key;
     $("summary", box).textContent = count(job.progress.errors || errs.length, "files.transfers.count.errors", int);
     $("ul", box).innerHTML = errs.map((e) => `<li><span title="${esc(e.path)}">${esc(e.path)}</span><span title="${esc(e.msg || "")}">${esc(errorText(e))}</span></li>`).join("");
+  }
+
+  /** The other transfers waiting their turn, folded away until asked for. */
+  renderQueue(job) {
+    const box = $(".xf-queue", this.dlg);
+    const waiting = [...jobs.values()].filter((j) => j.id !== job.id && j.state === "queued").sort((a, b) => (a.created || 0) - (b.created || 0) || a.id - b.id);
+    box.hidden = !waiting.length;
+    if (!waiting.length) return;
+    $("summary", box).textContent = count(waiting.length, "files.transfers.count.queued", int);
+    const startNow = esc(t("files.transfers.start_now"));
+    const cancel = esc(t("files.common.cancel"));
+    setHTML($("ul", box), waiting.map((j) => {
+      const r = route(j);
+      const op = OP[j.op] || OP.copy;
+      const start = j.source === "local" ? "" : `<button type="button" class="icon-btn" data-a="start" data-id="${j.id}" title="${startNow}" aria-label="${startNow}">${svg("play")}</button>`;
+      return `<li>${svg(op.icon)}<div class="tt"><b title="${esc(title(j))}">${esc(title(j))}</b><small>${esc(r.from)} → ${esc(r.to || "")}</small></div>${start}<button type="button" class="icon-btn" data-a="cancel" data-id="${j.id}" title="${cancel}" aria-label="${cancel}">${svg("stop")}</button></li>`;
+    }).join(""));
   }
 
   /** The speed chart: throughput against progress (or time), with the average. */

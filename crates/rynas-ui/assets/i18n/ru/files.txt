@@ -91,6 +91,10 @@ files.transfers.count.errors.one	{n} ошибка
 files.transfers.count.errors.few	{n} ошибки
 files.transfers.count.errors.many	{n} ошибок
 files.transfers.count.errors.other	{n} ошибки
+files.transfers.count.queued.one	{n} передача в очереди
+files.transfers.count.queued.few	{n} передачи в очереди
+files.transfers.count.queued.many	{n} передач в очереди
+files.transfers.count.queued.other	{n} передачи в очереди
 files.pane.count.selected.one	Выбрано: {n}
 files.pane.count.selected.few	Выбрано: {n}
 files.pane.count.selected.many	Выбрано: {n}
@@ -319,11 +323,9 @@ files.transfers.data_copy	Копирование данных
 files.transfers.speed	Скорость
 files.transfers.average	Средняя
 files.transfers.peak	Пиковая
-files.transfers.files_per_second	Файлов в секунду
 files.transfers.elapsed	Прошло
 files.transfers.remaining	Осталось
 files.transfers.expected_end	Ожидаемое завершение
-files.transfers.method	Способ
 files.transfers.estimating	оценка…
 files.transfers.n_s	{n}/с
 files.transfers.method_verify	проверка

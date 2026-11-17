@@ -81,6 +81,8 @@ files.common.count.folders.one	{n} cartella
 files.common.count.folders.other	{n} cartelle
 files.transfers.count.errors.one	{n} errore
 files.transfers.count.errors.other	{n} errori
+files.transfers.count.queued.one	{n} trasferimento in coda
+files.transfers.count.queued.other	{n} trasferimenti in coda
 files.pane.count.selected.one	{n} selezionato
 files.pane.count.selected.other	{n} selezionati
 files.common.count.items_selected.one	{n} elemento selezionato
@@ -305,11 +307,9 @@ files.transfers.data_copy	Copia dati
 files.transfers.speed	Velocità
 files.transfers.average	Media
 files.transfers.peak	Picco
-files.transfers.files_per_second	File al secondo
 files.transfers.elapsed	Trascorso
 files.transfers.remaining	Rimanente
 files.transfers.expected_end	Fine prevista
-files.transfers.method	Metodo
 files.transfers.estimating	calcolo…
 files.transfers.n_s	{n}/s
 files.transfers.method_verify	verifica
