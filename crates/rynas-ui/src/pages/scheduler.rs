@@ -12,7 +12,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::PendingOp;
 use rynas_api_types::scheduler::{
-    Blocker, CronEntry, LiveRun, NotifyPolicy, PauseRequest, QueueWait, Resource, RunConflicts, RunNowRequest, RunTrigger, ScheduledTask, SchedulerPause, SkipReason,
+    Blocker, CronEntry, LiveRun, NotifyPolicy, OverviewOwner, PauseRequest, QueueWait, Resource, RunConflicts, RunNowRequest, RunTrigger, ScheduledTask, SchedulerPause, SkipReason,
     SmartTestKind, SystemTimer, TaskAction, TaskRun, TaskTrigger, TaskView, YieldInfo,
 };
 
@@ -281,6 +281,46 @@ pub fn owner_page(a: &TaskAction) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Who a job belongs to, in words (the owner column, the Schedule page).
+pub fn owner_text(o: OverviewOwner) -> String {
+    t(match o {
+        OverviewOwner::User => "sch.title",
+        OverviewOwner::Snapshots => "sch.own.snapshots",
+        OverviewOwner::Replication => "sch.own.replication",
+        OverviewOwner::Backup => "sch.own.backup",
+        OverviewOwner::Power => "sch.own.power",
+        OverviewOwner::Dedup => "sch.own.dedup",
+        OverviewOwner::Updates => "sch.own.updates",
+        OverviewOwner::Docker => "sch.own.docker",
+        OverviewOwner::Apps => "sch.own.apps",
+        OverviewOwner::PcBackup => "sch.own.pc_backup",
+        OverviewOwner::System => "sch.own.system",
+    })
+    .to_string()
+}
+
+/// The owner of a task.
+pub fn owner_of(a: &TaskAction) -> OverviewOwner {
+    OverviewOwner::of(&rynas_api_types::scheduler::TaskOwner::of_action(a))
+}
+
+/// The CSS suffix of an owner's colour (`own-<suffix>`).
+pub fn owner_class(o: OverviewOwner) -> &'static str {
+    match o {
+        OverviewOwner::User => "user",
+        OverviewOwner::Snapshots => "snapshots",
+        OverviewOwner::Replication => "replication",
+        OverviewOwner::Backup => "backup",
+        OverviewOwner::Power => "power",
+        OverviewOwner::Dedup => "dedup",
+        OverviewOwner::Updates => "updates",
+        OverviewOwner::Docker => "docker",
+        OverviewOwner::Apps => "apps",
+        OverviewOwner::PcBackup => "pc",
+        OverviewOwner::System => "system",
+    }
+}
+
 /// Where a task managed by another page is changed (`None`: edited here).
 fn managed_href(a: &TaskAction) -> Option<String> {
     match a {
@@ -323,6 +363,7 @@ pub fn run_status(r: &TaskRun) -> (Tone, String) {
             SkipReason::Window => (Tone::Unknown, "sch.skip.window"),
             SkipReason::NotDue => (Tone::Unknown, "sch.skip.not_due"),
             SkipReason::Busy => (Tone::Warn, "sch.skip.busy"),
+            SkipReason::Maintenance => (Tone::Unknown, "sch.skip.maintenance"),
         };
         return (tone, t(key).to_string());
     }
@@ -362,7 +403,7 @@ pub fn run_origin(r: &TaskRun) -> Option<String> {
         (None, Some(_)) if r.yielded => Some(t("sch.yielded_detail").to_string()),
         // the server names what it waited for in English (the journal's words): the chip says
         // enough
-        (Some(SkipReason::Busy), _) => None,
+        (Some(SkipReason::Busy | SkipReason::Maintenance), _) => None,
         (_, Some(d)) if !d.is_empty() => Some(d.to_string()),
         _ => None,
     };
@@ -373,7 +414,7 @@ pub fn run_origin(r: &TaskRun) -> Option<String> {
 }
 
 /// The i18n key of one of rynas's own jobs by its task id (their stored names are English).
-fn own_job_key(id: &str) -> Option<&'static str> {
+pub(crate) fn own_job_key(id: &str) -> Option<&'static str> {
     use rynas_api_types::scheduler::system as s;
     Some(match id {
         s::UPDATES_CHECK => "sch.act.updates_check",
@@ -415,6 +456,9 @@ fn blocker_who(b: &Blocker) -> String {
 
 /// "Queued: waiting for Backup offsite on /srv/vol1".
 pub fn queued_text(q: &QueueWait) -> String {
+    if let Some(o) = q.window_opens_ms {
+        return tf("sch.q.window", &[("when", &i18n::short_when(o))]);
+    }
     match &q.blocker {
         Some(b) => tf("sch.q.waiting", &[("who", &blocker_who(b)), ("res", &resource_text(&b.resource))]),
         None => t("sch.q.queued").to_string(),
@@ -568,7 +612,7 @@ const PAUSE_FOR: &[(&str, &str)] = &[
 ];
 
 /// Pauses every task (`task` `None`) or one task (id, name).
-fn pause_dialog(task: Option<(String, String)>, done: Callback<()>, close: Callback<()>) -> AnyView {
+pub(crate) fn pause_dialog(task: Option<(String, String)>, done: Callback<()>, close: Callback<()>) -> AnyView {
     let reason = RwSignal::new(String::new());
     let dur = RwSignal::new("0".to_string());
     let busy = RwSignal::new(false);
@@ -621,7 +665,7 @@ fn pause_dialog(task: Option<(String, String)>, done: Callback<()>, close: Callb
 }
 
 /// While every task is paused: what it means, since when, and Resume.
-fn pause_banner(pause: Remote<SchedulerPause>, tasks: Remote<Vec<TaskView>>) -> impl IntoView {
+pub(crate) fn pause_banner(pause: Remote<SchedulerPause>, tasks: Remote<Vec<TaskView>>) -> impl IntoView {
     let busy = RwSignal::new(false);
     let resume = move |_| {
         busy.set(true);
@@ -711,7 +755,7 @@ fn tasks_panel(tasks: Remote<Vec<TaskView>>, edit: RwSignal<Option<(ScheduledTas
             };
         }
         view! {
-            {ui::table("", &["sch.col.enabled", "sch.col.task", "sch.col.action", "sch.col.schedule", "sch.col.last", ""], rows.into_iter().map(|v| task_row(v, tasks, edit, history, del, pausing, asking)).collect::<Vec<_>>())}
+            {ui::table("", &["sch.col.enabled", "sch.col.task", "sch.col.owner", "sch.col.action", "sch.col.schedule", "sch.col.last", ""], rows.into_iter().map(|v| task_row(v, tasks, edit, history, del, pausing, asking)).collect::<Vec<_>>())}
         }
         .into_any()
     };
@@ -877,6 +921,7 @@ fn task_row(
                 </div>
             }
             .into_any()),
+            ui::cell("sch.col.owner", "", view! { <span class=format!("owner-tag own-{}", owner_class(owner_of(&task.action)))>{owner_text(owner_of(&task.action))}</span> }.into_any()),
             ui::cell("sch.col.action", "sch-action", view! {
                 <div class="cell-main">
                     <span>{akind}</span>
@@ -966,7 +1011,7 @@ fn task_row(
     )
 }
 
-fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyView {
+pub(crate) fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyView {
     let internal_fixed = !is_new && init.action.is_internal();
     // the schedule of a job's, a replica's or a power rule's task is theirs (the server
     // refuses a change here): shown, not edited
@@ -1023,6 +1068,20 @@ fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyVie
         },
     );
     let (notify_output, set_notify_output) = lens_bool(d, |t| t.notify_output, |t, v| t.notify_output = v);
+    // heavy work follows the global maintenance window unless it has a start window of its
+    // own; stored only when it differs from that default
+    let (in_window, set_in_window) = lens_bool(
+        d,
+        |t| t.policy.maintenance.unwrap_or(t.policy.window_min.unwrap_or(0) == 0),
+        |t, v| t.policy.maintenance = (v != (t.policy.window_min.unwrap_or(0) == 0)).then_some(v),
+    );
+    let heavy = Memo::new(move |_| {
+        if internal_fixed {
+            d.with(|t| t.action.heavy())
+        } else {
+            act.with(|a| a.action().is_ok_and(|x| x.heavy()))
+        }
+    });
 
     let akind = Memo::new(move |_| act.with(|a| a.kind.clone()));
     let afield = move |get: fn(&ActionDraft) -> String, set: fn(&mut ActionDraft, String)| (Signal::derive(move || act.with(get)), Callback::new(move |v| act.update(|a| set(a, v))));
@@ -1162,6 +1221,7 @@ fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyVie
             } else {
                 trig.view(true)
             }}
+            {move || heavy.get().then(|| switch("sch.f.maintenance", Some("sch.f.maintenance_help"), in_window, set_in_window))}
             <h3 class="form-section">{tr("sch.sec.notify")}</h3>
             {select_field("sch.f.notify", None, NOTIFY, notify, set_notify)}
             {switch("sch.f.notify_output", Some("sch.f.notify_output_help"), notify_output, set_notify_output)}
@@ -1184,7 +1244,7 @@ fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyVie
 
 const HISTORY_PAGE: usize = 50;
 
-fn history_drawer(task: ScheduledTask, tasks: Remote<Vec<TaskView>>, close: Callback<()>) -> AnyView {
+pub(crate) fn history_drawer(task: ScheduledTask, tasks: Remote<Vec<TaskView>>, close: Callback<()>) -> AnyView {
     let id = task.id.clone();
     let runs = RwSignal::new(None::<Vec<TaskRun>>);
     let err = RwSignal::new(None::<String>);

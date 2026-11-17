@@ -2378,6 +2378,68 @@ body:has(.sysp-overlay), body:has(.sysp-overlay) .main { overflow: hidden; }
 .dd-hrow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
 /* shared folder list: deduplication on, a coloured label like the protocol ones */
 
+/* Schedule page (pages/schedule.rs): owners' colours, the week view (days × 24 h, bars in
+   lanes, windows as bands) and, on a narrow box, the same days as lists */
+.own-user { --own: var(--c3); }
+.own-snapshots { --own: var(--c4); }
+.own-replication { --own: var(--accent-2); }
+.own-backup { --own: var(--c1); }
+.own-power { --own: var(--danger); }
+.own-dedup { --own: var(--border-strong); }
+.own-updates { --own: var(--c5); }
+.own-docker, .own-apps { --own: var(--info); }
+.own-pc { --own: var(--success-fill); }
+.own-system { --own: var(--text-subtle); }
+.owner-tag { display: inline-flex; align-items: center; gap: var(--s-2); font-size: var(--fs-13); color: var(--text-muted); overflow-wrap: anywhere; min-width: 0; }
+.owner-tag::before { content: ""; flex: none; width: 10px; height: 10px; border-radius: var(--r-xs); background: var(--own, var(--border-strong)); }
+.sv-mw-on { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); }
+.sv-mw-on p { margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.sv-filters { align-items: flex-end; }
+.sv-filter { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; max-width: 100%; }
+.sv-filter .input { max-width: 100%; }
+.sv-outcomes { min-width: 0; max-width: 100%; }
+.sv-outcomes .field { margin: 0; }
+.sv-outcomes .segmented { flex-wrap: wrap; max-width: 100%; }
+.sv-conflicts { margin: var(--s-2) 0 0; padding-left: var(--s-4); display: flex; flex-direction: column; gap: var(--s-1); overflow-wrap: anywhere; }
+.sv { container: sv / inline-size; min-width: 0; margin-top: var(--s-3); }
+.sv-week { display: flex; flex-direction: column; gap: var(--s-1); }
+.sv-hours { display: flex; gap: var(--s-2); font-size: var(--fs-12); color: var(--text-subtle); font-family: var(--mono); }
+.sv-hour-scale { position: relative; flex: 1; min-width: 0; height: 16px; }
+.sv-hour-scale span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.sv-hour-scale span:first-child { transform: none; }
+.sv-day { display: flex; gap: var(--s-2); align-items: stretch; }
+.sv-day-label { flex: none; width: 64px; font-size: var(--fs-13); color: var(--text-muted); padding-top: var(--s-1); }
+.sv-today .sv-day-label { color: var(--accent); font-weight: 600; }
+.sv-track { position: relative; flex: 1; min-width: 0; height: calc(var(--lanes, 1) * 24px + 8px); border-radius: var(--r-sm); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--border); overflow: hidden; }
+.sv-grid { position: absolute; inset: 0; background: repeating-linear-gradient(90deg, transparent 0 calc(100% / 24 - 1px), var(--border) calc(100% / 24 - 1px) calc(100% / 24)); pointer-events: none; }
+.sv-band { position: absolute; top: 0; bottom: 0; background: color-mix(in oklch, var(--own, var(--accent)) 12%, transparent); pointer-events: none; }
+.sv-band-mw { background: repeating-linear-gradient(135deg, color-mix(in oklch, var(--accent) 16%, transparent) 0 4px, transparent 4px 8px); box-shadow: inset 0 2px 0 var(--accent); }
+.sv-now { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--danger); pointer-events: none; }
+.sv-bar { position: absolute; top: calc(var(--lane, 0) * 24px + 4px); height: 20px; min-width: 6px; display: flex; align-items: center; padding: 0 var(--s-1); border-radius: var(--r-xs); border-left: 3px solid var(--own, var(--accent)); background: color-mix(in oklch, var(--own, var(--accent)) 30%, var(--surface)); color: var(--text); font-size: var(--fs-12); overflow: hidden; text-decoration: none; }
+.sv-bar:hover, .sv-bar:focus-visible { background: color-mix(in oklch, var(--own, var(--accent)) 45%, var(--surface)); z-index: 2; }
+.sv-bar:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+.sv-bar-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sv-conflict.sv-bar { box-shadow: 0 0 0 2px var(--warning-fill); }
+.sv-skipped.sv-bar { opacity: .55; background: repeating-linear-gradient(135deg, color-mix(in oklch, var(--own, var(--accent)) 30%, var(--surface)) 0 4px, var(--surface) 4px 8px); }
+.sv-daylist { display: none; flex-direction: column; gap: var(--s-4); }
+.sv-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.sv-item { display: flex; gap: var(--s-3); padding: var(--s-2) 0 var(--s-2) var(--s-3); border-left: 3px solid var(--own, var(--accent)); border-bottom: 1px solid var(--border); min-width: 0; }
+.sv-item.sv-conflict { background: color-mix(in oklch, var(--warning-fill) 10%, transparent); }
+.sv-item-time { flex: none; width: 112px; font-size: var(--fs-13); color: var(--text-muted); }
+.sv-item-main { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; flex: 1; }
+.sv-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); min-width: 0; }
+.sv-item-head .link-strong { overflow-wrap: anywhere; }
+.sv-item-warn { margin: 0; padding-left: var(--s-4); color: var(--warning); font-size: var(--fs-13); overflow-wrap: anywhere; }
+.sv-legend { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-4); margin: var(--s-3) 0 0; padding: 0; list-style: none; }
+.sv-legend-mw { display: inline-flex; align-items: center; gap: var(--s-2); font-size: var(--fs-13); color: var(--text-muted); }
+.sv-swatch-mw { width: 16px; height: 10px; border-radius: var(--r-xs); background: repeating-linear-gradient(135deg, color-mix(in oklch, var(--accent) 30%, transparent) 0 3px, transparent 3px 6px); box-shadow: inset 0 2px 0 var(--accent); }
+@container sv (max-width: 639px) {
+  .sv-week { display: none; }
+  .sv-daylist { display: flex; }
+  .sv-item { flex-direction: column; gap: var(--s-1); }
+  .sv-item-time { width: auto; }
+}
+
 /* printing: the whole page, not the visible part of the scrolling main area */
 @media print {
   .app { height: auto; display: block; }

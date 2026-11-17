@@ -62,6 +62,7 @@ fn entries() -> Vec<Entry> {
         Entry { text: None, key: "proc.title", icon: icons::ACTIVITY, action: Action::Go("/system/processes"), hint: "" },
         Entry { text: None, key: "cfg.title", icon: icons::HISTORY, action: Action::Go("/system/configuration"), hint: "" },
         Entry { text: None, key: "sch.title", icon: icons::CALENDAR_CLOCK, action: Action::Go("/system/scheduler"), hint: "" },
+        Entry { text: None, key: "sv.title", icon: icons::CALENDAR_CLOCK, action: Action::Go("/system/schedule"), hint: "" },
         Entry { text: None, key: "upd.title", icon: icons::DOWNLOAD, action: Action::Go("/system/updates"), hint: "" },
         Entry { text: None, key: "nt.settings_title", icon: icons::BELL_RING, action: Action::Go("/system/notifications"), hint: "" },
         Entry { text: None, key: "nt.center", icon: icons::BELL, action: Action::Go("/notifications"), hint: "" },

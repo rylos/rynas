@@ -2470,6 +2470,67 @@ sch.run_queue	Metti in coda
 sch.queued_toast	{name} attende in coda
 sch.act.md_check	Controllo RAID
 sch.act.md_check_continue	Controllo RAID (continuazione)
+sch.skip.maintenance	Saltata: fuori dalla finestra di manutenzione
+sch.q.window	In attesa della finestra di manutenzione ({when})
+sch.col.owner	Proprietario
+sch.own.snapshots	Snapshot
+sch.own.replication	Replica
+sch.own.backup	Backup
+sch.own.power	Accensione pianificata
+sch.own.dedup	Deduplicazione
+sch.own.updates	Aggiornamenti di sistema
+sch.own.docker	Docker
+sch.own.apps	Catalogo app
+sch.own.pc_backup	Backup dei PC
+sch.own.system	Sistema
+sch.f.maintenance	Segui la finestra di manutenzione
+sch.f.maintenance_help	Se nella pagina Pianificazione è impostata una finestra di manutenzione, un avvio pianificato fuori dalla finestra attende che si apra, oppure viene saltato se la finestra si apre dopo la scadenza dell'avvio.
+sv.title	Pianificazione
+sv.subtitle	Tutti i lavori pianificati, le finestre e i conflitti della settimana
+sv.open_text	Cosa parte e quando: la settimana a colpo d'occhio, le prossime 24 ore, i conflitti, la finestra di manutenzione e la cronologia di tutte le attività.
+sv.tab.week	Settimana
+sv.tab.next	Prossime 24 ore
+sv.tab.history	Cronologia
+sv.grid_off	Chiusa
+sv.grid_on	Aperta
+sv.about	≈{d}
+sv.c.waits	{a}{est} si sovrappone a {b} alle {when} su {res}; {who} attenderà
+sv.c.gives_way	{a}{est} si sovrappone a {b} alle {when} su {res}; {a} cederà il passo e riprenderà dopo
+sv.c.both_run	{a}{est} si sovrappone a {b} alle {when} su {res}; vanno entrambi, più lentamente
+sv.c.deferred	{a} alle {when} è fuori dalla finestra di manutenzione; attenderà fino a {until}
+sv.c.skipped	{a} alle {when} è fuori dalla finestra di manutenzione, che si apre solo dopo la sua scadenza; verrà saltata
+sv.c.more.one	e un'altra volta questa settimana
+sv.c.more.other	e altre {n} volte questa settimana
+sv.conflicts.one	{n} conflitto
+sv.conflicts.other	{n} conflitti
+sv.mw.title	Finestra di manutenzione
+sv.mw.off	Spenta: il lavoro pesante parte ai suoi orari.
+sv.mw.help	Il lavoro pesante (scrub, backup, replica, manutenzione dei backup dei PC, test SMART lunghi, controllo RAID, aggiornamenti di sistema e di Docker) parte solo dentro questa finestra. Un avvio fuori dalla finestra attende che si apra, oppure viene saltato se la finestra si apre dopo la scadenza dell'avvio. I lavori con una propria finestra di avvio la mantengono, a meno che in Attività pianificate non seguano questa finestra.
+sv.mw.saved	Finestra di manutenzione salvata
+sv.mw.enabled	Usa una finestra di manutenzione
+sv.mw.enabled_help	Spenta: niente attende una finestra.
+sv.mw.grid_help	Colora le ore in cui il lavoro pesante può partire, nell'ora locale del NAS.
+sv.mw.empty	Apri almeno un'ora, oppure spegni la finestra.
+sv.f.volume	Volume
+sv.f.all_volumes	Tutti i volumi
+sv.f.owner	Proprietario
+sv.f.all_owners	Tutti i proprietari
+sv.empty	Niente di pianificato
+sv.empty_text	Qui compaiono le attività pianificate, i lavori di snapshot e di backup, gli aggiornamenti e i controlli.
+sv.nothing	Niente di pianificato
+sv.nothing_24h	Niente di pianificato nelle prossime 24 ore.
+sv.usual	di solito dura {d}
+sv.no_estimate	durata non ancora nota
+sv.every_h	Ogni {h} h
+sv.uses	Usa {res}
+sv.h.outcome	Esito
+sv.h.all	Tutti
+sv.h.ok	Riusciti
+sv.h.failed	Non riusciti
+sv.h.skipped	Saltati
+sv.h.yielded	Hanno ceduto il passo
+sv.h.all_tasks	Tutte le attività
+sv.h.none	Nessuna esecuzione corrisponde a questi filtri.
 sch.trigger.catch_up	Recupero dopo lo spegnimento
 sch.trigger.boot	All'avvio
 sch.trigger.manual	Esegui ora

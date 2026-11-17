@@ -8,6 +8,7 @@ pub mod docker;
 pub mod files;
 pub mod hardware;
 pub mod notifications;
+pub mod schedule;
 pub mod scheduler;
 pub mod scheduler_live;
 pub mod memory;

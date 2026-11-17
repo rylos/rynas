@@ -142,6 +142,14 @@ pub fn System() -> impl IntoView {
                 <section class="card widget w-12 link-card" style="--i:3">
                     <span class="w-icon"><Icon icon=icons::CALENDAR_CLOCK size=18 /></span>
                     <div class="link-card-text">
+                        <h2 class="w-title">{tr("sv.title")}</h2>
+                        <p class="muted small">{tr("sv.open_text")}</p>
+                    </div>
+                    <a class="btn ghost" href="/system/schedule">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
+                </section>
+                <section class="card widget w-12 link-card" style="--i:3">
+                    <span class="w-icon"><Icon icon=icons::CALENDAR_CLOCK size=18 /></span>
+                    <div class="link-card-text">
                         <h2 class="w-title">{tr("sch.title")}</h2>
                         <p class="muted small">{tr("sch.open_text")}</p>
                     </div>
