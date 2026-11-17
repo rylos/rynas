@@ -770,7 +770,8 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                     <button class="btn primary sm" disabled=move || busy.get() || running || waiting
                         title=move || if running { t("pca.st.running") } else if waiting { t("pca.waiting_pc") } else { "" }
                         on:click=move |_| command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("run_now")}</button>
-                    <button class="btn ghost sm" disabled=move || busy.get() || !running on:click=move |_| command("cancel")><Icon icon=icons::SQUARE size=14 />{tr("pca.cancel")}</button>
+                    // also takes back a "Back up now" still waiting for the PC
+                    <button class="btn ghost sm" disabled=move || busy.get() || !(running || waiting) on:click=move |_| command("cancel")><Icon icon=icons::SQUARE size=14 />{tr("pca.cancel")}</button>
                 })}
                 <button class="btn ghost sm" on:click=make_code><Icon icon=icons::LIFE_BUOY size=14 />{tr("pca.restore_code")}</button>
             </div>
@@ -1354,17 +1355,10 @@ fn browse_drawer(device: String, version: String, close: Callback<()>) -> AnyVie
         selected.set(Vec::new());
         path.set(p.clone());
         let (u, v) = base.get_value();
-        let url = format!("{u}/browse?version={}&path={}", api::encode(&v), api::encode(&p));
-        // a new listing for the new folder
-        let r = Remote::<Vec<NodeEntry>>::new(url);
-        Effect::new(move |_| {
-            if let Some(d) = r.data.get() {
-                listing.data.set(Some(d));
-            }
-            if let Some(e) = r.err.get() {
-                listing.err.set(Some(e));
-            }
-        });
+        // the same listing, pointed at the new folder (an effect made in a click handler has
+        // no owner and never ran: the browser stayed on its skeleton)
+        listing.err.set(None);
+        listing.load(format!("{u}/browse?version={}&path={}", api::encode(&v), api::encode(&p)));
     };
     let up = move |_| {
         let p = path.get_untracked();

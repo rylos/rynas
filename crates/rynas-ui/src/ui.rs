@@ -324,6 +324,18 @@ impl<T: serde::de::DeserializeOwned + Send + Sync + 'static> Remote<T> {
         );
     }
 
+    /// Points the value at another address and fetches it (a browser going into a folder).
+    /// What was shown stays until the new answer; an answer still on its way for the old
+    /// address is dropped when it arrives.
+    pub fn load(self, url: impl Into<String>) {
+        let url = url.into();
+        let _ = self.src.try_update_value(|s| {
+            s.0 = url;
+            s.1.clear();
+        });
+        self.reload();
+    }
+
     pub fn retry(self) -> Callback<()> {
         Callback::new(move |_| self.reload())
     }
@@ -350,7 +362,12 @@ impl<T: serde::de::DeserializeOwned + Send + Sync + 'static> Remote<T> {
 fn fetch_text(src: StoredValue<(String, String)>, err: RwSignal<Option<String>>, apply: Callback<String>) {
     let Some(url) = src.try_with_value(|s| s.0.clone()) else { return };
     leptos::task::spawn_local(async move {
-        match crate::api::get_text(&url).await {
+        let answer = crate::api::get_text(&url).await;
+        // the value was pointed at another address meanwhile (`Remote::load`): stale answer
+        if src.try_with_value(|s| s.0 != url) != Some(false) {
+            return;
+        }
+        match answer {
             Ok(text) => {
                 // a set notifies even when the value stays the same: views that read the error
                 // (gates, `not_found` pages) would be built again on every successful poll
