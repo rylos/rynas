@@ -470,8 +470,12 @@ apt-get install -y -qq /tmp/rynas-old.deb >/dev/null 2>&1
 useradd -m -G rynas-admin alice; echo 'alice:Al1ce-test-pw' | chpasswd
 sleep 2
 systemctl is-active -q rynasd.service || fail "old release not running"
-# the online catalog was checked an hour ago (the next automatic check is due in about a day);
-# the machine booted long ago (a container sees the host's uptime): every OnBootSec= is past
+# the online catalog was checked an hour ago (the next automatic check is due in about a day).
+# In a container OnBootSec= counts from the container's systemd start (it is OnStartupSec=
+# there), while rynasd reads the host's uptime: wait until every OnBootSec= of the tasks (at
+# most 10 min, the 2 min of the retention matter) is past, as on a NAS that booted long ago,
+# so their timers elapse at once when created and the gate alone keeps them waiting
+while [ "$(ps -o etimes= -p 1 | tr -d ' ')" -lt 150 ]; do sleep 5; done
 systemctl stop rynasd.service rynasd.socket
 mkdir -p /var/lib/rynas/catalog
 echo "{\"last_check\": $(( $(date +%s) - 3600 ))}" > /var/lib/rynas/catalog/state.json

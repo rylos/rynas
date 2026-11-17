@@ -58,6 +58,9 @@ pub const SPOOL_FILE: &str = "scheduler/gate-spool.jsonl";
 pub const GATE_TIMEOUT: Duration = Duration::from_secs(20);
 /// A timer start this close after a scheduled time (plus the random delay) is on time.
 pub const ON_TIME_MS: u64 = 120_000;
+/// An interval task's timer start this close before it is due runs (timers have
+/// `AccuracySec=1s`); earlier it is not due.
+pub const INTERVAL_ON_TIME_MS: u64 = 5_000;
 /// Spool lines kept at most (a rynasd down for weeks with minutely tasks).
 pub const SPOOL_MAX: usize = 2000;
 
@@ -507,8 +510,11 @@ pub fn decide(s: &Start) -> Decision {
                     Some((_, end)) => interval_due_ms(s.task, end),
                     None => Some(s.not_before_ms),
                 };
+                // no calendar tolerance here: it would take minutes off the delay after
+                // boot (a timer whose `OnBootSec=` passed long ago elapses at once after an
+                // upgrade) and off the interval; rynasd's watch loop starts it when due
                 if let Some(due) = due
-                    && s.now_ms + ON_TIME_MS < due
+                    && s.now_ms + INTERVAL_ON_TIME_MS < due
                 {
                     return skip(trigger, SkipReason::NotDue, Some(format!("due at {due}")));
                 }
@@ -866,6 +872,26 @@ mod tests {
         by_hand.requested = None;
         by_hand.by_timer = false;
         assert_eq!(decide(&by_hand), Decision::Run { trigger: RunTrigger::Other, attempt: 0 });
+    }
+
+    /// An interval task's timer start is not due before its time: no calendar tolerance (a
+    /// never-run task whose `OnBootSec=` passed long ago elapses at once after an upgrade; its
+    /// delay after rynasd's start must hold).
+    #[test]
+    fn interval_starts_have_no_tolerance() {
+        let tz = utc();
+        let none = SchedulerPause::default();
+        let mut t = task("*-*-* 02:00:00", RunPolicy::default());
+        t.trigger = TaskTrigger::Interval { hours: 1, after_boot_min: 2 };
+        let mut s = start(&t, "2026-11-16T10:00:00", &none, &tz);
+        s.not_before_ms = at("2026-11-16T10:02:00");
+        assert!(matches!(decide(&s), Decision::Skip { reason: SkipReason::NotDue, .. }));
+        s.now_ms = at("2026-11-16T10:01:58");
+        assert!(matches!(decide(&s), Decision::Run { .. }));
+        // after a run: due an interval after its end
+        s.last_run = Some((at("2026-11-16T09:00:00"), at("2026-11-16T09:10:00")));
+        s.now_ms = at("2026-11-16T10:08:30");
+        assert!(matches!(decide(&s), Decision::Skip { reason: SkipReason::NotDue, .. }));
     }
 
     #[test]
