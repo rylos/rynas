@@ -647,6 +647,24 @@ fn drawer(tab: Tab, device: String) -> AnyView {
     let dev = StoredValue::new(device.clone());
     let detail = Remote::<PcDeviceDetail>::new(dev_url(&device));
     let versions = Remote::<Vec<SnapshotEntry>>::new(format!("{}/versions", dev_url(&device)));
+    // live like the list behind it: read again every 5 s while the PC backs up (as the drawer
+    // or the list sees it: a scheduled run that began after the drawer opened) or a command
+    // waits for it; when a run ends, its versions are read again too
+    let busy_now = move || {
+        let name = dev.get_value();
+        detail.data.with(|d| d.as_ref().is_some_and(|d| d.device.state == PcState::Running || command_waiting(&d.device)))
+            || tab.data.data.with(|o| o.as_ref().is_some_and(|o| o.devices.iter().any(|x| x.device == name && x.state == PcState::Running)))
+    };
+    crate::live::poll_while(5000, busy_now, move || detail.reload());
+    let was_running = StoredValue::new(false);
+    Effect::new(move |_| {
+        let running = detail.data.with(|d| d.as_ref().is_some_and(|d| d.device.state == PcState::Running));
+        if was_running.get_value() && !running {
+            versions.reload();
+            tab.data.reload();
+        }
+        was_running.set_value(running);
+    });
     let browse = RwSignal::new(None::<String>);
     let edit = RwSignal::new(false);
     let ask_revoke = RwSignal::new(false);
@@ -720,6 +738,8 @@ fn drawer(tab: Tab, device: String) -> AnyView {
             })
             .collect::<Vec<_>>();
         let running = p.state == PcState::Running;
+        // a backup running, or "Back up now" already waiting for the PC: not again
+        let waiting = command_waiting(&p);
         let revoked = p.revoked;
         let bm_ready = p.bare_metal.ready;
         view! {
@@ -747,7 +767,9 @@ fn drawer(tab: Tab, device: String) -> AnyView {
             {form_error(error)}
             <div class="sec-actions">
                 {(!revoked).then(|| view! {
-                    <button class="btn primary sm" disabled=move || busy.get() || running on:click=move |_| command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("run_now")}</button>
+                    <button class="btn primary sm" disabled=move || busy.get() || running || waiting
+                        title=move || if running { t("pca.st.running") } else if waiting { t("pca.waiting_pc") } else { "" }
+                        on:click=move |_| command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("run_now")}</button>
                     <button class="btn ghost sm" disabled=move || busy.get() || !running on:click=move |_| command("cancel")><Icon icon=icons::SQUARE size=14 />{tr("pca.cancel")}</button>
                 })}
                 <button class="btn ghost sm" on:click=make_code><Icon icon=icons::LIFE_BUOY size=14 />{tr("pca.restore_code")}</button>
