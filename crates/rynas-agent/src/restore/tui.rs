@@ -146,20 +146,21 @@ fn message(term: &mut DefaultTerminal, title: &str, lines: &[String]) -> Answer<
 }
 
 fn date(ms: u64) -> String {
-    // UTC, without a time zone database on a live system
-    let secs = (ms / 1000) as i64;
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", rem / 3600, (rem % 3600) / 60)
+    // the live system's zone (`TZ`, `/etc/localtime`), read once
+    static ZONE: std::sync::OnceLock<Option<jiff::tz::TimeZone>> = std::sync::OnceLock::new();
+    date_in(ms, ZONE.get_or_init(|| jiff::tz::TimeZone::try_system().ok()).as_ref())
+}
+
+/// `YYYY-MM-DD HH:MM` in `tz` with its abbreviation (`CET`, `UTC`); without a known zone, in
+/// UTC and labelled so.
+fn date_in(ms: u64, tz: Option<&jiff::tz::TimeZone>) -> String {
+    let Some(t) = i64::try_from(ms).ok().and_then(|m| jiff::Timestamp::from_millisecond(m).ok()) else {
+        return String::new();
+    };
+    match tz {
+        Some(z) => t.to_zoned(z.clone()).strftime("%Y-%m-%d %H:%M %Z").to_string(),
+        None => t.to_zoned(jiff::tz::TimeZone::UTC).strftime("%Y-%m-%d %H:%M UTC").to_string(),
+    }
 }
 
 fn gib(b: u64) -> String {
@@ -822,6 +823,12 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
 mod tests {
     #[test]
     fn dates() {
-        assert_eq!(super::date(1_709_210_096_000), "2024-02-29 12:34 UTC");
+        // no zone known: UTC, said so
+        assert_eq!(super::date_in(1_709_210_096_000, None), "2024-02-29 12:34 UTC");
+        // the live system's zone, with its abbreviation
+        let rome = jiff::tz::TimeZone::get("Europe/Rome").unwrap();
+        assert_eq!(super::date_in(1_709_210_096_000, Some(&rome)), "2024-02-29 13:34 CET");
+        assert_eq!(super::date_in(1_719_664_496_000, Some(&rome)), "2024-06-29 14:34 CEST");
+        assert_eq!(super::date_in(1_709_210_096_000, Some(&jiff::tz::TimeZone::UTC)), "2024-02-29 12:34 UTC");
     }
 }
