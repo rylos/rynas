@@ -775,3 +775,7 @@ files.sync.n_replaced_go_recycle	Будут заменены: {n}. Текуща�
 files.sync.n_replaced_lost	Будут заменены безвозвратно: {n}. Текущую версию восстановить нельзя.
 files.sync.sync_ask	Синхронизировать папки?
 files.undo.not_recorded	Результат передачи не был записан: отменить нельзя
+files.transfers.destination_gone	Место назначения больше недоступно: диск отключён или нет сети?
+files.transfers.source_gone	Источник больше недоступен: диск отключён или нет сети?
+files.transfers.stopped_unexpectedly	Процесс копирования неожиданно остановился
+files.transfers.cleaning_up	удаление временных файлов…

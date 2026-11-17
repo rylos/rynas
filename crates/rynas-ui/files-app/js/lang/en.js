@@ -755,4 +755,8 @@ export default {
   "files.sync.n_replaced_lost": "{n} will be replaced for good: their current version cannot be restored.",
   "files.sync.sync_ask": "Synchronize the folders?",
   "files.undo.not_recorded": "What the transfer made was not recorded: it cannot be undone",
+  "files.transfers.destination_gone": "The destination is no longer available: disk unplugged or network down?",
+  "files.transfers.source_gone": "The source is no longer available: disk unplugged or network down?",
+  "files.transfers.stopped_unexpectedly": "The copy process stopped unexpectedly",
+  "files.transfers.cleaning_up": "removing the temporary files…",
 };

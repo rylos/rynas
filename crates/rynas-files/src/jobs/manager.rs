@@ -95,9 +95,13 @@ pub struct JobView {
     pub policy: Policy,
     /// [ms since start, bytes done, files done, bytes verified]
     pub samples: Vec<[u64; 4]>,
-    /// stopped by a restart of rynasd: it can be run again
+    /// stopped by a restart of rynasd, or its worker ended without a word: it can be run
+    /// again
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub interrupted: bool,
+    /// its temporary files are being removed: Retry waits for it
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cleaning: bool,
     /// the rynas task (UPID) while and after it runs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
@@ -130,6 +134,49 @@ struct Proc {
     /// when its progress last moved, and what it was
     moved_at: Option<Instant>,
     seen: [u64; 5],
+    /// where it reads and writes, as they were when it started
+    places: Places,
+}
+
+/// The local folders of a job when its worker started, with the device each was on: a
+/// worker that ends without a word is explained by them (a USB disk unplugged, a network
+/// share gone: the folder is missing, or what stands at its path is another filesystem).
+#[derive(Default)]
+struct Places {
+    dest: Option<(PathBuf, u64)>,
+    /// the folders the sources are in
+    sources: Vec<(PathBuf, u64)>,
+}
+
+impl Places {
+    fn of(spec: &Spec) -> Places {
+        let local = |p: &Path| !p.to_str().is_some_and(|s| crate::conns::split(s).is_some());
+        let dev = |p: &Path| std::fs::metadata(p).ok().map(|m| std::os::unix::fs::MetadataExt::dev(&m));
+        let dest = spec.dest.as_deref().filter(|d| local(d)).and_then(|d| Some((d.to_path_buf(), dev(d)?)));
+        let mut sources: Vec<(PathBuf, u64)> = Vec::new();
+        for s in spec.sources.iter().filter(|s| local(s)) {
+            let Some(parent) = s.parent() else { continue };
+            if !sources.iter().any(|(p, _)| p == parent)
+                && let Some(d) = dev(parent)
+            {
+                sources.push((parent.to_path_buf(), d));
+            }
+        }
+        Places { dest, sources }
+    }
+
+    /// Whether a folder is no longer what it was: missing, or another device at its path.
+    fn gone((path, dev): &(PathBuf, u64)) -> bool {
+        std::fs::metadata(path).map(|m| std::os::unix::fs::MetadataExt::dev(&m) != *dev).unwrap_or(true)
+    }
+
+    fn dest_gone(&self) -> bool {
+        self.dest.as_ref().is_some_and(Places::gone)
+    }
+
+    fn sources_gone(&self) -> bool {
+        !self.sources.is_empty() && self.sources.iter().all(Places::gone)
+    }
 }
 
 impl Proc {
@@ -159,6 +206,13 @@ fn pidfd_of(child: &std::process::Child) -> Option<std::os::fd::OwnedFd> {
 /// Job message codes that are not `error_codes`.
 pub const CODE_CANCELLED: &str = "cancelled";
 pub const CODE_INTERRUPTED: &str = "interrupted";
+/// A worker that ended without a word, its destination gone (a disk unplugged, a network
+/// share lost): Retry once it is back.
+pub const CODE_DEST_GONE: &str = "destination_gone";
+/// The same, all its sources' folders gone.
+pub const CODE_SOURCE_GONE: &str = "source_gone";
+/// A worker that ended without a word, for no reason the places tell.
+pub const CODE_STOPPED: &str = "stopped";
 
 /// The rynas task behind a running job.
 pub trait JobTask: Send {
@@ -447,6 +501,7 @@ impl Manager {
             policy: spec.conflict,
             samples: Vec::new(),
             interrupted: false,
+            cleaning: false,
             task_id: None,
             stalled_s: 0,
             cancelling: false,
@@ -491,6 +546,7 @@ impl Manager {
                 let mut v = j.view.clone();
                 v.active_ms = j.active_ms();
                 v.stalled_s = j.stalled().map_or(0, |d| d.as_secs());
+                v.cleaning = j.cleaning;
                 let started = v.started.unwrap_or(0);
                 v.samples.retain(|s| started + s[0] > since);
                 v
@@ -669,7 +725,7 @@ impl Manager {
         let stdin = child.stdin.take().ok_or_else(|| io::Error::other("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no stdout"))?;
         job.stdin = Some(stdin);
-        job.proc = Proc { pidfd: pidfd_of(&child), ..Proc::default() };
+        job.proc = Proc { pidfd: pidfd_of(&child), places: Places::of(&job.spec), ..Proc::default() };
         job.proc.moved(&job.view.progress);
         job.view.started = Some(now_ms());
         job.start_instant = Some(Instant::now());
@@ -752,8 +808,28 @@ impl Manager {
                     }
                     job.set_state(State::Cancelled, &journal);
                 } else {
-                    job.view.msg = t!("the copy process stopped unexpectedly");
-                    job.view.code = error_codes::INTERNAL.into();
+                    // ended without a word (killed, a disk unplugged under it): why, if the
+                    // places tell, and Retry as after a restart
+                    let places = std::mem::take(&mut job.proc.places);
+                    let dest_gone = places.dest_gone();
+                    (job.view.msg, job.view.code) = if dest_gone {
+                        (t!("the destination is no longer available: disk unplugged or network down?"), CODE_DEST_GONE.into())
+                    } else if places.sources_gone() {
+                        (t!("the source is no longer available: disk unplugged or network down?"), CODE_SOURCE_GONE.into())
+                    } else {
+                        (t!("the copy process stopped unexpectedly"), CODE_STOPPED.into())
+                    };
+                    job.view.interrupted = true;
+                    // its temporary files go now when the destination is still there (a
+                    // destination gone is cleaned by the copy itself on Retry: each file
+                    // copied again replaces its own leftover)
+                    if job.spec.op != Op::Delete && job.spec.dest.is_some() && !dest_gone {
+                        job.cleaning = true;
+                        let mut clean = job.spec.clone();
+                        clean.cleanup_of = Some(clean.cleanup_of.unwrap_or(clean.op));
+                        clean.op = Op::Cleanup;
+                        cleanup = Some((id, job.user.clone(), clean));
+                    }
                     job.set_state(State::Failed, &journal);
                 }
             }
@@ -1039,6 +1115,7 @@ fn interrupted(e: JournalEntry, cleaning: bool, journal: &Path) -> Job {
         policy: e.spec.conflict,
         samples: Vec::new(),
         interrupted: true,
+        cleaning,
         task_id: None,
         stalled_s: 0,
         cancelling: false,
@@ -1159,6 +1236,112 @@ mod tests {
         assert!(!m.inner.jobs.lock().unwrap()[0].cleaning);
     }
 
+    /// A worker killed under a job (SIGKILL, a disk unplugged): the job says why when its
+    /// destination is gone, offers Retry, and its temporary files are cleaned only while the
+    /// destination is there; the journal goes once that is done.
+    #[test]
+    fn a_worker_killed_under_a_job_is_explained_and_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let (seen, here, gone) = (dir.path().join("seen"), dir.path().join("here"), dir.path().join("gone"));
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::create_dir_all(&gone).unwrap();
+        let worker = dir.path().join("worker");
+        std::fs::write(
+            &worker,
+            format!(
+                "#!/bin/sh\nread spec\ncase \"$spec\" in *'\"op\":\"cleanup\"'*) echo cleanup >> {seen}; exit 0;; esac\ncase \"$spec\" in *'/gone\"'*) mv {gone} {gone}.away;; esac\nkill -9 $$\n",
+                seen = seen.display(),
+                gone = gone.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let journal = dir.path().join("journal");
+        let m = Manager::new(Config { worker, journal: journal.clone(), hooks: Arc::new(NoHooks) });
+        let user = crate::identity::current().expect("the test user has a passwd entry");
+        let run = |dest: &Path| {
+            let spec: Spec = serde_json::from_value(json!({ "op": "copy", "sources": [dir.path().join("a")], "dest": dest })).unwrap();
+            let info = Info { sources: vec!["/s/a".into()], dest: Some("/d".into()), permanent: false };
+            let id = m.submit(user.clone(), false, spec, info).unwrap()["id"].as_u64().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let jobs = m.list(&user.name, 0)["jobs"].as_array().unwrap().clone();
+                let job = jobs.into_iter().find(|j| j["id"] == id).unwrap();
+                if (job["state"] == "failed" && job["cleaning"].is_null()) || Instant::now() > deadline {
+                    break (id, job);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        // the destination still there: "stopped", Retry, cleaned, the journal gone
+        let (id, job) = run(&here);
+        assert_eq!(job["code"], CODE_STOPPED, "{job}");
+        assert_eq!(job["interrupted"], true);
+        assert_eq!(std::fs::read_to_string(&seen).unwrap_or_default().lines().count(), 1, "one clean-up run");
+        assert!(!journal_path(&journal, id).exists());
+        // the destination gone (unplugged): said so, Retry, nothing cleaned now
+        let (id, job) = run(&gone);
+        assert_eq!(job["code"], CODE_DEST_GONE, "{job}");
+        assert_eq!(job["interrupted"], true);
+        assert_eq!(std::fs::read_to_string(&seen).unwrap_or_default().lines().count(), 1, "no clean-up while it is gone");
+        assert!(!journal_path(&journal, id).exists());
+    }
+
+    /// The same with the real worker (`RYNAS_TEST_WORKER=…/rynas-files-worker cargo test --
+    /// --ignored killed_real`): a copy killed with SIGKILL leaves no temporary file when its
+    /// destination is still there; killed while its destination is away (a disk unplugged),
+    /// Retry once it is back copies the file again, whole.
+    #[test]
+    #[ignore = "needs the worker binary in RYNAS_TEST_WORKER"]
+    fn killed_real_worker_cleans_up_and_retries() {
+        let worker = PathBuf::from(std::env::var("RYNAS_TEST_WORKER").expect("RYNAS_TEST_WORKER"));
+        let dir = tempfile::tempdir().unwrap();
+        let (src, dest) = (dir.path().join("src"), dir.path().join("dest"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        let data: Vec<u8> = (0..6_000_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(src.join("big"), &data).unwrap();
+        let m = Manager::new(Config { worker, journal: dir.path().join("journal"), hooks: Arc::new(NoHooks) });
+        let user = crate::identity::current().unwrap();
+        let roots = [dir.path().to_path_buf()];
+        let spec: Spec = serde_json::from_value(json!({ "op": "copy", "sources": [src.join("big")], "dest": &dest, "limit": 1_000_000, "roots": roots, "write_roots": roots })).unwrap();
+        let info = Info { sources: vec!["/s/big".into()], dest: Some("/d".into()), permanent: false };
+        let part = dest.join(".big.rynas-part");
+        let wait = |what: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !what() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(what(), "timed out");
+        };
+        let job = |id: u64| m.list(&user.name, 0)["jobs"].as_array().unwrap().iter().find(|j| j["id"] == id).cloned().unwrap();
+        let kill = |id: u64| m.inner.jobs.lock().unwrap().iter().find(|j| j.view.id == id).unwrap().proc.signal(libc::SIGKILL);
+        // 1. killed with its destination there: the temporary file goes
+        let id = m.submit(user.clone(), false, spec.clone(), info.clone()).unwrap()["id"].as_u64().unwrap();
+        wait(&|| part.exists());
+        kill(id);
+        wait(&|| job(id)["state"] == "failed" && job(id)["cleaning"].is_null());
+        assert_eq!(job(id)["code"], CODE_STOPPED);
+        assert_eq!(job(id)["interrupted"], true);
+        assert!(!part.exists(), "cleaned");
+        assert!(!dest.join("big").exists());
+        // 2. killed with its destination away, Retry once it is back
+        let id = m.submit(user.clone(), false, spec, info).unwrap()["id"].as_u64().unwrap();
+        wait(&|| part.exists());
+        let away = dir.path().join("dest.away");
+        std::fs::rename(&dest, &away).unwrap();
+        kill(id);
+        wait(&|| job(id)["state"] == "failed");
+        assert_eq!(job(id)["code"], CODE_DEST_GONE, "{}", job(id));
+        assert!(job(id)["cleaning"].is_null());
+        std::fs::rename(&away, &dest).unwrap();
+        let control = Control { id, action: "retry".into(), policy: None, all: false, bps: None, conflict: None, password: None };
+        let next = m.control(&user.name, control).unwrap()["id"].as_u64().unwrap();
+        wait(&|| job(next)["state"] == "done");
+        assert_eq!(std::fs::read(dest.join("big")).unwrap(), data, "copied again, whole");
+        assert!(!part.exists());
+    }
+
     /// The PCs' folders as they are when a job starts: an administrator's job always gets
     /// them fresh (a stale list from the journal or a retry is replaced), anyone else's none.
     #[test]
@@ -1188,12 +1371,13 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         let lines = loop {
             let text = std::fs::read_to_string(&seen).unwrap_or_default();
-            if text.lines().count() >= 2 || Instant::now() > deadline {
+            if text.lines().filter(|l| !l.contains("\"op\":\"cleanup\"")).count() >= 2 || Instant::now() > deadline {
                 break text;
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        let specs: Vec<Spec> = lines.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        // the jobs themselves (each worker ends without a word: its clean-up runs after)
+        let specs: Vec<Spec> = lines.lines().map(|l| serde_json::from_str::<Spec>(l).unwrap()).filter(|s| s.op != Op::Cleanup).collect();
         assert_eq!(specs.len(), 2, "{lines}");
         let admin = specs.iter().find(|s| s.pc_roots.is_some()).expect("the administrator's job is guarded");
         assert_eq!(admin.pc_roots.as_ref().unwrap()[0].path, PathBuf::from("/srv/vol1/pcs/today"));

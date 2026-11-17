@@ -71,6 +71,10 @@ const JOB_CODES = {
   // the state says it already
   cancelled: () => "",
   interrupted: () => t("files.transfers.interrupted_restart_nas"),
+  // the worker ended without a word: why, when its folders tell
+  destination_gone: () => t("files.transfers.destination_gone"),
+  source_gone: () => t("files.transfers.source_gone"),
+  stopped: () => t("files.transfers.stopped_unexpectedly"),
 };
 const errorText = (e) => (e.code === "permission_denied" ? `${t("files.transfers.permission_denied")} · ${t(PERM_HINT)}` : codeText(e.code, e.msg));
 // one failed item with where it failed, never a bare reason
@@ -981,6 +985,7 @@ class JobDialog {
       } else {
         const why = jobMsg(job);
         const head = allFailed(job) ? `${t(STATE.failed)}: ${firstError(job)}` : job.state === "done" ? doneLabel(job, op) : why ? `${t(STATE[job.state])}: ${why}` : t(STATE[job.state]);
+        if (job.cleaning) parts.push(t("files.transfers.cleaning_up"));
         setHTML(sum, `${svg(ok ? "check" : "alert")}<div><b>${esc(head)}</b>${esc(parts.join(" · "))}</div>`);
       }
     } else sum.hidden = true;
@@ -998,6 +1003,9 @@ class JobDialog {
     $(".b-close", d).hidden = !finished(job);
     $(".b-open", d).hidden = !finished(job) || !job.info.dest;
     $(".b-retry", d).hidden = !job.interrupted;
+    // its temporary files are still being removed: Retry once that is over
+    $(".b-retry", d).disabled = !!job.cleaning;
+    $(".b-retry", d).title = job.cleaning ? t("files.transfers.cleaning_up") : "";
     // the focus was on something that went away (Pause, Cancel, a conflict answered): to Close
     // once the job is over, else to the dialog itself; not when the focus has moved on since (to
     // a conflict's first answer)
