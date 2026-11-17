@@ -169,8 +169,9 @@ export function stats(job) {
   if (job.state === "done") pct = 1;
   const s = job.samples;
   const elapsed = job.active_ms + (job.state === "running" && job._polledAt ? Date.now() - job._polledAt : 0);
-  // throughput: bytes moved plus bytes verified
-  const work = (x) => (byBytes ? x[1] + x[3] : x[2]);
+  // throughput: bytes moved plus bytes verified, never the bytes done without moving data
+  // (skipped, cloned, renamed: x[4], 0 in the samples of an older NAS)
+  const work = (x) => (byBytes ? x[1] - (x[4] || 0) + x[3] : x[2]);
   // over the last `ms`, never across a pause (a gap in the samples)
   const windowSpeed = (ms) => {
     if (s.length < 2) return 0;
@@ -182,7 +183,9 @@ export function stats(job) {
   };
   const now = job.state === "running" ? windowSpeed(2500) : 0;
   const smooth = windowSpeed(10000);
-  const avg = elapsed > 500 ? (doneWork / elapsed) * 1000 : 0;
+  // the average leaves the free bytes out too; the percentage and the time left keep them
+  const free = byBytes ? p.bytes_free || 0 : 0;
+  const avg = elapsed > 500 ? (Math.max(0, doneWork - free) / elapsed) * 1000 : 0;
   let peak = 0;
   // over about a second, however close together the samples are
   for (let i = 1, j = 0; i < s.length; i++) {
@@ -1131,7 +1134,10 @@ class JobDialog {
       return c;
     };
     const st = this.st || stats(job);
-    const work = (x) => (st.byBytes ? x[1] + x[3] : x[2]);
+    // the speed from the data moved; the place on the progress axis from all that is done
+    const work = (x) => (st.byBytes ? x[1] - (x[4] || 0) + x[3] : x[2]);
+    const done = (x) => (st.byBytes ? x[1] + x[3] : x[2]);
+    const freeOf = st.byBytes ? (x) => x[4] || 0 : () => 0;
     const s = job.samples;
     const pad = { l: 8, r: 64, t: 22, b: 10 };
     const w = W - pad.l - pad.r;
@@ -1149,7 +1155,7 @@ class JobDialog {
     const curveKey = `${s.length}/${tEnd}/${win}/${st.byBytes}`;
     if (this.curveKey !== curveKey) {
       this.curveKey = curveKey;
-      this.curve = speedCurve(s, work, win);
+      this.curve = speedCurve(s, work, win, done, freeOf);
     }
     const pts = this.curve;
     const headT = pts.length ? this.headTime(job, pts) : 0;
@@ -1165,9 +1171,14 @@ class JobDialog {
         last.n++;
         last.v += (p.v - last.v) / last.n;
         last.verifying ||= p.verifying;
+        last.free ||= p.free;
         last.p = p;
-      } else plot.push({ x, v: p.v, verifying: p.verifying, n: 1, p });
+      } else plot.push({ x, v: p.v, verifying: p.verifying, free: p.free, n: 1, p });
     }
+    // a job that starts by skipping: the line starts where the data starts to move
+    let lead = 0;
+    while (lead < plot.length - 2 && plot[lead + 1].free) lead++;
+    if (lead) plot.splice(0, lead);
 
     // the scale: a round top over the smoothed peak and the average, with hysteresis (it grows
     // at once, shrinks only once everything fits in half of it), so it does not breathe
@@ -1263,29 +1274,43 @@ class JobDialog {
     const grad = g.createLinearGradient(0, pad.t, 0, pad.t + hh);
     grad.addColorStop(0, alpha(accent, 0.38));
     grad.addColorStop(1, alpha(accent, 0.03));
-    g.beginPath();
-    g.moveTo(xy[0][0], yOf(0));
-    g.lineTo(xy[0][0], xy[0][1]);
-    for (let k = 0; k < xy.length - 1; k++) piece(k);
-    g.lineTo(xy[xy.length - 1][0], yOf(0));
-    g.closePath();
+    // filled under the stretches where data moved; a stretch done without moving data (files
+    // skipped, cloned, renamed: "free") is a dashed line with nothing under it
     g.fillStyle = grad;
-    g.fill();
+    for (let a = 0; a < xy.length - 1; ) {
+      if (plot[a + 1].free) {
+        a++;
+        continue;
+      }
+      let b = a;
+      while (b < xy.length - 1 && !plot[b + 1].free) b++;
+      g.beginPath();
+      g.moveTo(xy[a][0], yOf(0));
+      g.lineTo(xy[a][0], xy[a][1]);
+      for (let k = a; k < b; k++) piece(k);
+      g.lineTo(xy[b][0], yOf(0));
+      g.closePath();
+      g.fill();
+      a = b;
+    }
     // the line, green where the data is being verified (one path per run of one colour)
     g.lineWidth = 2;
     g.lineJoin = "round";
     g.lineCap = "round";
     for (let a = 0; a < xy.length - 1; ) {
       const ver = plot[a + 1].verifying;
+      const free = plot[a + 1].free;
       let b = a;
-      while (b < xy.length - 1 && plot[b + 1].verifying === ver) b++;
+      while (b < xy.length - 1 && plot[b + 1].verifying === ver && !!plot[b + 1].free === !!free) b++;
       g.strokeStyle = ver ? col("--ok") : accent;
+      g.setLineDash(free ? [4, 4] : []);
       g.beginPath();
       g.moveTo(xy[a][0], xy[a][1]);
-      for (let k = a; k < b; k++) piece(k);
+      for (let k = a; k < b; k++) (free ? g.lineTo(xy[k + 1][0], xy[k + 1][1]) : piece(k));
       g.stroke();
       a = b;
     }
+    g.setLineDash([]);
     g.restore();
     // the head of the line
     if (active(job) || headT < this.head.target) {
@@ -1382,26 +1407,32 @@ function samplePeriod(s) {
  * instead of starting with the spike of a first short interval. A sample less than 100 ms after
  * the one before it adds no point, and a new sample leaves the earlier points as they were.
  */
-function speedCurve(s, work, win) {
+function speedCurve(s, work, win, done = work, free = () => 0) {
   if (s.length < 2) return [];
   const holes = pauses(s);
   const t0 = s[0][0];
   const tEnd = s[s.length - 1][0];
-  let k = 0;
-  const at = (tm) => {
-    if (tm <= t0) return work(s[0]);
-    if (tm >= tEnd) return work(s[s.length - 1]);
-    while (k > 0 && s[k][0] > tm) k--;
-    while (k < s.length - 2 && s[k + 1][0] < tm) k++;
-    let [a, b] = [s[k][0], s[k + 1][0]];
-    const hole = holes.find(([x]) => x === a);
-    if (hole) {
-      if (tm <= hole[1]) return work(s[k]);
-      a = hole[1];
-    }
-    const f = b > a ? (tm - a) / (b - a) : 1;
-    return work(s[k]) + (work(s[k + 1]) - work(s[k])) * f;
+  // a counter read at any time, interpolated between the samples, flat across a pause
+  const reader = (get) => {
+    let k = 0;
+    return (tm) => {
+      if (tm <= t0) return get(s[0]);
+      if (tm >= tEnd) return get(s[s.length - 1]);
+      while (k > 0 && s[k][0] > tm) k--;
+      while (k < s.length - 2 && s[k + 1][0] < tm) k++;
+      let [a, b] = [s[k][0], s[k + 1][0]];
+      const hole = holes.find(([x]) => x === a);
+      if (hole) {
+        if (tm <= hole[1]) return get(s[k]);
+        a = hole[1];
+      }
+      const f = b > a ? (tm - a) / (b - a) : 1;
+      return get(s[k]) + (get(s[k + 1]) - get(s[k])) * f;
+    };
   };
+  const at = reader(work);
+  const atDone = reader(done);
+  const atFree = reader(free);
   let v = 1;
   const ver = (tm) => {
     // verifying: the verify counter grew around this point (tm only grows)
@@ -1423,7 +1454,12 @@ function speedCurve(s, work, win) {
     if (i && times[i] === times[i - 1]) continue;
     const tm = times[i];
     const v = Math.max(0, (at(tm) - at(tm - win)) / (win / 1000));
-    out.push({ t: tm, w: at(tm), v, verifying: ver(tm) });
+    out.push({ t: tm, w: atDone(tm), f: atFree(tm), v, verifying: ver(tm) });
+  }
+  // free spans: where at least half of the progress was done without moving data
+  for (let i = 1; i < out.length; i++) {
+    const dw = out[i].w - out[i - 1].w;
+    out[i].free = dw > 0 && out[i].f - out[i - 1].f >= dw / 2;
   }
   return out;
 }

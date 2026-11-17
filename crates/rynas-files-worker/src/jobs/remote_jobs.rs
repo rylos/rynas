@@ -622,6 +622,7 @@ impl Engine {
         self.p.skipped += 1;
         self.p.files_done += 1;
         self.p.bytes_done += meta.size;
+        self.p.bytes_free += meta.size;
         self.unverified(meta.size);
     }
 

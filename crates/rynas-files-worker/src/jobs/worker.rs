@@ -430,6 +430,14 @@ impl Engine {
         self.window.1 += n;
     }
 
+    /// `n` bytes done without moving data (a reflink clone, a rename): the bar moves, the
+    /// speed and the bandwidth limit's window do not.
+    fn free(&mut self, n: u64) {
+        self.p.bytes_done += n;
+        self.p.bytes_free += n;
+        self.p.current_done += n;
+    }
+
     /// `n` bytes counted as done that the verification will never read (skipped, renamed):
     /// with verification on they count towards its share too, so it reaches the end.
     fn unverified(&mut self, n: u64) {
@@ -442,7 +450,10 @@ impl Engine {
     /// counts as handled, whatever part of it was copied or verified, so the bar and the
     /// verify share still reach their end. The phase it was in (the verify pass) is undone.
     fn file_failed(&mut self, start: (u64, u64), len: u64, phase: String) {
-        self.p.bytes_done = self.p.bytes_done.max(start.0 + len);
+        // the part never copied is counted as done, not as moved
+        let rest = (start.0 + len).saturating_sub(self.p.bytes_done);
+        self.p.bytes_done += rest;
+        self.p.bytes_free += rest;
         let verified = self.p.verify_bytes.saturating_sub(start.1);
         self.unverified(len.saturating_sub(verified));
         self.p.phase = phase;
@@ -850,7 +861,7 @@ impl Engine {
                     self.p.instant += 1;
                     self.p.files_done += 1;
                     let len = if meta.is_file() { meta.len() } else { 0 };
-                    self.advance(len);
+                    self.free(len);
                     self.unverified(len);
                     return Ok(());
                 }
@@ -901,6 +912,7 @@ impl Engine {
         if meta.is_file() {
             // skipped bytes count as handled, so the bar and the time left stay true
             self.p.bytes_done += meta.len();
+            self.p.bytes_free += meta.len();
             self.unverified(meta.len());
         }
     }
@@ -1007,6 +1019,7 @@ impl Engine {
         self.p.files_done += files;
         self.p.instant += files;
         self.p.bytes_done += bytes;
+        self.p.bytes_free += bytes;
         self.unverified(bytes);
     }
 
@@ -1015,6 +1028,7 @@ impl Engine {
         self.p.files_done += files;
         self.p.skipped += files;
         self.p.bytes_done += bytes;
+        self.p.bytes_free += bytes;
         self.unverified(bytes);
     }
 
@@ -1118,7 +1132,7 @@ impl Engine {
                 self.clone_works = Some(true);
                 self.p.method = "clone".into();
                 self.p.instant += 1;
-                self.advance(size);
+                self.free(size);
                 return Ok(());
             }
             let e = io::Error::last_os_error();
@@ -2636,6 +2650,30 @@ mod tests {
         assert!(!in_use(&part, OsStr::new(".a.rynas-part")));
         assert!(in_use(&dir, OsStr::new(&format!(".rynas-x-{}", std::process::id()))));
         assert!(!in_use(&dir, OsStr::new(".rynas-x-999999999")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skipped_and_renamed_bytes_are_done_without_moving_data() {
+        let dir = scratch("free");
+        let (src, dest) = (dir.join("src"), dir.join("dest"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(src.join("old"), vec![1u8; 3000]).unwrap();
+        fs::write(dest.join("old"), vec![1u8; 3000]).unwrap();
+        fs::write(src.join("new"), vec![2u8; 5000]).unwrap();
+        let spec: Spec = serde_json::from_value(serde_json::json!({ "op": "copy", "sources": [src.join("old"), src.join("new")], "dest": &dest, "conflict": "skip" })).unwrap();
+        let mut e = engine(spec);
+        assert!(e.transfer().is_ok());
+        // the skipped file is done, not moved; the copied one moved (or was cloned: free too)
+        assert_eq!(e.p.bytes_done, 8000);
+        assert!(e.p.bytes_free == 3000 || (e.p.method == "clone" && e.p.bytes_free == 8000), "{:?}", e.p);
+        // a move inside one filesystem is a rename: all free
+        let spec: Spec = serde_json::from_value(serde_json::json!({ "op": "move", "sources": [dest.join("new")], "dest": &src.join("sub"), "conflict": "skip" })).unwrap();
+        fs::create_dir_all(src.join("sub")).unwrap();
+        let mut e = engine(spec);
+        assert!(e.transfer().is_ok());
+        assert_eq!(e.p.bytes_done, e.p.bytes_free);
         let _ = fs::remove_dir_all(&dir);
     }
 

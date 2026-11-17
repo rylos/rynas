@@ -250,6 +250,10 @@ pub struct Progress {
     /// (skipped, renamed, or of a file that failed), so the verify share can reach its end
     #[serde(default)]
     pub verify_skip: u64,
+    /// bytes counted in `bytes_done` without moving any data (skipped, cloned with a
+    /// reflink, moved by a rename, the rest of a failed file): the speed leaves them out
+    #[serde(default)]
+    pub bytes_free: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

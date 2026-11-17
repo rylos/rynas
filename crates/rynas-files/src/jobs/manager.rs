@@ -93,8 +93,9 @@ pub struct JobView {
     pub verify: bool,
     pub limit: u64,
     pub policy: Policy,
-    /// [ms since start, bytes done, files done, bytes verified]
-    pub samples: Vec<[u64; 4]>,
+    /// [ms since start, bytes done, files done, bytes verified, bytes done without moving
+    /// data] (the interface reads a 4-element sample of an older NAS with 0 for the last)
+    pub samples: Vec<[u64; 5]>,
     /// stopped by a restart of rynasd, or its worker ended without a word: it can be run
     /// again
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -315,7 +316,7 @@ impl Job {
             && let Some(last) = self.view.samples.last_mut()
         {
             let p = &self.view.progress;
-            last[1..].copy_from_slice(&[p.bytes_done, p.files_done, p.verify_bytes]);
+            last[1..].copy_from_slice(&[p.bytes_done, p.files_done, p.verify_bytes, p.bytes_free]);
             return;
         }
         if !force && self.last_sample.is_some_and(|t| t.elapsed() < SAMPLE_EVERY) {
@@ -323,7 +324,7 @@ impl Job {
         }
         self.last_sample = Some(Instant::now());
         let p = &self.view.progress;
-        self.view.samples.push([start.elapsed().as_millis() as u64, p.bytes_done, p.files_done, p.verify_bytes]);
+        self.view.samples.push([start.elapsed().as_millis() as u64, p.bytes_done, p.files_done, p.verify_bytes, p.bytes_free]);
         if self.view.samples.len() > MAX_SAMPLES {
             thin_samples(&mut self.view.samples);
         }
@@ -360,7 +361,7 @@ fn percent(p: &Progress) -> Option<u8> {
 /// the job, so a long job keeps its whole history at one resolution: halving the older half
 /// at every overflow thinned the oldest samples again each time, until hours of a copy were a
 /// single gap the chart took for a pause.
-fn thin_samples(samples: &mut Vec<[u64; 4]>) {
+fn thin_samples(samples: &mut Vec<[u64; 5]>) {
     let recent = MAX_SAMPLES / 4;
     if samples.len() <= recent + 1 {
         return;
@@ -373,9 +374,9 @@ fn thin_samples(samples: &mut Vec<[u64; 4]>) {
     }
     // both ends of a pause (a gap wider than the spacing with nothing moved) always stay,
     // so the chart still finds it
-    let still = |a: &[u64; 4], b: &[u64; 4]| a[1..] == b[1..] && b[0] > a[0] + grain;
+    let still = |a: &[u64; 5], b: &[u64; 5]| a[1..] == b[1..] && b[0] > a[0] + grain;
     let old = &samples[..cut];
-    let mut kept: Vec<[u64; 4]> = Vec::with_capacity(MAX_SAMPLES / 2 + recent + 1);
+    let mut kept: Vec<[u64; 5]> = Vec::with_capacity(MAX_SAMPLES / 2 + recent + 1);
     for (i, s) in old.iter().enumerate() {
         let edge = old.get(i + 1).is_some_and(|n| still(s, n)) || (i > 0 && still(&old[i - 1], s));
         if edge || kept.last().is_none_or(|k| s[0] >= k[0] + grain) {
@@ -1155,9 +1156,9 @@ mod tests {
     /// and the recent quarter stays at full resolution.
     #[test]
     fn a_long_job_keeps_its_whole_history() {
-        let mut s: Vec<[u64; 4]> = Vec::new();
+        let mut s: Vec<[u64; 5]> = Vec::new();
         for i in 0..(3 * 3600 * 4u64) {
-            s.push([i * 250, i * 16_000_000, i / 400, 0]);
+            s.push([i * 250, i * 16_000_000, i / 400, 0, 0]);
             if s.len() > MAX_SAMPLES {
                 thin_samples(&mut s);
             }
@@ -1175,17 +1176,17 @@ mod tests {
     /// still there, with nothing moved between them.
     #[test]
     fn thinning_keeps_both_ends_of_a_pause() {
-        let mut s: Vec<[u64; 4]> = Vec::new();
+        let mut s: Vec<[u64; 5]> = Vec::new();
         let (mut t, mut bytes) = (0u64, 0u64);
         for i in 0..(3 * 3600 * 4u64) {
             if i == 2000 {
-                s.push([t, bytes, 0, 0]);
+                s.push([t, bytes, 0, 0, 0]);
                 t += 600_000;
-                s.push([t, bytes, 0, 0]);
+                s.push([t, bytes, 0, 0, 0]);
             }
             t += 250;
             bytes += 16_000_000;
-            s.push([t, bytes, 0, 0]);
+            s.push([t, bytes, 0, 0, 0]);
             if s.len() > MAX_SAMPLES {
                 thin_samples(&mut s);
             }
@@ -1340,6 +1341,53 @@ mod tests {
         wait(&|| job(next)["state"] == "done");
         assert_eq!(std::fs::read(dest.join("big")).unwrap(), data, "copied again, whole");
         assert!(!part.exists());
+    }
+
+    /// Five files of 60 MB skipped and one copied at 8 MiB/s with the real worker
+    /// (`RYNAS_TEST_WORKER`): the job's view goes to `RYNAS_TEST_OUT` for the interface's speed
+    /// figures (the skipped bytes are `bytes_free`, the 5th number of every sample).
+    #[test]
+    #[ignore = "needs the worker binary in RYNAS_TEST_WORKER"]
+    fn skipped_files_are_not_speed() {
+        let worker = PathBuf::from(std::env::var("RYNAS_TEST_WORKER").expect("RYNAS_TEST_WORKER"));
+        // on disk: 420 MB do not belong in a RAM /tmp
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let dir = tempfile::tempdir_in(&base).unwrap();
+        // the destination on another filesystem: no reflink clone, the data really moves
+        let other = tempfile::tempdir().unwrap();
+        let (src, dest) = (dir.path().join("src"), other.path().join("dest"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        let data: Vec<u8> = (0..60_000_000u32).map(|i| (i % 251) as u8).collect();
+        let mut sources = Vec::new();
+        for n in 0..6 {
+            let name = format!("f{n}");
+            std::fs::write(src.join(&name), &data).unwrap();
+            if n < 5 {
+                std::fs::write(dest.join(&name), &data).unwrap();
+            }
+            sources.push(src.join(name));
+        }
+        let m = Manager::new(Config { worker, journal: dir.path().join("journal"), hooks: Arc::new(NoHooks) });
+        let user = crate::identity::current().unwrap();
+        let roots = [dir.path().to_path_buf(), other.path().to_path_buf()];
+        let spec: Spec = serde_json::from_value(json!({ "op": "copy", "sources": sources, "dest": &dest, "conflict": "skip", "limit": 8 << 20, "roots": roots, "write_roots": roots })).unwrap();
+        let info = Info { sources: vec!["/s/f0".into()], dest: Some("/d".into()), permanent: false };
+        let id = m.submit(user.clone(), false, spec, info).unwrap()["id"].as_u64().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let job = loop {
+            let job = m.list(&user.name, 0)["jobs"].as_array().unwrap().iter().find(|j| j["id"] == id).cloned().unwrap();
+            if job["state"] == "done" || Instant::now() > deadline {
+                break job;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert_eq!(job["state"], "done", "{job}");
+        assert_eq!(job["progress"]["bytes_free"], 300_000_000u64);
+        assert!(job["samples"].as_array().unwrap().iter().all(|s| s.as_array().unwrap().len() == 5));
+        if let Ok(out) = std::env::var("RYNAS_TEST_OUT") {
+            std::fs::write(out, job.to_string()).unwrap();
+        }
     }
 
     /// The PCs' folders as they are when a job starts: an administrator's job always gets
