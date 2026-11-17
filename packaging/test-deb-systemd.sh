@@ -216,16 +216,22 @@ grep -qx 'ExecCondition=+/usr/libexec/rynas/rynasctl gate updates-check' $U/ryna
 grep -q $'^OnBootSec=600\nOnUnitInactiveSec=86400$' <(grep -E '^On' $U/rynas-task-updates-check.timer | head -2) \
     || { cat $U/rynas-task-updates-check.timer; fail "updates-check: not the interval timer"; }
 systemctl is-active -q rynas-task-updates-check.timer || fail "updates-check: timer not active"
-echo "--- the updates check, never run, is due: started through the gate, its run recorded"
-wait_rows updates-check '.ok and .trigger == "timer"' 1 240
-wait_rows pcbackup-retention '.ok' 1 240
-journalctl -u rynas-task-updates-check.service --no-pager -o cat | grep -q 'package lists' \
-    || { journalctl -u rynas-task-updates-check.service --no-pager -o cat; fail "updates-check: the check did not run"; }
-echo "--- a second start of its timer before the interval is not due: skipped, no row"
-n=$(rows updates-check 'true')
+echo "--- never run: not due before its delay after rynasd's start (10 min), no row"
 systemctl stop rynas-task-updates-check.timer
 # (OnBootSec has passed: a timer that never elapsed in this boot elapses at once)
 systemctl start rynas-task-updates-check.timer
+sleep 5
+[ "$(rows updates-check 'true')" = 0 ] || fail "updates-check: a start that was not due left a row"
+echo "--- the retention (2 min after rynasd's start) is started by the watch loop when due"
+wait_rows pcbackup-retention '.ok and .trigger == "timer"' 1 400
+echo "--- run now runs the check (lists refreshed when old, notification)"
+api POST /scheduler/tasks/updates-check/run; expect 204 "run updates-check"
+wait_rows updates-check '.ok and .trigger == "manual"' 1 240
+journalctl -u rynas-task-updates-check.service --no-pager -o cat | grep -q 'package lists' \
+    || { journalctl -u rynas-task-updates-check.service --no-pager -o cat; fail "updates-check: the check did not run"; }
+echo "--- after that run, a start of its timer is not due: skipped, no row"
+n=$(rows updates-check 'true')
+systemctl restart rynas-task-updates-check.timer
 sleep 5
 [ "$(rows updates-check 'true')" = "$n" ] || fail "updates-check: a start that was not due left a row"
 [ "$(systemctl show -P Result rynas-task-updates-check.service)" != failed ] || fail "updates-check: unit failed"
