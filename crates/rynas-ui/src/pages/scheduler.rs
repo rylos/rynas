@@ -12,8 +12,8 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::PendingOp;
 use rynas_api_types::scheduler::{
-    CronEntry, LiveRun, NotifyPolicy, PauseRequest, RunTrigger, ScheduledTask, SchedulerPause, SkipReason, SmartTestKind, SystemTimer, TaskAction, TaskRun, TaskTrigger,
-    TaskView,
+    Blocker, CronEntry, LiveRun, NotifyPolicy, PauseRequest, QueueWait, Resource, RunConflicts, RunNowRequest, RunTrigger, ScheduledTask, SchedulerPause, SkipReason,
+    SmartTestKind, SystemTimer, TaskAction, TaskRun, TaskTrigger, TaskView, YieldInfo,
 };
 
 use rynas_schedule::describe::{all_day, day_span};
@@ -185,7 +185,8 @@ impl ActionDraft {
             | TaskAction::DockerAutoUpdate
             | TaskAction::AppsCatalog
             | TaskAction::PcMaintenance
-            | TaskAction::PcRetention => d.kind = "system".into(),
+            | TaskAction::PcRetention
+            | TaskAction::MdCheck { .. } => d.kind = "system".into(),
         }
         d
     }
@@ -261,6 +262,10 @@ pub fn action_text(a: &TaskAction) -> (String, String) {
         TaskAction::AppsCatalog => (t("sch.act.apps_catalog").to_string(), t("dk.title").to_string()),
         TaskAction::PcMaintenance => (t("sch.act.pc_maintenance").to_string(), t("nav.backup").to_string()),
         TaskAction::PcRetention => (t("sch.act.pc_retention").to_string(), t("nav.backup").to_string()),
+        TaskAction::MdCheck { resume } => (
+            t(if *resume { "sch.act.md_check_continue" } else { "sch.act.md_check" }).to_string(),
+            t("sch.system_timer").to_string(),
+        ),
     }
 }
 
@@ -317,8 +322,12 @@ pub fn run_status(r: &TaskRun) -> (Tone, String) {
             SkipReason::Running => (Tone::Unknown, "sch.skip.running"),
             SkipReason::Window => (Tone::Unknown, "sch.skip.window"),
             SkipReason::NotDue => (Tone::Unknown, "sch.skip.not_due"),
+            SkipReason::Busy => (Tone::Warn, "sch.skip.busy"),
         };
         return (tone, t(key).to_string());
+    }
+    if r.yielded {
+        return (Tone::Unknown, t("sch.run.yielded").to_string());
     }
     if r.ok {
         return (Tone::Ok, t("sch.run.ok").to_string());
@@ -345,15 +354,164 @@ pub fn run_origin(r: &TaskRun) -> Option<String> {
         RunTrigger::Retry => Some(tf("sch.trigger.retry", &[("n", &r.attempt.to_string())])),
         RunTrigger::Queued => Some(t("sch.trigger.queued").to_string()),
         RunTrigger::Other => Some(t("sch.trigger.other").to_string()),
+        RunTrigger::Resume => Some(t("sch.trigger.resume").to_string()),
     };
     let detail = match (r.skipped, r.detail.as_deref()) {
         (Some(SkipReason::Missed), Some(d)) => Some(tf("sch.skip.missed_detail", &[("deadline", d)])),
+        // the server's sentence of a scrub that gave way, in the interface's language
+        (None, Some(_)) if r.yielded => Some(t("sch.yielded_detail").to_string()),
+        // the server names what it waited for in English (the journal's words): the chip says
+        // enough
+        (Some(SkipReason::Busy), _) => None,
         (_, Some(d)) if !d.is_empty() => Some(d.to_string()),
         _ => None,
     };
+    let waited = (r.queued_ms >= 1000).then(|| tf("sch.waited", &[("d", &i18n::duration(r.queued_ms / 1000))]));
     let ungated = r.ungated.then(|| t("sch.ungated").to_string());
-    let parts: Vec<String> = [how, detail, ungated].into_iter().flatten().collect();
+    let parts: Vec<String> = [how, waited, detail, ungated].into_iter().flatten().collect();
     (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The i18n key of one of rynas's own jobs by its task id (their stored names are English).
+fn own_job_key(id: &str) -> Option<&'static str> {
+    use rynas_api_types::scheduler::system as s;
+    Some(match id {
+        s::UPDATES_CHECK => "sch.act.updates_check",
+        s::SYSTEM_UPGRADE => "sch.act.system_upgrade",
+        s::DOCKER_IMAGE_CHECK => "sch.act.docker_image_check",
+        s::DOCKER_AUTO_UPDATE => "sch.act.docker_auto_update",
+        s::APPS_CATALOG => "sch.act.apps_catalog",
+        s::PC_MAINTENANCE => "sch.act.pc_maintenance",
+        s::PC_RETENTION => "sch.act.pc_retention",
+        s::MD_CHECK_START => "sch.act.md_check",
+        s::MD_CHECK_CONTINUE => "sch.act.md_check_continue",
+        _ => return None,
+    })
+}
+
+/// A resource of the queue in words ("/srv/vol1", "disk sda", "the package system").
+fn resource_text(r: &Resource) -> String {
+    match r {
+        Resource::Volume { path } if path == "*" => t("sch.res.every").to_string(),
+        Resource::Volume { path } => path.clone(),
+        Resource::Disk { disk } => tf("sch.res.disk", &[("disk", disk)]),
+        Resource::Packages => t("sch.res.packages").to_string(),
+        Resource::Power => t("sch.res.power").to_string(),
+        Resource::Maintenance => t("sch.res.maintenance").to_string(),
+    }
+}
+
+/// Who holds a resource, in words: a task by its name, other work by its type.
+fn blocker_who(b: &Blocker) -> String {
+    match (&b.task, &b.kind) {
+        (Some(id), _) => own_job_key(id)
+            .map(|k| t(k).to_string())
+            .unwrap_or_else(|| if b.name.is_empty() { id.clone() } else { b.name.clone() }),
+        (None, Some(k)) => crate::tasks::task_label(k),
+        (None, None) if !b.name.is_empty() => b.name.clone(),
+        (None, None) => t("sch.other_work").to_string(),
+    }
+}
+
+/// "Queued: waiting for Backup offsite on /srv/vol1".
+pub fn queued_text(q: &QueueWait) -> String {
+    match &q.blocker {
+        Some(b) => tf("sch.q.waiting", &[("who", &blocker_who(b)), ("res", &resource_text(&b.resource))]),
+        None => t("sch.q.queued").to_string(),
+    }
+}
+
+/// "Gave way to Backup offsite on /srv/vol1: resumes by itself".
+pub fn yielded_text(y: &YieldInfo) -> String {
+    match (&y.to, y.stopped) {
+        (_, false) => t("sch.y.stopping").to_string(),
+        (Some(b), true) => tf("sch.y.gave_way", &[("who", &blocker_who(b)), ("res", &resource_text(&b.resource))]),
+        (None, true) => t("sch.y.will_resume").to_string(),
+    }
+}
+
+/// One line of the run now question: who, on what.
+fn busy_line(b: &Blocker) -> String {
+    format!("{} · {}", blocker_who(b), resource_text(&b.resource))
+}
+
+/// A run now waiting for the user's answer: the task, the work it would slow down, the
+/// row's "running" flag and the latest run before it.
+#[derive(Clone)]
+struct RunAsk {
+    id: String,
+    name: String,
+    busy: Vec<Blocker>,
+    running: RwSignal<bool>,
+    before: Option<u64>,
+}
+
+/// Starts the task (`skip_queue`: ahead of the queue, the user confirmed) and follows its run
+/// to a toast.
+async fn start_run(id: String, name: String, before: Option<u64>, skip_queue: bool, running: RwSignal<bool>, tasks: Remote<Vec<TaskView>>) {
+    running.set(true);
+    let body = RunNowRequest { skip_queue };
+    let r = api::post_empty(&format!("/api/v1/scheduler/tasks/{}/run", api::encode(&id)), Some(&body)).await;
+    match r {
+        Ok(()) => {
+            toast(Tone::Info, tf("sch.started", &[("name", &name)]));
+            set_timeout(move || tasks.reload(), Duration::from_millis(800));
+            let done = follow_run(&id, before).await;
+            running.try_set(false);
+            match done {
+                Some(r) if r.yielded => {}
+                Some(r) if r.ok => toast(Tone::Ok, tf("sch.finished_ok", &[("name", &name)])),
+                Some(r) => toast(Tone::Err, tf("sch.finished_err", &[("name", &name), ("why", &run_status(&r).1)])),
+                None => {}
+            }
+            tasks.reload();
+        }
+        Err(e) => {
+            running.set(false);
+            if e.code() == rynas_api_types::error_codes::NOT_APPLIED {
+                toast(Tone::Err, t("sch.not_applied").to_string())
+            } else {
+                toast(Tone::Err, e.text())
+            }
+        }
+    }
+}
+
+/// Run now while other work holds what the task needs: names that work, and lets the user
+/// run at once (slowing it down) or wait in the queue.
+fn run_ask_dialog(ask: RunAsk, tasks: Remote<Vec<TaskView>>, close: Callback<()>) -> AnyView {
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let lines: Vec<String> = ask.busy.iter().map(busy_line).collect();
+    let (a1, a2) = (ask.clone(), ask.clone());
+    let queue = move |_| {
+        close.run(());
+        let a = a2.clone();
+        spawn_local(start_run(a.id, a.name, a.before, false, a.running, tasks));
+    };
+    let extra = view! {
+        <ul class="sch-busy-list">{lines.into_iter().map(|l| view! { <li>{l}</li> }).collect::<Vec<_>>()}</ul>
+        <div class="card-actions">
+            <button class="btn" on:click=queue>{tr("sch.run_queue")}</button>
+        </div>
+    }
+    .into_any();
+    confirm(Confirm {
+        title: tf("sch.run_busy_title", &[("name", &ask.name)]),
+        text: t("sch.run_busy_text").to_string(),
+        action: "sch.run_anyway",
+        danger: false,
+        extra: Some(extra),
+        typed: Signal::stored(None),
+        busy,
+        error,
+        on_confirm: Callback::new(move |_| {
+            close.run(());
+            let a = a1.clone();
+            spawn_local(start_run(a.id, a.name, a.before, true, a.running, tasks));
+        }),
+        on_cancel: close,
+    })
 }
 
 // ------------------------------------------------------------------ page
@@ -528,6 +686,7 @@ fn tasks_panel(tasks: Remote<Vec<TaskView>>, edit: RwSignal<Option<(ScheduledTas
     let history = RwSignal::new(None::<ScheduledTask>);
     let del = RwSignal::new(None::<(String, String)>);
     let pausing = RwSignal::new(None::<(String, String)>);
+    let asking = RwSignal::new(None::<RunAsk>);
     let table = move || {
         if let Some(v) = tasks.gate(5) {
             return v;
@@ -552,7 +711,7 @@ fn tasks_panel(tasks: Remote<Vec<TaskView>>, edit: RwSignal<Option<(ScheduledTas
             };
         }
         view! {
-            {ui::table("", &["sch.col.enabled", "sch.col.task", "sch.col.action", "sch.col.schedule", "sch.col.last", ""], rows.into_iter().map(|v| task_row(v, tasks, edit, history, del, pausing)).collect::<Vec<_>>())}
+            {ui::table("", &["sch.col.enabled", "sch.col.task", "sch.col.action", "sch.col.schedule", "sch.col.last", ""], rows.into_iter().map(|v| task_row(v, tasks, edit, history, del, pausing, asking)).collect::<Vec<_>>())}
         }
         .into_any()
     };
@@ -597,6 +756,7 @@ fn tasks_panel(tasks: Remote<Vec<TaskView>>, edit: RwSignal<Option<(ScheduledTas
         {move || history.get().map(|t| history_drawer(t, tasks, Callback::new(move |_| history.set(None))))}
         {deleter}
         {move || pausing.get().map(|target| pause_dialog(Some(target), Callback::new(move |_| tasks.reload()), Callback::new(move |_| pausing.set(None))))}
+        {move || asking.get().map(|a| run_ask_dialog(a, tasks, Callback::new(move |_| asking.set(None))))}
     }
     .into_any()
 }
@@ -608,13 +768,15 @@ fn task_row(
     history: RwSignal<Option<ScheduledTask>>,
     del: RwSignal<Option<(String, String)>>,
     pausing: RwSignal<Option<(String, String)>>,
+    asking: RwSignal<Option<RunAsk>>,
 ) -> AnyView {
     let task = v.task.clone();
     let st = v.status.clone();
     let id = task.id.clone();
     // rynas's own jobs are named by their action (in the interface's language); their stored
     // name and description are English
-    let own_job = owner_page(&task.action).is_some() && !matches!(task.action, TaskAction::PowerShutdown { .. });
+    let own_job = own_job_key(&task.id).is_some()
+        || (owner_page(&task.action).is_some() && !matches!(task.action, TaskAction::PowerShutdown { .. }));
     let name = if own_job {
         action_text(&task.action).0
     } else if task.name.is_empty() {
@@ -657,32 +819,21 @@ fn task_row(
     };
     let (id_r, name_r) = (id.clone(), name.clone());
     let before = st.last_run.as_ref().map(|r| r.id);
+    // run now: when other work holds what the task needs, the user chooses between running
+    // at once (it slows that work down) and waiting in the queue
     let run = move |_| {
         running.set(true);
         let (id, name) = (id_r.clone(), name_r.clone());
         spawn_local(async move {
-            let r = api::post_empty::<()>(&format!("/api/v1/scheduler/tasks/{}/run", api::encode(&id)), None).await;
-            match r {
-                Ok(()) => {
-                    toast(Tone::Info, tf("sch.started", &[("name", &name)]));
-                    set_timeout(move || tasks.reload(), Duration::from_millis(800));
-                    let done = follow_run(&id, before).await;
-                    running.try_set(false);
-                    match done {
-                        Some(r) if r.ok => toast(Tone::Ok, tf("sch.finished_ok", &[("name", &name)])),
-                        Some(r) => toast(Tone::Err, tf("sch.finished_err", &[("name", &name), ("why", &run_status(&r).1)])),
-                        None => {}
-                    }
-                    tasks.reload();
-                }
-                Err(e) => {
-                    running.set(false);
-                    if e.code() == rynas_api_types::error_codes::NOT_APPLIED {
-                        toast(Tone::Err, t("sch.not_applied").to_string())
-                    } else {
-                        toast(Tone::Err, e.text())
-                    }
-                }
+            let busy = api::get::<RunConflicts>(&format!("/api/v1/scheduler/tasks/{}/conflicts", api::encode(&id)))
+                .await
+                .map(|c| c.busy)
+                .unwrap_or_default();
+            if busy.is_empty() {
+                start_run(id, name, before, false, running, tasks).await;
+            } else {
+                running.set(false);
+                asking.set(Some(RunAsk { id, name, busy, running, before }));
             }
         });
     };
@@ -712,6 +863,8 @@ fn task_row(
                     {match (managed.clone(), system.then_some(owner).flatten()) {
                         (Some(href), _) => view! { <a class="link-strong" href=href title=tr("sch.managed_storage")>{name.clone()}</a> }.into_any(),
                         (None, Some((href, _))) => view! { <a class="link-strong" href=href>{name.clone()}</a> }.into_any(),
+                        // the system's own timer (the md RAID check): nothing to edit here
+                        (None, None) if system => view! { <strong>{name.clone()}</strong> }.into_any(),
                         (None, None) => view! { <button class="link-strong" disabled=deleting on:click=move |_| edit.set(Some((t_edit.clone(), false)))>{name.clone()}</button> }.into_any(),
                     }}
                     {managed.is_some().then(|| view! { <span class="cell-sub">{tr("sch.managed_storage")}</span> })}
@@ -743,6 +896,8 @@ fn task_row(
                     {st.paused.is_some().then(|| ui::status(Tone::Warn, t("sch.paused").to_string()))}
                     {st.retry.map(|r| ui::status(Tone::Info, tf("sch.retry_at", &[("n", &r.attempt.to_string()), ("of", &r.attempts.to_string()), ("when", &i18n::short_when(r.due_ms))])))}
                     {st.running.then(|| ui::status(Tone::Info, t("sch.running").to_string()))}
+                    {st.queued.as_ref().filter(|_| !st.running).map(|q| ui::status(Tone::Unknown, queued_text(q)))}
+                    {st.yielded.as_ref().filter(|_| !st.running).map(|y| ui::status(Tone::Unknown, yielded_text(y)))}
                     {if st.running { None } else { last.map(|l| l.into_any()) }}
                     {ui::pending_status(st.pending)}
                     {(st.last_run.is_none() && !st.running && st.pending.is_none()).then(|| view! { <span class="muted small">{tr("never_run")}</span> })}
@@ -765,7 +920,7 @@ fn task_row(
                     .into_any()
                 } else {
                     view! {
-                        <button class="icon-btn sm" title=tr("sch.history") aria-label=ui::verb_name("sch.history", &n3) disabled=system on:click=move |_| history.set(Some(t_hist.clone()))>
+                        <button class="icon-btn sm" title=tr("sch.history") aria-label=ui::verb_name("sch.history", &n3) on:click=move |_| history.set(Some(t_hist.clone()))>
                             <Icon icon=icons::HISTORY size=16 />
                         </button>
                     }
@@ -792,7 +947,7 @@ fn task_row(
                     let key = if is_paused { "sch.resume" } else { "sch.pause" };
                     view! {
                         <button class="icon-btn sm" title=tr(key) aria-label=ui::verb_name(key, &n7) aria-pressed=is_paused.to_string()
-                            disabled=deleting || !st.applied || system on:click=toggle_pause>
+                            disabled=deleting || !st.applied on:click=toggle_pause>
                             <Icon icon=icons::PAUSE size=16 />
                         </button>
                     }

@@ -1403,6 +1403,23 @@ pub fn spawn_run(who: &str, job: &str) -> Res<String> {
     })
 }
 
+/// The folders a backup job reads (its shares and folders; not the configuration export):
+/// the volumes its runs claim in the scheduler's queue (S4). Empty when the job is unknown.
+pub fn job_source_paths(job: &str) -> Vec<String> {
+    let Some(s) = SVC.get().cloned() else {
+        return Vec::new();
+    };
+    let Ok((j, _)) = applied_job(&s, job) else {
+        return Vec::new();
+    };
+    source_paths(&s, &j)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, sp)| sp.is_none())
+        .map(|(p, _)| p)
+        .collect()
+}
+
 /// A temporary snapshot to delete at the end.
 struct TempSnap {
     parent: PathBuf,

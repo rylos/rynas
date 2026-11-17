@@ -240,3 +240,39 @@ fn the_gate_keeps_the_loops_rules_at_their_edges() {
     let runs: Vec<&str> = pv.runs.iter().map(|r| r.local.as_str()).collect();
     assert_eq!(runs, ["2026-11-22 00:00:00", "2026-11-29 00:00:00"]);
 }
+
+/// The drop-ins shipped for the system's own timers (S4) put exactly the gate and the end
+/// report on the service of each gated system task, and nothing else: no timer, schedule or
+/// command of the system's unit changes.
+#[test]
+fn the_system_timers_get_the_gate_and_nothing_else() {
+    let files = [
+        ("apt-daily-upgrade.service", include_str!("../../../../packaging/systemd/apt-daily-upgrade.service.d/rynas-gate.conf")),
+        ("mdcheck_start.service", include_str!("../../../../packaging/systemd/mdcheck_start.service.d/rynas-gate.conf")),
+        ("mdcheck_continue.service", include_str!("../../../../packaging/systemd/mdcheck_continue.service.d/rynas-gate.conf")),
+    ];
+    assert_eq!(files.len(), system::GATED_UNITS.len());
+    for (id, service, timer) in system::GATED_UNITS {
+        let text = files.iter().find(|(s, _)| s == service).map(|(_, t)| *t).unwrap();
+        let settings: Vec<&str> = text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).collect();
+        assert_eq!(
+            settings,
+            [
+                "[Service]".to_string(),
+                format!("ExecCondition=+/usr/libexec/rynas/rynasctl gate {id}"),
+                format!("ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished {id}"),
+            ],
+            "{service}"
+        );
+        assert_eq!(crate::units::timer_of(id), *timer);
+        assert_eq!(crate::units::service_of(id), *service);
+        assert!(system::RESERVED.contains(id));
+    }
+    // the tasks of rynas keep their own units
+    assert_eq!(crate::units::service_of("backup-offsite"), "rynas-task-backup-offsite.service");
+    // the RAID check is listed, never stored
+    let mut t = system::md_check(false);
+    assert!(normalize_task(t.clone()).is_err());
+    t.id = "x".into();
+    assert!(normalize_task(t).is_err());
+}

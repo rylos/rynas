@@ -16,6 +16,7 @@ pub mod apps;
 pub mod backports;
 pub mod backup;
 pub mod cgroup;
+pub mod claims;
 pub mod clock;
 pub mod dedup;
 pub mod docker;

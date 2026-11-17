@@ -12,7 +12,8 @@
 //! - [`live`]: the live output of a running task (journal entries, event data);
 //! - [`preview`]: a schedule as the NAS will run it (next runs, DST notes), without systemd;
 //! - [`cron`]: read-only listing of crontab entries;
-//! - [`window`]: weekly-window triggers (calendar lines, one start per block).
+//! - [`window`]: weekly-window triggers (calendar lines, one start per block);
+//! - [`queue`]: resource classes, priorities and the queue of heavy work (S4).
 //!
 //! Run notifications (per-task policy) are emitted by rynasd through `rynas_notify::Notifier`.
 
@@ -24,6 +25,7 @@ pub mod history;
 pub mod live;
 pub mod preview;
 pub mod probe;
+pub mod queue;
 pub mod units;
 pub mod window;
 

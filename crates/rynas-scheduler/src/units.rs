@@ -54,6 +54,17 @@ pub fn timer_name(id: &str) -> String {
     format!("{UNIT_PREFIX}{id}.timer")
 }
 
+/// The service a task's starts run in: its own, or the system's unit of a gated system task
+/// (`apt-daily-upgrade.service`).
+pub fn service_of(id: &str) -> String {
+    rynas_api_types::scheduler::system::gated_unit(id).map_or_else(|| service_name(id), |(s, _)| s.to_string())
+}
+
+/// The timer that starts a task: its own, or the system's timer of a gated system task.
+pub fn timer_of(id: &str) -> String {
+    rynas_api_types::scheduler::system::gated_unit(id).map_or_else(|| timer_name(id), |(_, t)| t.to_string())
+}
+
 pub fn service_path(id: &str) -> PathBuf {
     Path::new(UNIT_DIR).join(service_name(id))
 }
@@ -116,6 +127,12 @@ pub fn render_service(t: &ScheduledTask, p: &Paths) -> Result<String, String> {
     let ctl = p.rynasctl.display();
     // the scheduling gate: as root whatever `User=`; exit 1 skips the start (not a failure)
     s.push_str(&format!("ExecCondition=+{ctl} gate {}\n", t.id));
+    // a start that may wait in the queue of its volume, disk or the package system: the gate
+    // keeps asking while it waits (S4), so the start has no time limit (the run keeps its
+    // `RuntimeMaxSec=`)
+    if crate::queue::queueable(&t.action) {
+        s.push_str(QUEUE_TIMEOUT);
+    }
     let internal = t.action.is_internal();
     match &t.action {
         TaskAction::Command { user, .. } | TaskAction::Script { user, .. } => {
@@ -163,6 +180,9 @@ pub fn render_service(t: &ScheduledTask, p: &Paths) -> Result<String, String> {
     }
     Ok(s)
 }
+
+/// The start of a task that can wait in a queue has no time limit (its gate waits).
+pub const QUEUE_TIMEOUT: &str = "TimeoutStartSec=infinity\n";
 
 /// Internal actions whose command the unit runs itself (`rynasctl job run` gets a plan from
 /// rynasd: btrfs scrub, smartctl, btrbk) instead of following a rynasd task.

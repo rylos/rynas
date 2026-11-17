@@ -344,28 +344,23 @@ fn is_maintenance(kind: &str) -> bool {
     MAINTENANCE_KINDS.iter().any(|k| kind.starts_with(k))
 }
 
-/// What keeps automatic updates from starting now: a maintenance task of rynas or a RAID
-/// resync.
+/// What keeps automatic updates from starting now: a question to the scheduler's lock table
+/// ([`crate::claims::docker_busy`]: other package work, maintenance, heavy storage work
+/// scheduled or started by hand, an md operation, a shutdown), plus the maintenance task
+/// types of [`MAINTENANCE_KINDS`] the table does not know by name.
 pub fn maintenance(s: &DockerSvc) -> Option<String> {
-    let busy = s.ops.tasks.list(200).into_iter().find(|t| {
-        matches!(t.status, TaskStatus::Running | TaskStatus::Queued) && is_maintenance(&t.kind)
-    });
-    if let Some(t) = busy {
-        return Some(format!("task {} is running", t.kind));
+    let mdstat = if s.dry { String::new() } else { std::fs::read_to_string("/proc/mdstat").unwrap_or_default() };
+    let gate = crate::gate::running();
+    let table = crate::claims::table(gate.as_deref(), &s.ops.tasks, &mdstat, &[]);
+    if let Some(why) = crate::claims::docker_busy(&table) {
+        return Some(why);
     }
-    // a scheduled scrub runs in its own unit, not as a rynasd task
-    if let Some(id) = crate::gate::heavy_runs_now().first() {
-        return Some(format!("scheduled task {id} is running"));
-    }
-    if !s.dry
-        && let Ok(md) = std::fs::read_to_string("/proc/mdstat")
-        && let Some(l) = md
-            .lines()
-            .find(|l| ["resync", "recovery", "reshape", "check"].iter().any(|w| l.contains(&format!("{w} ="))))
-    {
-        return Some(format!("RAID: {}", l.trim()));
-    }
-    None
+    s.ops
+        .tasks
+        .list(200)
+        .into_iter()
+        .find(|t| matches!(t.status, TaskStatus::Running | TaskStatus::Queued) && is_maintenance(&t.kind))
+        .map(|t| format!("task {} is running", t.kind))
 }
 
 async fn wait_finished(s: &DockerSvc, id: &str, deadline: Duration) -> Waited {

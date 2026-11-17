@@ -7,8 +7,11 @@
 //! the filesystem, or gives up at its deadline. Two deduplication writers never share a
 //! filesystem (oans has no lock of its own on its hashfile).
 //!
-//! Heavy holders do not wait for each other: that would change what they did before this
-//! lock (a 72-hour scrub would hold a replication back).
+//! Heavy holders do not wait for each other here: work started by hand goes at once. The
+//! scheduled runs wait for each other in the scheduling gate's queue instead (S4,
+//! `rynas_scheduler::queue`), where a scrub gives way to more urgent work rather than
+//! holding it back for 72 hours; the gate's lock table reads these holders too
+//! ([`FsLocks::holders`]).
 //!
 //! The key of a filesystem is the `major:minor` of its superblock in `/proc/self/mountinfo`
 //! ([`key_of`]): the same for every subvolume and bind mount of one btrfs filesystem.
@@ -66,6 +69,13 @@ pub struct HeavyGuard {
     locks: Arc<FsLocks>,
     keys: Vec<String>,
     id: u64,
+}
+
+impl HeavyGuard {
+    /// The holder's id in [`FsLocks::holders`].
+    pub fn id(&self) -> u64 {
+        self.id
+    }
 }
 
 impl Drop for HeavyGuard {
@@ -199,6 +209,23 @@ impl FsLocks {
     pub async fn heavy_paths(self: &Arc<Self>, paths: &[&str], what: &str) -> HeavyGuard {
         let keys: Vec<String> = paths.iter().filter_map(|p| key_of(p)).collect();
         self.heavy(&keys, what).await
+    }
+
+    /// The work holding filesystems now (the scheduler's lock table, S4): `(key, holder id,
+    /// task type, deduplication)`.
+    pub fn holders(&self) -> Vec<(String, u64, String, bool)> {
+        let s = self.slots.lock().unwrap();
+        let mut out = Vec::new();
+        for (k, slot) in s.iter() {
+            for (id, what) in &slot.heavy {
+                out.push((k.clone(), *id, what.clone(), false));
+            }
+            if let Some(d) = &slot.dedup {
+                out.push((k.clone(), d.id, "storage.dedup".to_string(), true));
+            }
+        }
+        out.sort();
+        out
     }
 
     /// Takes the filesystem `key` for a deduplication run: waits while other work holds it

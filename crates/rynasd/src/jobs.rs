@@ -77,6 +77,7 @@ pub async fn spawn(p: &Arc<Protection>, t: &ScheduledTask, user: &str) -> Res<St
         TaskAction::SystemUpgrade => Err(invalid(
             "the automatic system updates run on the system's own timer",
         )),
+        TaskAction::MdCheck { .. } => Err(invalid("the RAID check runs on the system's own timers")),
         TaskAction::Command { .. } | TaskAction::Script { .. } => {
             Err(invalid("not an internal action"))
         }
@@ -103,6 +104,14 @@ pub struct JobPlan {
     pub timeout_s: u64,
     #[serde(default)]
     pub report: PlanReport,
+    /// Exit codes that are a success too (`btrfs scrub resume` gives 2 when the scrub had
+    /// nothing left to resume).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ok_codes: Vec<i32>,
+    /// rynasd's state directory when the run may be asked to give way (a scrub, S4): a
+    /// failed exit of a run listed there gave way, and the unit ends as a success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yield_state: Option<String>,
 }
 
 /// What the unit prints of the command's output.
@@ -126,9 +135,12 @@ pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>
             let guard = crate::fslock::FsLocks::global()
                 .heavy_paths(&[filesystem], "btrfs.scrub")
                 .await;
-            p.gate.attach_guard(&t.id, guard);
+            p.gate.attach_guard(&t.id, || crate::gate::holder_of(p, t), guard);
+            // a scrub that gave way to more urgent work goes on from where it stopped (S4)
+            let resume = p.gate.yields().get(&t.id).is_some_and(|e| e.filesystem == *filesystem);
+            let verb = if resume { "resume" } else { "start" };
             Ok(Some(JobPlan {
-                argv: ["btrfs", "scrub", "start", "-B", "-d"]
+                argv: ["btrfs", "scrub", verb, "-B", "-d"]
                     .iter()
                     .map(|s| s.to_string())
                     .chain([filesystem.clone()])
@@ -136,6 +148,8 @@ pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>
                 env: Vec::new(),
                 timeout_s: SCRUB_TIMEOUT.as_secs(),
                 report: PlanReport::Plain,
+                ok_codes: if resume { vec![2] } else { Vec::new() },
+                yield_state: Some(p.state_dir.display().to_string()),
             }))
         }
         TaskAction::SmartTest { disk, test } => {
@@ -148,6 +162,8 @@ pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>
                 env: Vec::new(),
                 timeout_s: SMART_TIMEOUT.as_secs(),
                 report: PlanReport::Plain,
+                ok_codes: Vec::new(),
+                yield_state: None,
             }))
         }
         TaskAction::Snapshot { job } => {
@@ -178,6 +194,8 @@ pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>
                 env: cmd.env_lossy(),
                 timeout_s: SNAPSHOT_TIMEOUT.as_secs(),
                 report: PlanReport::Btrbk,
+                ok_codes: Vec::new(),
+                yield_state: None,
             }))
         }
         _ => Ok(None),
@@ -199,7 +217,7 @@ pub fn track(p: &Arc<Protection>, t: &ScheduledTask) {
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
     let inv = p
         .gate
-        .attach_tracker(&t.id, crate::gate::heavy_action(&t.action), tx);
+        .attach_tracker(&t.id, || crate::gate::holder_of(p, t), tx);
     let p2 = p.clone();
     let r = p.ops.tasks.spawn(kind, crate::scheduler::SCHEDULER_USER, move |ctx| async move {
         ctx.log(&format!("runs in {unit}"));

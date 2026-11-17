@@ -5,9 +5,13 @@
 //!   records the run and its output. Always exits 0: bookkeeping never fails the unit.
 //! - `rynasctl gate <id>`: `ExecCondition=` of every task unit, the scheduling gate
 //!   (`rynas_scheduler::gate`): asks rynasd whether this start runs (exit 0) or is skipped
-//!   (exit 1: paused, a missed run past its deadline, overlap). Without an answer within
+//!   (exit 1: paused, a missed run past its deadline, overlap). While the answer says
+//!   `wait` (S4: the start waits in the queue of its volume, disk or the package system) it
+//!   asks again every 5 s, saying in the journal what it waits for. Without an answer within
 //!   20 s it runs the start, as before the gate (only a pause in the pause file still skips
-//!   a timer's start), and spools the outcome for rynasd.
+//!   a timer's start), and spools the outcome for rynasd. Also the gate of the system's own
+//!   timers rynas gates through drop-ins (`apt-upgrade`, `mdcheck-start`,
+//!   `mdcheck-continue`).
 //! - `rynasctl job run <id>`: `ExecStart=` of internal tasks; asks rynasd for the action:
 //!   a command it then runs itself (scrub, SMART test, snapshots), or a rynasd task whose log
 //!   it prints as it grows; exits with the result. SIGTERM (stop, timeout) cancels the
@@ -52,8 +56,8 @@ use rynas_api_types::{TaskInfo, TaskStarted, TaskStatus};
 use rynas_auth::ipc::{DEFAULT_SOCKET, USER_HEADER};
 use rynas_btrfs::system::{self, SystemSnapshot, Taken};
 use rynas_scheduler::gate::{
-    ANSWER_BY, GATE_TIMEOUT, GateAnswer, GateRequest, SpoolEntry, SpoolFinished, load_pause,
-    spool_append,
+    ANSWER_BY, GATE_TIMEOUT, GateAnswer, GateRequest, SpoolEntry, SpoolFinished, WAIT_POLL,
+    load_pause, spool_append,
 };
 use rynasd::jobs::{JobPlan, PlanReport};
 use rynasd::scheduler::{ExecuteRequest, TaskFinished};
@@ -423,66 +427,91 @@ fn on_stop_signals() {
     }
 }
 
-/// `rynasctl gate <id>` ([`rynas_scheduler::gate`]). Never exits with anything but 0 (run)
-/// or 1 (skip): an internal error runs the start ([`main`] turns a panic into exit 0 too).
 fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
     let env = |k: &str| std::env::var(k).unwrap_or_default();
-    let req = GateRequest {
+    let mut req = GateRequest {
         invocation_id: env("INVOCATION_ID"),
         trigger_unit: env("TRIGGER_UNIT"),
+        answer_by_ms: 0,
+        trigger_timer_ms: env("TRIGGER_TIMER_REALTIME_USEC").parse::<u64>().map_or(0, |us| us / 1000),
+        // this rynasctl asks again while its start waits in the queue (S4)
+        can_wait: true,
+        queued_since_ms: 0,
+    };
+    let mut said = String::new();
+    loop {
         // after this rynasd answers "run" without recording a skip: the start may be
         // running by the time a late answer arrives
-        answer_by_ms: rynas_tasks::now_ms() + ANSWER_BY.as_millis() as u64,
-        trigger_timer_ms: env("TRIGGER_TIMER_REALTIME_USEC").parse::<u64>().map_or(0, |us| us / 1000),
-    };
-    let body = serde_json::to_vec(&req).unwrap_or_default();
-    let answer = request_waiting(
-        socket,
-        "POST",
-        &format!("/v1/scheduler/tasks/{id}/gate"),
-        Some(&body),
-        GATE_TIMEOUT,
-    )
-    .and_then(|a| match a.status {
-        200 => serde_json::from_slice::<GateAnswer>(&a.body).map_err(|e| e.to_string()),
-        _ => Err(a.error()),
-    });
-    match answer {
-        Ok(a) => {
-            if !a.message.is_empty() {
-                say(&a.message);
+        req.answer_by_ms = rynas_tasks::now_ms() + ANSWER_BY.as_millis() as u64;
+        let body = serde_json::to_vec(&req).unwrap_or_default();
+        let answer = request_waiting(
+            socket,
+            "POST",
+            &format!("/v1/scheduler/tasks/{id}/gate"),
+            Some(&body),
+            GATE_TIMEOUT,
+        )
+        .and_then(|a| match a.status {
+            200 => serde_json::from_slice::<GateAnswer>(&a.body).map_err(|e| e.to_string()),
+            _ => Err(a.error()),
+        });
+        match answer {
+            Ok(a) if a.wait => {
+                // queued: say what it waits for when that changes, ask again soon
+                if !a.message.is_empty() && a.message != said {
+                    say(&a.message);
+                    said = a.message.clone();
+                }
+                if req.queued_since_ms == 0 {
+                    req.queued_since_ms = rynas_tasks::now_ms();
+                    on_stop_signals();
+                }
+                let until = std::time::Instant::now() + WAIT_POLL;
+                while std::time::Instant::now() < until {
+                    if STOP.load(Ordering::SeqCst) {
+                        // stopped while it waited: skipped, not a failure
+                        say("rynas: stopped while waiting in the queue: start skipped");
+                        return ExitCode::from(1);
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
             }
-            if a.run { ExitCode::SUCCESS } else { ExitCode::from(1) }
-        }
-        Err(e) => {
-            // as before the gate, but a pause the user set still holds for timer starts
-            let now = rynas_tasks::now_ms();
-            let by_timer = rynas_scheduler::gate::started_by_timer(
-                req.trigger_unit == rynas_scheduler::units::timer_name(id),
-                req.trigger_timer_ms,
-                None,
-                now,
-            );
-            let skipped = if by_timer { load_pause(state).blocks(id, now) } else { None };
-            let entry = SpoolEntry {
-                task_id: id.to_string(),
-                invocation_id: req.invocation_id.clone(),
-                at_ms: now,
-                by_timer,
-                skipped,
-                finished: None,
-            };
-            if !req.invocation_id.is_empty()
-                && let Err(err) = spool_append(state, &entry)
-            {
-                warn(&format!("rynasctl: spooling the gate outcome: {err}"));
+            Ok(a) => {
+                if !a.message.is_empty() {
+                    say(&a.message);
+                }
+                return if a.run { ExitCode::SUCCESS } else { ExitCode::from(1) };
             }
-            if skipped.is_some() {
-                say(&format!("rynas: no answer from the scheduling gate ({e}); the task is paused: start skipped"));
-                ExitCode::from(1)
-            } else {
-                say(&format!("rynas: no answer from the scheduling gate ({e}); running the start as before the gate"));
-                ExitCode::SUCCESS
+            Err(e) => {
+                // as before the gate, but a pause the user set still holds for timer starts
+                let now = rynas_tasks::now_ms();
+                let by_timer = rynas_scheduler::gate::started_by_timer(
+                    req.trigger_unit == rynas_scheduler::units::timer_of(id),
+                    req.trigger_timer_ms,
+                    None,
+                    now,
+                );
+                let skipped = if by_timer { load_pause(state).blocks(id, now) } else { None };
+                let entry = SpoolEntry {
+                    task_id: id.to_string(),
+                    invocation_id: req.invocation_id.clone(),
+                    at_ms: now,
+                    by_timer,
+                    skipped,
+                    finished: None,
+                };
+                if !req.invocation_id.is_empty()
+                    && let Err(err) = spool_append(state, &entry)
+                {
+                    warn(&format!("rynasctl: spooling the gate outcome: {err}"));
+                }
+                return if skipped.is_some() {
+                    say(&format!("rynas: no answer from the scheduling gate ({e}); the task is paused: start skipped"));
+                    ExitCode::from(1)
+                } else {
+                    say(&format!("rynas: no answer from the scheduling gate ({e}); running the start as before the gate"));
+                    ExitCode::SUCCESS
+                };
             }
         }
     }
@@ -608,8 +637,20 @@ fn run_plan(plan: &JobPlan) -> ExitCode {
             println!("{} created, {} deleted", r.created.len(), r.deleted.len());
         }
     }
+    // a scrub rynasd asked to give way (S4): its cancel is not a failure
+    if code != Some(0)
+        && let Some(state) = &plan.yield_state
+        && rynas_scheduler::gate::gave_way(std::path::Path::new(state), &std::env::var("INVOCATION_ID").unwrap_or_default())
+    {
+        println!("rynas: stopped to give way to more urgent work on the volume; it resumes by itself from where it stopped");
+        return ExitCode::SUCCESS;
+    }
     match code {
         Some(0) => ExitCode::SUCCESS,
+        Some(c) if plan.ok_codes.contains(&c) => {
+            println!("{prog} exited with code {c}: nothing left to do");
+            ExitCode::SUCCESS
+        }
         Some(c) => {
             eprintln!("rynasctl: {prog} exited with code {c}");
             ExitCode::from(c.clamp(1, 255) as u8)

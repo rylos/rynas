@@ -337,6 +337,9 @@ pub fn normalize_task(mut t: ScheduledTask) -> Result<ScheduledTask, String> {
                 "task {id}: the automatic system updates run on the system's own timer: set them in Updates"
             ));
         }
+        TaskAction::MdCheck { .. } => {
+            return Err(format!("task {id}: the RAID check runs on the system's own timers"));
+        }
         TaskAction::UpdatesCheck
         | TaskAction::DockerImageCheck
         | TaskAction::DockerAutoUpdate

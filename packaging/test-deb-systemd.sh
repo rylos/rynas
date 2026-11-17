@@ -2,12 +2,13 @@
 # Install the rynas .deb in a Debian 13 container booted with systemd and check that the
 # maintainer scripts enable and start the units, that the hardened units work, that the
 # scheduling gate of the Task Scheduler (ExecCondition=, docs/research/scheduling.md S2)
-# behaves with the trixie systemd, and that remove/purge clean up. Then, in a second
-# container, an upgrade from the release $UPGRADE_FROM (downloaded from GitHub, checked
-# against its SHA256SUMS): the jobs that became scheduler tasks (S3) are created without a
-# failed or extra run. Needs a privileged
-# container (systemd as PID 1; container=docker and masked gettys keep it off the host's
-# consoles).
+# behaves with the trixie systemd, that heavy work on one volume queues and a scrub gives
+# way to a backup and resumes (S4, on a loop-mounted btrfs volume), that Debian's
+# apt-daily-upgrade is gated, and that remove/purge clean up. Then, in a second container,
+# an upgrade from the release $UPGRADE_FROM (downloaded from GitHub, checked against its
+# SHA256SUMS): the jobs that became scheduler tasks (S3) are created without a failed or
+# extra run. Needs a privileged container (systemd as PID 1; container=docker and masked
+# gettys keep it off the host's consoles).
 #
 #   packaging/test-deb-systemd.sh [path/to/rynas_*.deb]
 set -euo pipefail
@@ -206,6 +207,90 @@ for _ in $(seq 20); do
 done
 [ "$panel" -ge 1 ] || fail "scrub not in the task panel (ended with its run): $BODY"
 echo "scheduling gate: OK"
+
+echo "=== the queue of heavy work and Debian's timers under the gate (S4)"
+apt-get install -y -qq --no-install-recommends btrfs-progs mdadm >/dev/null 2>&1
+# a btrfs volume on a loop device (a kernel object of the host: the container has no node
+# for a new one, so it is made here; it is detached at the end whatever happens)
+qclean() {
+    mountpoint -q /srv/qvol && umount -l /srv/qvol
+    losetup -j /var/tmp/q.img 2>/dev/null | cut -d: -f1 | while read -r l; do losetup -d "$l" || true; done
+}
+trap qclean EXIT
+truncate -s 2G /var/tmp/q.img
+mkfs.btrfs -q /var/tmp/q.img
+n=$(losetup -f | tr -dc '0-9'); [ -e "/dev/loop$n" ] || mknod "/dev/loop$n" b 7 "$n"
+losetup "/dev/loop$n" /var/tmp/q.img
+mkdir -p /srv/qvol; mount "/dev/loop$n" /srv/qvol
+mkdir -p /srv/qvol/data /srv/qvol/small /srv/qvol/repo
+head -c 700M /dev/urandom > /srv/qvol/data/blob; echo hello > /srv/qvol/small/f; sync
+# a scrub slow enough to watch (20 MiB/s: about 35 s for this volume)
+QUUID=$(findmnt -no UUID /srv/qvol)
+ls /sys/fs/btrfs/"$QUUID"/devinfo/*/scrub_speed_max >/dev/null || fail "no scrub_speed_max on this kernel"
+for f in /sys/fs/btrfs/"$QUUID"/devinfo/*/scrub_speed_max; do echo 20m > "$f"; done
+mk '{"id":"qscrub-a","action":{"kind":"scrub","filesystem":"/srv/qvol"},"trigger":{"kind":"manual"}}'
+mk '{"id":"qscrub-b","action":{"kind":"scrub","filesystem":"/srv/qvol"},"trigger":{"kind":"manual"}}'
+api POST /backup/restic/jobs '{"job":{"name":"qb","sources":[{"kind":"folder","path":"/srv/qvol/small"}],"destination":{"kind":"local","path":"/srv/qvol/repo"}},"schedule":{"kind":"manual"}}'
+expect 201 "create backup qb"
+apply
+grep -qx 'TimeoutStartSec=infinity' $U/rynas-task-qscrub-a.service || fail "qscrub-a: a start timeout"
+! grep -q TimeoutStartSec $U/rynas-task-tick.service || fail "tick: a user command changed"
+
+echo "--- two heavy jobs on one volume go one at a time"
+T=$(date +%s)
+api POST /scheduler/tasks/qscrub-a/run; expect 204 "run qscrub-a"
+wait_journal qscrub-a "$T" 'btrfs scrub start -B -d /srv/qvol'
+api POST /scheduler/tasks/qscrub-b/run '{}'; expect 204 "run qscrub-b"
+wait_journal qscrub-b "$T" 'queued: waiting for task qscrub-a on /srv/qvol'
+[ "$(systemctl show -P SubState rynas-task-qscrub-b.service)" = condition ] || fail "qscrub-b: not waiting in its gate"
+api GET /scheduler/queue; expect 200 queue
+echo "$BODY" | jq -e 'any(.[]; .task == "qscrub-b" and .queued.blocker.task == "qscrub-a")' >/dev/null || fail "queue: $BODY"
+api GET /scheduler/tasks/qscrub-b/conflicts; expect 200 conflicts
+echo "$BODY" | jq -e 'any(.busy[]; .task == "qscrub-a" and .resource.path == "/srv/qvol")' >/dev/null || fail "conflicts: $BODY"
+# stopped while it waits: a skipped start, not a failed unit
+systemctl stop rynas-task-qscrub-b.service
+! systemctl is-failed -q rynas-task-qscrub-b.service || fail "qscrub-b: failed after a stop in the queue"
+[ "$(rows qscrub-b 'true')" = 0 ] || fail "qscrub-b: a start that never ran left a row"
+
+echo "--- the scrub gives way to a backup and resumes from where it stopped"
+api POST /scheduler/tasks/backup-qb/run '{}'; expect 204 "run backup-qb"
+wait_rows qscrub-a '.yielded and .ok' 1 120
+wait_rows backup-qb '.ok and .queued_ms > 0' 1 240
+wait_journal qscrub-a "$T" 'btrfs scrub resume -B -d /srv/qvol' 240
+wait_rows qscrub-a '.trigger == "resume" and .ok and (.yielded | not)' 1 240
+! systemctl is-failed -q rynas-task-qscrub-a.service || fail "qscrub-a: unit failed"
+api GET /scheduler/tasks/qscrub-a; [ "$(echo "$BODY" | jq -c .status.yielded)" = null ] || fail "qscrub-a: still marked: $BODY"
+btrfs scrub status /srv/qvol | grep -Eq 'finished|Status:[[:space:]]+finished' || { btrfs scrub status /srv/qvol; fail "the scrub did not finish"; }
+api GET '/notifications?key=scheduler:task:qscrub-a&limit=10'
+[ "$(echo "$BODY" | jq 'length')" = 0 ] || fail "qscrub-a: giving way notified: $BODY"
+qclean; trap - EXIT
+
+echo "--- Debian's apt-daily-upgrade under the gate: pause all skips its timer's start"
+systemctl cat apt-daily-upgrade.service | grep -qx 'ExecCondition=+/usr/libexec/rynas/rynasctl gate apt-upgrade' \
+    || { systemctl cat apt-daily-upgrade.service; fail "apt-daily-upgrade: no gate"; }
+mkdir -p /run/systemd/system/apt-daily-upgrade.timer.d
+printf '[Timer]\nRandomizedDelaySec=0\n' > /run/systemd/system/apt-daily-upgrade.timer.d/zz-test.conf
+api POST /scheduler/pause '{"reason":"maintenance"}'; expect 200 "pause all"
+systemctl stop apt-daily-upgrade.timer
+touch -d '2 days ago' /var/lib/systemd/timers/stamp-apt-daily-upgrade.timer
+systemctl daemon-reload; systemctl start apt-daily-upgrade.timer
+wait_rows apt-upgrade '.skipped == "paused_all" and .detail == "maintenance"' 1
+[ "$(systemctl show -P Result apt-daily-upgrade.service)" = exec-condition ] || fail "apt-daily-upgrade: not a condition skip"
+! systemctl is-failed -q apt-daily-upgrade.service || fail "apt-daily-upgrade: failed"
+api POST /scheduler/resume; expect 200 resume
+rm -r /run/systemd/system/apt-daily-upgrade.timer.d; systemctl daemon-reload
+api GET /scheduler/tasks; expect 200 tasks
+echo "$BODY" | jq -e 'any(.[]; .task.id == "apt-upgrade" and .status.last_run.skipped == "paused_all")' >/dev/null \
+    || fail "apt-upgrade: its history is not shown: $BODY"
+if systemctl cat mdcheck_start.service >/dev/null 2>&1; then
+    systemctl cat mdcheck_start.service | grep -q 'rynasctl gate mdcheck-start' || fail "mdcheck_start: no gate"
+    echo "$BODY" | jq -e 'any(.[]; .task.id == "mdcheck-start" and .status.system)' >/dev/null || fail "mdcheck-start not listed: $BODY"
+    echo "mdadm's RAID check: gated"
+else
+    echo "mdadm has no mdcheck units here: nothing gated, nothing listed"
+    ! echo "$BODY" | jq -e 'any(.[]; .task.id == "mdcheck-start")' >/dev/null || fail "mdcheck-start listed without its timer"
+fi
+echo "queue and Debian timers: OK"
 
 echo "=== the jobs of rynas are scheduler tasks (S3)"
 api GET /scheduler/tasks; expect 200 "tasks"

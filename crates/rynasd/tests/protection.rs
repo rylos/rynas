@@ -569,6 +569,180 @@ async fn the_gate_skips_a_task_it_does_not_know() {
     assert!(e.prot.history.by_invocation("dd01").unwrap().is_none(), "no row");
 }
 
+/// The queue of S4: two scrubs of one volume go one at a time (the second waits, keeps its
+/// place across questions and records how long it waited); a scrub gives way to more urgent
+/// work on its volume and resumes from where it stopped once the volume is free; a long SMART
+/// test waits for another one on its disk; an older rynasctl never waits; run now confirmed
+/// by the user goes ahead; a pause skips a waiting start; a start past its deadline is skipped
+/// as `busy`.
+#[tokio::test]
+async fn heavy_work_queues_per_volume_and_a_scrub_yields() {
+    use rynas_api_types::scheduler::{RunConflicts, RunTrigger, SkipReason};
+    let e = env();
+    for t in [
+        json!({"id": "scrub-a", "action": {"kind": "scrub", "filesystem": "/"}, "trigger": {"kind": "calendar", "on_calendar": "minutely"}}),
+        json!({"id": "scrub-b", "action": {"kind": "scrub", "filesystem": "/"}, "trigger": {"kind": "calendar", "on_calendar": "minutely"}}),
+        json!({"id": "smart-a", "action": {"kind": "smart_test", "disk": "sdzz", "test": "long"}, "trigger": {"kind": "manual"}}),
+        json!({"id": "smart-b", "action": {"kind": "smart_test", "disk": "sdzz", "test": "long"}, "trigger": {"kind": "manual"}}),
+        json!({"id": "smart-c", "action": {"kind": "smart_test", "disk": "sdzz", "test": "long"}, "trigger": {"kind": "manual"}}),
+    ] {
+        let (s, b) = call(&e, "POST", "/v1/scheduler/tasks", Some(t)).await;
+        assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    }
+    apply(&e);
+    // the units of heavy work have no start timeout: their gate may wait
+    let svc = std::fs::read_to_string(e._dir.path().join("root/etc/systemd/system/rynas-task-scrub-a.service")).unwrap();
+    assert!(svc.contains("TimeoutStartSec=infinity\n"), "{svc}");
+    let ask = async |id: &str, inv: &str, since: u64| {
+        let unit = format!("rynas-task-{id}.timer");
+        gate_ask_body(&e, id, json!({"invocation_id": inv, "trigger_unit": unit, "trigger_timer_ms": rynas_tasks::now_ms(),
+            "can_wait": true, "queued_since_ms": since})).await
+    };
+    let view = async |id: &str| -> TaskView {
+        let (_, b) = call(&e, "GET", &format!("/v1/scheduler/tasks/{id}"), None).await;
+        serde_json::from_slice(&b).unwrap()
+    };
+
+    // one at a time on a volume
+    let a = ask("scrub-a", "ab01", 0).await;
+    assert!(a.run && !a.wait, "{a:?}");
+    let b = ask("scrub-b", "ab02", 0).await;
+    assert!(!b.run && b.wait && b.skipped.is_none(), "{b:?}");
+    assert!(b.message.contains("task scrub-a on /"), "{}", b.message);
+    let q = view("scrub-b").await.status.queued.expect("shown as queued");
+    assert_eq!(q.blocker.as_ref().and_then(|x| x.task.as_deref()), Some("scrub-a"));
+    let (_, body) = call(&e, "GET", "/v1/scheduler/queue", None).await;
+    let queue: Vec<rynas_api_types::scheduler::QueueEntry> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(queue.iter().map(|x| x.task.as_str()).collect::<Vec<_>>(), ["scrub-b"]);
+    // nothing is recorded while it waits; a run now would wait for the same work
+    assert!(e.prot.history.by_invocation("ab02").unwrap().is_none());
+    let (_, body) = call(&e, "GET", "/v1/scheduler/tasks/scrub-b/conflicts", None).await;
+    let c: RunConflicts = serde_json::from_slice(&body).unwrap();
+    assert_eq!(c.busy.iter().filter_map(|x| x.task.as_deref()).collect::<Vec<_>>(), ["scrub-a"]);
+    // scrub-a ends: scrub-b's next question runs it, with its wait recorded
+    gate_end(&e, "scrub-a", "ab01", "success").await;
+    let since = rynas_tasks::now_ms() - 90_000;
+    let b = ask("scrub-b", "ab02", since).await;
+    assert!(b.run && !b.wait, "{b:?}");
+    assert_eq!(e.prot.history.gate_note("ab02").unwrap().unwrap().queued_ms / 1000, 90);
+    assert!(view("scrub-b").await.status.queued.is_none());
+
+    // a scrub gives way to more urgent work on its volume (a backup run started by hand)...
+    let guard = rynasd::fslock::FsLocks::global().heavy_paths(&["/"], "backup.run").await;
+    rynasd::gate::tick(&e.prot);
+    let cancel = "run btrfs scrub cancel /";
+    assert!(e.sys.state().calls.iter().any(|c| c == cancel), "{:?}", e.sys.state().calls);
+    let y = view("scrub-b").await.status.yielded.expect("giving way");
+    assert!(!y.stopped);
+    assert_eq!(y.to.as_ref().and_then(|t| t.kind.as_deref()), Some("backup.run"));
+    let state = e._dir.path().join("state");
+    assert!(rynas_scheduler::gate::gave_way(&state, "ab02"), "the unit can tell its end is no failure");
+    // ...its end is recorded as such, no failure, nothing notified
+    e.notifier.take();
+    gate_end(&e, "scrub-b", "ab02", "success").await;
+    let run = e.prot.history.by_invocation("ab02").unwrap().unwrap();
+    assert!(run.yielded && run.ok && run.queued_ms >= 90_000, "{run:?}");
+    assert!(view("scrub-b").await.status.yielded.unwrap().stopped);
+    assert!(e.notifier.take().is_empty());
+    // the volume is still busy: not resumed yet
+    rynasd::gate::tick(&e.prot);
+    let resume = "run systemctl start --no-block rynas-task-scrub-b.service";
+    let started = |e: &Env| e.sys.state().calls.iter().any(|c| c.contains("rynas-task-scrub-b.service") && c.contains("start"));
+    assert!(!started(&e), "{:?}", e.sys.state().calls);
+    drop(guard);
+    rynasd::gate::tick(&e.prot);
+    assert!(started(&e), "{resume}: {:?}", e.sys.state().calls);
+    // the start rynasd made is a resume, and the unit goes on from where it stopped
+    let r = gate_ask_body(&e, "scrub-b", json!({"invocation_id": "ab03", "can_wait": true})).await;
+    assert_eq!((r.run, r.trigger), (true, RunTrigger::Resume), "{r:?}");
+    let (s, body) = call_peer(&e, Some(0), "POST", "/v1/scheduler/tasks/scrub-b/execute", Some(json!({"plan": true}))).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let plan: rynasd::jobs::JobPlan = serde_json::from_slice(&body).unwrap();
+    assert_eq!(plan.argv, ["btrfs", "scrub", "resume", "-B", "-d", "/"]);
+    assert_eq!(plan.ok_codes, [2]);
+    gate_end(&e, "scrub-b", "ab03", "success").await;
+    assert!(view("scrub-b").await.status.yielded.is_none());
+    let (s, body) = call_peer(&e, Some(0), "POST", "/v1/scheduler/tasks/scrub-a/execute", Some(json!({"plan": true}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let plan: rynasd::jobs::JobPlan = serde_json::from_slice(&body).unwrap();
+    assert_eq!(plan.argv[2], "start", "a scrub that never gave way starts");
+    gate_end(&e, "scrub-a", "ab04", "success").await;
+
+    // a disk: one long SMART test at a time; an older rynasctl (no can_wait) never waits
+    let s1 = gate_ask_body(&e, "smart-a", json!({"invocation_id": "cd01", "can_wait": true})).await;
+    assert!(s1.run);
+    // (started by its timer: a start the user did not ask for, which a pause skips)
+    let s2 = gate_ask_body(&e, "smart-b", json!({"invocation_id": "cd02", "can_wait": true,
+        "trigger_unit": "rynas-task-smart-b.timer", "trigger_timer_ms": rynas_tasks::now_ms()})).await;
+    assert!(s2.wait && s2.trigger == RunTrigger::Timer, "{s2:?}");
+    let old = gate_ask_body(&e, "smart-c", json!({"invocation_id": "cd03"})).await;
+    assert!(old.run && !old.wait);
+    gate_end(&e, "smart-c", "cd03", "success").await;
+    // a pause while it waits skips it
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/smart-b/pause", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let s2 = gate_ask_body(&e, "smart-b", json!({"invocation_id": "cd02", "can_wait": true, "queued_since_ms": rynas_tasks::now_ms() - 5000})).await;
+    assert_eq!((s2.run, s2.wait, s2.skipped), (false, false, Some(SkipReason::Paused)));
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/smart-b/resume", None).await;
+    assert_eq!(s, StatusCode::OK);
+    // past its deadline (a day) it is skipped as busy, and recorded
+    let late = rynas_tasks::now_ms() - 25 * 3_600_000;
+    let s2 = gate_ask_body(&e, "smart-b", json!({"invocation_id": "cd04", "can_wait": true, "queued_since_ms": late})).await;
+    assert_eq!(s2.skipped, Some(SkipReason::Busy), "{s2:?}");
+    assert_eq!(e.prot.history.by_invocation("cd04").unwrap().unwrap().skipped, Some(SkipReason::Busy));
+    // run now confirmed by the user goes ahead of the queue; without, it waits like the rest
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/smart-b/run", Some(json!({"skip_queue": false}))).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let s2 = gate_ask_body(&e, "smart-b", json!({"invocation_id": "cd05", "can_wait": true})).await;
+    assert!(s2.wait && s2.trigger == RunTrigger::Manual, "{s2:?}");
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/smart-b/run", Some(json!({"skip_queue": true}))).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let s2 = gate_ask_body(&e, "smart-b", json!({"invocation_id": "cd05", "can_wait": true})).await;
+    assert!(s2.run && s2.trigger == RunTrigger::Manual, "{s2:?}");
+    gate_end(&e, "smart-b", "cd05", "success").await;
+    gate_end(&e, "smart-a", "cd01", "success").await;
+}
+
+/// Debian's own timers under the gate (S4): a start of `apt-daily-upgrade.service` by its
+/// timer is skipped while every task is paused and recorded as the system task's; started
+/// by hand it runs; its end is recorded in the same history.
+#[tokio::test]
+async fn the_system_timers_are_gated() {
+    use rynas_api_types::scheduler::{RunTrigger, SkipReason};
+    let e = env();
+    let ask = async |inv: &str, timer: bool| {
+        let unit = if timer { "apt-daily-upgrade.timer" } else { "" };
+        gate_ask_body(&e, "apt-upgrade", json!({"invocation_id": inv, "trigger_unit": unit,
+            "trigger_timer_ms": if timer { rynas_tasks::now_ms() } else { 0 }, "can_wait": true})).await
+    };
+    let a = ask("ee01", true).await;
+    assert!(a.run, "{a:?}");
+    gate_end(&e, "apt-upgrade", "ee01", "success").await;
+    let (s, _) = call(&e, "POST", "/v1/scheduler/pause", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let a = ask("ee02", true).await;
+    // (a timer start away from the daily time: a catch-up)
+    assert_eq!((a.run, a.skipped, a.trigger), (false, Some(SkipReason::PausedAll), RunTrigger::CatchUp));
+    let a = ask("ee03", false).await;
+    assert_eq!((a.run, a.trigger), (true, RunTrigger::Other));
+    gate_end(&e, "apt-upgrade", "ee03", "exit-code").await;
+    let (_, b) = call(&e, "GET", "/v1/scheduler/tasks/apt-upgrade/history", None).await;
+    let runs: Vec<TaskRun> = serde_json::from_slice(&b).unwrap();
+    let got: Vec<(&str, bool, Option<SkipReason>)> = runs.iter().map(|r| (r.invocation_id.as_str(), r.ok, r.skipped)).collect();
+    assert_eq!(got, [("ee03", false, None), ("ee02", false, Some(SkipReason::PausedAll)), ("ee01", true, None)]);
+    // never retried (the system's timer runs it again), never notified (notify never)
+    assert!(e.prot.history.retry("apt-upgrade").unwrap().is_none());
+    // the md RAID check is known too, a unit the gate never heard of is not
+    assert!(ask_unknown(&e, "mdcheck-start").await);
+    assert!(!ask_unknown(&e, "mdcheck-other").await);
+}
+
+/// The gate knows the task `id` (it does not answer "not in the configuration").
+async fn ask_unknown(e: &Env, id: &str) -> bool {
+    let a = gate_ask_body(e, id, json!({"invocation_id": "ff99", "can_wait": true})).await;
+    !a.message.contains("not in the configuration")
+}
+
 /// The gate's answer for a start of `id` (`timer`: started by its own timer); `by`: the
 /// deadline rynasctl sends (0: none).
 async fn gate_ask(e: &Env, id: &str, inv: &str, timer: bool, by: u64) -> rynas_scheduler::gate::GateAnswer {

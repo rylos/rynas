@@ -28,8 +28,18 @@
 //! - **Late answers**: an answer decided after rynasctl's deadline
 //!   ([`GateRequest::answer_by_ms`]) says "run" and records no skip, since rynasctl may have
 //!   run the start already.
+//! - **Queue** (S4, [`rynas_scheduler::queue`]): a start the checks let through whose claims
+//!   (from its action: a volume, a disk, the package system) meet what other work holds in
+//!   the lock table ([`crate::claims`]), or what a waiter ahead of it needs, is answered
+//!   `wait`: rynasctl asks again every 5 s (the start keeps its first answer's origin), until
+//!   its turn comes or it has waited past its deadline (`busy`, recorded). Run now confirmed
+//!   by the user goes ahead of it. The lease then carries the claims.
+//! - **Yield** (S4): a scheduled scrub holding a volume that more urgent work holds or waits
+//!   for is cancelled (`btrfs scrub cancel`: the position is kept), after an entry in
+//!   [`YIELD_FILE`] that tells the unit its end is not a failure; once nothing more urgent
+//!   holds or waits for the volume the watch loop starts it again (`btrfs scrub resume`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -37,16 +47,19 @@ use std::time::{Duration, Instant};
 use jiff::tz::TimeZone;
 use rynas_api_types::TaskStatus as UpidStatus;
 use rynas_api_types::scheduler::{
-    PauseInfo, RunTrigger, ScheduledTask, SchedulerPause, SkipReason, TaskAction, TaskTrigger,
+    Blocker, PauseInfo, QueueWait, Resource, RunTrigger, ScheduledTask, SchedulerPause, SkipReason,
+    TaskAction, TaskTrigger,
 };
 use rynas_notify::event::{code, field, oneshot};
 use rynas_notify::{NewEvent, NotifyCategory, NotifySeverity};
 use rynas_scheduler::gate::{
-    Decision, GateAnswer, GateRequest, Start, decide, load_pause, next_retry, replace_due,
-    retries_after, save_pause, spool_take,
+    Decision, GateAnswer, GateRequest, Start, WAITER_STALE, YIELD_FILE, YieldEntry, decide,
+    load_pause, load_yields, next_retry, queue_limit_ms, replace_due, retries_after, save_pause,
+    save_yields, spool_take,
 };
 use rynas_scheduler::history::{ArmedRetry, GateNote, NewRun};
-use rynas_scheduler::units::{UNIT_PREFIX, runs_in_unit, service_name, timer_name};
+use rynas_scheduler::queue::{Block, Claim, Gives, Holder, Waiter, blocked_by, priority_of, yield_to};
+use rynas_scheduler::units::{UNIT_PREFIX, runs_in_unit, service_name, timer_of};
 use rynas_tasks::{Cmd, now_ms};
 
 use crate::fslock::HeavyGuard;
@@ -64,25 +77,87 @@ struct Lease {
     upid: Option<String>,
     /// The filesystem lock of a run working in its own unit.
     _guard: Option<HeavyGuard>,
-    /// The task action takes the heavy lock (docker updates wait for it).
-    heavy: bool,
+    /// What the run holds in the lock table (S4: its claims, priority, how it gives way).
+    holder: Holder,
+    /// The rynas task type of its work in rynasd (its filesystem lock is the lease's).
+    kind: Option<&'static str>,
+    /// The unit it runs in.
+    unit: String,
+    /// When it was granted.
+    since: Instant,
     /// The task panel's entry of a run working in its own unit ([`crate::jobs::track`]):
     /// told systemd's result when the run ends.
     tracker: Option<tokio::sync::oneshot::Sender<String>>,
 }
 
 impl Lease {
-    fn new(invocation_id: &str, heavy: bool) -> Self {
-        Lease { invocation_id: invocation_id.to_string(), upid: None, _guard: None, heavy, tracker: None }
+    fn new(id: &str, invocation_id: &str, holder: Holder, kind: Option<&'static str>) -> Self {
+        Lease {
+            invocation_id: invocation_id.to_string(),
+            upid: None,
+            _guard: None,
+            holder,
+            kind,
+            unit: rynas_scheduler::units::service_of(id),
+            since: Instant::now(),
+            tracker: None,
+        }
+    }
+}
+
+/// A lease whose unit has not been running for this long is gone (its end was never
+/// reported: the lock table must not keep it).
+const LEASE_LOST: Duration = Duration::from_secs(60);
+
+/// A lease as the lock table sees it ([`crate::claims`]).
+#[derive(Debug, Clone)]
+pub struct LeaseView {
+    pub holder: Holder,
+    pub invocation_id: String,
+    /// The id of its filesystem lock.
+    pub guard: Option<u64>,
+    pub kind: Option<&'static str>,
+    pub unit: String,
+}
+
+/// A start waiting in the queue (S4): what its first answer decided, and when rynasctl last
+/// asked.
+struct WaitEntry {
+    waiter: Waiter,
+    invocation_id: String,
+    seen: Instant,
+    blocker: Option<Blocker>,
+    trigger: RunTrigger,
+    attempt: u8,
+    /// Run now (confirmed by the user) came while it waited: it goes at its next question.
+    skip: bool,
+}
+
+/// What a task's run holds: its claims, priority and how it gives way.
+pub fn holder_of(p: &Protection, t: &ScheduledTask) -> Holder {
+    Holder {
+        task: Some(t.id.clone()),
+        name: t.name.clone(),
+        kind: None,
+        claims: crate::claims::claims_of(p, t),
+        priority: priority_of(&t.action),
+        gives: crate::claims::gives_of(&t.action),
     }
 }
 
 pub struct Gate {
     state: PathBuf,
     pause: Mutex<SchedulerPause>,
-    /// trigger, attempt, asked at (for the TTL), asked at in ms since the epoch
-    requested: Mutex<HashMap<String, (RunTrigger, u8, Instant, u64)>>,
+    /// trigger, attempt, asked at (for the TTL), asked at in ms since the epoch, skip the
+    /// queue (run now confirmed by the user)
+    requested: Mutex<HashMap<String, Request>>,
     leases: Mutex<HashMap<String, Lease>>,
+    /// The starts waiting in the queue (S4), by task.
+    waiting: Mutex<HashMap<String, WaitEntry>>,
+    /// The scrubs that gave way (S4, kept in [`rynas_scheduler::gate::YIELD_FILE`]).
+    yields: Mutex<BTreeMap<String, YieldEntry>>,
+    /// When a scrub's cancel last failed (tried again a minute later).
+    yield_failed: Mutex<HashMap<String, Instant>>,
     /// The applied task ids at the last watch tick (a task gone since was deleted).
     known: Mutex<Option<HashSet<String>>>,
     /// When the watch loop last started each interval task that was due (it never starts
@@ -105,11 +180,15 @@ impl Gate {
     /// `state`: rynasd's state directory (the pauses are below it).
     pub fn new(state: PathBuf) -> Self {
         let pause = load_pause(&state);
+        let yields = load_yields(&state);
         Self {
             state,
             pause: Mutex::new(pause),
             requested: Mutex::new(HashMap::new()),
             leases: Mutex::new(HashMap::new()),
+            waiting: Mutex::new(HashMap::new()),
+            yields: Mutex::new(yields),
+            yield_failed: Mutex::new(HashMap::new()),
             known: Mutex::new(None),
             interval_started: Mutex::new(HashMap::new()),
         }
@@ -155,18 +234,23 @@ impl Gate {
 
     /// The next start of `id` is one rynasd asked for.
     pub fn request(&self, id: &str, trigger: RunTrigger, attempt: u8) {
-        self.requested
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), (trigger, attempt, Instant::now(), now_ms()));
+        self.request_with(id, trigger, attempt, false);
     }
 
-    /// Takes the request of `id` (used once, whoever started the unit), with when it was
-    /// made (ms since the epoch).
-    fn take_request(&self, id: &str) -> Option<(RunTrigger, u8, u64)> {
+    /// [`Gate::request`]; `skip_queue`: the start does not wait in the queue (run now, the
+    /// user confirmed what it slows down).
+    pub fn request_with(&self, id: &str, trigger: RunTrigger, attempt: u8, skip_queue: bool) {
+        self.requested.lock().unwrap().insert(
+            id.to_string(),
+            Request { trigger, attempt, at: Instant::now(), at_ms: now_ms(), skip_queue },
+        );
+    }
+
+    /// Takes the request of `id` (used once, whoever started the unit).
+    fn take_request(&self, id: &str) -> Option<Request> {
         let mut r = self.requested.lock().unwrap();
-        r.retain(|_, (_, _, at, _)| at.elapsed() < REQUEST_TTL);
-        r.remove(id).map(|(t, a, _, ms)| (t, a, ms))
+        r.retain(|_, q| q.at.elapsed() < REQUEST_TTL);
+        r.remove(id)
     }
 
     /// A start of `id` that rynasd asked for is still waiting for its gate.
@@ -175,7 +259,128 @@ impl Gate {
             .lock()
             .unwrap()
             .get(id)
-            .is_some_and(|(_, _, at, _)| at.elapsed() < REQUEST_TTL)
+            .is_some_and(|q| q.at.elapsed() < REQUEST_TTL)
+    }
+
+    /// The start `invocation_id` of `id` waits in the queue already: how its first answer
+    /// said it came about.
+    fn waiting_as(&self, id: &str, invocation_id: &str) -> Option<(RunTrigger, u8, bool)> {
+        self.waiting
+            .lock()
+            .unwrap()
+            .get(id)
+            .filter(|w| w.invocation_id == invocation_id && w.seen.elapsed() < WAITER_STALE)
+            .map(|w| (w.trigger, w.attempt, w.skip))
+    }
+
+    /// Run now on a task whose start waits in the queue: `true` when it waits (then, with
+    /// `skip_queue`, it goes at its next question; without, it keeps its place).
+    pub fn let_through(&self, id: &str, skip_queue: bool) -> bool {
+        let mut m = self.waiting.lock().unwrap();
+        match m.get_mut(id).filter(|w| w.seen.elapsed() < WAITER_STALE) {
+            Some(w) => {
+                w.skip |= skip_queue;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The start of `id` waits (again) for `blocker`; `true` when that changed what is shown.
+    fn wait(&self, id: &str, invocation_id: &str, waiter: Waiter, blocker: Blocker, trigger: RunTrigger, attempt: u8) -> bool {
+        let mut m = self.waiting.lock().unwrap();
+        let changed = m
+            .get(id)
+            .is_none_or(|w| w.invocation_id != invocation_id || w.blocker.as_ref() != Some(&blocker));
+        m.insert(
+            id.to_string(),
+            WaitEntry { waiter, invocation_id: invocation_id.to_string(), seen: Instant::now(), blocker: Some(blocker), trigger, attempt, skip: false },
+        );
+        changed
+    }
+
+    /// A start of `id` waits in the queue now.
+    pub fn is_waiting(&self, id: &str) -> bool {
+        self.waiting.lock().unwrap().get(id).is_some_and(|w| w.seen.elapsed() < WAITER_STALE)
+    }
+
+    /// The start of `id` no longer waits; returns since when it had waited.
+    fn unwait(&self, id: &str) -> Option<u64> {
+        self.waiting.lock().unwrap().remove(id).map(|w| w.waiter.since_ms)
+    }
+
+    /// The fresh waiters but `except` (whose rynasctl asked within [`WAITER_STALE`]).
+    pub fn waiters(&self, except: &str) -> Vec<Waiter> {
+        self.waiting
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, w)| id.as_str() != except && w.seen.elapsed() < WAITER_STALE)
+            .map(|(_, w)| w.waiter.clone())
+            .collect()
+    }
+
+    /// Drops the waiters gone silent (their unit was stopped); `true` when one went.
+    fn expire_waiters(&self) -> bool {
+        let mut m = self.waiting.lock().unwrap();
+        let n = m.len();
+        m.retain(|_, w| w.seen.elapsed() < WAITER_STALE);
+        m.len() != n
+    }
+
+    /// The starts waiting in the queue: task, since, what they wait for.
+    pub fn queued(&self) -> Vec<(String, QueueWait)> {
+        self.waiting
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, w)| w.seen.elapsed() < WAITER_STALE)
+            .map(|(id, w)| (id.clone(), QueueWait { since_ms: w.waiter.since_ms, blocker: w.blocker.clone() }))
+            .collect()
+    }
+
+    /// The scrubs that gave way.
+    pub fn yields(&self) -> BTreeMap<String, YieldEntry> {
+        self.yields.lock().unwrap().clone()
+    }
+
+    fn change_yields(&self, f: impl FnOnce(&mut BTreeMap<String, YieldEntry>)) {
+        let mut m = self.yields.lock().unwrap();
+        f(&mut m);
+        if let Err(e) = save_yields(&self.state, &m) {
+            tracing::warn!("scheduler: {}: {e}", YIELD_FILE);
+        }
+    }
+
+    /// The run `invocation_id` of `id` ended: `true` when it is the run that gave way (it
+    /// waits to be resumed now). Any other run of the task ends the scrub's yield (it
+    /// resumed, or a run since went to the end).
+    pub fn run_ended(&self, id: &str, invocation_id: &str) -> bool {
+        let mut gave_way = false;
+        let known = self.yields.lock().unwrap().contains_key(id);
+        if !known {
+            return false;
+        }
+        self.change_yields(|m| match m.get_mut(id) {
+            Some(e) if e.invocation_id == invocation_id => {
+                e.stopped = true;
+                gave_way = true;
+            }
+            Some(e) if e.stopped => {
+                m.remove(id);
+            }
+            _ => {}
+        });
+        gave_way
+    }
+
+    /// Forgets the yield of `id` (the task is gone or off).
+    fn drop_yield(&self, id: &str) {
+        if self.yields.lock().unwrap().contains_key(id) {
+            self.change_yields(|m| {
+                m.remove(id);
+            });
+        }
     }
 
     /// The watch loop may start the interval task `id` now; records the start when it may. A
@@ -202,11 +407,55 @@ impl Gate {
         true
     }
 
-    fn grant(&self, id: &str, invocation_id: &str, heavy: bool) {
+    fn grant(&self, id: &str, invocation_id: &str, holder: Holder, kind: Option<&'static str>) {
         self.leases
             .lock()
             .unwrap()
-            .insert(id.to_string(), Lease::new(invocation_id, heavy));
+            .insert(id.to_string(), Lease::new(id, invocation_id, holder, kind));
+    }
+
+    /// Drops the leases whose unit no longer runs (its end report never came: rynasctl and
+    /// the spool both lost it), granted more than [`LEASE_LOST`] ago. Their lock and task
+    /// panel entry go with them.
+    fn sweep(&self, running: &[String]) {
+        let gone: Vec<(String, Lease)> = {
+            let mut l = self.leases.lock().unwrap();
+            let ids: Vec<String> = l
+                .iter()
+                .filter(|(_, x)| x.since.elapsed() > LEASE_LOST && !running.contains(&x.unit))
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter().filter_map(|id| l.remove(&id).map(|x| (id, x))).collect()
+        };
+        for (id, mut lease) in gone {
+            tracing::warn!("scheduler: task {id}: its unit no longer runs and its end never came: lease dropped");
+            if let Some(t) = lease.tracker.take() {
+                let _ = t.send("unknown".into());
+            }
+        }
+    }
+
+    fn has_leases(&self) -> bool {
+        !self.leases.lock().unwrap().is_empty()
+    }
+
+    /// The leases as the lock table sees them.
+    pub fn lease_views(&self) -> Vec<LeaseView> {
+        let mut v: Vec<LeaseView> = self
+            .leases
+            .lock()
+            .unwrap()
+            .values()
+            .map(|l| LeaseView {
+                holder: l.holder.clone(),
+                invocation_id: l.invocation_id.clone(),
+                guard: l._guard.as_ref().map(HeavyGuard::id),
+                kind: l.kind,
+                unit: l.unit.clone(),
+            })
+            .collect();
+        v.sort_by(|a, b| a.holder.task.cmp(&b.holder.task));
+        v
     }
 
     /// The run of `id` started the rynasd task `upid`.
@@ -216,12 +465,12 @@ impl Gate {
         }
     }
 
-    /// The run of `id` holds a filesystem lock until it ends.
-    pub fn attach_guard(&self, id: &str, guard: HeavyGuard) {
+    /// The run of `id` holds a filesystem lock until it ends (`holder`: what it holds, for a
+    /// start without the gate: rynasd was down then, the run gets a lease of its own).
+    pub fn attach_guard(&self, id: &str, holder: impl FnOnce() -> Holder, guard: HeavyGuard) {
         let mut l = self.leases.lock().unwrap();
-        // a start without the gate (rynasd was down then): a lease of its own
         l.entry(id.to_string())
-            .or_insert_with(|| Lease::new("", true))
+            .or_insert_with(|| Lease::new(id, "", holder(), None))
             ._guard = Some(guard);
     }
 
@@ -230,11 +479,11 @@ impl Gate {
     pub fn attach_tracker(
         &self,
         id: &str,
-        heavy: bool,
+        holder: impl FnOnce() -> Holder,
         tracker: tokio::sync::oneshot::Sender<String>,
     ) -> String {
         let mut l = self.leases.lock().unwrap();
-        let lease = l.entry(id.to_string()).or_insert_with(|| Lease::new("", heavy));
+        let lease = l.entry(id.to_string()).or_insert_with(|| Lease::new(id, "", holder(), None));
         lease.tracker = Some(tracker);
         lease.invocation_id.clone()
     }
@@ -266,41 +515,38 @@ impl Gate {
         })
     }
 
-    /// Tasks whose run holds a filesystem for heavy work now (for other features' "busy"
-    /// checks: they no longer show as rynasd tasks).
-    pub fn heavy_runs(&self) -> Vec<String> {
-        self.leases
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, l)| l.heavy)
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
-    /// After a start of rynasd: a lease for every task unit that runs now (with the lock of
-    /// those that work in their own unit, and their task panel entry).
+    /// After a start of rynasd: a lease for every task unit that runs now, the gated system
+    /// units too (with the lock of those that work in their own unit, and their task panel
+    /// entry). A start still waiting in its gate is not running: its rynasctl asks again and
+    /// takes its place in the queue.
     pub async fn rebuild(p: &Arc<Protection>) {
         let p2 = p.clone();
-        let found = tokio::task::spawn_blocking(move || -> Vec<(ScheduledTask, String)> {
+        let found = tokio::task::spawn_blocking(move || -> Vec<(ScheduledTask, String, Holder)> {
             let running = p2.probe.running_tasks().unwrap_or_default();
             running
                 .iter()
                 .filter_map(|unit| {
-                    let id = unit.strip_prefix(UNIT_PREFIX)?.strip_suffix(".service")?;
+                    let id = match unit.strip_prefix(UNIT_PREFIX).and_then(|u| u.strip_suffix(".service")) {
+                        Some(id) => id.to_string(),
+                        None => rynas_api_types::scheduler::system::GATED_UNITS
+                            .iter()
+                            .find(|(_, s, _)| s == unit)
+                            .map(|(i, ..)| i.to_string())?,
+                    };
                     let run = p2.probe.current_run(unit).ok().flatten()?;
-                    let t = crate::scheduler::applied_task(&p2, id).ok().flatten()?;
-                    Some((t, run.invocation_id))
+                    let t = crate::scheduler::applied_task(&p2, &id).ok().flatten()?;
+                    let h = holder_of(&p2, &t);
+                    Some((t, run.invocation_id, h))
                 })
                 .collect()
         })
         .await
         .unwrap_or_default();
-        for (t, inv) in found {
-            p.gate.grant(&t.id, &inv, heavy_action(&t.action));
+        for (t, inv, h) in found {
+            p.gate.grant(&t.id, &inv, h, crate::claims::work_kind(&t.action));
             if let TaskAction::Scrub { filesystem } = &t.action {
                 let g = crate::fslock::FsLocks::global().heavy_paths(&[filesystem], "btrfs.scrub").await;
-                p.gate.attach_guard(&t.id, g);
+                p.gate.attach_guard(&t.id, Holder::default, g);
             }
             if runs_in_unit(&t.action) {
                 crate::jobs::track(p, &t);
@@ -310,21 +556,23 @@ impl Gate {
     }
 }
 
+/// A start rynasd asked for (run now, a retry, an interval due, a resume).
+#[derive(Debug, Clone, Copy)]
+struct Request {
+    trigger: RunTrigger,
+    attempt: u8,
+    at: Instant,
+    at_ms: u64,
+    skip_queue: bool,
+}
+
 /// The gate of this rynasd once its watch loop runs (for the busy checks of other features).
 static RUNNING: std::sync::OnceLock<Arc<Gate>> = std::sync::OnceLock::new();
 
-/// Scheduled tasks doing heavy work now (a scrub in its own unit, a backup...): what other
-/// features' busy checks must see besides rynasd's own tasks.
-pub fn heavy_runs_now() -> Vec<String> {
-    RUNNING.get().map(|g| g.heavy_runs()).unwrap_or_default()
-}
-
-/// Actions that take the filesystem lock for heavy work.
-pub fn heavy_action(a: &TaskAction) -> bool {
-    matches!(
-        a,
-        TaskAction::Scrub { .. } | TaskAction::Replicate { .. } | TaskAction::Backup { .. }
-    )
+/// The gate of this rynasd, once its watch loop runs: the lock table's leases for other
+/// features' questions ([`crate::claims`]).
+pub fn running() -> Option<Arc<Gate>> {
+    RUNNING.get().cloned()
 }
 
 fn reason_text(r: SkipReason) -> &'static str {
@@ -336,6 +584,7 @@ fn reason_text(r: SkipReason) -> &'static str {
         SkipReason::Running => "the previous run is still going",
         SkipReason::Window => "past the start window of its scheduled time",
         SkipReason::NotDue => "not due yet",
+        SkipReason::Busy => "it waited in the queue past its deadline",
     }
 }
 
@@ -377,6 +626,7 @@ pub fn import_spool(p: &Protection) {
                     trigger: Some(trigger),
                     attempt: 0,
                     ungated: true,
+                    queued_ms: 0,
                 })
                 .map(|_| 0),
         };
@@ -386,12 +636,10 @@ pub fn import_spool(p: &Protection) {
     }
 }
 
-/// The gate: `POST /v1/scheduler/tasks/{id}/gate` (root only, from `rynasctl gate`). Quick
-/// on purpose (the spool is imported by the watch loop, not here).
 pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
     let now = now_ms();
     // (a task an apply in progress adds is found: [`crate::scheduler::applied_task`] reads the
-    // value being applied)
+    // value being applied; the gated system units are tasks too)
     let Some(task) = crate::scheduler::applied_task(p, id)? else {
         // rynasd answers, and the task is not rynas's: a unit left behind, nothing to run
         // (skipped, not failed; only an unreachable rynasd runs the start as before the gate)
@@ -400,19 +648,42 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
             trigger: RunTrigger::Other,
             skipped: Some(SkipReason::NotDue),
             message: format!("rynas: task {id} is not in the configuration: start skipped"),
+            wait: false,
         });
     };
+    let pause = p.gate.pause();
+    let late = req.answer_by_ms > 0 && now_ms() > req.answer_by_ms;
+    // a start waiting in the queue already: its first answer decided how it came about; a
+    // pause set meanwhile still skips it (unless the user asked for it)
+    if let Some((trigger, attempt, skip)) = p.gate.waiting_as(id, &req.invocation_id) {
+        if skip {
+            return queue_or_run(p, &task, req, trigger, attempt, true, late, now);
+        }
+        if !matches!(trigger, RunTrigger::Manual | RunTrigger::Other)
+            && let Some(reason) = pause.blocks(id, now)
+            && !late
+        {
+            p.gate.unwait(id);
+            let p_info = match reason {
+                SkipReason::PausedAll => pause.all.as_ref(),
+                _ => pause.tasks.get(id),
+            };
+            let detail = p_info.map(|i| i.reason.clone()).filter(|r| !r.is_empty());
+            return skipped(p, &task, req, now, trigger, reason, detail);
+        }
+        return queue_or_run(p, &task, req, trigger, attempt, false, late, now);
+    }
     // used once, and dropped by a start of the timer (run now on a running task left it);
     // a start rynasd asked for may still name the timer (systemd keeps activation details)
     let asked = p.gate.take_request(id);
     let by_timer = rynas_scheduler::gate::started_by_timer(
-        req.trigger_unit == timer_name(id),
+        req.trigger_unit == timer_of(id),
         req.trigger_timer_ms,
-        asked.map(|(_, _, ms)| ms),
+        asked.map(|q| q.at_ms),
         now,
     );
-    let requested = asked.map(|(t, a, _)| (t, a));
-    let pause = p.gate.pause();
+    let requested = asked.map(|q| (q.trigger, q.attempt));
+    let skip_queue = !by_timer && asked.is_some_and(|q| q.skip_queue);
     let tz = TimeZone::system();
     let interval = matches!(task.trigger, TaskTrigger::Interval { .. });
     let last_run = if interval {
@@ -436,7 +707,6 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
         tz: &tz,
     };
     let decision = decide(&start);
-    let late = req.answer_by_ms > 0 && now_ms() > req.answer_by_ms;
     let (trigger, attempt) = match &decision {
         Decision::Run { trigger, attempt } => (*trigger, *attempt),
         Decision::Skip { trigger, .. } if late => {
@@ -454,34 +724,144 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
                 trigger: *trigger,
                 skipped: Some(SkipReason::NotDue),
                 message: String::new(),
+                wait: false,
             });
         }
         Decision::Skip { trigger, reason, detail } => {
-            let (trigger, reason) = (*trigger, *reason);
-            // an interval task's start skipped for the same reason as its latest one: one row
-            let repeated = interval
-                && p.history.list(id, 1, None).ok().and_then(|v| v.into_iter().next()).is_some_and(|r| {
-                    r.skipped == Some(reason) && r.trigger == Some(trigger) && r.detail == *detail
-                });
-            if !repeated {
-                let run = NewRun::skipped(id, &req.invocation_id, now, trigger, reason, detail.clone());
-                p.history.record(&run).map_err(Error::internal)?;
-            }
-            p.invalidate();
-            if trigger == RunTrigger::Retry {
-                drop_retry(p, id, "its start was skipped");
-            }
-            if reason == SkipReason::Missed && task.effective_policy().rules.on_missed {
-                p.notifier.emit(missed_event(&task));
-            }
-            let mut message = format!("rynas: start skipped: {}", reason_text(reason));
-            if let Some(d) = detail {
-                message.push_str(&format!(" ({d})"));
-            }
-            return Ok(GateAnswer { run: false, trigger, skipped: Some(reason), message });
+            return skipped(p, &task, req, now, *trigger, *reason, detail.clone());
         }
     };
-    p.gate.grant(id, &req.invocation_id, heavy_action(&task.action));
+    queue_or_run(p, &task, req, trigger, attempt, skip_queue, late, now)
+}
+
+/// Records a skipped start (an interval task's same skip as its latest: one row) and answers
+/// it.
+fn skipped(
+    p: &Protection,
+    task: &ScheduledTask,
+    req: &GateRequest,
+    now: u64,
+    trigger: RunTrigger,
+    reason: SkipReason,
+    detail: Option<String>,
+) -> Res<GateAnswer> {
+    let id = task.id.as_str();
+    let interval = matches!(task.trigger, TaskTrigger::Interval { .. });
+    let repeated = interval
+        && p.history.list(id, 1, None).ok().and_then(|v| v.into_iter().next()).is_some_and(|r| {
+            r.skipped == Some(reason) && r.trigger == Some(trigger) && r.detail == detail
+        });
+    if !repeated {
+        let run = NewRun::skipped(id, &req.invocation_id, now, trigger, reason, detail.clone());
+        p.history.record(&run).map_err(Error::internal)?;
+    }
+    p.invalidate();
+    if trigger == RunTrigger::Retry {
+        drop_retry(p, id, "its start was skipped");
+    }
+    if reason == SkipReason::Missed && task.effective_policy().rules.on_missed {
+        p.notifier.emit(missed_event(task));
+    }
+    let mut message = format!("rynas: start skipped: {}", reason_text(reason));
+    if let Some(d) = detail {
+        message.push_str(&format!(" ({d})"));
+    }
+    Ok(GateAnswer { run: false, trigger, skipped: Some(reason), message, wait: false })
+}
+
+/// The lock table now, for the gate's questions.
+pub fn table_now(p: &Protection) -> crate::claims::Table {
+    let running = p.probe.running_tasks().unwrap_or_default();
+    let mdstat = std::fs::read_to_string("/proc/mdstat").unwrap_or_default();
+    crate::claims::table(Some(&p.gate), &p.ops.tasks, &mdstat, &running)
+}
+
+/// A blocker in the words of the unit's journal.
+fn blocker_text(b: &Blocker) -> String {
+    let who = match (&b.task, b.name.is_empty() || b.task.as_deref() == Some(b.name.as_str()), &b.kind) {
+        (Some(t), true, _) => format!("task {t}"),
+        (Some(t), false, _) => format!("{} (task {t})", b.name),
+        (None, false, _) => b.name.clone(),
+        (None, true, Some(k)) => format!("rynas task {k}"),
+        (None, true, None) => "other work".into(),
+    };
+    let what = match &b.resource {
+        Resource::Volume { path } if path == rynas_scheduler::queue::EVERY => "every volume".to_string(),
+        Resource::Volume { path } => path.clone(),
+        Resource::Disk { disk } => format!("disk {disk}"),
+        Resource::Packages => "the package system".into(),
+        Resource::Power => "a scheduled shutdown".into(),
+        Resource::Maintenance => "maintenance".into(),
+    };
+    format!("{who} on {what}")
+}
+
+/// The name of a task (its id when it has none or is unknown).
+fn task_name(p: &Protection, id: &str) -> String {
+    crate::scheduler::applied_task(p, id)
+        .ok()
+        .flatten()
+        .map(|t| t.name)
+        .filter(|n| !n.is_empty())
+        .unwrap_or_default()
+}
+
+/// A start the gate lets through, unless what it claims is busy: then it waits in the queue
+/// (S4), or is skipped once it has waited past its deadline. `skip_queue`: run now that the
+/// user confirmed. An older rynasctl (`can_wait` false) and a late answer never wait.
+#[allow(clippy::too_many_arguments)]
+fn queue_or_run(
+    p: &Protection,
+    task: &ScheduledTask,
+    req: &GateRequest,
+    trigger: RunTrigger,
+    attempt: u8,
+    skip_queue: bool,
+    late: bool,
+    now: u64,
+) -> Res<GateAnswer> {
+    let id = task.id.as_str();
+    let holder = holder_of(p, task);
+    // a shutdown waits by its own policy (it holds what it claims at once)
+    let can_queue = req.can_wait
+        && !late
+        && !skip_queue
+        && holder.claims.iter().any(|c| !matches!(c, Claim::Power));
+    let since = if req.queued_since_ms > 0 { req.queued_since_ms.min(now) } else { now };
+    if can_queue {
+        let me = Waiter { task: id.to_string(), claims: holder.claims.clone(), priority: holder.priority, since_ms: since };
+        let table = table_now(p);
+        let others = p.gate.waiters(id);
+        let disks = |k: &str| table.disks(k);
+        if let Some(block) = blocked_by(&me, &table.holders, &others, &disks) {
+            let blocker = match &block {
+                Block::Holder(i, c) => table.blocker(&table.holders[*i], c),
+                Block::Waiter(i, c) => Blocker {
+                    task: Some(others[*i].task.clone()),
+                    name: task_name(p, &others[*i].task),
+                    kind: None,
+                    resource: table.resource(c),
+                },
+            };
+            if now.saturating_sub(since) > queue_limit_ms(task) {
+                p.gate.unwait(id);
+                return skipped(p, task, req, now, trigger, SkipReason::Busy, Some(blocker_text(&blocker)));
+            }
+            let message = format!("rynas: queued: waiting for {}", blocker_text(&blocker));
+            if p.gate.wait(id, &req.invocation_id, me, blocker, trigger, attempt) {
+                tracing::info!("scheduler: task {id}: {}", message.trim_start_matches("rynas: "));
+                p.invalidate();
+            }
+            return Ok(GateAnswer { run: false, trigger, skipped: None, message, wait: true });
+        }
+    }
+    let waited = p.gate.unwait(id);
+    // rynasctl's own count wins (it survives a restart of rynasd)
+    let queued_ms = match (req.queued_since_ms, waited) {
+        (s, _) | (0, Some(s)) if s > 0 => now.saturating_sub(s),
+        _ => 0,
+    };
+    p.gate.grant(id, &req.invocation_id, holder, crate::claims::work_kind(&task.action));
     p.history
         .note_gate(&GateNote {
             invocation_id: req.invocation_id.clone(),
@@ -490,10 +870,15 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
             trigger: Some(trigger),
             attempt,
             ungated: false,
+            queued_ms,
         })
         .map_err(Error::internal)?;
+    if queued_ms > 0 {
+        p.invalidate();
+    }
     let message = match trigger {
         _ if late => "rynas: the scheduling gate answered late; running the start".into(),
+        _ if queued_ms > 0 => format!("rynas: its turn in the queue came after {} s: starting", queued_ms / 1000),
         RunTrigger::Retry => format!(
             "rynas: retry {attempt} of {} after a failed run",
             task.effective_policy().retry.attempts
@@ -502,9 +887,11 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
             "rynas: its time came while the previous run was going: starting now (overlap policy queue)".into()
         }
         RunTrigger::CatchUp => "rynas: catching up a run missed while the NAS was off".into(),
+        RunTrigger::Resume => "rynas: the volume is free again: resuming".into(),
+        _ if skip_queue => "rynas: run now, ahead of the queue".into(),
         _ => String::new(),
     };
-    Ok(GateAnswer { run: true, trigger, skipped: None, message })
+    Ok(GateAnswer { run: true, trigger, skipped: None, message, wait: false })
 }
 
 fn missed_event(task: &ScheduledTask) -> NewEvent {
@@ -633,6 +1020,7 @@ fn forget_deleted(p: &Protection, applied: &[ScheduledTask]) {
             }
         }
         drop_retry(p, &id, "the task was deleted");
+        p.gate.drop_yield(&id);
     }
 }
 
@@ -766,6 +1154,122 @@ fn interval_due(p: &Protection, t: &ScheduledTask, last: Option<(u64, u64)>, now
     }
 }
 
+/// A scrub whose cancel failed is asked again after this long.
+const YIELD_RETRY: Duration = Duration::from_secs(60);
+/// A scrub asked to give way whose end was never reported counts as stopped after this long
+/// (rynasd was away when it ended).
+const YIELD_LOST_MS: u64 = 120_000;
+
+/// The queue's turn of the watch loop (S4): a running scrub gives way to more urgent work on
+/// its volume (`btrfs scrub cancel`: its position is kept), and a scrub that gave way resumes
+/// once nothing more urgent holds or waits for its volume.
+fn queue_tick(p: &Protection, applied: &[ScheduledTask], now: u64) {
+    let leases = p.gate.lease_views();
+    let yields = p.gate.yields();
+    if yields.is_empty() && !leases.iter().any(|l| l.holder.gives == Gives::Yields) {
+        return;
+    }
+    let table = table_now(p);
+    let waiters = p.gate.waiters("");
+    let disks = |k: &str| table.disks(k);
+    for l in leases.iter().filter(|l| l.holder.gives == Gives::Yields) {
+        let Some(id) = l.holder.task.as_deref() else { continue };
+        if yields.contains_key(id)
+            || l.invocation_id.is_empty()
+            || p.gate.yield_failed.lock().unwrap().get(id).is_some_and(|at| at.elapsed() < YIELD_RETRY)
+        {
+            continue;
+        }
+        let Some(block) = yield_to(&l.holder, &table.holders, &waiters, &disks) else { continue };
+        let Some(TaskAction::Scrub { filesystem }) = applied.iter().find(|t| t.id == id).map(|t| &t.action) else {
+            continue;
+        };
+        let to = match &block {
+            Block::Holder(i, c) => table.blocker(&table.holders[*i], c),
+            Block::Waiter(i, c) => Blocker {
+                task: Some(waiters[*i].task.clone()),
+                name: task_name(p, &waiters[*i].task),
+                kind: None,
+                resource: table.resource(c),
+            },
+        };
+        tracing::info!("scheduler: task {id}: the scrub gives way to {}", blocker_text(&to));
+        // written before the cancel: the unit reads it to tell this end from a failure
+        let entry = YieldEntry {
+            filesystem: filesystem.clone(),
+            invocation_id: l.invocation_id.clone(),
+            since_ms: now,
+            to: Some(to),
+            stopped: false,
+        };
+        p.gate.change_yields(|m| {
+            m.insert(id.to_string(), entry);
+        });
+        let r = p
+            .ops
+            .config
+            .system()
+            .run(&Cmd::new("btrfs").args(["scrub", "cancel"]).arg(filesystem).env_clear());
+        let ok = matches!(&r, Ok(o) if o.success());
+        if !ok {
+            let why = match r {
+                Ok(o) => format!("exit code {:?}: {}", o.code, o.stderr.trim()),
+                Err(e) => e.to_string(),
+            };
+            tracing::warn!("scheduler: task {id}: btrfs scrub cancel {filesystem}: {why}");
+            p.gate.yield_failed.lock().unwrap().insert(id.to_string(), Instant::now());
+            p.gate.drop_yield(id);
+        }
+        p.invalidate();
+    }
+    // resumes
+    let pause = p.gate.pause();
+    let running = p.probe.running_tasks().unwrap_or_default();
+    for (id, e) in p.gate.yields() {
+        let Some(task) = applied.iter().find(|t| t.id == id) else {
+            tracing::info!("scheduler: task {id} is gone: its scrub is not resumed");
+            p.gate.drop_yield(&id);
+            continue;
+        };
+        if !task.enabled {
+            p.gate.drop_yield(&id);
+            continue;
+        }
+        let unit = service_name(&id);
+        let leased = leases.iter().any(|l| l.holder.task.as_deref() == Some(id.as_str()));
+        if !e.stopped {
+            // asked to give way, its end never reported (rynasd was away): stopped
+            if !leased && !running.contains(&unit) && now.saturating_sub(e.since_ms) > YIELD_LOST_MS {
+                p.gate.change_yields(|m| {
+                    if let Some(x) = m.get_mut(&id) {
+                        x.stopped = true;
+                    }
+                });
+            }
+            continue;
+        }
+        if leased
+            || running.contains(&unit)
+            || pause.blocks(&id, now).is_some()
+            || p.gate.requested_now(&id)
+            || p.gate.waiting.lock().unwrap().contains_key(&id)
+        {
+            continue;
+        }
+        let holder = holder_of(p, task);
+        let me = Waiter { task: id.clone(), claims: holder.claims, priority: holder.priority, since_ms: e.since_ms };
+        if blocked_by(&me, &table.holders, &waiters, &disks).is_some() {
+            continue;
+        }
+        p.gate.request(&id, RunTrigger::Resume, 0);
+        match p.ops.config.system().start_unit(&unit) {
+            Ok(()) => tracing::info!("scheduler: task {id}: its volume is free: the scrub resumes"),
+            Err(err) => tracing::warn!("scheduler: task {id}: resume: {err}"),
+        }
+        p.invalidate();
+    }
+}
+
 /// One turn of the watch loop (public for the tests).
 pub fn tick(p: &Protection) {
     import_spool(p);
@@ -778,6 +1282,15 @@ pub fn tick(p: &Protection) {
         }
     };
     forget_deleted(p, &applied);
+    if p.gate.expire_waiters() {
+        p.invalidate();
+    }
+    if p.gate.has_leases()
+        && let Ok(running) = p.probe.running_tasks()
+    {
+        p.gate.sweep(&running);
+    }
+    queue_tick(p, &applied, now);
     let retries = p.history.retries().unwrap_or_default();
     let replacing: Vec<&ScheduledTask> = applied
         .iter()
@@ -811,8 +1324,9 @@ pub fn tick(p: &Protection) {
             drop_retry(p, &id, "the task is off");
             continue;
         }
-        // a run goes on: its end moves the chain on (the retry itself, or a run before it)
-        if running.contains(&unit) {
+        // a run goes on: its end moves the chain on (the retry itself, or a run before it);
+        // a retry waiting in the queue is a start on its way, like any other (S4)
+        if running.contains(&unit) || p.gate.is_waiting(&id) {
             continue;
         }
         if let Some(at) = armed.started_ms {

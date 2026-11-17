@@ -27,10 +27,10 @@ use rynas_api_types::power::{
 use rynas_api_types::scheduler::{
     NotifyPolicy, ScheduledTask, SchedulerConfig, TaskAction, TaskTrigger,
 };
-use rynas_api_types::{TaskStarted, TaskStatus, error_codes};
+use rynas_api_types::{TaskStarted, error_codes};
 use rynas_notify::event::{code, field, oneshot};
 use rynas_power::POWER_KEY;
-use rynas_power::policy::{Decision, RECHECK_S, decide, mdstat_busy, smb_open_files};
+use rynas_power::policy::{Decision, RECHECK_S, decide, smb_open_files};
 use rynas_power::rules::{self, normalize, on_calendar, task_id, valid_rule_id};
 use rynas_power::wake::{self, PowerState};
 use rynas_scheduler::SCHEDULER_KEY;
@@ -230,33 +230,23 @@ async fn next_get(State(st): State<HwState>) -> Res<Json<PowerNext>> {
 
 const SMBSTATUS_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// One round of the enabled checks: what keeps the NAS busy.
 async fn busy_reasons(h: &Arc<Hardware>, p: &ShutdownPolicy, me: &str, unit: &str) -> Vec<String> {
-    let mut busy = Vec::new();
-    if p.check_storage {
+    // the storage and task checks are questions to the scheduler's lock table (S4): md
+    // operations, scrubs, rynas tasks and running task units (deduplication left out: it
+    // stops and saves its work, D-DEDUP)
+    let mut busy = if p.check_storage || p.check_tasks {
         let mdstat = rynas_hw::under(&h.hw_root, "/proc/mdstat");
         let text = tokio::fs::read_to_string(mdstat).await.unwrap_or_default();
-        busy.extend(mdstat_busy(&text));
-        for t in h.ops.tasks.list(500) {
-            if t.status == TaskStatus::Running && t.kind.contains("scrub") {
-                busy.push(format!("{} running ({})", t.kind, t.id));
-            }
-        }
-    }
-    if p.check_tasks {
-        for t in h.ops.tasks.list(500) {
-            // a deduplication run never holds a shutdown back: it is stopped, saves its
-            // work and goes on in its next window (D-DEDUP)
-            if t.status == TaskStatus::Running && t.id != me && !t.kind.contains("scrub") && !crate::dedup::gives_way(&t.kind) {
-                busy.push(format!("rynas task {} running", t.kind));
-            }
-        }
-        if let Some(prot) = &h.protection {
-            for u in prot.runtime().await.running.iter().filter(|u| *u != unit && !crate::dedup::gives_way(u)) {
-                busy.push(format!("scheduler task {u} running"));
-            }
-        }
-    }
+        let units = match &h.protection {
+            Some(prot) => prot.runtime().await.running.clone(),
+            None => Vec::new(),
+        };
+        let gate = h.protection.as_ref().map(|prot| prot.gate.clone());
+        let table = crate::claims::table(gate.as_deref(), &h.ops.tasks, &text, &units);
+        crate::claims::power_busy(&table, p.check_storage, p.check_tasks, me, unit)
+    } else {
+        Vec::new()
+    };
     if p.check_smb {
         let cmd = Cmd::new("smbstatus")
             .args(["-L", "--json"])

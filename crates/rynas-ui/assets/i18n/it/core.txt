@@ -216,6 +216,7 @@ task.st.error	Errore
 task.st.cancelled	Annullata
 task.st.running	In esecuzione
 task.st.queued	In coda
+tasks.queue	Attività pianificate in attesa
 task.config.apply	Applicazione configurazione
 task.zram.apply	Applicazione impostazioni memoria
 task.time.apply	Applicazione impostazioni data e ora
@@ -2446,6 +2447,29 @@ sch.skip.overlap	Saltata: l'esecuzione precedente era in corso
 sch.skip.running	Saltata: già in esecuzione
 sch.skip.window	Saltata: fuori dalla sua finestra
 sch.skip.not_due	Saltata: non ancora dovuta
+sch.skip.busy	Saltata: è rimasta troppo in coda
+sch.run.yielded	Ha ceduto il passo, riprenderà
+sch.trigger.resume	Ripresa dal punto in cui si era fermata
+sch.yielded_detail	Fermata per lasciare il volume a un lavoro più urgente; riprende da sola dal punto in cui si era fermata
+sch.waited	In coda per {d}
+sch.q.waiting	In coda: attende {who} ({res})
+sch.q.queued	In coda
+sch.y.gave_way	Ha ceduto il passo a {who} ({res}): riprende da sola
+sch.y.stopping	Cede il passo a un lavoro più urgente: si sta fermando
+sch.y.will_resume	Ha ceduto il passo: riprende da sola
+sch.res.every	tutti i volumi
+sch.res.disk	disco {disk}
+sch.res.packages	sistema dei pacchetti
+sch.res.power	spegnimento pianificato
+sch.res.maintenance	manutenzione
+sch.other_work	altro lavoro
+sch.run_busy_title	Eseguire {name} adesso?
+sch.run_busy_text	Questo lavoro sta usando ciò che serve all'attività. Eseguirla adesso lo rallenta; in coda l'attività parte appena si libera.
+sch.run_anyway	Esegui comunque adesso
+sch.run_queue	Metti in coda
+sch.queued_toast	{name} attende in coda
+sch.act.md_check	Controllo RAID
+sch.act.md_check_continue	Controllo RAID (continuazione)
 sch.trigger.catch_up	Recupero dopo lo spegnimento
 sch.trigger.boot	All'avvio
 sch.trigger.manual	Esegui ora

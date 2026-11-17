@@ -216,6 +216,7 @@ task.st.error	Ошибка
 task.st.cancelled	Отменено
 task.st.running	Выполняется
 task.st.queued	В очереди
+tasks.queue	Запланированные задачи в ожидании
 task.config.apply	Применение конфигурации
 task.zram.apply	Применение настроек памяти
 task.time.apply	Применение настроек даты и времени
@@ -2466,6 +2467,29 @@ sch.skip.overlap	Пропущено: предыдущий запуск ещё ш
 sch.skip.running	Пропущено: уже выполняется
 sch.skip.window	Пропущено: вне своего окна
 sch.skip.not_due	Пропущено: ещё не пора
+sch.skip.busy	Пропущено: слишком долго ждала в очереди
+sch.run.yielded	Уступила, продолжит
+sch.trigger.resume	Продолжена с места остановки
+sch.yielded_detail	Остановлена, чтобы том мог использовать более срочный процесс; продолжится сама с места остановки
+sch.waited	Ждала в очереди {d}
+sch.q.waiting	В очереди: ждёт {who} ({res})
+sch.q.queued	В очереди
+sch.y.gave_way	Уступила: {who} ({res}); продолжится сама
+sch.y.stopping	Уступает более срочному процессу: останавливается
+sch.y.will_resume	Уступила: продолжится сама
+sch.res.every	все тома
+sch.res.disk	диск {disk}
+sch.res.packages	система пакетов
+sch.res.power	запланированное выключение
+sch.res.maintenance	обслуживание
+sch.other_work	другой процесс
+sch.run_busy_title	Запустить {name} сейчас?
+sch.run_busy_text	Этот процесс использует то, что нужно задаче. Запуск сейчас замедлит его; в очереди задача запустится, как только ресурс освободится.
+sch.run_anyway	Всё равно запустить
+sch.run_queue	Поставить в очередь
+sch.queued_toast	{name} ждёт в очереди
+sch.act.md_check	Проверка RAID
+sch.act.md_check_continue	Проверка RAID (продолжение)
 sch.trigger.catch_up	Наверстывание после простоя
 sch.trigger.boot	При запуске системы
 sch.trigger.manual	Запуск вручную

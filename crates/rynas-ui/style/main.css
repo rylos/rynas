@@ -1289,6 +1289,11 @@ kbd {
 .task-list .table-wrap { margin: 0; overflow: visible; }
 .tasks-body.with-log .tasks-table :is(th, td):is(:nth-child(3), :nth-child(4)) { display: none; }
 .tasks-pad { padding: var(--s-2) var(--s-4); }
+.sched-queue { padding: var(--s-2) var(--s-4); border-bottom: 1px solid var(--border); }
+.sched-queue-h { font-size: var(--fs-13); font-weight: 600; margin-bottom: var(--s-1); }
+.sched-queue ul { list-style: none; display: grid; gap: var(--s-1); }
+.sched-queue li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); font-size: var(--fs-13); min-width: 0; overflow-wrap: anywhere; }
+.sch-busy-list { margin: var(--s-2) 0 0 var(--s-5); display: grid; gap: var(--s-1); overflow-wrap: anywhere; }
 .tasks-table th { position: sticky; top: 0; z-index: 1; background: var(--bg-sunken); height: 30px; }
 .tasks-table td { height: 34px; }
 .tasks-table th, .tasks-table td { padding: 0 var(--s-3); }
@@ -2175,6 +2180,8 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .status-card-head .link-btn { margin-left: 0; }
 /* a long status (paused or unreachable with its date) wraps inside the card instead of leaving it */
 .status-card-head > .status, .cell-main > .status { height: auto; min-height: 22px; white-space: normal; max-width: 100%; }
+/* long chips (a queued task: what it waits for) wrap instead of widening the cell */
+.chips > .status { height: auto; min-height: 22px; white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
 /* ui::fold: a folded part (advanced options, history, a log, rare actions): chevron, title, an
    optional state after it. Inside .folds they are separated by rules; .fold.sub is the small
    one inside a card (the last run's notes). */

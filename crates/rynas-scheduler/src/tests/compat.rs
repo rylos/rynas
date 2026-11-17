@@ -61,6 +61,11 @@ fn documents_of_older_releases_render_the_same_units() {
         let sandboxed = ["snapshot-docs", "scrub-vol1"].contains(&id);
         assert_eq!(service.contains(crate::units::JOB_SANDBOX), sandboxed, "{service}");
         let service = service.replace(crate::units::JOB_SANDBOX, "");
+        // and, since S4, no start timeout for the work that may wait in a queue (heavy work
+        // on a volume): nothing else changes
+        let queued = ["replicate-docs-usb", "backup-offsite", "scrub-vol1"].contains(&id);
+        assert_eq!(service.contains(crate::units::QUEUE_TIMEOUT), queued, "{service}");
+        let service = service.replace(crate::units::QUEUE_TIMEOUT, "");
         let body = |s: &str| s.lines().skip(1).map(|l| format!("{l}\n")).collect::<String>();
         let want = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

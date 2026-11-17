@@ -21,8 +21,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use rynas_api_types::scheduler::{
     CalendarPreview, CalendarPreviewRequest, CalendarSyntax, CronEntry, NotifyPolicy, Overlap, PauseInfo,
-    PauseRequest, RunTrigger, SchedulePreview, SchedulePreviewRequest, ScheduledTask,
-    SchedulerConfig, SchedulerPause, SystemTimer, TaskAction, TaskRun, TaskStatus, TaskView,
+    PauseRequest, QueueEntry, RunConflicts, RunNowRequest, RunTrigger, SchedulePreview,
+    SchedulePreviewRequest, ScheduledTask, SchedulerConfig, SchedulerPause, SystemTimer,
+    TaskAction, TaskRun, TaskStatus, TaskView, YieldInfo,
 };
 use rynas_scheduler::gate::{GateAnswer, GateRequest};
 use rynas_api_types::snapshots::SnapshotsConfig;
@@ -73,6 +74,8 @@ pub fn router(st: ProtState) -> Router {
             get(get_one).put(put).delete(delete),
         )
         .route("/v1/scheduler/tasks/{id}/run", post(run_now))
+        .route("/v1/scheduler/tasks/{id}/conflicts", get(conflicts))
+        .route("/v1/scheduler/queue", get(queue))
         .route("/v1/scheduler/tasks/{id}/enable", post(enable))
         .route("/v1/scheduler/tasks/{id}/disable", post(disable))
         .route("/v1/scheduler/tasks/{id}/history", get(history))
@@ -153,14 +156,12 @@ fn status_of(
         paused: None,
         retry: None,
         system: false,
+        queued: None,
+        yielded: None,
     }
 }
 
-/// The automatic system updates as the Task Scheduler lists them: the task of
-/// `updates.auto` (the one its `apt-daily-upgrade.timer` drop-in is rendered from), run by
-/// that Debian timer, read-only here. Listed once unattended-upgrades is set (the key has a
-/// value: applied, or what the system does).
-fn system_upgrade_view(p: &Protection, owner: &str, rt: &Runtime) -> Option<TaskView> {
+fn system_upgrade_view(p: &Protection, owner: &str, rt: &Runtime, latest: &HashMap<String, TaskRun>) -> Option<TaskView> {
     use rynas_api_types::updates::AutoUpdates;
     let (eff, cur, applied): (AutoUpdates, AutoUpdates, Option<AutoUpdates>) =
         docs(&p.ops.config, owner, rynas_updates::domain::AUTO_KEY).ok()?;
@@ -178,11 +179,39 @@ fn system_upgrade_view(p: &Protection, owner: &str, rt: &Runtime) -> Option<Task
             } else {
                 None
             },
+            last_run: latest.get(&task.id).cloned(),
             system: true,
             ..Default::default()
         },
         task,
     })
+}
+
+/// The md RAID checks of mdadm's own timers, gated by rynas (S4): listed while the system has
+/// their timers (mdadm installed), read-only.
+fn md_check_views(rt: &Runtime, latest: &HashMap<String, TaskRun>) -> Vec<TaskView> {
+    use rynas_api_types::scheduler::system::{gated_unit, md_check};
+    [false, true]
+        .into_iter()
+        .filter_map(|resume| {
+            // (the schedule shown is Debian's; the timer itself says when it runs next)
+            let task = md_check(resume);
+            let (svc, timer) = gated_unit(&task.id)?;
+            let t = rt.timers.iter().find(|x| x.unit == timer)?;
+            Some(TaskView {
+                status: TaskStatus {
+                    applied: true,
+                    unit: svc.into(),
+                    running: rt.running.iter().any(|u| u == svc),
+                    next_run_ms: t.next_ms,
+                    last_run: latest.get(&task.id).cloned(),
+                    system: true,
+                    ..Default::default()
+                },
+                task,
+            })
+        })
+        .collect()
 }
 
 /// A task as the API shows it: in the current model (owner, run policy) even when the
@@ -224,16 +253,21 @@ pub(crate) fn task_views(p: &Protection, owner: &str, rt: &Runtime) -> Res<Vec<T
             task: migrated(t),
         });
     }
+    out.extend(system_upgrade_view(p, owner, rt, &latest));
+    out.extend(md_check_views(rt, &latest));
     let pause = p.gate.pause();
     let retries = p.history.retries().unwrap_or_default();
+    let queued = p.gate.queued();
+    let yields = p.gate.yields();
     for v in &mut out {
         v.status.paused = pause.tasks.get(&v.task.id).cloned();
         v.status.retry = retries
             .iter()
             .find(|(id, _)| *id == v.task.id)
             .map(|(_, a)| a.retry);
+        v.status.queued = queued.iter().find(|(id, _)| *id == v.task.id).map(|(_, q)| q.clone());
+        v.status.yielded = yields.get(&v.task.id).map(|e| YieldInfo { since_ms: e.since_ms, to: e.to.clone(), stopped: e.stopped });
     }
-    out.extend(system_upgrade_view(p, owner, rt));
     Ok(out)
 }
 
@@ -539,8 +573,6 @@ async fn disable(
     set_enabled(st, h, id, false).await
 }
 
-/// The applied task `id`, or the one an apply in progress is putting in place: its timer may
-/// start (and ask the gate, and run) before the revision is saved.
 pub(crate) fn applied_task(p: &Protection, id: &str) -> Res<Option<ScheduledTask>> {
     let value = match p.ops.config.applying(SCHEDULER_KEY) {
         Some(v) => v,
@@ -551,7 +583,35 @@ pub(crate) fn applied_task(p: &Protection, id: &str) -> Res<Option<ScheduledTask
     if let Some(t) = &mut t {
         t.migrate();
     }
+    if t.is_none() {
+        t = gated_system_task(p, id);
+    }
     Ok(t)
+}
+
+/// A system task whose unit rynas gates (S4: `apt-daily-upgrade`, `mdcheck_*`), as the gate
+/// and the history see it. The automatic updates' start window is left out: Debian's timer
+/// catches a missed run up at any time after boot, and the gate keeps that.
+fn gated_system_task(p: &Protection, id: &str) -> Option<ScheduledTask> {
+    use rynas_api_types::scheduler::system;
+    match id {
+        system::SYSTEM_UPGRADE => {
+            let auto: rynas_api_types::updates::AutoUpdates = p
+                .ops
+                .config
+                .applied(rynas_updates::domain::AUTO_KEY)
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
+            let mut t = system::system_upgrade(&auto);
+            t.policy.window_min = None;
+            Some(t)
+        }
+        system::MD_CHECK_START => Some(system::md_check(false)),
+        system::MD_CHECK_CONTINUE => Some(system::md_check(true)),
+        _ => None,
+    }
 }
 
 /// The task `id` of the saved revision only (not one an apply in progress is adding: its unit
@@ -567,9 +627,16 @@ async fn run_now(
     State(st): State<ProtState>,
     h: HeaderMap,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Res<StatusCode> {
     let (p, who) = (prot(&st)?, user(&h)?);
     check_id(&id)?;
+    // no body (older clients): the start waits in the queue like a scheduled one
+    let ask: RunNowRequest = if body.is_empty() {
+        RunNowRequest::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| Error::bad_request(format!("invalid body: {e}")))?
+    };
     blocking(&p, move |p| {
         let Some(t) = committed_task(p, &id)? else {
             return Err(conflict(
@@ -582,8 +649,13 @@ async fn run_now(
         // already gets no request (the start is a no-op for systemd: the request would be
         // left for a later start)
         let unit = service_name(&id);
+        // a start waiting in the queue: run now (confirmed) lets it through at its next
+        // question; otherwise it keeps its place
+        if p.gate.let_through(&id, ask.skip_queue) {
+            return Ok(id);
+        }
         if p.probe.current_run(&unit).ok().flatten().is_none() {
-            p.gate.request(&id, RunTrigger::Manual, 0);
+            p.gate.request_with(&id, RunTrigger::Manual, 0, ask.skip_queue);
         }
         p.ops
             .config
@@ -601,6 +673,50 @@ async fn run_now(
     })?;
     p.invalidate();
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// What a run now of the task would wait for (S4): the work holding the volume, disk or
+/// package system it needs. The page asks before "Run now", and names what running at once
+/// would slow down.
+async fn conflicts(State(st): State<ProtState>, Path(id): Path<String>) -> Res<Json<RunConflicts>> {
+    let p = prot(&st)?;
+    check_id(&id)?;
+    Ok(Json(
+        blocking(&p, move |p| {
+            let Some(t) = committed_task(p, &id)? else {
+                return Ok(RunConflicts::default());
+            };
+            let claims = crate::claims::claims_of(p, &t);
+            if claims.is_empty() || claims.iter().all(|c| *c == rynas_scheduler::queue::Claim::Power) {
+                return Ok(RunConflicts::default());
+            }
+            let table = crate::gate::table_now(p);
+            Ok(RunConflicts { busy: table.meeting(&id, &claims) })
+        })
+        .await?,
+    ))
+}
+
+/// The starts waiting in the queue and the scrubs that gave way (the task panel lists them).
+async fn queue(State(st): State<ProtState>, h: HeaderMap) -> Res<Json<Vec<QueueEntry>>> {
+    let (p, owner) = (prot(&st)?, user(&h)?);
+    let rt = p.runtime().await;
+    Ok(Json(
+        blocking(&p, move |p| {
+            let views = task_views(p, &owner, &rt)?;
+            Ok(views
+                .into_iter()
+                .filter(|v| v.status.queued.is_some() || v.status.yielded.is_some())
+                .map(|v| QueueEntry {
+                    task: v.task.id.clone(),
+                    name: v.task.name.clone(),
+                    queued: v.status.queued,
+                    yielded: v.status.yielded,
+                })
+                .collect())
+        })
+        .await?,
+    ))
 }
 
 /// Live output of the run going on now (SSE, [`crate::scheduler_live`]): the same read
@@ -621,7 +737,7 @@ async fn live(
             "too many live output streams open: close one".into(),
         )
     })?;
-    Ok(crate::scheduler_live::stream(p, service_name(&id), slot)
+    Ok(crate::scheduler_live::stream(p, rynas_scheduler::units::service_of(&id), slot)
         .await
         .into_response())
 }
@@ -831,6 +947,8 @@ pub(crate) fn record_end(
         "killed" | "dumped" => (None, Some(f.exit_status.clone()).filter(|s| !s.is_empty())),
         _ => (None, None),
     };
+    // a scrub that gave way waits to be resumed; any other run ends its yield (S4)
+    let yielded = p.gate.run_ended(id, &f.invocation_id);
     let note = p.history.gate_note(&f.invocation_id).ok().flatten();
     // no note: a skipped row of this start (a late answer) still knows how it came about
     let prior = match note {
@@ -852,6 +970,9 @@ pub(crate) fn record_end(
         trigger: note.as_ref().and_then(|n| n.trigger).or(prior),
         attempt: note.as_ref().map_or(0, |n| n.attempt),
         ungated: note.as_ref().is_some_and(|n| n.ungated),
+        queued_ms: note.as_ref().map_or(0, |n| n.queued_ms),
+        yielded,
+        detail: yielded.then(|| "gave way to more urgent work on its volume; it resumes by itself".to_string()),
         ..NewRun::default()
     };
     // a skipped row of this start (a gate answer that came too late) gives way to the run
@@ -884,6 +1005,10 @@ pub(crate) fn collect_output(p: &Protection, task_id: &str, (run_id, run): (u64,
     let Ok(Some(task)) = applied_task(p, task_id) else {
         return;
     };
+    // a scrub that gave way is neither a failure nor the end of its work: nothing to tell
+    if run.yielded {
+        return;
+    }
     // skipped starts are not failures
     let failed_before = p.history.failed_before(task_id, run_id).unwrap_or(false);
     let Some(ev) = run_event(&task, &run, &out.text, failed_before) else {
@@ -1129,7 +1254,9 @@ async fn pause_task(
     let (i, w) = (id.clone(), who.clone());
     let exists = blocking(&p, move |p| {
         let rt = Runtime::default();
-        Ok(task_views(p, &w, &rt)?.iter().any(|v| v.task.id == i))
+        // the system's own gated timers too (listed only while their timer exists)
+        Ok(rynas_api_types::scheduler::system::gated_unit(&i).is_some()
+            || task_views(p, &w, &rt)?.iter().any(|v| v.task.id == i))
     })
     .await?;
     if !exists {

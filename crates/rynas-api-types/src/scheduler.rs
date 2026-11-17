@@ -162,6 +162,9 @@ pub enum OwnerFeature {
     Apps,
     /// PC backups (the repositories' maintenance, the folders' retention).
     PcBackup,
+    /// The operating system's own timers that rynas gates (the md RAID check): their
+    /// schedule is the system's.
+    System,
 }
 
 /// Parts of a task its owner decides: the Task Scheduler page shows them read-only.
@@ -197,6 +200,10 @@ impl TaskOwner {
             TaskAction::AppsCatalog => (OwnerFeature::Apps, "catalog".into()),
             TaskAction::PcMaintenance => (OwnerFeature::PcBackup, "maintenance".into()),
             TaskAction::PcRetention => (OwnerFeature::PcBackup, "retention".into()),
+            TaskAction::MdCheck { resume } => (
+                OwnerFeature::System,
+                if *resume { "mdcheck-continue" } else { "mdcheck-start" }.into(),
+            ),
             TaskAction::Command { .. }
             | TaskAction::Script { .. }
             | TaskAction::Scrub { .. }
@@ -218,7 +225,8 @@ impl TaskOwner {
                     | OwnerFeature::Updates
                     | OwnerFeature::Docker
                     | OwnerFeature::Apps
-                    | OwnerFeature::PcBackup,
+                    | OwnerFeature::PcBackup
+                    | OwnerFeature::System,
                 ..
             } => &[
                 LockedField::Action,
@@ -495,6 +503,13 @@ pub enum TaskAction {
     /// The retention of the PC backup folders whose retention the NAS owns, and their
     /// freshness alerts.
     PcRetention,
+    /// The md RAID check of the system (`mdadm`'s `mdcheck_start.timer`, or
+    /// `mdcheck_continue.timer` with `resume`): run by those timers, gated by rynas through a
+    /// drop-in; listed by the Task Scheduler, never stored in its configuration.
+    MdCheck {
+        #[serde(default)]
+        resume: bool,
+    },
 }
 
 fn default_root() -> String {
@@ -659,10 +674,17 @@ pub struct TaskStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<PendingRetry>,
     /// Run by a timer of the system, not by units of the Task Scheduler (the automatic system
-    /// updates: Debian's `apt-daily-upgrade.timer`): listed read-only, edited on its page;
-    /// no run now, pause or history here.
+    /// updates: Debian's `apt-daily-upgrade.timer`; the md RAID check: `mdcheck_*.timer`),
+    /// gated by rynas: listed read-only (edited on its page, or the system's), with its
+    /// history and a pause; no run now.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub system: bool,
+    /// The start waits in a queue (its volume, disk or the package system is busy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued: Option<QueueWait>,
+    /// The run gave way to more urgent work and resumes by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yielded: Option<YieldInfo>,
 }
 
 /// A pause of the scheduled starts (`POST /api/v1/scheduler/pause`, or
@@ -762,6 +784,9 @@ pub enum RunTrigger {
     Queued,
     /// Started outside rynas (`systemctl start`).
     Other,
+    /// A scrub that gave way to more urgent work on its volume, started again by rynas once
+    /// the volume was free: it goes on from where it stopped.
+    Resume,
 }
 
 /// Why a start was skipped (a recorded outcome, not a run).
@@ -784,6 +809,9 @@ pub enum SkipReason {
     /// Nothing due: an interval task whose interval has not passed since its last run, a
     /// weekly-window task that already ran in this block. Not recorded in the history.
     NotDue,
+    /// It waited in the queue of its volume, disk or the package system past its deadline
+    /// (the catch-up deadline, the start window, or a day).
+    Busy,
 }
 
 /// One recorded run (from the `ExecStopPost` hook).
@@ -829,6 +857,104 @@ pub struct TaskRun {
     /// scheduling gate.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ungated: bool,
+    /// How long the start waited in a queue before it ran (ms).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub queued_ms: u64,
+    /// The run stopped to give way to more urgent work on its volume (a scrub): not a
+    /// failure, rynas resumes it once the volume is free.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub yielded: bool,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+/// A resource that scheduled work holds or waits for (S4 of `docs/research/scheduling.md`).
+/// Derived from the action: the user never sets them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "class", rename_all = "snake_case")]
+pub enum Resource {
+    /// Heavy reads and writes on one volume (the mount point of its filesystem; `*`: every
+    /// volume).
+    Volume { path: String },
+    /// One disk (`sda`): a SMART long test, the md RAID check of its arrays.
+    Disk { disk: String },
+    /// The package system: system updates, Docker and app updates, package installs.
+    Packages,
+    /// A scheduled shutdown waiting for the work in progress.
+    Power,
+    /// Maintenance work of rynas (applying the configuration, a rollback, a migration).
+    Maintenance,
+}
+
+/// What a queued start waits for, or what a start would slow down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blocker {
+    /// The scheduled task holding it, if it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// Its name (the task's name, empty for other work).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// The type of the rynas task holding it (`backup.run`, `storage.scrub`), when it is not
+    /// a scheduled task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub resource: Resource,
+}
+
+/// A start waiting in a queue: rynas starts it once what it waits for has ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueWait {
+    pub since_ms: u64,
+    /// What it waits for (the first of them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<Blocker>,
+}
+
+/// A scrub that gave way to more urgent work on its volume and resumes by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct YieldInfo {
+    pub since_ms: u64,
+    /// The work it gave way to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<Blocker>,
+    /// It stopped and waits for the volume to be free (`false`: it is stopping now).
+    #[serde(default)]
+    pub stopped: bool,
+}
+
+/// `GET /api/v1/scheduler/queue`: the starts waiting and the scrubs that gave way (the task
+/// panel lists them).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueEntry {
+    pub task: String,
+    #[serde(default)]
+    pub name: String,
+    /// Waiting to start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued: Option<QueueWait>,
+    /// Gave way, resumes by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yielded: Option<YieldInfo>,
+}
+
+/// Body of `POST /api/v1/scheduler/tasks/{id}/run` (optional).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RunNowRequest {
+    /// Start at once even when other work holds what the task needs (the user confirmed
+    /// what it slows down); otherwise the start waits in the queue like a scheduled one.
+    #[serde(default)]
+    pub skip_queue: bool,
+}
+
+/// `GET /api/v1/scheduler/tasks/{id}/conflicts`: what a run now would wait for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RunConflicts {
+    /// The work holding what the task needs; empty: it would start at once.
+    #[serde(default)]
+    pub busy: Vec<Blocker>,
 }
 
 fn is_zero(n: &u8) -> bool {
@@ -1031,6 +1157,8 @@ pub mod system {
     pub const APPS_CATALOG: &str = "apps-catalog-refresh";
     pub const PC_MAINTENANCE: &str = "pc-maintenance";
     pub const PC_RETENTION: &str = "pcbackup-retention";
+    pub const MD_CHECK_START: &str = "mdcheck-start";
+    pub const MD_CHECK_CONTINUE: &str = "mdcheck-continue";
 
     /// The ids of rynas's own jobs: a task made on the Task Scheduler page cannot take them.
     pub const RESERVED: &[&str] = &[
@@ -1041,7 +1169,54 @@ pub mod system {
         APPS_CATALOG,
         PC_MAINTENANCE,
         PC_RETENTION,
+        MD_CHECK_START,
+        MD_CHECK_CONTINUE,
     ];
+
+    /// The system's own timers rynas gates (S4): task id, its service, its timer. A drop-in
+    /// shipped with rynas adds the gate to the service (`ExecCondition=` and
+    /// `ExecStopPost=`); a unit the system does not have is left out.
+    pub const GATED_UNITS: &[(&str, &str, &str)] = &[
+        (SYSTEM_UPGRADE, "apt-daily-upgrade.service", "apt-daily-upgrade.timer"),
+        (MD_CHECK_START, "mdcheck_start.service", "mdcheck_start.timer"),
+        (MD_CHECK_CONTINUE, "mdcheck_continue.service", "mdcheck_continue.timer"),
+    ];
+
+    /// The service and timer of a gated system task.
+    pub fn gated_unit(id: &str) -> Option<(&'static str, &'static str)> {
+        GATED_UNITS.iter().find(|(i, ..)| *i == id).map(|(_, s, t)| (*s, *t))
+    }
+
+    /// The md RAID check of mdadm's timers (`resume`: `mdcheck_continue`), as Debian ships
+    /// them (the first Sunday of the month at 01:00, continued every night at 01:05 until
+    /// every array is checked). Listed read-only; the schedule is the system's.
+    pub fn md_check(resume: bool) -> ScheduledTask {
+        let (id, name, desc, cal) = if resume {
+            (
+                MD_CHECK_CONTINUE,
+                "RAID check (continued)",
+                "Continues an md RAID check that reached its time limit. Run by the system's mdcheck_continue.timer.",
+                "*-*-* 01:05:00",
+            )
+        } else {
+            (
+                MD_CHECK_START,
+                "RAID check",
+                "Checks the md RAID arrays for errors, a few hours each night. Run by the system's mdcheck_start.timer.",
+                "Sun *-*-1..7 01:00:00",
+            )
+        };
+        let mut t = task(
+            id,
+            name,
+            desc,
+            TaskAction::MdCheck { resume },
+            TaskTrigger::Calendar { on_calendar: cal.into(), cron: None, persistent: false, randomized_delay_s: 0 },
+        );
+        t.policy.missed = Some(MissedPolicy::Skip);
+        t.policy.jitter_s = Some(0);
+        t
+    }
 
     /// A late nightly PC maintenance runs up to this many hours after its hour.
     pub const PC_MAINTENANCE_CATCH_UP_H: u32 = 6;

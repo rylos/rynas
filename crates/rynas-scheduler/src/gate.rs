@@ -21,7 +21,9 @@
 //!    scheduled time lies within `missed.within_h` hours before it; a task with a start
 //!    window (`window_min`) runs a catch-up, a queued start or a retry only inside the
 //!    window of its scheduled time (otherwise skipped, `window`);
-//! 4. another run of the task still going in rynasd (the lease of an earlier start).
+//! 4. another run of the task still going in rynasd (the lease of an earlier start);
+//! 5. (rynasd, S4) the queue: a start whose claims meet what other work holds waits
+//!    ([`GateAnswer::wait`], [`crate::queue`]); rynasctl asks again every [`WAIT_POLL`].
 //!
 //! **rynasd unreachable.** rynasctl waits at most [`GATE_TIMEOUT`] (rynasd is socket
 //! activated: a stopped rynasd is started by the connection, a restarting one answers once
@@ -74,7 +76,20 @@ pub struct GateRequest {
     /// `$TRIGGER_TIMER_REALTIME_USEC` in ms: when the timer elapsed (0: not set).
     #[serde(default)]
     pub trigger_timer_ms: u64,
+    /// rynasctl can wait in the queue (S4: it asks again while the answer says `wait`). An
+    /// older rynasctl never gets `wait`: its start runs, as before the queue.
+    #[serde(default)]
+    pub can_wait: bool,
+    /// The start has been waiting in the queue since then (0: first question). rynasctl
+    /// keeps it, so the order of the queue survives a restart of rynasd.
+    #[serde(default)]
+    pub queued_since_ms: u64,
 }
+
+/// How often `rynasctl gate` asks again while its start waits in the queue.
+pub const WAIT_POLL: Duration = Duration::from_secs(5);
+/// A waiter rynasd has not heard from for this long is gone (its unit was stopped).
+pub const WAITER_STALE: Duration = Duration::from_secs(30);
 
 /// A timer's activation details older than this are not this start's.
 pub const STALE_TRIGGER_MS: u64 = 15 * 60_000;
@@ -111,6 +126,10 @@ pub struct GateAnswer {
     /// One line for the journal of the unit (empty: say nothing).
     #[serde(default)]
     pub message: String,
+    /// Not yet: the start waits in the queue; ask again after [`WAIT_POLL`] (then `run` is
+    /// false and nothing is recorded).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wait: bool,
 }
 
 /// A gate outcome written by rynasctl while rynasd could not be reached.
@@ -208,6 +227,60 @@ pub fn spool_take(state: &Path) -> Vec<SpoolEntry> {
         .filter_map(|l| serde_json::from_str(l).ok())
         .take(SPOOL_MAX)
         .collect()
+}
+
+/// The scrubs that gave way (S4), below rynasd's state directory (root only, 0600): rynasd
+/// writes an entry before it cancels the scrub, `rynasctl job run` reads it to tell a scrub
+/// that gave way (exit 0, not a failure) from one that failed.
+pub const YIELD_FILE: &str = "scheduler/yield.json";
+
+/// A scrub that gave way to more urgent work on its volume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct YieldEntry {
+    /// The filesystem it scrubs.
+    pub filesystem: String,
+    /// The run that gave way.
+    pub invocation_id: String,
+    pub since_ms: u64,
+    /// What it gave way to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<rynas_api_types::scheduler::Blocker>,
+    /// The run has stopped: rynasd resumes it once the volume is free.
+    #[serde(default)]
+    pub stopped: bool,
+}
+
+pub fn yield_path(state: &Path) -> PathBuf {
+    state.join(YIELD_FILE)
+}
+
+/// The scrubs that gave way, by task id (none when the file is missing or unreadable).
+pub fn load_yields(state: &Path) -> std::collections::BTreeMap<String, YieldEntry> {
+    std::fs::read(yield_path(state))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Writes the scrubs that gave way (atomically, 0600).
+pub fn save_yields(state: &Path, m: &std::collections::BTreeMap<String, YieldEntry>) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = yield_path(state);
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        f.write_all(&serde_json::to_vec(m).map_err(std::io::Error::other)?)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)
+}
+
+/// The run `invocation_id` is one rynasd asked to give way.
+pub fn gave_way(state: &Path, invocation_id: &str) -> bool {
+    !invocation_id.is_empty() && load_yields(state).values().any(|e| e.invocation_id == invocation_id)
 }
 
 /// What rynasd knows about a start when the gate asks.
@@ -541,8 +614,24 @@ pub fn retries_after(t: Option<RunTrigger>) -> bool {
                 | RunTrigger::Boot
                 | RunTrigger::Retry
                 | RunTrigger::Queued
+                | RunTrigger::Resume
         )
     )
+}
+
+/// A start waits in the queue at most a day, unless its policy says less.
+pub const QUEUE_MAX: Duration = Duration::from_secs(24 * 3600);
+
+/// How long a start of `t` may wait in the queue before it is skipped (`busy`): its catch-up
+/// deadline, else its start window, else [`QUEUE_MAX`].
+pub fn queue_limit_ms(t: &ScheduledTask) -> u64 {
+    let p = t.effective_policy();
+    let max = QUEUE_MAX.as_millis() as u64;
+    match p.missed {
+        MissedPolicy::RunOnce { within_h: Some(h) } => (u64::from(h) * 3_600_000).min(max),
+        _ if p.window_min > 0 => (u64::from(p.window_min) * 60_000).min(max),
+        _ => max,
+    }
 }
 
 /// The overlap policy `replace` applies now: the task runs since `run_start_ms` and one of

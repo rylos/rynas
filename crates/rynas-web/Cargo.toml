@@ -106,6 +106,10 @@ assets = [
     ["../../packaging/pam.d/rynas", "etc/pam.d/rynas", "644"],
     # Debian's nightly btrbk.service: skipped while it has no configuration of its own
     ["../../packaging/systemd/btrbk.service.d/rynas.conf", "usr/lib/systemd/system/btrbk.service.d/rynas.conf", "644"],
+    # the scheduling gate on Debian's own timers (S4): unattended-upgrades and mdadm's RAID check
+    ["../../packaging/systemd/apt-daily-upgrade.service.d/rynas-gate.conf", "usr/lib/systemd/system/apt-daily-upgrade.service.d/rynas-gate.conf", "644"],
+    ["../../packaging/systemd/mdcheck_start.service.d/rynas-gate.conf", "usr/lib/systemd/system/mdcheck_start.service.d/rynas-gate.conf", "644"],
+    ["../../packaging/systemd/mdcheck_continue.service.d/rynas-gate.conf", "usr/lib/systemd/system/mdcheck_continue.service.d/rynas-gate.conf", "644"],
     # the Synology module's pre-UPS-Safe-Mode hook: rynasd links it into synodeb's hook folder
     # only where synodeb runs the UPS (nothing below /etc/synodeb on other systems)
     ["../../packaging/modules/synology/ups-pre-safemode", "usr/lib/rynas/modules/synology/ups-pre-safemode", "755"],

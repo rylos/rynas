@@ -64,13 +64,19 @@ const ADDED_RETRIES: [(&str, &str); 2] = [
 ];
 
 /// Columns added to `runs` by the scheduling gate (older databases get them on open).
-const ADDED: [(&str, &str); 5] = [
+const ADDED: [(&str, &str); 7] = [
     ("trigger", "TEXT"),
     ("skipped", "TEXT"),
     ("attempt", "INTEGER NOT NULL DEFAULT 0"),
     ("detail", "TEXT"),
     ("ungated", "INTEGER NOT NULL DEFAULT 0"),
+    // S4: the wait in a queue before the run, a scrub that gave way
+    ("queued_ms", "INTEGER NOT NULL DEFAULT 0"),
+    ("yielded", "INTEGER NOT NULL DEFAULT 0"),
 ];
+
+/// Columns added to `gates` by S4 (added on open).
+const ADDED_GATES: [(&str, &str); 1] = [("queued_ms", "INTEGER NOT NULL DEFAULT 0")];
 
 /// What the gate noted about a start it let through.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -82,6 +88,8 @@ pub struct GateNote {
     pub attempt: u8,
     /// rynasd was not asked (`rynasctl gate` could not reach it).
     pub ungated: bool,
+    /// How long the start waited in a queue (ms).
+    pub queued_ms: u64,
 }
 
 /// A retry armed after a failed run (the run ended at `after_ms`).
@@ -122,6 +130,9 @@ pub struct NewRun {
     pub attempt: u8,
     pub detail: Option<String>,
     pub ungated: bool,
+    pub queued_ms: u64,
+    /// It stopped to give way (a scrub): recorded as such, not a failure.
+    pub yielded: bool,
 }
 
 impl NewRun {
@@ -173,10 +184,12 @@ fn row(r: &rusqlite::Row, with_output: bool) -> rusqlite::Result<TaskRun> {
         attempt: r.get::<_, i64>(13)?.clamp(0, 255) as u8,
         detail: r.get(14)?,
         ungated: r.get::<_, i64>(15)? != 0,
+        queued_ms: r.get::<_, i64>(16)?.max(0) as u64,
+        yielded: r.get::<_, i64>(17)? != 0,
     })
 }
 
-const COLS: &str = "id, task_id, invocation_id, start_ms, end_ms, result, exit_code, signal, ok, output, output_truncated, trigger, skipped, attempt, detail, ungated";
+const COLS: &str = "id, task_id, invocation_id, start_ms, end_ms, result, exit_code, signal, ok, output, output_truncated, trigger, skipped, attempt, detail, ungated, queued_ms, yielded";
 
 const RETRY_COLS: &str = "task_id, attempt, attempts, due_ms, after_ms, started_ms";
 
@@ -223,6 +236,15 @@ impl History {
                 c.execute_batch(&format!("ALTER TABLE retries ADD COLUMN {col} {ty}"))?;
             }
         }
+        let have: Vec<String> = c
+            .prepare("SELECT name FROM pragma_table_info('gates')")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (col, ty) in ADDED_GATES {
+            if !have.iter().any(|h| h == col) {
+                c.execute_batch(&format!("ALTER TABLE gates ADD COLUMN {col} {ty}"))?;
+            }
+        }
         Ok(Self { db: Mutex::new(c) })
     }
 
@@ -239,13 +261,14 @@ impl History {
         let db = self.db.lock().unwrap();
         let written = db.execute(
             "INSERT INTO runs (task_id, invocation_id, start_ms, end_ms, result, exit_code, signal, ok,
-                               trigger, skipped, attempt, detail, ungated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                               trigger, skipped, attempt, detail, ungated, queued_ms, yielded)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT (invocation_id) DO UPDATE SET
                  start_ms = coalesce(excluded.start_ms, runs.start_ms), end_ms = excluded.end_ms,
                  result = excluded.result, exit_code = excluded.exit_code, signal = excluded.signal,
                  ok = excluded.ok, trigger = coalesce(excluded.trigger, runs.trigger), skipped = NULL,
-                 attempt = excluded.attempt, detail = excluded.detail, ungated = excluded.ungated
+                 attempt = excluded.attempt, detail = excluded.detail, ungated = excluded.ungated,
+                 queued_ms = excluded.queued_ms, yielded = excluded.yielded
              WHERE runs.skipped IS NOT NULL AND excluded.skipped IS NULL
                  AND excluded.result <> 'exec-condition'",
             params![
@@ -261,7 +284,9 @@ impl History {
                 r.skipped.as_ref().and_then(word),
                 r.attempt as i64,
                 r.detail,
-                r.ungated as i64
+                r.ungated as i64,
+                r.queued_ms.min(i64::MAX as u64) as i64,
+                r.yielded as i64
             ],
         )? > 0;
         let id: i64 = db.query_row(
@@ -371,10 +396,11 @@ impl History {
         // a note of a start without the gate (spooled by rynasctl) never replaces the note of
         // a real answer for the same start (a late answer: both exist)
         db.execute(
-            "INSERT INTO gates (invocation_id, task_id, at_ms, trigger, attempt, ungated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO gates (invocation_id, task_id, at_ms, trigger, attempt, ungated, queued_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT (invocation_id) DO UPDATE SET task_id = excluded.task_id, at_ms = excluded.at_ms,
-                 trigger = excluded.trigger, attempt = excluded.attempt, ungated = excluded.ungated
+                 trigger = excluded.trigger, attempt = excluded.attempt, ungated = excluded.ungated,
+                 queued_ms = excluded.queued_ms
              WHERE excluded.ungated = 0 OR gates.ungated = 1",
             params![
                 n.invocation_id,
@@ -382,7 +408,8 @@ impl History {
                 n.at_ms as i64,
                 n.trigger.as_ref().and_then(word),
                 n.attempt as i64,
-                n.ungated as i64
+                n.ungated as i64,
+                n.queued_ms.min(i64::MAX as u64) as i64
             ],
         )?;
         db.execute(
@@ -396,7 +423,7 @@ impl History {
     pub fn gate_note(&self, invocation_id: &str) -> rusqlite::Result<Option<GateNote>> {
         let db = self.db.lock().unwrap();
         db.query_row(
-            "SELECT invocation_id, task_id, at_ms, trigger, attempt, ungated FROM gates WHERE invocation_id = ?1",
+            "SELECT invocation_id, task_id, at_ms, trigger, attempt, ungated, queued_ms FROM gates WHERE invocation_id = ?1",
             [invocation_id],
             |r| {
                 Ok(GateNote {
@@ -406,6 +433,7 @@ impl History {
                     trigger: from_word(r.get(3)?),
                     attempt: r.get::<_, i64>(4)?.clamp(0, 255) as u8,
                     ungated: r.get::<_, i64>(5)? != 0,
+                    queued_ms: r.get::<_, i64>(6)?.max(0) as u64,
                 })
             },
         )
@@ -576,7 +604,7 @@ mod tests {
         assert!(h.ran_since("t", 600).unwrap());
         assert_eq!(h.list("t", 1, None).unwrap()[0].attempt, 2);
 
-        let n = GateNote { invocation_id: "cc03".into(), task_id: "t".into(), at_ms: 9, trigger: Some(RunTrigger::CatchUp), attempt: 0, ungated: true };
+        let n = GateNote { invocation_id: "cc03".into(), task_id: "t".into(), at_ms: 9, trigger: Some(RunTrigger::CatchUp), attempt: 0, ungated: true, queued_ms: 0 };
         h.note_gate(&n).unwrap();
         assert_eq!(h.gate_note("cc03").unwrap(), Some(n));
         assert_eq!(h.gate_note("nope").unwrap(), None);
@@ -589,6 +617,26 @@ mod tests {
         h.set_retry("t", &a).unwrap();
         h.forget("t").unwrap();
         assert!(h.retries().unwrap().is_empty() && h.gate_note("cc03").unwrap().is_none());
+    }
+
+    #[test]
+    fn queue_waits_and_yielded_runs_are_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let h = History::open(&d.path().join("scheduler.db")).unwrap();
+        let n = GateNote { invocation_id: "dd01".into(), task_id: "t".into(), at_ms: 9, trigger: Some(RunTrigger::Timer), attempt: 0, ungated: false, queued_ms: 90_000 };
+        h.note_gate(&n).unwrap();
+        assert_eq!(h.gate_note("dd01").unwrap().unwrap().queued_ms, 90_000);
+        let mut r = run("t", "dd01", "success");
+        r.queued_ms = 90_000;
+        r.yielded = true;
+        r.trigger = Some(RunTrigger::Resume);
+        h.record(&r).unwrap();
+        let got = h.by_invocation("dd01").unwrap().unwrap();
+        assert_eq!((got.queued_ms, got.yielded, got.ok, got.trigger), (90_000, true, true, Some(RunTrigger::Resume)));
+        // reopening an S3 database adds nothing twice
+        drop(h);
+        let h = History::open(&d.path().join("scheduler.db")).unwrap();
+        assert!(h.by_invocation("dd01").unwrap().unwrap().yielded);
     }
 
     #[test]
@@ -631,7 +679,7 @@ mod tests {
         assert!(!h.failed_before("t", sid).unwrap());
 
         // a spooled note without the gate never replaces the note of a real answer
-        let real = GateNote { invocation_id: "ee01".into(), task_id: "t".into(), at_ms: 9, trigger: Some(RunTrigger::Queued), attempt: 0, ungated: false };
+        let real = GateNote { invocation_id: "ee01".into(), task_id: "t".into(), at_ms: 9, trigger: Some(RunTrigger::Queued), attempt: 0, ungated: false, queued_ms: 0 };
         h.note_gate(&real).unwrap();
         h.note_gate(&GateNote { trigger: Some(RunTrigger::Timer), ungated: true, ..real.clone() }).unwrap();
         assert_eq!(h.gate_note("ee01").unwrap(), Some(real.clone()));

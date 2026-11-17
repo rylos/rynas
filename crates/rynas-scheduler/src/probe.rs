@@ -116,6 +116,22 @@ struct JsonUnit {
     unit: String,
     #[serde(default)]
     active: String,
+    #[serde(default)]
+    sub: String,
+}
+
+/// Parses `systemctl list-units --output=json`: the services that run. A start still in its
+/// `ExecCondition=` (sub-state `condition`: the scheduling gate, waiting in a queue) is not
+/// running yet.
+pub fn parse_running(json: &str) -> Result<Vec<String>, String> {
+    let v: Vec<JsonUnit> = serde_json::from_str(json).map_err(|e| format!("list-units: {e}"))?;
+    Ok(v.into_iter()
+        .filter(|u| {
+            matches!(u.active.as_str(), "active" | "activating" | "deactivating" | "reloading")
+                && u.sub != "condition"
+        })
+        .map(|u| u.unit)
+        .collect())
 }
 
 fn us_to_ms(v: Option<u64>) -> Option<u64> {
@@ -242,21 +258,13 @@ impl SystemdProbe for HostProbe {
             "--no-pager",
             "--type=service",
             "rynas-task-*",
-        ]))?;
+        ])
+        // the system's own timers rynas gates (S4)
+        .args(rynas_api_types::scheduler::system::GATED_UNITS.iter().map(|(_, s, _)| *s)))?;
         if !o.success() {
             return Err(format!("systemctl list-units: {}", o.stderr.trim()));
         }
-        let v: Vec<JsonUnit> =
-            serde_json::from_str(&o.stdout).map_err(|e| format!("list-units: {e}"))?;
-        Ok(v.into_iter()
-            .filter(|u| {
-                matches!(
-                    u.active.as_str(),
-                    "active" | "activating" | "deactivating" | "reloading"
-                )
-            })
-            .map(|u| u.unit)
-            .collect())
+        parse_running(&o.stdout)
     }
 
     fn start_ms(&self, unit: &str) -> Option<u64> {
@@ -448,5 +456,14 @@ mod tests {
         assert!(parse_current_run(&out.replace("=active", "=inactive")).is_none());
         assert!(parse_current_run("ActiveState=active\nInvocationID=\n").is_none());
         assert!(parse_current_run("ActiveState=deactivating\nInvocationID=ab12\nExecMainStartTimestamp=\n").is_some_and(|r| r.start_ms.is_none()));
+    }
+
+    #[test]
+    fn a_start_waiting_in_its_gate_is_not_running() {
+        let j = r#"[{"unit":"rynas-task-a.service","load":"loaded","active":"active","sub":"running"},
+            {"unit":"rynas-task-b.service","load":"loaded","active":"activating","sub":"condition"},
+            {"unit":"rynas-task-c.service","load":"loaded","active":"inactive","sub":"dead"},
+            {"unit":"apt-daily-upgrade.service","load":"loaded","active":"activating","sub":"start"}]"#;
+        assert_eq!(parse_running(j).unwrap(), ["rynas-task-a.service", "apt-daily-upgrade.service"]);
     }
 }

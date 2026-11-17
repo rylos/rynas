@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use rynas_api_types::scheduler::QueueEntry;
 use rynas_api_types::{TaskEvent, TaskInfo, TaskStatus};
 
 use crate::api::{self, ApiErr};
@@ -280,6 +281,26 @@ fn elapsed(task: &TaskInfo, now_ms: f64) -> String {
 pub fn TaskPanel() -> impl IntoView {
     let s = tasks();
     let open = s.open;
+    // scheduled starts waiting in the queue, scrubs that gave way (S4): not rynas tasks, read
+    // while the panel is open
+    let queue = RwSignal::new(Vec::<QueueEntry>::new());
+    let read_queue = move || {
+        spawn_local(async move {
+            if let Ok(q) = api::get::<Vec<QueueEntry>>("/api/v1/scheduler/queue").await {
+                queue.try_set(q);
+            }
+        });
+    };
+    Effect::new(move |_| {
+        if open.get() {
+            read_queue();
+        }
+    });
+    crate::live::poll(Duration::from_secs(10), move || {
+        if open.get_untracked() {
+            read_queue();
+        }
+    });
     let running = Memo::new(move |_| s.list.with(|l| l.iter().filter(|t| !t.status.is_finished()).count()));
     let summary = move || {
         let n = running.get();
@@ -319,7 +340,7 @@ pub fn TaskPanel() -> impl IntoView {
             </button>
             <Show when=move || open.get()>
                 <div id="tasks-body" class="tasks-body" class:with-log=move || s.selected.with(Option::is_some)>
-                    <TaskList />
+                    <TaskList queue=queue />
                     {move || s.selected.get().map(|id| view! { <LogView id=id /> })}
                 </div>
             </Show>
@@ -327,14 +348,47 @@ pub fn TaskPanel() -> impl IntoView {
     }
 }
 
+/// The scheduled starts waiting in the queue and the scrubs that gave way, above the tasks.
+fn queue_list(queue: RwSignal<Vec<QueueEntry>>) -> impl IntoView {
+    move || {
+        let q = queue.get();
+        (!q.is_empty()).then(|| {
+            let items = q
+                .into_iter()
+                .map(|e| {
+                    let name = if e.name.is_empty() { e.task.clone() } else { e.name.clone() };
+                    let what = match (&e.queued, &e.yielded) {
+                        (Some(w), _) => crate::pages::scheduler::queued_text(w),
+                        (None, Some(y)) => crate::pages::scheduler::yielded_text(y),
+                        (None, None) => String::new(),
+                    };
+                    view! {
+                        <li>
+                            <Icon icon=icons::CALENDAR_CLOCK size=14 />
+                            <a class="row-link" href="/system/scheduler">{name}</a>
+                            <span class="muted">{what}</span>
+                        </li>
+                    }
+                })
+                .collect::<Vec<_>>();
+            view! {
+                <div class="sched-queue" role="group" aria-label=tr("tasks.queue")>
+                    <h3 class="sched-queue-h">{tr("tasks.queue")}</h3>
+                    <ul>{items}</ul>
+                </div>
+            }
+        })
+    }
+}
+
 #[component]
-fn TaskList() -> impl IntoView {
+fn TaskList(queue: RwSignal<Vec<QueueEntry>>) -> impl IntoView {
     let s = tasks();
     move || {
         if let Some(code) = s.err.get().filter(|_| !s.loaded.get()) {
             return view! { <div class="tasks-pad"><ErrorBox code=code on_retry=Callback::new(move |_| s.reload()) /></div> }.into_any();
         }
-        if s.list.with(Vec::is_empty) {
+        if s.list.with(Vec::is_empty) && queue.with(Vec::is_empty) {
             return view! {
                 <div class="tasks-empty">
                     <Icon icon=icons::HISTORY size=22 />
@@ -377,6 +431,7 @@ fn TaskList() -> impl IntoView {
         });
         view! {
             <div class="task-list">
+                {queue_list(queue)}
                 {table("tasks-table", &["tasks.col_task", "col.status", "tasks.col_user", "tasks.col_start", "#tasks.col_duration"], rows)}
             </div>
         }

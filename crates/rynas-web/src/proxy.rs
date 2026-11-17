@@ -178,6 +178,8 @@ pub fn routes() -> Router<AppState> {
             get(forward).put(forward).delete(forward),
         )
         .route("/scheduler/tasks/{id}/run", post(forward))
+        .route("/scheduler/tasks/{id}/conflicts", get(forward))
+        .route("/scheduler/queue", get(forward))
         .route("/scheduler/tasks/{id}/enable", post(forward))
         .route("/scheduler/tasks/{id}/disable", post(forward))
         .route("/scheduler/tasks/{id}/history", get(forward))
