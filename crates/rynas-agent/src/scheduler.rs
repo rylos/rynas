@@ -58,14 +58,15 @@ pub fn zone(plan: &AgentPlan) -> TimeZone {
         .unwrap_or(TimeZone::UTC)
 }
 
-/// When the next scheduled backup starts (ms): when it is due, or when the allowed window
-/// opens after that. `None` when paused.
-pub fn next_due(st: &State, started_ms: u64) -> Option<u64> {
+/// When the next scheduled backup starts (ms), not before `now_ms`: when it is due, or when
+/// the allowed window opens after that (a backup overdue while the window is closed starts
+/// when it opens next, not at its past due time). `None` when paused.
+pub fn next_due(st: &State, started_ms: u64, now_ms: u64) -> Option<u64> {
     if st.plan.plan.paused {
         return None;
     }
     let s = st.plan.schedule();
-    rynas_schedule::window::start_at(s.window.as_deref(), &zone(&st.plan), due_ms(st, started_ms))
+    rynas_schedule::window::start_at(s.window.as_deref(), &zone(&st.plan), due_ms(st, started_ms).max(now_ms))
 }
 
 /// What the service does about the schedule now.
@@ -269,7 +270,7 @@ pub fn run_service(mode: Mode) -> Result<(), String> {
         let wait = if running.is_some() {
             5
         } else {
-            next_due(&st, started).map_or(50, |d| (d.saturating_sub(now_ms()) / 1000).clamp(5, 50))
+            next_due(&st, started, now_ms()).map_or(50, |d| (d.saturating_sub(now_ms()) / 1000).clamp(5, 50))
         };
         let wait = end.map_or(wait, |e| wait.min(e.saturating_duration_since(Instant::now()).as_secs().max(1)));
         match poll(&st, wait) {
@@ -382,14 +383,14 @@ mod tests {
         st.plan.plan.interval_hours = 24;
         st.plan.plan.start_delay_min = 10;
         // never backed up: after the start delay
-        assert_eq!(next_due(&st, 1_000_000), Some(1_000_000 + 600_000));
+        assert_eq!(next_due(&st, 1_000_000, 0), Some(1_000_000 + 600_000));
         st.last_ok_ms = Some(10_000_000);
-        assert_eq!(next_due(&st, 0), Some(10_000_000 + 86_400_000));
+        assert_eq!(next_due(&st, 0, 0), Some(10_000_000 + 86_400_000));
         st.failures = 1;
         st.last_attempt_ms = Some(200_000_000);
-        assert_eq!(next_due(&st, 0), Some(200_000_000 + 600_000));
+        assert_eq!(next_due(&st, 0, 0), Some(200_000_000 + 600_000));
         st.plan.plan.paused = true;
-        assert_eq!(next_due(&st, 0), None);
+        assert_eq!(next_due(&st, 0, 0), None);
     }
 
     fn rome_ms(s: &str) -> u64 {
@@ -419,7 +420,7 @@ mod tests {
         st.last_ok_ms = Some(rome_ms("2026-11-17T08:00"));
         let afternoon = rome_ms("2026-11-17T15:00");
         // older NAS: due at 14:00, started at once, no skipped starts ever reported
-        assert_eq!(next_due(&st, 0), Some(rome_ms("2026-11-17T14:00")));
+        assert_eq!(next_due(&st, 0, 0), Some(rome_ms("2026-11-17T14:00")));
         assert_eq!(decide(&st, 0, afternoon, &tz), Decision::Start(RunTrigger::Timer));
         st.plan.plan.paused = true;
         assert_eq!(decide(&st, 0, afternoon, &tz), Decision::Idle);
@@ -428,7 +429,9 @@ mod tests {
         st.plan.trigger = Some(TaskTrigger::Interval { hours: 6, after_boot_min: 0 });
         st.plan.tz = Some("Europe/Rome".into());
         st.plan.plan.interval_hours = 99;
-        assert_eq!(next_due(&st, 0), Some(rome_ms("2026-11-17T22:00")));
+        assert_eq!(next_due(&st, 0, 0), Some(rome_ms("2026-11-17T22:00")));
+        // overdue since the night and the window closed now: the next opening, never the past
+        assert_eq!(next_due(&st, 0, rome_ms("2026-11-18T09:00")), Some(rome_ms("2026-11-18T22:00")));
         assert_eq!(decide(&st, 0, afternoon, &tz), Decision::Skip(SkipReason::Window));
         // reported once per wait
         st.skip_noted = Some((afternoon, SkipReason::Window));
@@ -445,7 +448,7 @@ mod tests {
         assert_eq!(decide(&st, 0, afternoon + 86_400_000, &tz), Decision::Skip(SkipReason::Window));
         st.plan.plan.paused = true;
         assert_eq!(decide(&st, 0, afternoon + 86_400_000 + 60_000, &tz), Decision::Skip(SkipReason::Paused));
-        assert_eq!(next_due(&st, 0), None);
+        assert_eq!(next_due(&st, 0, 0), None);
         // the zone: the NAS's, else the PC's
         assert_eq!(zone(&st.plan).iana_name(), Some("Europe/Rome"));
         st.plan.tz = Some("Not/AZone".into());

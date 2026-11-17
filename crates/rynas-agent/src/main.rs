@@ -294,6 +294,15 @@ fn backup_cmd(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// The hidden test commands run only with `RYNAS_AGENT_STATE` set to a folder other than the
+/// service's: a test's own pairing, never the PC's.
+fn test_state_only() -> Result<(), String> {
+    match std::env::var_os("RYNAS_AGENT_STATE") {
+        Some(d) if std::path::Path::new(&d) != std::path::Path::new(state::STATE_DIR) => Ok(()),
+        _ => Err("a test command: set RYNAS_AGENT_STATE to a test state folder".into()),
+    }
+}
+
 /// Hidden, tests (`schedule-test`): a stand-in for a backup run. It reports a good run with
 /// its trigger after two seconds and keeps the outcome in the state as a backup does; it
 /// reads and sends nothing of the PC.
@@ -346,7 +355,7 @@ fn status() -> Result<(), String> {
     let when = |ms: Option<u64>| ms.map(|m| format!("{} min ago", now_ms().saturating_sub(m) / 60_000)).unwrap_or_else(|| "never".into());
     println!("last good    {}", when(st.last_ok_ms));
     println!("last attempt {}{}", when(st.last_attempt_ms), if st.failures > 0 { format!(" ({} failed in a row)", st.failures) } else { String::new() });
-    if let Some(d) = scheduler::next_due(&st, now_ms()) {
+    if let Some(d) = scheduler::next_due(&st, now_ms(), now_ms()) {
         let left = d.saturating_sub(now_ms()) / 60_000;
         println!("next         in about {left} min (when the service runs)");
     }
@@ -483,8 +492,10 @@ fn main() {
         // hidden, tests: the service's schedule against a NAS, with a stand-in for each run
         // (`test-run`: it reports a run and backs nothing up), for `--for` seconds; the state
         // is `$RYNAS_AGENT_STATE`
-        "schedule-test" => scheduler::run_service(scheduler::Mode { fake: true, for_s: Some(opt(&args, "--for").and_then(|s| s.parse().ok()).unwrap_or(60)) }),
-        "test-run" => test_run(&args),
+        // (only with a state of its own: never against the paired PC's real state, where a
+        // stand-in run would tell the NAS of a backup that never happened)
+        "schedule-test" => test_state_only().and_then(|_| scheduler::run_service(scheduler::Mode { fake: true, for_s: Some(opt(&args, "--for").and_then(|s| s.parse().ok()).unwrap_or(60)) })),
+        "test-run" => test_state_only().and_then(|_| test_run(&args)),
         "backup" => backup_cmd(&args),
         "status" => status(),
         "set-server" => set_server(&args),
