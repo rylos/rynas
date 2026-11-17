@@ -228,6 +228,9 @@ head -c 700M /dev/urandom > /srv/qvol/data/blob; echo hello > /srv/qvol/small/f;
 QUUID=$(findmnt -no UUID /srv/qvol)
 ls /sys/fs/btrfs/"$QUUID"/devinfo/*/scrub_speed_max >/dev/null || fail "no scrub_speed_max on this kernel"
 for f in /sys/fs/btrfs/"$QUUID"/devinfo/*/scrub_speed_max; do echo 20m > "$f"; done
+# as a volume mounted at boot: rynasd's mount namespace (its sandbox) is made at its start,
+# and in this container a later mount does not reach it
+systemctl restart rynasd.service; sleep 2; relogin
 mk '{"id":"qscrub-a","action":{"kind":"scrub","filesystem":"/srv/qvol"},"trigger":{"kind":"manual"}}'
 mk '{"id":"qscrub-b","action":{"kind":"scrub","filesystem":"/srv/qvol"},"trigger":{"kind":"manual"}}'
 api POST /backup/restic/jobs '{"job":{"name":"qb","sources":[{"kind":"folder","path":"/srv/qvol/small"}],"destination":{"kind":"local","path":"/srv/qvol/repo"}},"schedule":{"kind":"manual"}}'
