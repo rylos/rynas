@@ -7,7 +7,7 @@ import { t, count, LOCALE, errText } from "./i18n.js";
 import { esc, size, sizeParts, ezaDate, relative, dateTime, duration, modeString, collator, joinPath, parentOf, baseName, int, isDirLike } from "./format.js";
 import { svg, iconHTML, glyph, colorClass, kindLabel, previewKind, shareGlyph, isProtectedFolder } from "./icons.js";
 import { pickIcon } from "./iconpick.js";
-import { h, $, errorToast, toast, copyText } from "./ui.js";
+import { h, $, errorToast, toast, copyText, dialog } from "./ui.js";
 import { fuzzy, highlight } from "./fuzzy.js";
 import { isHeic, HEIC_LIMIT, fillHeic } from "./heic.js";
 import { rememberArchive } from "./archive.js";
@@ -750,8 +750,9 @@ export class Pane {
 
   columns() {
     if (this.view === "columns") return [{ key: "name", label: "files.common.name", width: "minmax(0, 1fr)" }];
-    const cols = [{ key: "name", label: "files.common.name", width: "minmax(160px, 1fr)" }];
-    if (this.search) cols.push({ key: "dir", label: "files.common.folder", width: "minmax(100px, .6fr)", cls: "" });
+    // a search or the flat view adds the Folder column: it gives way first, Name next
+    const cols = [{ key: "name", label: "files.common.name", width: this.search ? "minmax(120px, 1fr)" : "minmax(160px, 1fr)" }];
+    if (this.search) cols.push({ key: "dir", label: "files.common.folder", width: "minmax(60px, .6fr)", cls: "" });
     // a PC's snapshots on a narrow screen: the room goes to their names, not to permissions
     const narrowPc = isPcFolder(this.path) && this.el.clientWidth > 0 && this.el.clientWidth < 600;
     for (const [key, c] of Object.entries(COLS)) {
@@ -759,7 +760,9 @@ export class Pane {
       const w = prefs.colWidths?.[key];
       // a saved width is narrowed on a small screen, never below the column's default
       const fit = w ? Math.min(w, Math.max(this.colMax(key), parseInt(c.width, 10))) : 0;
-      cols.push({ key, ...c, width: fit ? `${fit}px` : c.width, resizable: true });
+      // never wider than the row: on a narrow pane the column narrows (its text ellipsized)
+      // instead of pushing the last columns out of sight
+      cols.push({ key, ...c, width: `minmax(0, ${fit ? `${fit}px` : c.width})`, resizable: true });
     }
     return cols;
   }
@@ -1087,7 +1090,8 @@ export class Pane {
     // a folder just opened shows itself, not its first item
     const list = this.selected();
     // a checksum being computed goes on only while its file is shown
-    if (this.sumRun && !(list.length === 1 && list[0].path === this.sumRun.path)) this.sumRun.controller.abort();
+    // (a run of the checksum dialog belongs to the dialog)
+    if (this.sumRun && !this.sumRun.dialog && !(list.length === 1 && list[0].path === this.sumRun.path)) this.sumRun.controller.abort();
     if (!list.length) {
       const name = (this.path.split("/").length === 2 && isRemote(this.path) ? this.app.connName(this.path) : baseName(this.path)) || t("files.common.shared_folders");
       const dirEntry = { name, kind: "d", mode: 0o755, path: this.path };
@@ -1139,9 +1143,7 @@ export class Pane {
         ${this.app.editable(this, e) ? `<button class="btn small info-edit">${svg("rename")} ${t("files.common.edit")}</button>` : ""}
         <button class="btn small cp">${svg("link")} ${t("files.common.copy_path")}</button>
       </div>
-      ${this.summable(e) ? `<div class="checksum"><div class="sum-row"><span class="sum-k">${t("files.pane.checksum")}</span>
-        <select class="input sum-algo" aria-label="${esc(t("files.pane.algorithm"))}">${SUM_ALGOS.map(([v, l]) => `<option value="${v}"${v === sumAlgo ? " selected" : ""}>${l}</option>`).join("")}</select>
-        <button class="btn small sum-go">${t("files.pane.compute")}</button></div><div class="sum-out"></div></div>` : ""}`;
+      ${this.summable(e) ? this.checksumHTML() : ""}`;
     $(".calc", this.infoEl)?.addEventListener("click", () => this.app.computeSizes(this, [e]));
     if ($(".checksum", this.infoEl)) this.bindChecksum(e);
     if (pickable) $(".preview-box", this.infoEl).onclick = (ev) => pickIcon(ev.currentTarget, e.path);
@@ -1182,13 +1184,38 @@ export class Pane {
     return e.kind === "f" && !e.share && !isRemote(e.path) && !this.archive;
   }
 
+  /** The checksum box: the algorithm, Compute, then the hash and the comparison. */
+  checksumHTML() {
+    return `<div class="checksum"><div class="sum-row"><span class="sum-k">${t("files.pane.checksum")}</span>
+        <select class="input sum-algo" aria-label="${esc(t("files.pane.algorithm"))}">${SUM_ALGOS.map(([v, l]) => `<option value="${v}"${v === sumAlgo ? " selected" : ""}>${l}</option>`).join("")}</select>
+        <button class="btn small sum-go">${t("files.pane.compute")}</button></div><div class="sum-out"></div></div>`;
+  }
+
   /**
-   * The info panel's checksum: computed on the NAS when asked (a big file
-   * takes a while, with a bar), kept for the file as long as it does not
-   * change, copied with a click, compared with a pasted one.
+   * The checksum of a file in a dialog of its own (the item menu): where the info panel is
+   * not shown (a phone) the same box, the run stopped when the dialog closes.
    */
-  bindChecksum(e) {
-    const box = $(".checksum", this.infoEl);
+  checksumDialog(e) {
+    if (!this.summable(e)) return;
+    const dlg = dialog(`
+      <div class="dlg-head"><div class="dlg-icon">${svg("hash")}</div><h2 title="${esc(e.name)}">${esc(e.name)}</h2></div>
+      <div class="dlg-body">${this.checksumHTML()}</div>
+      <div class="dlg-foot"><button class="btn primary d-close">${esc(t("files.common.close"))}</button></div>`, { cls: "checksum-dlg" });
+    $(".d-close", dlg).onclick = () => dlg.close();
+    dlg.addEventListener("close", () => {
+      if (this.sumRun?.dialog) this.sumRun.controller.abort();
+    });
+    this.bindChecksum(e, dlg);
+  }
+
+  /**
+   * The info panel's checksum (or the dialog's, `root`): computed on the NAS when asked (a
+   * big file takes a while, with a bar), kept for the file as long as it does not change,
+   * copied with a click, compared with a pasted one.
+   */
+  bindChecksum(e, root = this.infoEl) {
+    const box = $(".checksum", root);
+    const inDialog = root !== this.infoEl;
     const algoSel = $(".sum-algo", box);
     const go = $(".sum-go", box);
     const out = $(".sum-out", box);
@@ -1197,7 +1224,8 @@ export class Pane {
       if ($(".sum-hash", out)?.dataset.hash === hash) return;
       out.innerHTML = `<button type="button" class="sum-hash" data-hash="${esc(hash)}" title="${esc(t("files.common.copy"))}">${esc(hash)}</button>
         <input class="input sum-cmp" placeholder="${esc(t("files.pane.paste_checksum_compare"))}" aria-label="${esc(t("files.pane.paste_checksum_compare"))}" spellcheck="false" autocomplete="off"><div class="sum-verdict" role="status"></div>`;
-      $(".sum-hash", out).onclick = () => copyText(hash).then(() => toast(t("files.pane.checksum_copied")));
+      // copyText says it was copied
+      $(".sum-hash", out).onclick = () => copyText(hash);
       const cmp = $(".sum-cmp", out);
       cmp.oninput = () => {
         // "hash  name" as the *sum tools print it: the first word
@@ -1211,7 +1239,7 @@ export class Pane {
     const refresh = () => {
       if (!box.isConnected) return;
       const known = this.sums.get(key());
-      const run = this.sumRun?.key === key() ? this.sumRun : null;
+      const run = this.sumRun?.key === key() && this.sumRun.dialog === inDialog ? this.sumRun : null;
       go.hidden = !!(known || run);
       if (known) show(known);
       else if (run) {
@@ -1229,7 +1257,7 @@ export class Pane {
     };
     go.onclick = async () => {
       this.sumRun?.controller.abort();
-      const run = (this.sumRun = { key: key(), path: e.path, pct: 0, controller: new AbortController(), refresh });
+      const run = (this.sumRun = { key: key(), path: e.path, pct: 0, controller: new AbortController(), refresh, dialog: inDialog });
       refresh();
       try {
         let hash = null;
@@ -1259,7 +1287,7 @@ export class Pane {
       run.refresh();
     };
     // a run started before this drawing reports to it from now on
-    if (this.sumRun?.key === key()) this.sumRun.refresh = refresh;
+    if (this.sumRun?.key === key() && this.sumRun.dialog === inDialog) this.sumRun.refresh = refresh;
     refresh();
   }
 

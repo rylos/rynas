@@ -217,7 +217,6 @@ files.actions.delete_permanently	Eliminare definitivamente?
 files.common.empty_recycle_bin	Svuota il cestino
 files.actions.empty_recycle_bin	Svuotare il cestino?
 files.actions.recycle_bin_already_empty	Il cestino è già vuoto
-files.actions.n_deleted_permanently_cannot_restored	{n} verranno eliminati definitivamente: non si possono recuperare.
 files.actions.recycle_bin_shared_folder_off	Il cestino di questa cartella condivisa è disattivato.
 files.common.move_recycle_bin	Sposta nel cestino
 files.common.delete	Elimina
@@ -547,7 +546,6 @@ files.pane.date_taken	Data di ripresa
 files.pane.location	Posizione
 files.pane.n_tracks	{n} tracce
 files.settings.list_grid_columns	Elenco / griglia / colonne
-files.actions.n_go_shared_folder_recycle	{n} finiranno nel cestino della cartella condivisa, da dove si possono recuperare.
 files.common.nas_unreachable	NAS non raggiungibile
 files.conns.rynas_key	Chiave di rynas
 files.health.browser_blocked_window_allow_pop	Il browser ha bloccato la finestra: consenti le finestre popup per questo sito
@@ -623,7 +621,6 @@ files.select.differences_a_b	Differenze: {a} a sinistra, {b} a destra
 files.select.same_items	Le due cartelle contengono gli stessi elementi
 files.pane.checksum	Checksum
 files.pane.algorithm	Algoritmo
-files.pane.checksum_copied	Checksum copiato
 files.pane.paste_checksum_compare	Incolla un checksum da confrontare
 files.pane.checksum_match	Uguale
 files.pane.checksum_different	Diverso
@@ -695,7 +692,6 @@ files.dupes.all_but_oldest	tutti tranne il più vecchio
 files.dupes.all_but_newest	tutti tranne il più recente
 files.dupes.all_but_shortest	tutti tranne il percorso più corto
 files.dupes.none	nessuno
-files.dupes.n_selected_s	{n} selezionati · {s}
 files.dupes.n_copies_of_s	{n} copie da {s}
 files.dupes.show_in_folder	Mostra nella cartella
 files.dupes.one_copy_stays	Una copia di ogni gruppo resta
@@ -733,7 +729,6 @@ files.sync.count.differences.one	{n} differenza
 files.sync.count.differences.other	{n} differenze
 files.sync.first_only	solo le prime
 files.sync.folders_same	Le due cartelle sono uguali
-files.sync.n_extra_go_recycle	{n} che a sinistra non ci sono finiranno nel cestino della cartella condivisa di destra, da dove si possono recuperare.
 files.sync.nothing_to_do	Niente da fare
 files.transfers.syncing	Sincronizzazione in corso
 files.transfers.sync_complete	Sincronizzazione completata
@@ -745,11 +740,24 @@ files.dupes.by_name_list_only	confrontati per nome e dimensione: solo elencati, 
 files.dupes.n_odd_names_skipped	{n} nomi non UTF-8 saltati
 files.sync.unreadable	illeggibile: lasciato com'è
 files.sync.n_unreadable	{n} illeggibili: lasciati come sono
-files.sync.n_replaced_go_recycle	{n} sostituiti: la versione attuale finisce nel cestino, da dove si può recuperare.
-files.sync.n_replaced_lost	{n} verranno sostituiti definitivamente: la versione attuale non si può recuperare.
 files.sync.sync_ask	Sincronizzare le cartelle?
 files.undo.not_recorded	Quello che il trasferimento ha creato non è stato registrato: non si annulla
 files.transfers.destination_gone	La destinazione non è più disponibile: disco scollegato o rete assente?
 files.transfers.source_gone	L'origine non è più disponibile: disco scollegato o rete assente?
 files.transfers.stopped_unexpectedly	Il processo di copia si è fermato inaspettatamente
 files.transfers.cleaning_up	rimozione dei file temporanei…
+files.actions.count.go_recycle.one	{n} elemento finirà nel cestino della cartella condivisa, da dove si può recuperare.
+files.actions.count.go_recycle.other	{n} elementi finiranno nel cestino della cartella condivisa, da dove si possono recuperare.
+files.actions.count.deleted_permanently.one	{n} elemento verrà eliminato definitivamente: non si potrà recuperare.
+files.actions.count.deleted_permanently.other	{n} elementi verranno eliminati definitivamente: non si potranno recuperare.
+files.sync.count.extra_go_recycle.one	{n} elemento che a sinistra non c'è finirà nel cestino della cartella condivisa di destra, da dove si può recuperare.
+files.sync.count.extra_go_recycle.other	{n} elementi che a sinistra non ci sono finiranno nel cestino della cartella condivisa di destra, da dove si possono recuperare.
+files.sync.count.replaced_go_recycle.one	{n} elemento sostituito: la versione attuale finisce nel cestino, da dove si può recuperare.
+files.sync.count.replaced_go_recycle.other	{n} elementi sostituiti: le versioni attuali finiscono nel cestino, da dove si possono recuperare.
+files.sync.count.replaced_lost.one	{n} elemento verrà sostituito definitivamente: la versione attuale non si potrà recuperare.
+files.sync.count.replaced_lost.other	{n} elementi verranno sostituiti definitivamente: le versioni attuali non si potranno recuperare.
+files.dupes.count.selected_s.one	{n} selezionato · {s}
+files.dupes.count.selected_s.other	{n} selezionati · {s}
+files.dupes.groups_left_g_s	{g} ancora da sistemare · {s} recuperabili
+files.dupes.none_left	Non restano duplicati
+files.menus.checksum	Checksum…

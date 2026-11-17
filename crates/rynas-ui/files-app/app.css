@@ -404,6 +404,8 @@ svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-widt
 .checksum .sum-verdict.bad { color: var(--crit); }
 .checksum .sum-prog { display: flex; align-items: center; gap: 8px; }
 .checksum .sum-prog .pbar { flex: 1; min-width: 0; }
+.checksum-dlg h2 { min-width: 0; overflow-wrap: anywhere; }
+.checksum-dlg .checksum { margin-top: 0; padding-top: 0; border-top: 0; }
 .info .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
 
 /* ---------- context menu ---------- */
@@ -467,6 +469,8 @@ dialog.dlg.wide { max-width: min(94vw, 760px); }
 .rename-dlg .ren-item > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rename-dlg .ren-item > span:nth-child(2) { color: var(--faint); text-align: center; }
 .rename-dlg .ren-item > span:last-child { color: var(--accent); }
+/* the reason of a refused name is read whole, on a phone too */
+.rename-dlg .ren-item.bad > span:last-child { white-space: normal; overflow-wrap: anywhere; }
 .rename-dlg .ren-item.same > span:last-child { color: var(--muted); }
 .rename-dlg .ren-item.bad > span:last-child { color: var(--crit); }
 .rename-dlg .ren-item em { font-style: normal; font-size: 11px; }
@@ -480,7 +484,7 @@ dialog.dlg.wide { max-width: min(94vw, 760px); }
 .dupes-dlg .dup-pick-l { color: var(--faint); }
 .dupes-dlg .dup-sum { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
 .dupes-dlg .dup-list { max-height: 48vh; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 4px 10px 8px; }
-.dupes-dlg .dup-gh { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; margin: 8px 0 2px; }
+.dupes-dlg .dup-gh { font-size: 11.5px; font-weight: 600; color: var(--faint); margin: 8px 0 2px; }
 .dupes-dlg .dup-item { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12.5px; cursor: pointer; min-width: 0; }
 .dupes-dlg .dup-item input { accent-color: var(--crit); flex: none; }
 .dupes-dlg .dup-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }

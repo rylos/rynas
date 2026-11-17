@@ -250,8 +250,8 @@ export const actionMethods = {
       const ok = await confirmBox({
         title: recycle ? t("files.actions.move_recycle_bin") : t("files.actions.delete_permanently"),
         message: recycle
-          ? t("files.actions.n_go_shared_folder_recycle", { n: count(list.length, "files.common.count.items", int) })
-          : `<b style="color:var(--crit)">${t("files.actions.n_deleted_permanently_cannot_restored", { n: count(list.length, "files.common.count.items", int) })}</b>${!pane.recycle && !inBin ? "<br>" + t("files.actions.recycle_bin_shared_folder_off") : ""}`,
+          ? count(list.length, "files.actions.count.go_recycle", int)
+          : `<b style="color:var(--crit)">${count(list.length, "files.actions.count.deleted_permanently", int)}</b>${!pane.recycle && !inBin ? "<br>" + t("files.actions.recycle_bin_shared_folder_off") : ""}`,
         items: names,
         ok: recycle ? t("files.common.move_recycle_bin") : t("files.common.delete"),
         danger: !recycle,
@@ -273,7 +273,7 @@ export const actionMethods = {
     if (!entries.length) return toast(t("files.actions.recycle_bin_already_empty"));
     const ok = await confirmBox({
       title: t("files.actions.empty_recycle_bin"),
-      message: `<b style="color:var(--crit)">${t("files.actions.n_deleted_permanently_cannot_restored", { n: count(entries.length, "files.common.count.items", int) })}</b>`,
+      message: `<b style="color:var(--crit)">${count(entries.length, "files.actions.count.deleted_permanently", int)}</b>`,
       ok: t("files.common.empty_recycle_bin"),
       danger: true,
       icon: "trash",

@@ -233,7 +233,6 @@ files.actions.delete_permanently	Удалить безвозвратно?
 files.common.empty_recycle_bin	Очистить корзину
 files.actions.empty_recycle_bin	Очистить корзину?
 files.actions.recycle_bin_already_empty	Корзина уже пуста
-files.actions.n_deleted_permanently_cannot_restored	Будут удалены безвозвратно: {n}. Восстановить их будет нельзя.
 files.actions.recycle_bin_shared_folder_off	Корзина этой общей папки отключена.
 files.common.move_recycle_bin	Переместить в корзину
 files.common.delete	Удалить
@@ -563,7 +562,6 @@ files.pane.date_taken	Дата съёмки
 files.pane.location	Место съёмки
 files.pane.n_tracks	Дорожек: {n}
 files.settings.list_grid_columns	Список / сетка / столбцы
-files.actions.n_go_shared_folder_recycle	Будут перемещены в корзину общей папки, откуда их можно восстановить: {n}.
 files.common.nas_unreachable	NAS недоступен
 files.conns.rynas_key	Ключ rynas
 files.health.browser_blocked_window_allow_pop	Браузер заблокировал окно: разрешите всплывающие окна для этого сайта
@@ -641,7 +639,6 @@ files.select.differences_a_b	Различия: слева {a}, справа {b}
 files.select.same_items	В обеих папках одинаковые элементы
 files.pane.checksum	Контрольная сумма
 files.pane.algorithm	Алгоритм
-files.pane.checksum_copied	Контрольная сумма скопирована
 files.pane.paste_checksum_compare	Вставьте контрольную сумму для сравнения
 files.pane.checksum_match	Совпадает
 files.pane.checksum_different	Не совпадает
@@ -717,7 +714,6 @@ files.dupes.all_but_oldest	все, кроме самого старого
 files.dupes.all_but_newest	все, кроме самого нового
 files.dupes.all_but_shortest	все, кроме самого короткого пути
 files.dupes.none	ничего
-files.dupes.n_selected_s	Выделено: {n} · {s}
 files.dupes.n_copies_of_s	Копий: {n} по {s}
 files.dupes.show_in_folder	Показать в папке
 files.dupes.one_copy_stays	Одна копия из каждой группы остаётся
@@ -759,7 +755,6 @@ files.sync.count.differences.many	{n} различий
 files.sync.count.differences.other	{n} различия
 files.sync.first_only	только первые
 files.sync.folders_same	Папки одинаковые
-files.sync.n_extra_go_recycle	Отсутствующие слева ({n}) будут перемещены в корзину общей папки справа, откуда их можно восстановить.
 files.sync.nothing_to_do	Нечего делать
 files.transfers.syncing	Синхронизация
 files.transfers.sync_complete	Синхронизация завершена
@@ -771,11 +766,36 @@ files.dupes.by_name_list_only	сравнение по имени и размер
 files.dupes.n_odd_names_skipped	Пропущено имён не в UTF-8: {n}
 files.sync.unreadable	не удалось прочитать: оставлено как есть
 files.sync.n_unreadable	Не удалось прочитать: {n}, оставлено как есть
-files.sync.n_replaced_go_recycle	Будут заменены: {n}. Текущая версия уйдёт в корзину, откуда её можно восстановить.
-files.sync.n_replaced_lost	Будут заменены безвозвратно: {n}. Текущую версию восстановить нельзя.
 files.sync.sync_ask	Синхронизировать папки?
 files.undo.not_recorded	Результат передачи не был записан: отменить нельзя
 files.transfers.destination_gone	Место назначения больше недоступно: диск отключён или нет сети?
 files.transfers.source_gone	Источник больше недоступен: диск отключён или нет сети?
 files.transfers.stopped_unexpectedly	Процесс копирования неожиданно остановился
 files.transfers.cleaning_up	удаление временных файлов…
+files.actions.count.go_recycle.one	{n} элемент будет перемещён в корзину общей папки, откуда его можно восстановить.
+files.actions.count.go_recycle.few	{n} элемента будут перемещены в корзину общей папки, откуда их можно восстановить.
+files.actions.count.go_recycle.many	{n} элементов будут перемещены в корзину общей папки, откуда их можно восстановить.
+files.actions.count.go_recycle.other	{n} элемента будут перемещены в корзину общей папки, откуда их можно восстановить.
+files.actions.count.deleted_permanently.one	{n} элемент будет удалён безвозвратно: восстановить его будет нельзя.
+files.actions.count.deleted_permanently.few	{n} элемента будут удалены безвозвратно: восстановить их будет нельзя.
+files.actions.count.deleted_permanently.many	{n} элементов будут удалены безвозвратно: восстановить их будет нельзя.
+files.actions.count.deleted_permanently.other	{n} элемента будут удалены безвозвратно: восстановить их будет нельзя.
+files.sync.count.extra_go_recycle.one	{n} элемент, которого нет слева, будет перемещён в корзину общей папки справа, откуда его можно восстановить.
+files.sync.count.extra_go_recycle.few	{n} элемента, которых нет слева, будут перемещены в корзину общей папки справа, откуда их можно восстановить.
+files.sync.count.extra_go_recycle.many	{n} элементов, которых нет слева, будут перемещены в корзину общей папки справа, откуда их можно восстановить.
+files.sync.count.extra_go_recycle.other	{n} элемента, которых нет слева, будут перемещены в корзину общей папки справа, откуда их можно восстановить.
+files.sync.count.replaced_go_recycle.one	{n} элемент будет заменён: текущая версия уйдёт в корзину, откуда её можно восстановить.
+files.sync.count.replaced_go_recycle.few	{n} элемента будут заменены: текущие версии уйдут в корзину, откуда их можно восстановить.
+files.sync.count.replaced_go_recycle.many	{n} элементов будут заменены: текущие версии уйдут в корзину, откуда их можно восстановить.
+files.sync.count.replaced_go_recycle.other	{n} элемента будут заменены: текущие версии уйдут в корзину, откуда их можно восстановить.
+files.sync.count.replaced_lost.one	{n} элемент будет заменён безвозвратно: текущую версию восстановить нельзя.
+files.sync.count.replaced_lost.few	{n} элемента будут заменены безвозвратно: текущие версии восстановить нельзя.
+files.sync.count.replaced_lost.many	{n} элементов будут заменены безвозвратно: текущие версии восстановить нельзя.
+files.sync.count.replaced_lost.other	{n} элемента будут заменены безвозвратно: текущие версии восстановить нельзя.
+files.dupes.count.selected_s.one	Выделен {n} · {s}
+files.dupes.count.selected_s.few	Выделено {n} · {s}
+files.dupes.count.selected_s.many	Выделено {n} · {s}
+files.dupes.count.selected_s.other	Выделено {n} · {s}
+files.dupes.groups_left_g_s	Осталось: {g} · можно освободить {s}
+files.dupes.none_left	Дубликатов не осталось
+files.menus.checksum	Контрольная сумма…

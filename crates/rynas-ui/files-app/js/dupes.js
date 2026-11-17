@@ -54,7 +54,7 @@ export function findDuplicates(app, root) {
   const full = (rel) => joinPath(root, rel);
   const selBytes = () => groups.reduce((a, g) => a + g.size * g.items.filter((i) => picked.has(i.path)).length, 0);
   const updateFoot = () => {
-    q(".dup-sel").textContent = picked.size ? t("files.dupes.n_selected_s", { n: int(picked.size), s: size(selBytes()) }) : "";
+    q(".dup-sel").textContent = picked.size ? count(picked.size, "files.dupes.count.selected_s", int).replace("{s}", size(selBytes())) : "";
     q(".d-del").disabled = !picked.size || listOnly;
     q(".d-del").hidden = listOnly;
   };
@@ -118,30 +118,36 @@ export function findDuplicates(app, root) {
     } catch (err) {
       return errorToast(err);
     }
-    const n = count(list.length, "files.common.count.items", int);
     const ok = await confirmBox({
       title: bin ? t("files.actions.move_recycle_bin") : t("files.actions.delete_permanently"),
       message: bin
-        ? esc(t("files.actions.n_go_shared_folder_recycle", { n }))
-        : `<b style="color:var(--crit)">${esc(t("files.actions.n_deleted_permanently_cannot_restored", { n }))}</b><br>${esc(t("files.actions.recycle_bin_shared_folder_off"))}`,
+        ? esc(count(list.length, "files.actions.count.go_recycle", int))
+        : `<b style="color:var(--crit)">${esc(count(list.length, "files.actions.count.deleted_permanently", int))}</b><br>${esc(t("files.actions.recycle_bin_shared_folder_off"))}`,
       items: list.map((p) => esc(p)),
       ok: bin ? t("files.common.move_recycle_bin") : t("files.common.delete"),
       danger: !bin,
       icon: "trash",
     });
     if (!ok) return;
-    dlg.close();
     // the NAS checks again before it deletes: each file still as found, and never the last
     // copy of its group still as found
     const seen = (it, g) => ({ size: g.size, mtime: it.mtime });
     const touched = groups.filter((g) => g.items.some((it) => picked.has(it.path)));
-    transfers.start({
+    const id = await transfers.start({
       op: "delete",
       sources: list.map(full),
       permanent: !bin,
       expect: touched.flatMap((g) => g.items.filter((it) => picked.has(it.path)).map((it) => ({ path: full(it.path), seen: seen(it, g) }))),
       keep: touched.map((g) => g.items.map((it) => ({ path: full(it.path), seen: seen(it, g) }))),
     });
+    if (id == null || !dlg.open) return;
+    // the dialog stays: the copies sent away leave their groups, a group of one is no group
+    groups = groups.map((g) => ({ ...g, items: g.items.filter((it) => !picked.has(it.path)) })).filter((g) => g.items.length > 1);
+    picked.clear();
+    const wasted = groups.reduce((a, g) => a + g.size * (g.items.length - 1), 0);
+    q(".dup-sum").textContent = groups.length ? t("files.dupes.groups_left_g_s", { g: count(groups.length, "files.dupes.count.groups", int), s: size(wasted) }) : t("files.dupes.none_left");
+    dlg.querySelectorAll("[data-pick]").forEach((b) => (b.disabled = !groups.length));
+    render();
   };
 
   q(".d-go").onclick = async () => {

@@ -122,12 +122,11 @@ export function recordTransfer(id, op, sources, dest, fresh) {
       // a copy: its new items go to the recycle bin, after asking
       const copies = left.map(([, p]) => p);
       const recycle = !!(await api.list(dest)).recycle;
-      const many = count(copies.length, "files.common.count.items", int);
       const ok = await confirmBox({
         title: t("files.undo.undo_copy_ask"),
         message: recycle
-          ? esc(t("files.actions.n_go_shared_folder_recycle", { n: many }))
-          : `<b style="color:var(--crit)">${esc(t("files.actions.n_deleted_permanently_cannot_restored", { n: many }))}</b><br>${esc(t("files.actions.recycle_bin_shared_folder_off"))}`,
+          ? esc(count(copies.length, "files.actions.count.go_recycle", int))
+          : `<b style="color:var(--crit)">${esc(count(copies.length, "files.actions.count.deleted_permanently", int))}</b><br>${esc(t("files.actions.recycle_bin_shared_folder_off"))}`,
         items: copies.map((p) => esc(baseName(p))),
         ok: recycle ? t("files.common.move_recycle_bin") : t("files.common.delete"),
         danger: !recycle,

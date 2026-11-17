@@ -106,6 +106,7 @@ export const menuMethods = {
       (!remote || this.connOf(pane.path)?.kind === "smb") && !noSmb && { label: t("files.menus.copy_smb_address"), icon: "link", action: () => this.copyPaths(list, "url") },
       !many && dir && { label: t("files.common.add_favorites"), icon: "star", action: () => this.toggleFavorite(entry.path) },
       { label: t("files.menus.properties"), icon: "info", key: "Ctrl+I", action: () => !prefs.info && this.toggleInfo() },
+      !many && pane.summable(entry) && { label: t("files.menus.checksum"), icon: "hash", action: () => pane.checksumDialog(entry) },
       !many && shareObj && !shareObj.home && shareObj.volume && !this.removableShare(entry.path) && { label: t("files.common.permissions_menu"), icon: "shield", action: () => sharePermissions(shareObj) },
       !many && share && this.removableShare(entry.path) && "-",
       !many && share && this.removableShare(entry.path) && { label: t("files.common.eject"), icon: "eject", action: () => this.eject(entry.name) },

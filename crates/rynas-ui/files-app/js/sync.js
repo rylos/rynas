@@ -199,13 +199,12 @@ export function syncFolders(app, paneA, paneB) {
     const lost = [...(binB ? [] : overB), ...(binA ? [] : overA)];
     const binned = [...(binB ? overB : []), ...(binA ? overA : [])];
     if (del.length || overB.length || overA.length) {
-      const items = (n) => count(n, "files.common.count.items", int);
       const lines = [];
-      if (binned.length) lines.push(esc(t("files.sync.n_replaced_go_recycle", { n: items(binned.length) })));
-      if (del.length && binB) lines.push(esc(t("files.sync.n_extra_go_recycle", { n: items(del.length) })));
+      if (binned.length) lines.push(esc(count(binned.length, "files.sync.count.replaced_go_recycle", int)));
+      if (del.length && binB) lines.push(esc(count(del.length, "files.sync.count.extra_go_recycle", int)));
       const danger = lost.length > 0 || (del.length > 0 && !binB);
-      if (lost.length) lines.push(`<b style="color:var(--crit)">${esc(t("files.sync.n_replaced_lost", { n: items(lost.length) }))}</b>`);
-      if (del.length && !binB) lines.push(`<b style="color:var(--crit)">${esc(t("files.actions.n_deleted_permanently_cannot_restored", { n: items(del.length) }))}</b>`);
+      if (lost.length) lines.push(`<b style="color:var(--crit)">${esc(count(lost.length, "files.sync.count.replaced_lost", int))}</b>`);
+      if (del.length && !binB) lines.push(`<b style="color:var(--crit)">${esc(count(del.length, "files.actions.count.deleted_permanently", int))}</b>`);
       if (danger) lines.push(esc(t("files.actions.recycle_bin_shared_folder_off")));
       const ok = await confirmBox({
         title: t("files.sync.sync_ask"),
