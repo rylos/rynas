@@ -357,6 +357,67 @@ impl History {
             .collect()
     }
 
+    /// How long each task usually runs: the median length of its last `n` runs that ran to
+    /// their end (skipped starts and scrubs that gave way left out), with how many there were.
+    pub fn estimates(&self, n: usize) -> rusqlite::Result<std::collections::HashMap<String, (u64, u8)>> {
+        let db = self.db.lock().unwrap();
+        let mut st = db.prepare(
+            "SELECT task_id, end_ms - start_ms FROM (
+                 SELECT task_id, start_ms, end_ms,
+                        row_number() OVER (PARTITION BY task_id ORDER BY id DESC) AS rn
+                 FROM runs WHERE skipped IS NULL AND yielded = 0 AND start_ms IS NOT NULL AND end_ms >= start_ms)
+             WHERE rn <= ?1",
+        )?;
+        let mut by: std::collections::HashMap<String, Vec<u64>> = std::collections::HashMap::new();
+        for r in st.query_map([n as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64)))? {
+            let (id, d) = r?;
+            by.entry(id).or_default().push(d);
+        }
+        Ok(by
+            .into_iter()
+            .map(|(id, mut v)| {
+                v.sort_unstable();
+                let m = if v.len() % 2 == 1 { v[v.len() / 2] } else { (v[v.len() / 2 - 1] + v[v.len() / 2]) / 2 };
+                (id, (m, v.len().min(255) as u8))
+            })
+            .collect())
+    }
+
+    /// Runs of every task, newest first, without output: of one task, with one outcome,
+    /// ended at or after `from_ms`, older than the run `before`; at most `limit`.
+    pub fn all_runs(
+        &self,
+        task_id: Option<&str>,
+        outcome: Option<rynas_api_types::scheduler::RunOutcome>,
+        from_ms: Option<u64>,
+        before: Option<u64>,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<TaskRun>> {
+        use rynas_api_types::scheduler::RunOutcome;
+        let cond = match outcome {
+            None => "1",
+            Some(RunOutcome::Ok) => "skipped IS NULL AND ok = 1",
+            Some(RunOutcome::Failed) => "skipped IS NULL AND ok = 0 AND yielded = 0",
+            Some(RunOutcome::Skipped) => "skipped IS NOT NULL",
+            Some(RunOutcome::Yielded) => "yielded = 1",
+        };
+        let db = self.db.lock().unwrap();
+        let mut st = db.prepare(&format!(
+            "SELECT {COLS} FROM runs WHERE (?1 IS NULL OR task_id = ?1) AND end_ms >= ?2 AND id < ?3 AND {cond}
+             ORDER BY id DESC LIMIT ?4"
+        ))?;
+        st.query_map(
+            params![
+                task_id,
+                from_ms.map_or(0, |f| f.min(i64::MAX as u64) as i64),
+                before.map_or(i64::MAX, |b| b.min(i64::MAX as u64) as i64),
+                limit as i64
+            ],
+            |r| row(r, false),
+        )?
+        .collect()
+    }
+
     /// Drops the history of a deleted task (its gate notes and armed retry too).
     pub fn forget(&self, task_id: &str) -> rusqlite::Result<usize> {
         let db = self.db.lock().unwrap();
@@ -563,6 +624,42 @@ mod tests {
             signal: None,
             ..NewRun::default()
         }
+    }
+
+    #[test]
+    fn estimates_and_the_history_of_every_task() {
+        let d = tempfile::tempdir().unwrap();
+        let h = History::open(&d.path().join("scheduler.db")).unwrap();
+        // lengths 1..=12 min of task a: the last 10 are 3..=12, median 7.5 min
+        for i in 1..=12u64 {
+            let mut r = run("a", &format!("a{i}"), "success");
+            r.start_ms = Some(i * 1_000_000);
+            r.end_ms = i * 1_000_000 + i * 60_000;
+            h.record(&r).unwrap();
+        }
+        // a skipped start and a scrub that gave way do not count
+        h.record(&NewRun::skipped("a", "askip", 99_000_000, RunTrigger::Timer, SkipReason::Paused, None)).unwrap();
+        let mut y = run("a", "ayield", "exit-code");
+        y.start_ms = Some(100_000_000);
+        y.end_ms = 200_000_000;
+        y.yielded = true;
+        h.record(&y).unwrap();
+        h.record(&run("b", "b1", "exit-code")).unwrap();
+        let e = h.estimates(10).unwrap();
+        assert_eq!(e["a"], (450_000, 10));
+        assert_eq!(e["b"], (1000, 1));
+        // every task, newest first; filters
+        let all = h.all_runs(None, None, None, None, 100).unwrap();
+        assert_eq!(all.len(), 15);
+        assert_eq!(all[0].invocation_id, "b1");
+        use rynas_api_types::scheduler::RunOutcome;
+        assert_eq!(h.all_runs(None, Some(RunOutcome::Failed), None, None, 100).unwrap().len(), 1);
+        assert_eq!(h.all_runs(None, Some(RunOutcome::Skipped), None, None, 100).unwrap().len(), 1);
+        assert_eq!(h.all_runs(None, Some(RunOutcome::Yielded), None, None, 100).unwrap().len(), 1);
+        assert_eq!(h.all_runs(Some("a"), Some(RunOutcome::Ok), None, None, 100).unwrap().len(), 12);
+        assert_eq!(h.all_runs(Some("a"), None, Some(10_000_000), None, 100).unwrap().len(), 5);
+        let page = h.all_runs(None, None, None, Some(all[1].id), 2).unwrap();
+        assert_eq!(page[0].id, all[2].id);
     }
 
     #[test]

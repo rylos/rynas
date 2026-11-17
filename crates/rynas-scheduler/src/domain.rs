@@ -515,7 +515,13 @@ impl Applier for SchedulerDomain {
         if tasks.len() > 1000 {
             return Err("at most 1000 tasks".into());
         }
-        serde_json::to_value(SchedulerConfig { tasks }).map_err(|e| e.to_string().into())
+        if let Some(w) = &c.maintenance
+            && !rynas_api_types::scheduler::week_window_valid(w)
+        {
+            return Err("the maintenance window must be 168 cells of 0 or 1 with at least one 1".into());
+        }
+        serde_json::to_value(SchedulerConfig { tasks, maintenance: c.maintenance })
+            .map_err(|e| e.to_string().into())
     }
 
     fn render(&self, value: &Value, ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {

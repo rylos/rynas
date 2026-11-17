@@ -87,6 +87,7 @@ pub fn router(st: ProtState) -> Router {
         .route("/v1/scheduler/resume", post(resume_all))
         .route("/v1/scheduler/system-timers", get(system_timers))
         .route("/v1/scheduler/cron-entries", get(cron_entries))
+        .merge(crate::schedule_view::routes())
         .merge(root_routes())
         .with_state(st)
 }
@@ -587,6 +588,17 @@ pub(crate) fn applied_task(p: &Protection, id: &str) -> Res<Option<ScheduledTask
         t = gated_system_task(p, id);
     }
     Ok(t)
+}
+
+/// The global maintenance window of the applied configuration (S5), when set (the value an
+/// apply in progress writes, like [`applied_task`]).
+pub(crate) fn maintenance_window(p: &Protection) -> Option<String> {
+    let value = match p.ops.config.applying(SCHEDULER_KEY) {
+        Some(v) => v,
+        None => p.ops.config.applied(SCHEDULER_KEY).ok()?,
+    };
+    let doc: SchedulerConfig = crate::services::from_value(value).ok()?;
+    doc.maintenance.filter(|w| rynas_api_types::scheduler::week_window_valid(w))
 }
 
 /// A system task whose unit rynas gates (S4: `apt-daily-upgrade`, `mdcheck_*`), as the gate

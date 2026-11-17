@@ -27,7 +27,7 @@
 //! themselves down for other I/O, so more urgent work on their disks goes on beside them
 //! instead of waiting hours (they never start beside heavy work, though).
 
-use rynas_api_types::scheduler::{SmartTestKind, TaskAction};
+use rynas_api_types::scheduler::TaskAction;
 use serde::{Deserialize, Serialize};
 
 /// What scheduled work holds or waits for.
@@ -80,17 +80,7 @@ pub fn priority_of(a: &TaskAction) -> u8 {
 /// The task's start can wait in a queue (it claims a volume, a disk or the package system):
 /// its unit has no start timeout, its gate keeps asking while it waits.
 pub fn queueable(a: &TaskAction) -> bool {
-    matches!(
-        a,
-        TaskAction::Scrub { .. }
-            | TaskAction::Backup { .. }
-            | TaskAction::Replicate { .. }
-            | TaskAction::PcMaintenance
-            | TaskAction::DockerAutoUpdate
-            | TaskAction::SystemUpgrade
-            | TaskAction::MdCheck { .. }
-            | TaskAction::SmartTest { test: SmartTestKind::Long, .. }
-    )
+    a.heavy()
 }
 
 /// How a holder behaves when more urgent work wants what it holds.
@@ -245,6 +235,7 @@ pub fn yield_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rynas_api_types::scheduler::SmartTestKind;
 
     fn disks(v: &str) -> Vec<String> {
         match v {

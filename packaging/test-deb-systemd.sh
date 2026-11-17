@@ -2,13 +2,14 @@
 # Install the rynas .deb in a Debian 13 container booted with systemd and check that the
 # maintainer scripts enable and start the units, that the hardened units work, that the
 # scheduling gate of the Task Scheduler (ExecCondition=, docs/research/scheduling.md S2)
-# behaves with the trixie systemd, that heavy work on one volume queues and a scrub gives
-# way to a backup and resumes (S4, on a loop-mounted btrfs volume), that Debian's
-# apt-daily-upgrade is gated, and that remove/purge clean up. Then, in a second container,
-# an upgrade from the release $UPGRADE_FROM (downloaded from GitHub, checked against its
-# SHA256SUMS): the jobs that became scheduler tasks (S3) are created without a failed or
-# extra run. Needs a privileged container (systemd as PID 1; container=docker and masked
-# gettys keep it off the host's consoles).
+# behaves with the trixie systemd, that heavy work on one volume queues and a scrub gives way
+# to a backup and resumes (S4, on a loop-mounted btrfs volume), that Debian's
+# apt-daily-upgrade is gated, that the global maintenance window defers a scheduled scrub and
+# apt-daily-upgrade and the overview names the conflicts (S5), and that remove/purge clean up.
+# Then, in a second container, an upgrade from the release $UPGRADE_FROM (downloaded from
+# GitHub, checked against its SHA256SUMS): the jobs that became scheduler tasks (S3) are
+# created without a failed or extra run. Needs a privileged container (systemd as PID 1;
+# container=docker and masked gettys keep it off the host's consoles).
 #
 #   packaging/test-deb-systemd.sh [path/to/rynas_*.deb]
 set -euo pipefail
@@ -287,6 +288,65 @@ wait_rows qscrub-a '.yielded' $((n0 + 1)) 120
 ! systemctl is-failed -q rynas-task-qscrub-a.service || fail "qscrub-a: failed after giving way"
 wait_journal qscrub-a "$T" 'btrfs scrub resume -B -d /srv/qvol' 120
 wait_rows qscrub-a '.trigger == "resume" and .ok and (.yielded | not)' 2 300
+
+echo "=== the global maintenance window and the overview (S5)"
+api GET /scheduler/maintenance-window; expect 200 "maintenance window"
+[ "$(echo "$BODY" | jq -c .window)" = null ] || fail "a maintenance window by default: $BODY"
+# open only three hours from now (every day): closed now, open within a day
+OPEN_H=$(( ($(date +%-H) + 3) % 24 ))
+MW=$(for i in $(seq 0 167); do [ $((i % 24)) = "$OPEN_H" ] && printf 1 || printf 0; done)
+api PUT /scheduler/maintenance-window "{\"window\":\"$MW\"}"; expect 200 "set the maintenance window"
+api GET /scheduler/maintenance-window; [ "$(echo "$BODY" | jq -r .window)" = "$MW" ] || fail "window not kept: $BODY"
+api GET /config/pending; expect 200 pending
+! echo "$BODY" | jq -e '.. | objects | select(.key? == "scheduler")' >/dev/null || fail "the window left a pending change: $BODY"
+echo "--- a scheduled scrub outside the window waits for it (not failed, nothing recorded)"
+T=$(date +%s)
+SOON2=$(date -d '+25 seconds' '+%Y-%m-%d %H:%M:%S')
+mk "{\"id\":\"mscrub\",\"action\":{\"kind\":\"scrub\",\"filesystem\":\"/srv/qvol\"},\"trigger\":{\"kind\":\"calendar\",\"on_calendar\":\"$SOON2\"}}"
+# two scrubs of one volume at the same time and one outside the window: conflicts
+AT_H=$(printf '%02d' $(( ($(date +%-H) + 6) % 24 )))
+for t in mx my; do
+    mk "{\"id\":\"$t\",\"action\":{\"kind\":\"scrub\",\"filesystem\":\"/srv/qvol\"},\"trigger\":{\"kind\":\"calendar\",\"on_calendar\":\"*-*-* $AT_H:00:00\"}}"
+done
+apply
+wait_journal mscrub "$T" 'deferred: outside the maintenance window' 120
+[ "$(systemctl show -P SubState rynas-task-mscrub.service)" = condition ] || fail "mscrub: not waiting in its gate"
+api GET /scheduler/queue; expect 200 queue
+echo "$BODY" | jq -e 'any(.[]; .task == "mscrub" and .queued.window_opens_ms > 0)' >/dev/null || fail "queue: no window wait: $BODY"
+systemctl stop rynas-task-mscrub.service
+! systemctl is-failed -q rynas-task-mscrub.service || fail "mscrub: failed after a stop while deferred"
+[ "$(rows mscrub 'true')" = 0 ] || fail "mscrub: a deferred start left a row"
+echo "--- Debian's apt-daily-upgrade outside the window waits for it too"
+mkdir -p /run/systemd/system/apt-daily-upgrade.timer.d
+printf '[Timer]\nRandomizedDelaySec=0\n' > /run/systemd/system/apt-daily-upgrade.timer.d/zz-test.conf
+systemctl stop apt-daily-upgrade.timer
+touch -d '2 days ago' /var/lib/systemd/timers/stamp-apt-daily-upgrade.timer
+T=$(date +%s)
+systemctl daemon-reload; systemctl start apt-daily-upgrade.timer
+ok=
+for _ in $(seq 120); do
+    journalctl -u apt-daily-upgrade.service --since "@$T" --no-pager -o cat | grep -q 'deferred: outside the maintenance window' && { ok=1; break; }
+    sleep 0.5
+done
+[ -n "$ok" ] || { journalctl -u apt-daily-upgrade.service --since "@$T" --no-pager -o cat; fail "apt-daily-upgrade: not deferred"; }
+[ "$(systemctl show -P SubState apt-daily-upgrade.service)" = condition ] || fail "apt-daily-upgrade: not waiting in its gate"
+systemctl stop apt-daily-upgrade.service
+! systemctl is-failed -q apt-daily-upgrade.service || fail "apt-daily-upgrade: failed after a stop while deferred"
+rm -r /run/systemd/system/apt-daily-upgrade.timer.d; systemctl daemon-reload
+echo "--- the overview names the conflicts"
+api GET "/scheduler/overview?from=$(( $(date +%s) * 1000 ))&to=$(( ($(date +%s) + 2 * 86400) * 1000 ))"; expect 200 overview
+echo "$BODY" | jq -e 'any(.conflicts[]; .kind == "volume" and .resource.path == "/srv/qvol" and (.first == "mx" or .first == "my"))' >/dev/null \
+    || fail "overview: no volume conflict: $(echo "$BODY" | jq -c .conflicts)"
+echo "$BODY" | jq -e 'any(.conflicts[]; .kind == "maintenance" and (.first == "mx" or .first == "my") and (.sentence | test("maintenance window")))' >/dev/null \
+    || fail "overview: no maintenance conflict: $(echo "$BODY" | jq -c .conflicts)"
+echo "$BODY" | jq -e 'any(.windows[]; .kind == "maintenance")' >/dev/null || fail "overview: no window band"
+echo "$BODY" | jq -e 'any(.jobs[]; .id == "apt-upgrade" and .system)' >/dev/null || fail "overview: apt-upgrade missing"
+api GET '/scheduler/runs?outcome=skipped&limit=200'; expect 200 runs
+echo "$BODY" | jq -e 'any(.runs[]; .task_id == "apt-upgrade" and .skipped == "paused_all") and (.names["apt-upgrade"] | length > 0)' >/dev/null \
+    || fail "runs: $BODY"
+api PUT /scheduler/maintenance-window '{"window":null}'; expect 200 "maintenance window off"
+api DELETE /scheduler/tasks/mx; api DELETE /scheduler/tasks/my; api DELETE /scheduler/tasks/mscrub; apply
+echo "maintenance window and overview: OK"
 qclean; trap - EXIT
 
 echo "--- Debian's apt-daily-upgrade under the gate: pause all skips its timer's start"

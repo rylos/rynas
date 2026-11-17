@@ -59,6 +59,7 @@ use rynas_scheduler::gate::{
     save_yields, spool_take, start_timeout_lets_wait,
 };
 use rynas_scheduler::history::{ArmedRetry, GateNote, NewRun};
+use rynas_scheduler::maintenance::Defer;
 use rynas_scheduler::queue::{Block, Claim, Gives, Holder, Waiter, blocked_by, priority_of, yield_to};
 use rynas_scheduler::units::{UNIT_PREFIX, runs_in_unit, service_name, timer_of};
 use rynas_tasks::{Cmd, now_ms};
@@ -130,6 +131,8 @@ struct WaitEntry {
     invocation_id: String,
     seen: Instant,
     blocker: Option<Blocker>,
+    /// It waits for the maintenance window, which opens then.
+    opens_ms: Option<u64>,
     trigger: RunTrigger,
     attempt: u8,
     /// Run now (confirmed by the user) came while it waited: it goes at its next question.
@@ -369,15 +372,26 @@ impl Gate {
         }
     }
 
-    /// The start of `id` waits (again) for `blocker`; `true` when that changed what is shown.
-    fn wait(&self, id: &str, invocation_id: &str, waiter: Waiter, blocker: Blocker, trigger: RunTrigger, attempt: u8) -> bool {
+    /// The start of `id` waits (again) for `blocker`, or for the maintenance window that opens
+    /// at `opens_ms`; `true` when that changed what is shown.
+    #[allow(clippy::too_many_arguments)]
+    fn wait(
+        &self,
+        id: &str,
+        invocation_id: &str,
+        waiter: Waiter,
+        blocker: Option<Blocker>,
+        opens_ms: Option<u64>,
+        trigger: RunTrigger,
+        attempt: u8,
+    ) -> bool {
         let mut m = self.waiting.lock().unwrap();
         let changed = m
             .get(id)
-            .is_none_or(|w| w.invocation_id != invocation_id || w.blocker.as_ref() != Some(&blocker));
+            .is_none_or(|w| w.invocation_id != invocation_id || w.blocker != blocker || w.opens_ms != opens_ms);
         m.insert(
             id.to_string(),
-            WaitEntry { waiter, invocation_id: invocation_id.to_string(), seen: Instant::now(), blocker: Some(blocker), trigger, attempt, skip: false },
+            WaitEntry { waiter, invocation_id: invocation_id.to_string(), seen: Instant::now(), blocker, opens_ms, trigger, attempt, skip: false },
         );
         changed
     }
@@ -429,7 +443,9 @@ impl Gate {
             .unwrap()
             .iter()
             .filter(|(_, w)| w.seen.elapsed() < WAITER_STALE)
-            .map(|(id, w)| (id.clone(), QueueWait { since_ms: w.waiter.since_ms, blocker: w.blocker.clone() }))
+            .map(|(id, w)| {
+                (id.clone(), QueueWait { since_ms: w.waiter.since_ms, blocker: w.blocker.clone(), window_opens_ms: w.opens_ms })
+            })
             .collect()
     }
 
@@ -729,6 +745,7 @@ fn reason_text(r: SkipReason) -> &'static str {
         SkipReason::Window => "past the start window of its scheduled time",
         SkipReason::NotDue => "not due yet",
         SkipReason::Busy => "it waited in the queue past its deadline",
+        SkipReason::Maintenance => "outside the maintenance window, which opens only after its deadline",
     }
 }
 
@@ -1004,6 +1021,42 @@ fn queue_or_run(
         && !skip_queue
         && holder.claims.iter().any(|c| !matches!(c, Claim::Power));
     let since = if req.queued_since_ms > 0 { req.queued_since_ms.min(now) } else { now };
+    // the global maintenance window (S5): a scheduled start of heavy work outside it waits
+    // for the window (never blocking anyone else meanwhile: it waits with no claims), or is
+    // skipped when the window opens only after the start's deadline
+    if req.can_wait && (!late || queued) && !skip_queue {
+        let window = crate::scheduler::maintenance_window(p);
+        let tz = TimeZone::system();
+        match rynas_scheduler::maintenance::defer(window.as_deref(), task, trigger, since, now, &tz) {
+            Defer::Go => {}
+            Defer::Skip(opens) => {
+                p.gate.unwait(id);
+                let detail = match opens {
+                    Some(o) => format!(
+                        "the maintenance window opens {}, after the start's deadline",
+                        rynas_scheduler::maintenance::wall_clock(&tz, o)
+                    ),
+                    None => "the maintenance window has no open hour".to_string(),
+                };
+                return skipped(p, task, req, now, trigger, SkipReason::Maintenance, Some(detail));
+            }
+            Defer::Until(opens) if queued || unit_can_wait(p, id) => {
+                let message = format!(
+                    "rynas: deferred: outside the maintenance window, waiting until it opens ({})",
+                    rynas_scheduler::maintenance::wall_clock(&tz, opens)
+                );
+                let me = Waiter { task: id.to_string(), claims: Vec::new(), priority: holder.priority, since_ms: since };
+                if p.gate.wait(id, &req.invocation_id, me, None, Some(opens), trigger, attempt) {
+                    tracing::info!("scheduler: task {id}: {}", message.trim_start_matches("rynas: "));
+                    p.invalidate();
+                }
+                return Ok(GateAnswer { run: false, trigger, skipped: None, message, wait: true, attempt });
+            }
+            Defer::Until(_) => {
+                tracing::warn!("scheduler: task {id}: its unit has a start timeout (written before rynas 0.8.18?): not deferred to the maintenance window");
+            }
+        }
+    }
     if can_queue {
         let me = Waiter { task: id.to_string(), claims: holder.claims.clone(), priority: holder.priority, since_ms: since };
         let table = table_now(p);
@@ -1029,7 +1082,7 @@ fn queue_or_run(
                 tracing::warn!("scheduler: task {id}: its unit has a start timeout (written before rynas 0.8.18?): not queued");
             } else {
                 let message = format!("rynas: queued: waiting for {}", blocker_text(&blocker));
-                if p.gate.wait(id, &req.invocation_id, me, blocker, trigger, attempt) {
+                if p.gate.wait(id, &req.invocation_id, me, Some(blocker), None, trigger, attempt) {
                     tracing::info!("scheduler: task {id}: {}", message.trim_start_matches("rynas: "));
                     p.invalidate();
                 }

@@ -153,7 +153,7 @@ fn stage(e: &Env, tasks: Vec<ScheduledTask>) -> Result<bool, ConfigError> {
     e.cfg.stage(
         "admin",
         SCHEDULER_KEY,
-        Some(serde_json::to_value(SchedulerConfig { tasks }).unwrap()),
+        Some(serde_json::to_value(SchedulerConfig { tasks, ..Default::default() }).unwrap()),
     )
 }
 
@@ -416,7 +416,7 @@ fn root_tasks_only_run_root_owned_files() {
 
 #[test]
 fn root_task_changes_between_values() {
-    let doc = |tasks: Vec<ScheduledTask>| serde_json::to_value(SchedulerConfig { tasks }).unwrap();
+    let doc = |tasks: Vec<ScheduledTask>| serde_json::to_value(SchedulerConfig { tasks, ..Default::default() }).unwrap();
     let base = doc(sample());
     // same tasks, nothing to check; internal and non-root tasks never count
     assert!(root_task_changes(Some(&base), Some(&base)).is_empty());

@@ -20,6 +20,38 @@ fn default_true() -> bool {
 pub struct SchedulerConfig {
     #[serde(default)]
     pub tasks: Vec<ScheduledTask>,
+    /// The global maintenance window (S5): 168 cells `0`/`1`, Sunday first
+    /// (`window[day * 24 + hour]`), in the NAS's local time, like every weekly grid of rynas.
+    /// `None` (the default): no window, nothing changes. When set, a scheduled start of heavy
+    /// work (a scrub, a backup, a replication, the PC repository maintenance, a SMART long
+    /// test, the md RAID check, system and Docker updates) outside it waits for its next "on"
+    /// hour, or is skipped when that comes after the start's deadline
+    /// ([`RunPolicy::maintenance`] says which tasks follow it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<String>,
+}
+
+/// Cells of a weekly window (one per hour, Sunday first).
+pub const WEEK_CELLS: usize = 168;
+
+/// A weekly window is 168 cells `0`/`1` with at least one `1`.
+pub fn week_window_valid(w: &str) -> bool {
+    w.len() == WEEK_CELLS && w.bytes().all(|b| b == b'0' || b == b'1') && w.contains('1')
+}
+
+/// The cell of a weekly window is on (`cell` wraps around the week).
+pub fn week_window_on(w: &str, cell: usize) -> bool {
+    w.as_bytes().get(cell % WEEK_CELLS) == Some(&b'1')
+}
+
+/// `GET`/`PUT /api/v1/scheduler/maintenance-window`: the global maintenance window
+/// ([`SchedulerConfig::maintenance`]). A `PUT` applies at once (no pending change), like a
+/// pause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MaintenanceWindow {
+    /// 168 cells `0`/`1`, Sunday first; `None`: no window (off).
+    #[serde(default)]
+    pub window: Option<String>,
 }
 
 /// One scheduled task.
@@ -130,6 +162,18 @@ impl ScheduledTask {
             rules: self.policy.notify,
             window_min: self.policy.window_min.unwrap_or(0),
         }
+    }
+
+    /// Its scheduled starts follow the global maintenance window when one is set: heavy work
+    /// ([`TaskAction::heavy`]) on a schedule of its own (not a weekly window), unless the
+    /// policy says otherwise; by default not when the task has a start window of its own.
+    pub fn follows_maintenance(&self) -> bool {
+        if !self.action.heavy() || matches!(self.trigger, TaskTrigger::Window { .. }) {
+            return false;
+        }
+        self.policy
+            .maintenance
+            .unwrap_or(self.policy.window_min.unwrap_or(0) == 0)
     }
 }
 
@@ -269,6 +313,13 @@ pub struct RunPolicy {
     /// stays inside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_min: Option<u32>,
+    /// The task's scheduled starts follow the global maintenance window
+    /// ([`SchedulerConfig::maintenance`]) when one is set. Only heavy work can
+    /// ([`TaskAction::heavy`]); absent = it does unless it has a start window of its own
+    /// (Docker's automatic updates keep theirs unless the user opts in), see
+    /// [`ScheduledTask::follows_maintenance`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<bool>,
 }
 
 impl RunPolicy {
@@ -528,6 +579,24 @@ impl TaskAction {
             TaskAction::Command { user, .. } | TaskAction::Script { user, .. } => Some(user),
             _ => None,
         }
+    }
+
+    /// Heavy work: it claims a volume, a disk or the package system, its start can wait in
+    /// a queue (its unit has no start timeout), and it follows the global maintenance window
+    /// (a scrub, a backup, a replication, the PC repository maintenance, a SMART long test,
+    /// the md RAID check, system and Docker updates).
+    pub fn heavy(&self) -> bool {
+        matches!(
+            self,
+            TaskAction::Scrub { .. }
+                | TaskAction::Backup { .. }
+                | TaskAction::Replicate { .. }
+                | TaskAction::PcMaintenance
+                | TaskAction::DockerAutoUpdate
+                | TaskAction::SystemUpgrade
+                | TaskAction::MdCheck { .. }
+                | TaskAction::SmartTest { test: SmartTestKind::Long, .. }
+        )
     }
 }
 
@@ -812,6 +881,9 @@ pub enum SkipReason {
     /// It waited in the queue of its volume, disk or the package system past its deadline
     /// (the catch-up deadline, the start window, or a day).
     Busy,
+    /// Outside the global maintenance window, which opens again only after the start's
+    /// deadline (the same deadline as the queue's).
+    Maintenance,
 }
 
 /// One recorded run (from the `ExecStopPost` hook).
@@ -911,6 +983,9 @@ pub struct QueueWait {
     /// What it waits for (the first of them).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocker: Option<Blocker>,
+    /// It waits for the global maintenance window, which opens then (ms since the epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_opens_ms: Option<u64>,
 }
 
 /// A scrub that gave way to more urgent work on its volume and resumes by itself.
@@ -955,6 +1030,235 @@ pub struct RunConflicts {
     /// The work holding what the task needs; empty: it would start at once.
     #[serde(default)]
     pub busy: Vec<Blocker>,
+}
+
+/// `GET /api/v1/scheduler/overview?from&to` (S5): every scheduled job and window between
+/// `from_ms` and `to_ms`, with estimated durations and the conflicts found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SchedulerOverview {
+    pub from_ms: u64,
+    pub to_ms: u64,
+    /// The NAS's time zone (IANA name, or empty when unknown).
+    #[serde(default)]
+    pub zone: String,
+    /// The global maintenance window (168 cells, Sunday first), when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<String>,
+    /// Every task was paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<PauseInfo>,
+    /// The jobs: the Task Scheduler's tasks (the user's and the features'), the system timers
+    /// rynas gates, and the PC backups the agents run by their plan.
+    #[serde(default)]
+    pub jobs: Vec<OverviewJob>,
+    /// When each job starts in the range, sorted by start.
+    #[serde(default)]
+    pub runs: Vec<OverviewRun>,
+    /// Windows in the range (the maintenance window, start windows, deduplication windows).
+    #[serde(default)]
+    pub windows: Vec<OverviewWindow>,
+    #[serde(default)]
+    pub conflicts: Vec<OverviewConflict>,
+}
+
+/// Who a job of the overview belongs to (its colour, and where it is edited).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverviewOwner {
+    /// A task made on the Task Scheduler page (scrub, SMART, scripts...).
+    User,
+    Snapshots,
+    Replication,
+    Backup,
+    Power,
+    Dedup,
+    Updates,
+    Docker,
+    Apps,
+    /// PC backups: the repositories' maintenance, the folders' retention, the agents' plans.
+    PcBackup,
+    /// The operating system's own timers (the md RAID check).
+    System,
+}
+
+impl OverviewOwner {
+    pub fn of(owner: &TaskOwner) -> OverviewOwner {
+        match owner {
+            TaskOwner::User => OverviewOwner::User,
+            TaskOwner::Feature { feature, .. } => match feature {
+                OwnerFeature::Snapshots => OverviewOwner::Snapshots,
+                OwnerFeature::Replication => OverviewOwner::Replication,
+                OwnerFeature::Backup => OverviewOwner::Backup,
+                OwnerFeature::Power => OverviewOwner::Power,
+                OwnerFeature::Dedup => OverviewOwner::Dedup,
+                OwnerFeature::Updates => OverviewOwner::Updates,
+                OwnerFeature::Docker => OverviewOwner::Docker,
+                OwnerFeature::Apps => OverviewOwner::Apps,
+                OwnerFeature::PcBackup => OverviewOwner::PcBackup,
+                OwnerFeature::System => OverviewOwner::System,
+            },
+        }
+    }
+}
+
+/// One job of the overview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverviewJob {
+    /// The task id (`pc:<device>` for a PC's backup plan).
+    pub id: String,
+    pub name: String,
+    pub owner: OverviewOwner,
+    /// The task's action (`None` for a PC's backup plan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<TaskAction>,
+    #[serde(default)]
+    pub enabled: bool,
+    /// Run by a timer of the system (gated by rynas): not edited on the Task Scheduler page.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub system: bool,
+    /// The job is paused on its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
+    /// Median length of its last runs (up to 10), when it ran at least once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_ms: Option<u64>,
+    /// How many runs the estimate comes from.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub estimate_runs: u8,
+    /// What it claims while it runs (volumes by mount point, disks, the package system).
+    #[serde(default)]
+    pub resources: Vec<Resource>,
+    /// Its scheduled starts follow the maintenance window (when one is set).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub maintenance: bool,
+    /// Its schedule in words is built by the interface from this trigger (absent for a PC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TaskTrigger>,
+    /// A PC's backup plan: every so many hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every_h: Option<u32>,
+    /// The overview could not list every start of the range (a job every few minutes).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// A start of a job in the overview's range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverviewRun {
+    pub job: String,
+    pub start_ms: u64,
+    /// Start + the job's estimate (or its window for a weekly-window job; a short default
+    /// when it never ran: then `estimated` is false).
+    pub end_ms: u64,
+    #[serde(default)]
+    pub estimated: bool,
+    /// The start falls outside the maintenance window (for a job that follows it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_to_ms: Option<u64>,
+    /// ... and it will be skipped: the window opens after the start's deadline.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
+}
+
+/// What a window of the overview is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverviewWindowKind {
+    /// The global maintenance window.
+    Maintenance,
+    /// Where a job may start (its start window).
+    Start,
+    /// A weekly window a job works in (deduplication).
+    Work,
+}
+
+/// A window in the range (a background band in the week view).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverviewWindow {
+    pub kind: OverviewWindowKind,
+    /// The job it belongs to (absent: the maintenance window).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<String>,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// What a conflict of the overview is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictKind {
+    /// Two jobs of heavy work on one volume overlap.
+    Volume,
+    /// A disk test overlaps heavy work on a volume of that disk.
+    Disk,
+    /// A job that follows the maintenance window starts outside it.
+    Maintenance,
+}
+
+/// What happens because of a conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictOutcome {
+    /// The second job waits in the queue for the first.
+    Waits,
+    /// The first job (a scrub) gives way to the second and resumes after it.
+    GivesWay,
+    /// Both run (a disk test slows itself down beside more urgent work).
+    BothRun,
+    /// The job waits for the maintenance window.
+    Deferred,
+    /// The job is skipped: the maintenance window opens after its deadline.
+    Skipped,
+}
+
+/// A conflict found in the overview, with a plain sentence (English; the interface builds
+/// its own from the other fields).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverviewConflict {
+    pub kind: ConflictKind,
+    pub outcome: ConflictOutcome,
+    /// The job that started (or starts) first; for `maintenance`, the job outside the window.
+    pub first: String,
+    pub first_ms: u64,
+    /// The other job (absent for `maintenance`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_ms: Option<u64>,
+    /// The job that waits, gives way or is deferred.
+    pub affected: String,
+    /// What both claim (the volume or the disk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<Resource>,
+    /// When the maintenance window opens (`deferred`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opens_ms: Option<u64>,
+    /// "Scrub of data (≈9 h) overlaps the backup offsite at 02:00; the backup will wait".
+    pub sentence: String,
+}
+
+/// `GET /api/v1/scheduler/runs?task&outcome&from&limit`: the history of every task, newest
+/// first (without output).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RunsPage {
+    pub runs: Vec<TaskRun>,
+    /// The names of the tasks in `runs` (id → name; English for rynas's own jobs).
+    #[serde(default)]
+    pub names: std::collections::BTreeMap<String, String>,
+    /// More older runs match (ask again with `before` = the last id).
+    #[serde(default)]
+    pub more: bool,
+}
+
+/// The `outcome` filter of `GET /api/v1/scheduler/runs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOutcome {
+    Ok,
+    Failed,
+    Skipped,
+    /// Gave way to more urgent work (a scrub), resumes by itself.
+    Yielded,
 }
 
 fn is_zero(n: &u8) -> bool {
@@ -1388,6 +1692,7 @@ pub mod system {
             want.policy.overlap = c.policy.overlap;
             want.policy.retry = c.policy.retry;
             want.policy.notify = c.policy.notify;
+            want.policy.maintenance = c.policy.maintenance;
         }
         want
     }

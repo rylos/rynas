@@ -44,6 +44,7 @@ pub mod removable;
 pub mod replication;
 pub mod restic_backup;
 pub mod roles;
+pub mod schedule_view;
 pub mod scheduler;
 pub mod scheduler_live;
 pub mod server;
