@@ -252,13 +252,39 @@ fn maintenance_card(ov: Remote<SchedulerOverview>) -> AnyView {
             </div>
             <p class="muted small">{tr("sv.mw.help")}</p>
             {win.view(2, body)}
-            {move || editing.get().then(|| maintenance_dialog(win.data.get_untracked().and_then(|w| w.window), Callback::new(move |_| { win.reload(); ov.reload(); }), Callback::new(move |_| editing.set(false))))}
+            {move || editing.get().then(|| maintenance_dialog(win.data.get_untracked().and_then(|w| w.window), ov.data.get_untracked().map(|o| o.jobs).unwrap_or_default(), Callback::new(move |_| { win.reload(); ov.reload(); }), Callback::new(move |_| editing.set(false))))}
         </section>
     }
     .into_any()
 }
 
-fn maintenance_dialog(cur: Option<String>, done: Callback<()>, close: Callback<()>) -> AnyView {
+/// Which jobs wait for the window and which start at their own time (those that could
+/// follow it: the switch is in the task's editor).
+fn followers(jobs: &[OverviewJob]) -> AnyView {
+    let can: Vec<&OverviewJob> = jobs.iter().filter(|j| j.action.as_ref().is_some_and(|a| a.may_follow_maintenance())).collect();
+    let list = |follow: bool| {
+        let names: Vec<String> = can.iter().filter(|j| j.maintenance == follow).map(|j| job_name(j)).collect();
+        if names.is_empty() {
+            view! { <p class="muted small">{tr("sv.mw.none")}</p> }.into_any()
+        } else {
+            view! { <ul class="sv-follow">{names.into_iter().map(|n| view! { <li>{n}</li> }).collect_view()}</ul> }.into_any()
+        }
+    };
+    view! {
+        <div class="field">
+            <span class="field-label">{tr("sv.mw.follow")}</span>
+            {list(true)}
+        </div>
+        <div class="field">
+            <span class="field-label">{tr("sv.mw.own_time")}</span>
+            {list(false)}
+            <span class="field-help">{tr("sv.mw.own_time_help")}</span>
+        </div>
+    }
+    .into_any()
+}
+
+fn maintenance_dialog(cur: Option<String>, jobs: Vec<OverviewJob>, done: Callback<()>, close: Callback<()>) -> AnyView {
     let on = RwSignal::new(cur.is_some());
     let grid = RwSignal::new(cur.unwrap_or_else(default_window));
     let busy = RwSignal::new(false);
@@ -299,6 +325,7 @@ fn maintenance_dialog(cur: Option<String>, done: Callback<()>, close: Callback<(
                     </div>
                     {move || empty.get().then(|| view! { <p class="form-error">{tr("sv.mw.empty")}</p> })}
                 </Show>
+                {followers(&jobs)}
             </div>
         </Modal>
     }

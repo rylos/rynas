@@ -86,7 +86,7 @@ fn units_of_the_system_tasks() {
     ];
     let ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
     e.cfg
-        .stage("admin", SCHEDULER_KEY, Some(serde_json::to_value(SchedulerConfig { tasks, ..Default::default() }).unwrap()))
+        .stage("admin", SCHEDULER_KEY, Some(serde_json::to_value(SchedulerConfig { tasks }).unwrap()))
         .unwrap();
     apply(&e).unwrap();
     for id in ids {

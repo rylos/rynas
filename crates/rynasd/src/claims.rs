@@ -418,7 +418,7 @@ pub fn table(gate: Option<&Gate>, tasks: &rynas_tasks::TaskManager, mdstat: &str
     table_in(gate, tasks, mdstat, units, &crate::places::mountinfo(), Path::new("/sys"))
 }
 
-fn table_in(
+pub(crate) fn table_in(
     gate: Option<&Gate>,
     tasks: &rynas_tasks::TaskManager,
     mdstat: &str,
@@ -512,7 +512,12 @@ fn table_in(
         });
         sources.push(Source::Raid { text: format!("{}: RAID {op}", a.name) });
     }
-    for u in units.iter().filter(|u| !leased_units.contains(u)) {
+    // a start that waits in its gate (the queue, the maintenance window) runs nothing and
+    // holds nothing: never "busy" (a scheduled shutdown does not wait for it)
+    let waiting: Vec<String> = gate
+        .map(|g| g.queued().into_iter().map(|(id, _)| rynas_scheduler::units::service_of(&id)).collect())
+        .unwrap_or_default();
+    for u in units.iter().filter(|u| !leased_units.contains(u) && !waiting.contains(u)) {
         let id = u
             .strip_prefix(rynas_scheduler::units::UNIT_PREFIX)
             .and_then(|s| s.strip_suffix(".service"))

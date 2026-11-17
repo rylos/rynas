@@ -2484,7 +2484,7 @@ sch.own.apps	Catalogo app
 sch.own.pc_backup	Backup dei PC
 sch.own.system	Sistema
 sch.f.maintenance	Segui la finestra di manutenzione
-sch.f.maintenance_help	Se nella pagina Pianificazione è impostata una finestra di manutenzione, un avvio pianificato fuori dalla finestra attende che si apra, oppure viene saltato se la finestra si apre dopo la scadenza dell'avvio.
+sch.f.maintenance_help	Se nella pagina Pianificazione è impostata una finestra di manutenzione, un avvio pianificato fuori dalla finestra attende che si apra, oppure viene saltato se la finestra si apre dopo la scadenza dell'avvio. Attivo di default per il lavoro di manutenzione, spento per backup, repliche e snapshot.
 sv.title	Pianificazione
 sv.subtitle	Tutti i lavori pianificati, le finestre e i conflitti della settimana
 sv.open_text	Cosa parte e quando: la settimana a colpo d'occhio, le prossime 24 ore, i conflitti, la finestra di manutenzione e la cronologia di tutte le attività.
@@ -2505,7 +2505,14 @@ sv.conflicts.one	{n} conflitto
 sv.conflicts.other	{n} conflitti
 sv.mw.title	Finestra di manutenzione
 sv.mw.off	Spenta: il lavoro pesante parte ai suoi orari.
-sv.mw.help	Il lavoro pesante (scrub, backup, replica, manutenzione dei backup dei PC, test SMART lunghi, controllo RAID, aggiornamenti di sistema e di Docker) parte solo dentro questa finestra. Un avvio fuori dalla finestra attende che si apra, oppure viene saltato se la finestra si apre dopo la scadenza dell'avvio. I lavori con una propria finestra di avvio la mantengono, a meno che in Attività pianificate non seguano questa finestra.
+sv.mw.help	Il lavoro di manutenzione (scrub, test SMART lunghi, controllo RAID, aggiornamenti di sistema e di Docker, manutenzione dei backup dei PC) parte solo dentro questa finestra. Un avvio fuori dalla finestra attende che si apra, oppure viene saltato se la finestra si apre dopo la scadenza dell'avvio. Backup, repliche e snapshot mantengono i propri orari, a meno che in Attività pianificate non siano impostati per seguire questa finestra.
+sv.mw.follow	Attende la finestra
+sv.mw.own_time	Parte al suo orario
+sv.mw.own_time_help	Per far attendere la finestra a uno di questi, modificalo in Attività pianificate e attiva Segui la finestra di manutenzione.
+sv.mw.none	Nessuno
+sch.skip.interrupted	Saltata: il NAS si è riavviato
+sch.interrupted.again	Era in attesa quando il NAS si è riavviato; avviata di nuovo
+sch.interrupted.not_again	Era in attesa quando il NAS si è riavviato; non avviata di nuovo
 sv.mw.saved	Finestra di manutenzione salvata
 sv.mw.enabled	Usa una finestra di manutenzione
 sv.mw.enabled_help	Spenta: niente attende una finestra.

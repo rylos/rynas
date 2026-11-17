@@ -45,7 +45,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use jiff::tz::TimeZone;
 use rynas_api_types::TaskStatus as UpidStatus;
 use rynas_api_types::scheduler::{
     Blocker, PauseInfo, QueueWait, Resource, RunTrigger, ScheduledTask, SchedulerPause, SkipReason,
@@ -55,7 +54,7 @@ use rynas_notify::event::{code, field, oneshot};
 use rynas_notify::{NewEvent, NotifyCategory, NotifySeverity};
 use rynas_scheduler::gate::{
     Decision, GateAnswer, GateRequest, Start, WAITER_STALE, YIELD_FILE, YieldEntry, decide,
-    load_pause, load_yields, next_retry, queue_deadline_ms, replace_due, retries_after, save_pause,
+    Parked, load_parked, load_pause, load_yields, next_retry, save_parked, queue_deadline_ms, replace_due, retries_after, save_pause,
     save_yields, spool_take, start_timeout_lets_wait,
 };
 use rynas_scheduler::history::{ArmedRetry, GateNote, NewRun};
@@ -247,6 +246,11 @@ pub struct Gate {
     /// When the watch loop last started each interval task that was due (it never starts
     /// one twice within [`INTERVAL_RESTART`], whatever the history says).
     interval_started: Mutex<HashMap<String, IntervalStart>>,
+    /// The waiting starts kept on disk ([`rynas_scheduler::gate::PARKED_FILE`]): a reboot
+    /// that stops one is recorded and, when it may still run, started again.
+    parked: Mutex<BTreeMap<String, Parked>>,
+    /// This boot's id.
+    boot: String,
 }
 
 /// The watch loop's last start of an interval task: when, the last run's end it saw then, how
@@ -265,7 +269,10 @@ impl Gate {
     pub fn new(state: PathBuf) -> Self {
         let pause = load_pause(&state);
         let yields = load_yields(&state);
+        let parked = load_parked(&state);
         Self {
+            parked: Mutex::new(parked),
+            boot: rynas_scheduler::gate::boot_id(),
             state,
             pause: Mutex::new(pause),
             requested: Mutex::new(HashMap::new()),
@@ -384,27 +391,85 @@ impl Gate {
         opens_ms: Option<u64>,
         trigger: RunTrigger,
         attempt: u8,
+        deadline_ms: u64,
     ) -> bool {
-        let mut m = self.waiting.lock().unwrap();
-        let changed = m
-            .get(id)
-            .is_none_or(|w| w.invocation_id != invocation_id || w.blocker != blocker || w.opens_ms != opens_ms);
-        m.insert(
-            id.to_string(),
-            WaitEntry { waiter, invocation_id: invocation_id.to_string(), seen: Instant::now(), blocker, opens_ms, trigger, attempt, skip: false },
-        );
+        let since_ms = waiter.since_ms;
+        let changed = {
+            let mut m = self.waiting.lock().unwrap();
+            let changed = m
+                .get(id)
+                .is_none_or(|w| w.invocation_id != invocation_id || w.blocker != blocker || w.opens_ms != opens_ms);
+            m.insert(
+                id.to_string(),
+                WaitEntry { waiter, invocation_id: invocation_id.to_string(), seen: Instant::now(), blocker, opens_ms, trigger, attempt, skip: false },
+            );
+            changed
+        };
+        // kept on disk once per start (and when what it waits for changes kind)
+        let want = Parked {
+            invocation_id: invocation_id.to_string(),
+            since_ms,
+            deadline_ms,
+            trigger,
+            attempt,
+            boot_id: self.boot.clone(),
+            window: opens_ms.is_some(),
+        };
+        if !invocation_id.is_empty() {
+            self.change_parked(|p| match p.get(id) {
+                Some(cur) if *cur == want => false,
+                _ => {
+                    p.insert(id.to_string(), want);
+                    true
+                }
+            });
+        }
         changed
     }
 
-    /// The start `invocation_id` of `id` was waiting in the queue when its unit ended (stopped
-    /// while queued: nothing ran); its place goes. `true` when it was.
-    pub fn ended_waiting(&self, id: &str, invocation_id: &str) -> bool {
-        let mut m = self.waiting.lock().unwrap();
-        if m.get(id).is_some_and(|w| w.invocation_id == invocation_id) {
-            m.remove(id);
-            return true;
+    /// Changes the waiting starts kept on disk (`f` says whether it changed anything).
+    fn change_parked(&self, f: impl FnOnce(&mut BTreeMap<String, Parked>) -> bool) {
+        let mut m = self.parked.lock().unwrap();
+        if f(&mut m)
+            && let Err(e) = save_parked(&self.state, &m)
+        {
+            tracing::warn!("scheduler: {}: {e}", rynas_scheduler::gate::PARKED_FILE);
         }
-        false
+    }
+
+    /// The start `invocation_id` of `id` was waiting in the queue when its unit ended (stopped
+    /// while queued: nothing ran); its place goes. `true` when it was. `keep`: the NAS is
+    /// shutting down, the start stays on disk (recorded and started again after the boot).
+    pub fn ended_waiting(&self, id: &str, invocation_id: &str, keep: bool) -> bool {
+        let was = {
+            let mut m = self.waiting.lock().unwrap();
+            if m.get(id).is_some_and(|w| w.invocation_id == invocation_id) {
+                m.remove(id);
+                true
+            } else {
+                false
+            }
+        };
+        let parked = self.parked.lock().unwrap().get(id).is_some_and(|p| p.invocation_id == invocation_id);
+        if parked && !keep {
+            self.change_parked(|p| p.remove(id).is_some());
+        }
+        was || parked
+    }
+
+    /// The waiting starts kept on disk.
+    pub fn parked(&self) -> BTreeMap<String, Parked> {
+        self.parked.lock().unwrap().clone()
+    }
+
+    /// Forgets a waiting start kept on disk.
+    pub fn unpark(&self, id: &str) {
+        self.change_parked(|p| p.remove(id).is_some());
+    }
+
+    /// This boot's id.
+    pub fn boot(&self) -> &str {
+        &self.boot
     }
 
     /// A start of `id` waits in the queue now.
@@ -414,7 +479,9 @@ impl Gate {
 
     /// The start of `id` no longer waits; returns since when it had waited.
     fn unwait(&self, id: &str) -> Option<u64> {
-        self.waiting.lock().unwrap().remove(id).map(|w| w.waiter.since_ms)
+        let w = self.waiting.lock().unwrap().remove(id).map(|w| w.waiter.since_ms);
+        self.change_parked(|p| p.remove(id).is_some());
+        w
     }
 
     /// The fresh waiters but `except` (whose rynasctl asked within [`WAITER_STALE`]).
@@ -746,6 +813,7 @@ fn reason_text(r: SkipReason) -> &'static str {
         SkipReason::NotDue => "not due yet",
         SkipReason::Busy => "it waited in the queue past its deadline",
         SkipReason::Maintenance => "outside the maintenance window, which opens only after its deadline",
+        SkipReason::Interrupted => "it was waiting when the NAS restarted",
     }
 }
 
@@ -810,7 +878,7 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
             skipped: Some(SkipReason::NotDue),
             message: format!("rynas: task {id} is not in the configuration: start skipped"),
             wait: false,
-            attempt: 0,
+            attempt: 0, deadline_ms: 0
         });
     };
     let pause = p.gate.pause();
@@ -830,7 +898,7 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
                 skipped: Some(SkipReason::NotDue),
                 message: "rynas: the task was turned off while it waited in the queue: start skipped".into(),
                 wait: false,
-                attempt,
+                attempt, deadline_ms: 0
             });
         }
         if skip {
@@ -861,7 +929,7 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
     );
     let requested = asked.map(|q| (q.trigger, q.attempt));
     let skip_queue = !by_timer && asked.is_some_and(|q| q.skip_queue);
-    let tz = TimeZone::system();
+    let tz = rynas_power::system_tz();
     let interval = matches!(task.trigger, TaskTrigger::Interval { .. });
     let last_run = if interval {
         // a history that cannot be read: an interval start is not due (no extra runs)
@@ -902,7 +970,7 @@ pub fn answer(p: &Protection, id: &str, req: &GateRequest) -> Res<GateAnswer> {
                 skipped: Some(SkipReason::NotDue),
                 message: String::new(),
                 wait: false,
-                attempt: 0,
+                attempt: 0, deadline_ms: 0
             });
         }
         Decision::Skip { trigger, reason, detail } => {
@@ -944,7 +1012,7 @@ fn skipped(
     if let Some(d) = detail {
         message.push_str(&format!(" ({d})"));
     }
-    Ok(GateAnswer { run: false, trigger, skipped: Some(reason), message, wait: false, attempt: 0 })
+    Ok(GateAnswer { run: false, trigger, skipped: Some(reason), message, wait: false, attempt: 0, deadline_ms: 0 })
 }
 
 /// The lock table now, for the gate's questions.
@@ -1026,7 +1094,7 @@ fn queue_or_run(
     // skipped when the window opens only after the start's deadline
     if req.can_wait && (!late || queued) && !skip_queue {
         let window = crate::scheduler::maintenance_window(p);
-        let tz = TimeZone::system();
+        let tz = rynas_power::system_tz();
         match rynas_scheduler::maintenance::defer(window.as_deref(), task, trigger, since, now, &tz) {
             Defer::Go => {}
             Defer::Skip(opens) => {
@@ -1046,11 +1114,12 @@ fn queue_or_run(
                     rynas_scheduler::maintenance::wall_clock(&tz, opens)
                 );
                 let me = Waiter { task: id.to_string(), claims: Vec::new(), priority: holder.priority, since_ms: since };
-                if p.gate.wait(id, &req.invocation_id, me, None, Some(opens), trigger, attempt) {
+                let deadline_ms = queue_deadline_ms(task, since, &tz);
+                if p.gate.wait(id, &req.invocation_id, me, None, Some(opens), trigger, attempt, deadline_ms) {
                     tracing::info!("scheduler: task {id}: {}", message.trim_start_matches("rynas: "));
                     p.invalidate();
                 }
-                return Ok(GateAnswer { run: false, trigger, skipped: None, message, wait: true, attempt });
+                return Ok(GateAnswer { run: false, trigger, skipped: None, message, wait: true, attempt, deadline_ms });
             }
             Defer::Until(_) => {
                 tracing::warn!("scheduler: task {id}: its unit has a start timeout (written before rynas 0.8.18?): not deferred to the maintenance window");
@@ -1072,7 +1141,8 @@ fn queue_or_run(
                     resource: table.resource(c),
                 },
             };
-            if now > queue_deadline_ms(task, since, &TimeZone::system()) {
+            let deadline_ms = queue_deadline_ms(task, since, &rynas_power::system_tz());
+            if now > deadline_ms {
                 p.gate.unwait(id);
                 return skipped(p, task, req, now, trigger, SkipReason::Busy, Some(blocker_text(&blocker)));
             }
@@ -1082,11 +1152,11 @@ fn queue_or_run(
                 tracing::warn!("scheduler: task {id}: its unit has a start timeout (written before rynas 0.8.18?): not queued");
             } else {
                 let message = format!("rynas: queued: waiting for {}", blocker_text(&blocker));
-                if p.gate.wait(id, &req.invocation_id, me, Some(blocker), None, trigger, attempt) {
+                if p.gate.wait(id, &req.invocation_id, me, Some(blocker), None, trigger, attempt, deadline_ms) {
                     tracing::info!("scheduler: task {id}: {}", message.trim_start_matches("rynas: "));
                     p.invalidate();
                 }
-                return Ok(GateAnswer { run: false, trigger, skipped: None, message, wait: true, attempt });
+                return Ok(GateAnswer { run: false, trigger, skipped: None, message, wait: true, attempt, deadline_ms });
             }
         }
     }
@@ -1126,7 +1196,7 @@ fn queue_or_run(
         _ if skip_queue => "rynas: run now, ahead of the queue".into(),
         _ => String::new(),
     };
-    Ok(GateAnswer { run: true, trigger, skipped: None, message, wait: false, attempt })
+    Ok(GateAnswer { run: true, trigger, skipped: None, message, wait: false, attempt, deadline_ms: 0 })
 }
 
 fn missed_event(task: &ScheduledTask) -> NewEvent {
@@ -1550,6 +1620,74 @@ fn queue_tick(p: &Protection, applied: &[ScheduledTask], now: u64) {
     }
 }
 
+/// The system is shutting down or rebooting (`systemctl is-system-running` says `stopping`).
+pub fn shutting_down(p: &Protection) -> bool {
+    p.ops
+        .config
+        .system()
+        .run(&Cmd::new("systemctl").arg("is-system-running"))
+        .is_ok_and(|o| o.stdout.trim() == "stopping")
+}
+
+/// The waiting starts kept on disk: one from an earlier boot was stopped by the restart (its
+/// timer has moved on and `Persistent=` will not catch it up): recorded as interrupted, and
+/// started again when it may still run ([`rynas_scheduler::gate::rearm_parked`]); one of this
+/// boot whose unit no longer waits (stopped while rynasd was away) is forgotten.
+fn parked_tick(p: &Protection, applied: &[ScheduledTask], now: u64) {
+    let parked = p.gate.parked();
+    if parked.is_empty() {
+        return;
+    }
+    for (id, w) in parked {
+        let unit = rynas_scheduler::units::service_of(&id);
+        if w.boot_id == p.gate.boot() {
+            if p.gate.is_waiting(&id) {
+                continue;
+            }
+            // the unit may still wait (rynasd restarted: its rynasctl asks again soon)
+            match p.probe.current_run(&unit) {
+                Ok(Some(r)) if r.invocation_id == w.invocation_id => {}
+                Ok(_) if now.saturating_sub(started_ms()) > WAITER_STALE.as_millis() as u64 => p.gate.unpark(&id),
+                _ => {}
+            }
+            continue;
+        }
+        p.gate.unpark(&id);
+        let task = applied
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
+            .map(|mut t| {
+                t.migrate();
+                t
+            })
+            .or_else(|| crate::scheduler::gated_system_task(p, &id));
+        let Some(task) = task else { continue };
+        let again = rynas_scheduler::gate::rearm_parked(&w, &task, now);
+        let what = if w.window { "the maintenance window" } else { "its turn in the queue" };
+        let detail = if again {
+            format!("waiting for {what} when the NAS restarted: started again")
+        } else {
+            format!("waiting for {what} when the NAS restarted: not started again")
+        };
+        let mut r = NewRun::skipped(&id, &w.invocation_id, now, w.trigger, SkipReason::Interrupted, Some(detail));
+        r.attempt = w.attempt;
+        if let Err(e) = p.history.record(&r) {
+            tracing::warn!("scheduler: task {id}: {e}");
+        }
+        p.invalidate();
+        if again {
+            p.gate.request(&id, RunTrigger::CatchUp, w.attempt);
+            match p.ops.config.system().start_unit(&unit) {
+                Ok(()) => tracing::info!("scheduler: task {id}: its wait was cut by a restart of the NAS: started again"),
+                Err(e) => tracing::warn!("scheduler: task {id}: start again after the restart: {e}"),
+            }
+        } else {
+            tracing::info!("scheduler: task {id}: its wait was cut by a restart of the NAS: recorded, not started again");
+        }
+    }
+}
+
 /// One turn of the watch loop (public for the tests).
 pub fn tick(p: &Protection) {
     import_spool(p);
@@ -1572,6 +1710,7 @@ pub fn tick(p: &Protection) {
     }
     disk_tests_tick(p, now);
     queue_tick(p, &applied, now);
+    parked_tick(p, &applied, now);
     let retries = p.history.retries().unwrap_or_default();
     let replacing: Vec<&ScheduledTask> = applied
         .iter()
@@ -1641,7 +1780,7 @@ pub fn tick(p: &Protection) {
         }
     }
     // overlap policy replace: a time came after the running one started
-    let tz = TimeZone::system();
+    let tz = rynas_power::system_tz();
     for task in replacing {
         let unit = service_name(&task.id);
         if !running.contains(&unit) || pause.blocks(&task.id, now).is_some() {
@@ -1691,6 +1830,35 @@ mod tests {
         assert!(g.interval_may_start(&t.id, Some(1), &t));
         // a run happened: at once again
         assert!(g.interval_may_start(&t.id, Some(2), &t));
+    }
+
+    /// A start waiting in its gate is kept on disk until it runs or is skipped; a stop while
+    /// the NAS shuts down keeps it (started again after the boot), a stop by hand forgets it;
+    /// and a scheduled shutdown never waits for it.
+    #[test]
+    fn waiting_starts_are_parked_and_never_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = Gate::new(dir.path().to_path_buf());
+        let me = Waiter { task: "scrub-a".into(), claims: Vec::new(), priority: 30, since_ms: 1000 };
+        assert!(g.wait("scrub-a", "inv1", me.clone(), None, Some(5000), RunTrigger::Timer, 0, 9000));
+        let on_disk = load_parked(dir.path());
+        assert_eq!(on_disk["scrub-a"].deadline_ms, 9000);
+        assert!(on_disk["scrub-a"].window);
+        // a new rynasd reads it back
+        assert_eq!(Gate::new(dir.path().to_path_buf()).parked().len(), 1);
+        // the shutdown: not busy (the unit is in its gate, holds nothing)
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _e = rt.enter();
+        let tasks = rynas_tasks::TaskManager::new(dir.path().join("t"), "nas", Default::default()).unwrap();
+        let t = crate::claims::table_in(Some(&g), &tasks, "", &["rynas-task-scrub-a.service".into()], "", std::path::Path::new("/nonexistent"));
+        assert!(crate::claims::power_busy(&t, true, true, "", "rynas-task-off.service").is_empty());
+        // stopped by a shutdown: kept
+        assert!(g.ended_waiting("scrub-a", "inv1", true));
+        assert_eq!(load_parked(dir.path()).len(), 1);
+        // stopped by hand: forgotten
+        assert!(g.wait("scrub-a", "inv2", me, None, None, RunTrigger::Timer, 0, 9000));
+        assert!(g.ended_waiting("scrub-a", "inv2", false));
+        assert!(load_parked(dir.path()).is_empty());
     }
 
     /// The first due time of a never-run interval task is kept: a restart of rynasd (another

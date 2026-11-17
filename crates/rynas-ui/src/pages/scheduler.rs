@@ -364,6 +364,7 @@ pub fn run_status(r: &TaskRun) -> (Tone, String) {
             SkipReason::NotDue => (Tone::Unknown, "sch.skip.not_due"),
             SkipReason::Busy => (Tone::Warn, "sch.skip.busy"),
             SkipReason::Maintenance => (Tone::Unknown, "sch.skip.maintenance"),
+            SkipReason::Interrupted => (Tone::Warn, "sch.skip.interrupted"),
         };
         return (tone, t(key).to_string());
     }
@@ -404,6 +405,7 @@ pub fn run_origin(r: &TaskRun) -> Option<String> {
         // the server names what it waited for in English (the journal's words): the chip says
         // enough
         (Some(SkipReason::Busy | SkipReason::Maintenance), _) => None,
+        (Some(SkipReason::Interrupted), Some(d)) => Some(t(if d.ends_with(": started again") { "sch.interrupted.again" } else { "sch.interrupted.not_again" }).to_string()),
         (_, Some(d)) if !d.is_empty() => Some(d.to_string()),
         _ => None,
     };
@@ -1068,18 +1070,25 @@ pub(crate) fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>
         },
     );
     let (notify_output, set_notify_output) = lens_bool(d, |t| t.notify_output, |t, v| t.notify_output = v);
-    // heavy work follows the global maintenance window unless it has a start window of its
-    // own; stored only when it differs from that default
-    let (in_window, set_in_window) = lens_bool(
-        d,
-        |t| t.policy.maintenance.unwrap_or(t.policy.window_min.unwrap_or(0) == 0),
-        |t, v| t.policy.maintenance = (v != (t.policy.window_min.unwrap_or(0) == 0)).then_some(v),
-    );
+    // maintenance work follows the global maintenance window by default, a backup, a
+    // replication or a snapshot job when opted in; stored only when it differs from that
+    let work = Memo::new(move |_| {
+        if internal_fixed {
+            d.with(|t| t.action.maintenance_work())
+        } else {
+            act.with(|a| a.action().is_ok_and(|x| x.maintenance_work()))
+        }
+    });
+    let in_window = Signal::derive(move || d.with(|t| t.policy.maintenance).unwrap_or_else(|| work.get()));
+    let set_in_window = Callback::new(move |v: bool| {
+        let w = work.get_untracked();
+        d.update(|t| t.policy.maintenance = (v != w).then_some(v));
+    });
     let heavy = Memo::new(move |_| {
         if internal_fixed {
-            d.with(|t| t.action.heavy())
+            d.with(|t| t.action.may_follow_maintenance())
         } else {
-            act.with(|a| a.action().is_ok_and(|x| x.heavy()))
+            act.with(|a| a.action().is_ok_and(|x| x.may_follow_maintenance()))
         }
     });
 

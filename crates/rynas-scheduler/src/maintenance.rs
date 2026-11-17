@@ -12,7 +12,7 @@
 use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
-use rynas_api_types::scheduler::{RunTrigger, ScheduledTask, week_window_on};
+use rynas_api_types::scheduler::{MAINTENANCE_KEY, MaintenanceWindow, RunTrigger, ScheduledTask, week_window_on, week_window_valid};
 
 /// How far ahead [`opens_at`] looks (a week and a day: every cell is met).
 const LOOK_AHEAD_H: u64 = 8 * 24;
@@ -23,6 +23,44 @@ fn ts(ms: u64) -> Option<Timestamp> {
 
 fn cell_of(dt: &DateTime) -> usize {
     dt.weekday().to_sunday_zero_offset() as usize * 24 + dt.hour() as usize
+}
+
+/// The configuration domain of the window (key [`MAINTENANCE_KEY`]): no file, no reload. The
+/// gate reads the applied value at every start; the engine keeps the revisions, the audit and
+/// the rollback.
+pub struct MaintenanceDomain;
+
+impl rynas_config::Applier for MaintenanceDomain {
+    fn key(&self) -> &str {
+        MAINTENANCE_KEY
+    }
+
+    /// Next to the `scheduler` key it gates (40).
+    fn order(&self) -> i32 {
+        41
+    }
+
+    fn validate(&self, value: serde_json::Value) -> Result<serde_json::Value, rynas_config::Invalid> {
+        let w: MaintenanceWindow = serde_json::from_value(value).map_err(|e| format!("invalid maintenance window: {e}"))?;
+        if let Some(cells) = &w.window
+            && !week_window_valid(cells)
+        {
+            return Err(rynas_config::Invalid::at("window", "the maintenance window is 168 cells of 0 or 1 with at least one 1"));
+        }
+        serde_json::to_value(w).map_err(|e| e.to_string().into())
+    }
+
+    fn render(&self, _value: &serde_json::Value, _ctx: &rynas_config::ApplyCtx) -> Result<Vec<rynas_config::ManagedFile>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// The window of an applied value of [`MAINTENANCE_KEY`] (`None`: off, or unreadable).
+pub fn window_of(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(|v| serde_json::from_value::<MaintenanceWindow>(v.clone()).ok())
+        .and_then(|w| w.window)
+        .filter(|w| week_window_valid(w))
 }
 
 /// The window is open at `ms`.
@@ -181,11 +219,11 @@ mod tests {
         assert_eq!(defer(Some(&w), &scrub, RunTrigger::Timer, night, night, &tz), Defer::Go);
         // a catch-up deadline of 6 h: the window opens 11 h later, skipped
         let late = task(
-            TaskAction::Backup { job: "b".into() },
+            TaskAction::Scrub { filesystem: "/srv/a".into() },
             RunPolicy { missed: Some(rynas_api_types::scheduler::MissedPolicy::RunOnce { within_h: Some(6) }), ..Default::default() },
         );
         assert_eq!(defer(Some(&w), &late, RunTrigger::Timer, now, now, &tz), Defer::Skip(Some(ms("2026-11-18T01:00", &tz))));
-        // light work never follows it; a SMART short test neither
+        // backups and snapshots only when opted in; a SMART short test never
         let snap = task(TaskAction::Snapshot { job: "s".into() }, RunPolicy::default());
         assert_eq!(defer(Some(&w), &snap, RunTrigger::Timer, now, now, &tz), Defer::Go);
         let short = task(TaskAction::SmartTest { disk: "sda".into(), test: SmartTestKind::Short }, RunPolicy::default());
@@ -193,19 +231,46 @@ mod tests {
     }
 
     #[test]
-    fn own_windows_unless_opted_in() {
+    fn maintenance_work_by_default_backups_when_opted_in() {
         let tz = TimeZone::get("Europe/Rome").unwrap();
         let w = nightly(1, 5);
         let now = ms("2026-11-17T14:00", &tz);
-        // Docker's automatic updates keep their own start window
+        let opens = ms("2026-11-18T01:00", &tz);
+        // Docker's automatic updates are maintenance work: they follow it; their own start
+        // window (until 15:00) ends before it opens: skipped
         let docker = task(TaskAction::DockerAutoUpdate, RunPolicy { window_min: Some(60), ..Default::default() });
-        assert!(!docker.follows_maintenance());
-        assert_eq!(defer(Some(&w), &docker, RunTrigger::Timer, now, now, &tz), Defer::Go);
-        // opted in: the window opens after the end of its own start window, skipped
-        let opted = task(TaskAction::DockerAutoUpdate, RunPolicy { window_min: Some(60), maintenance: Some(true), ..Default::default() });
-        assert!(matches!(defer(Some(&w), &opted, RunTrigger::Timer, now, now, &tz), Defer::Skip(_)));
-        // a heavy task the user took out of the window
+        assert!(docker.follows_maintenance());
+        assert!(matches!(defer(Some(&w), &docker, RunTrigger::Timer, now, now, &tz), Defer::Skip(_)));
+        // a backup, a replication, a snapshot job: at their own time unless opted in
+        for a in [
+            TaskAction::Backup { job: "b".into() },
+            TaskAction::Replicate { job: "j".into(), target: "t".into() },
+            TaskAction::Snapshot { job: "s".into() },
+        ] {
+            let plain = task(a.clone(), RunPolicy::default());
+            assert!(!plain.follows_maintenance(), "{a:?}");
+            assert_eq!(defer(Some(&w), &plain, RunTrigger::Timer, now, now, &tz), Defer::Go);
+            let opted = task(a, RunPolicy { maintenance: Some(true), ..Default::default() });
+            assert_eq!(defer(Some(&w), &opted, RunTrigger::Timer, now, now, &tz), Defer::Until(opens));
+        }
+        // maintenance work the user took out of the window
         let out = task(TaskAction::Scrub { filesystem: "/srv/a".into() }, RunPolicy { maintenance: Some(false), ..Default::default() });
         assert_eq!(defer(Some(&w), &out, RunTrigger::Timer, now, now, &tz), Defer::Go);
+        // a user command can never follow it
+        let cmd = task(TaskAction::Command { command: "true".into(), user: "root".into() }, RunPolicy { maintenance: Some(true), ..Default::default() });
+        assert!(!cmd.follows_maintenance());
+    }
+
+    #[test]
+    fn the_window_is_its_own_domain() {
+        use rynas_config::Applier;
+        let d = MaintenanceDomain;
+        assert_eq!(d.key(), MAINTENANCE_KEY);
+        assert!(d.validate(serde_json::json!({"window": null})).is_ok());
+        assert!(d.validate(serde_json::json!({"window": nightly(1, 5)})).is_ok());
+        assert!(d.validate(serde_json::json!({"window": "0".repeat(168)})).is_err());
+        assert!(d.validate(serde_json::json!({"window": "1".repeat(100)})).is_err());
+        assert_eq!(window_of(Some(&serde_json::json!({"window": nightly(1, 5)}))), Some(nightly(1, 5)));
+        assert_eq!(window_of(None), None);
     }
 }

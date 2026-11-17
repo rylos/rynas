@@ -149,6 +149,15 @@ pub struct GateAnswer {
     /// The retry number of the start (rynasctl sends it back with `trigger` while it waits).
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub attempt: u8,
+    /// With `wait`: when the wait ends (ms since the epoch; the queue's deadline of this
+    /// start). rynasctl keeps it: once waiting, a rynasd that does not answer never makes it
+    /// run outside the queue; past this moment it skips. 0: not said (an older rynasd).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub deadline_ms: u64,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
 }
 
 fn is_zero_u8(n: &u8) -> bool {
@@ -299,6 +308,71 @@ pub fn save_yields(state: &Path, m: &std::collections::BTreeMap<String, YieldEnt
         f.sync_all()?;
     }
     std::fs::rename(&tmp, &path)
+}
+
+/// The starts waiting in the queue or for the maintenance window, kept on disk (below the
+/// state directory): a reboot that stops a waiting start would otherwise lose it (its timer's
+/// last trigger has moved on, `Persistent=` does not catch it up). rynasd records it as
+/// interrupted at its next start and starts it again when it may still run.
+pub const PARKED_FILE: &str = "scheduler/waiting.json";
+
+/// A start waiting (in [`PARKED_FILE`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Parked {
+    pub invocation_id: String,
+    pub since_ms: u64,
+    /// The end of its wait (the queue's deadline).
+    pub deadline_ms: u64,
+    pub trigger: RunTrigger,
+    #[serde(default)]
+    pub attempt: u8,
+    /// The kernel's boot id when it began waiting.
+    pub boot_id: String,
+    /// It waited for the maintenance window (not for other work).
+    #[serde(default)]
+    pub window: bool,
+}
+
+pub fn parked_path(state: &Path) -> PathBuf {
+    state.join(PARKED_FILE)
+}
+
+pub fn load_parked(state: &Path) -> std::collections::BTreeMap<String, Parked> {
+    std::fs::read(parked_path(state))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Writes the waiting starts (atomically, 0600).
+pub fn save_parked(state: &Path, m: &std::collections::BTreeMap<String, Parked>) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = parked_path(state);
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        f.write_all(&serde_json::to_vec(m).map_err(std::io::Error::other)?)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)
+}
+
+/// The kernel's id of this boot (`/proc/sys/kernel/random/boot_id`), empty when unknown.
+pub fn boot_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id").map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// What to do with a start that was waiting when the NAS restarted: start it again when its
+/// wait had not ended yet and the task catches up missed runs (or the start was a catch-up,
+/// a retry or a start queued behind a run: it was owed); otherwise it is only recorded.
+pub fn rearm_parked(p: &Parked, task: &ScheduledTask, now_ms: u64) -> bool {
+    now_ms <= p.deadline_ms
+        && task.enabled
+        && (task.effective_policy().missed.catches_up()
+            || matches!(p.trigger, RunTrigger::CatchUp | RunTrigger::Retry | RunTrigger::Queued | RunTrigger::Resume))
 }
 
 /// The run `invocation_id` is one rynasd asked to give way.
@@ -977,6 +1051,35 @@ mod tests {
         let mut md = rynas_api_types::scheduler::system::md_check(false);
         md.migrate();
         assert_eq!(queue_limit_ms(&md), 6 * 24 * 3_600_000);
+    }
+
+    /// A start cut by a restart of the NAS while it waited is started again only within its
+    /// deadline and when it was owed (the task catches up, or the start was a catch-up).
+    #[test]
+    fn interrupted_waits_are_started_again_when_owed() {
+        let parked = |trigger, deadline_ms| Parked {
+            invocation_id: "i".into(),
+            since_ms: 0,
+            deadline_ms,
+            trigger,
+            attempt: 0,
+            boot_id: "b".into(),
+            window: true,
+        };
+        let catches_up = task("*-*-* 02:00:00", RunPolicy::default());
+        assert!(rearm_parked(&parked(RunTrigger::Timer, 10_000), &catches_up, 5_000));
+        assert!(!rearm_parked(&parked(RunTrigger::Timer, 10_000), &catches_up, 20_000), "past its deadline");
+        let skips = task("*-*-* 02:00:00", RunPolicy { missed: Some(MissedPolicy::Skip), ..Default::default() });
+        assert!(!rearm_parked(&parked(RunTrigger::Timer, 10_000), &skips, 5_000));
+        assert!(rearm_parked(&parked(RunTrigger::CatchUp, 10_000), &skips, 5_000));
+        let mut off = catches_up.clone();
+        off.enabled = false;
+        assert!(!rearm_parked(&parked(RunTrigger::Timer, 10_000), &off, 5_000));
+        // what rynasctl keeps: the end of its wait
+        let a: GateAnswer = serde_json::from_str(r#"{"run":false,"trigger":"timer","wait":true,"deadline_ms":42}"#).unwrap();
+        assert_eq!(a.deadline_ms, 42);
+        let old: GateAnswer = serde_json::from_str(r#"{"run":false,"trigger":"timer","wait":true}"#).unwrap();
+        assert_eq!(old.deadline_ms, 0);
     }
 
     #[test]

@@ -28,7 +28,8 @@ use crate::queue::{Claim, EVERY, priority_of};
 /// Starts listed per job at most (a job every few minutes is marked `truncated`).
 pub const MAX_RUNS_PER_JOB: usize = 400;
 
-/// Conflicts listed at most.
+/// Conflicts listed at most, of each group (jobs that meet on a volume or disk; starts
+/// outside the maintenance window).
 pub const MAX_CONFLICTS: usize = 500;
 
 /// The length shown for a job that never ran (no estimate yet).
@@ -265,17 +266,34 @@ pub fn build(
                 _ => {}
             }
         }
+        // a start whose time comes while an earlier one of the job waits for the window: the
+        // unit is starting already, systemd does not start it again (merged into that one)
+        let mut waiting_until: Option<u64> = None;
         for (st, end, estimated) in starts {
-            let mut run = OverviewRun { job: job.id.clone(), start_ms: st, end_ms: end.max(st + 60_000), estimated, deferred_to_ms: None, skipped: false };
+            let mut run = OverviewRun {
+                job: job.id.clone(),
+                start_ms: st,
+                end_ms: end.max(st + 60_000),
+                estimated,
+                deferred_to_ms: None,
+                skipped: false,
+                merged: false,
+            };
             let mut eff_start = Some(st);
             if job.maintenance
                 && let Some(t) = &j.task
             {
                 match defer(window, t, RunTrigger::Timer, st, st, tz) {
                     Defer::Go => {}
+                    Defer::Until(o) if waiting_until == Some(o) => {
+                        run.deferred_to_ms = Some(o);
+                        run.merged = true;
+                        eff_start = None;
+                    }
                     Defer::Until(o) => {
                         run.deferred_to_ms = Some(o);
                         eff_start = Some(o);
+                        waiting_until = Some(o);
                     }
                     Defer::Skip(_) => {
                         run.skipped = true;
@@ -345,43 +363,10 @@ fn conflicts(
 ) -> Vec<OverviewConflict> {
     let name = |i: usize| jobs[i].job.name.clone();
     let est = |i: usize| jobs[i].job.estimate_ms.map(|d| format!(" ({})", about(d))).unwrap_or_default();
-    let mut out: Vec<OverviewConflict> = Vec::new();
-    let index = |id: &str| jobs.iter().position(|j| j.job.id == id);
-    // outside the maintenance window
-    for r in runs {
-        let Some(i) = index(&r.job) else { continue };
-        let (outcome, opens) = match (r.deferred_to_ms, r.skipped) {
-            (Some(o), _) => (ConflictOutcome::Deferred, Some(o)),
-            (None, true) => (ConflictOutcome::Skipped, None),
-            _ => continue,
-        };
-        let sentence = match opens {
-            Some(o) => format!(
-                "{} at {} is outside the maintenance window; it will wait until {}",
-                name(i),
-                when(tz, r.start_ms, with_day),
-                when(tz, o, true)
-            ),
-            None => format!(
-                "{} at {} is outside the maintenance window, which opens only after its deadline; it will be skipped",
-                name(i),
-                when(tz, r.start_ms, with_day)
-            ),
-        };
-        out.push(OverviewConflict {
-            kind: ConflictKind::Maintenance,
-            outcome,
-            first: r.job.clone(),
-            first_ms: r.start_ms,
-            second: None,
-            second_ms: None,
-            affected: r.job.clone(),
-            resource: None,
-            opens_ms: opens,
-            sentence,
-        });
-    }
-    // heavy work: the starts that claim something, by effective start
+    let index: std::collections::HashMap<&str, usize> = jobs.iter().enumerate().map(|(i, j)| (j.job.id.as_str(), i)).collect();
+    // heavy work first (each kind has its own cap: many starts outside the window never hide
+    // two jobs on one volume): the starts that claim something, by effective start
+    let mut pairs: Vec<OverviewConflict> = Vec::new();
     let mut heavy: Vec<&Eff> = effs
         .iter()
         .filter(|e| {
@@ -396,12 +381,16 @@ fn conflicts(
             pb.cmp(&pa)
         })
     });
-    for (x, a) in heavy.iter().enumerate() {
+    'outer: for (x, a) in heavy.iter().enumerate() {
         for b in heavy.iter().skip(x + 1) {
+            // sorted by start: nothing later overlaps `a` either
             if b.start >= a.end {
-                continue;
+                break;
             }
-            if a.job == b.job || out.len() >= MAX_CONFLICTS {
+            if pairs.len() >= MAX_CONFLICTS {
+                break 'outer;
+            }
+            if a.job == b.job {
                 continue;
             }
             let (ja, jb) = (&jobs[a.job], &jobs[b.job]);
@@ -416,7 +405,7 @@ fn conflicts(
                 } else {
                     (ConflictOutcome::Waits, b.job, format!("{} will wait", name(b.job)))
                 };
-                out.push(OverviewConflict {
+                pairs.push(OverviewConflict {
                     kind: ConflictKind::Volume,
                     outcome,
                     first: ja.job.id.clone(),
@@ -445,7 +434,7 @@ fn conflicts(
                     let t = if test_first { a.job } else { b.job };
                     (ConflictOutcome::Waits, t, format!("{} will wait", name(t)))
                 };
-                out.push(OverviewConflict {
+                pairs.push(OverviewConflict {
                     kind: ConflictKind::Disk,
                     outcome,
                     first: ja.job.id.clone(),
@@ -460,8 +449,46 @@ fn conflicts(
             }
         }
     }
-    out.truncate(MAX_CONFLICTS);
-    out
+    // outside the maintenance window (a start merged into an earlier waiting one is no start)
+    let mut window: Vec<OverviewConflict> = Vec::new();
+    for r in runs.iter().filter(|r| !r.merged) {
+        if window.len() >= MAX_CONFLICTS {
+            break;
+        }
+        let Some(&i) = index.get(r.job.as_str()) else { continue };
+        let (outcome, opens) = match (r.deferred_to_ms, r.skipped) {
+            (Some(o), _) => (ConflictOutcome::Deferred, Some(o)),
+            (None, true) => (ConflictOutcome::Skipped, None),
+            _ => continue,
+        };
+        let sentence = match opens {
+            Some(o) => format!(
+                "{} at {} is outside the maintenance window; it will wait until {}",
+                name(i),
+                when(tz, r.start_ms, with_day),
+                when(tz, o, true)
+            ),
+            None => format!(
+                "{} at {} is outside the maintenance window, which opens only after its deadline; it will be skipped",
+                name(i),
+                when(tz, r.start_ms, with_day)
+            ),
+        };
+        window.push(OverviewConflict {
+            kind: ConflictKind::Maintenance,
+            outcome,
+            first: r.job.clone(),
+            first_ms: r.start_ms,
+            second: None,
+            second_ms: None,
+            affected: r.job.clone(),
+            resource: None,
+            opens_ms: opens,
+            sentence,
+        });
+    }
+    pairs.extend(window);
+    pairs
 }
 
 #[cfg(test)]
@@ -578,7 +605,7 @@ mod tests {
             }
         }
         let w = String::from_utf8(w).unwrap();
-        let backup = input(task("backup-day", TaskAction::Backup { job: "day".into() }, "*-*-* 14:00"), "Backup day", Some(1), vec![Claim::Volume("0:40".into())], vec![vol("/srv/data")]);
+        let backup = input(task("backup-day", TaskAction::Scrub { filesystem: "/srv/data".into() }, "*-*-* 14:00"), "Backup day", Some(1), vec![Claim::Volume("0:40".into())], vec![vol("/srv/data")]);
         let snap = input(task("snap", TaskAction::Snapshot { job: "s".into() }, "hourly"), "Snapshots", None, vec![], vec![]);
         let o = build(vec![backup, snap], Some(&w), &tz, from, to, from, &|_| vec![]);
         assert_eq!(o.windows.iter().filter(|x| x.kind == OverviewWindowKind::Maintenance).count(), 1);
@@ -590,6 +617,31 @@ mod tests {
         // snapshots never follow it
         assert!(o.runs.iter().filter(|r| r.job == "snap").all(|r| r.deferred_to_ms.is_none() && !r.skipped));
         assert_eq!(o.runs.iter().filter(|r| r.job == "snap").count(), 24);
+    }
+
+    /// Starts deferred to the same opening are one start (systemd does not start a unit that
+    /// waits already), and they never crowd out the conflicts of two jobs on one volume.
+    #[test]
+    fn deferred_starts_merge_and_pairs_come_first() {
+        let tz = TimeZone::get("Europe/Rome").unwrap();
+        let from = ms("2026-11-17T00:00", &tz);
+        let to = from + 86_400_000 - 1;
+        let mut w = vec![b'0'; 168];
+        for d in 0..7 {
+            for h in 1..5 {
+                w[d * 24 + h] = b'1';
+            }
+        }
+        let w = String::from_utf8(w).unwrap();
+        let hourly = input(task("h", TaskAction::Scrub { filesystem: "/a".into() }, "hourly"), "h", None, vec![Claim::Volume("0:40".into())], vec![vol("/a")]);
+        let other = input(task("o", TaskAction::Scrub { filesystem: "/a".into() }, "*-*-* 02:00"), "o", Some(1), vec![Claim::Volume("0:40".into())], vec![vol("/a")]);
+        let o = build(vec![hourly, other], Some(&w), &tz, from, to, from, &|_| vec![]);
+        // 00:00 waits for 01:00, 05:00 for tomorrow 01:00, 06:00–23:00 merged into it
+        assert_eq!(o.runs.iter().filter(|r| r.job == "h" && r.merged).count(), 18);
+        let m: Vec<_> = o.conflicts.iter().filter(|c| c.kind == ConflictKind::Maintenance).collect();
+        assert_eq!(m.len(), 2, "{m:?}");
+        // the two scrubs of /a at 02:00 are listed, and before the window's
+        assert_eq!(o.conflicts[0].kind, ConflictKind::Volume);
     }
 
     #[test]

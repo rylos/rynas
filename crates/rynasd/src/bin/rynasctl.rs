@@ -445,8 +445,10 @@ fn wait_poll() -> bool {
 
 /// `rynasctl gate <id>` ([`rynas_scheduler::gate`]). Never exits with anything but 0 (run)
 /// or 1 (skip): an internal error runs the start ([`main`] turns a panic into exit 0 too).
-/// While the answer says `wait` it asks again; once queued, an unreachable rynasd keeps it
-/// waiting (up to [`QUEUE_MAX`]) instead of running it beside the work it waits for.
+/// While the answer says `wait` it asks again; once queued (or deferred to the maintenance
+/// window), an unreachable rynasd keeps it waiting until the end of the wait the gate gave
+/// ([`GateAnswer::deadline_ms`], else [`QUEUE_MAX`]) and then skips it: it never runs beside
+/// the work it waits for, nor outside the window.
 fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
     let env = |k: &str| std::env::var(k).unwrap_or_default();
     let mut req = GateRequest {
@@ -461,6 +463,8 @@ fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
         queued_attempt: 0,
     };
     let mut said = String::new();
+    // the end of the wait the gate gave (0: not said yet, or an older rynasd)
+    let mut deadline_ms = 0u64;
     loop {
         // after this rynasd answers "run" without recording a skip: the start may be
         // running by the time a late answer arrives
@@ -492,16 +496,37 @@ fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
                 // knows it from this)
                 req.queued_trigger = Some(a.trigger);
                 req.queued_attempt = a.attempt;
+                if a.deadline_ms > 0 {
+                    deadline_ms = a.deadline_ms;
+                }
                 if wait_poll() {
                     return ExitCode::SUCCESS;
                 }
             }
-            // queued already and rynasd does not answer (restarting, an upgrade): the start
-            // keeps its place and asks again, never running beside the work it waits for; a
-            // day later it runs as before the gate
-            Err(e) if req.queued_since_ms > 0
-                && rynas_tasks::now_ms().saturating_sub(req.queued_since_ms) < QUEUE_MAX.as_millis() as u64 =>
-            {
+            // queued (or deferred) already and rynasd does not answer (restarting, an
+            // upgrade): the start keeps its place and asks again until the end of its wait,
+            // never running beside the work it waits for nor outside the window; past that end
+            // it is skipped, never run as before the gate
+            Err(e) if req.queued_since_ms > 0 => {
+                let until = if deadline_ms > 0 { deadline_ms } else { req.queued_since_ms + QUEUE_MAX.as_millis() as u64 };
+                let now = rynas_tasks::now_ms();
+                if now > until {
+                    say(&format!("rynas: no answer from the scheduling gate ({e}) and the wait has ended: start skipped"));
+                    let entry = SpoolEntry {
+                        task_id: id.to_string(),
+                        invocation_id: req.invocation_id.clone(),
+                        at_ms: now,
+                        by_timer: false,
+                        skipped: Some(rynas_api_types::scheduler::SkipReason::Busy),
+                        finished: None,
+                    };
+                    if !req.invocation_id.is_empty()
+                        && let Err(err) = spool_append(state, &entry)
+                    {
+                        warn(&format!("rynasctl: spooling the gate outcome: {err}"));
+                    }
+                    return ExitCode::from(1);
+                }
                 if said != e {
                     say(&format!("rynas: no answer from the scheduling gate ({e}); still waiting in the queue"));
                     said = e.clone();

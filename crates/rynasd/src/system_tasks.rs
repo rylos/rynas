@@ -226,7 +226,7 @@ mod tests {
         };
         let mut apt = user.clone();
         apt.id = "apt-upgrade".into();
-        let mut mine = SchedulerConfig { tasks: vec![user.clone(), apt], ..Default::default() };
+        let mut mine = SchedulerConfig { tasks: vec![user.clone(), apt] };
         assert!(merge(&mut mine, tasks(&Wanted { always: true, ..Default::default() }), &|_| {}));
         let ids: Vec<&str> = mine.tasks.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["updates-check-user", "apt-upgrade-user", "updates-check", "pcbackup-retention"]);
@@ -244,7 +244,7 @@ mod tests {
             r#"{"id":"dedup-vol1","name":"Deduplication vol1","description":"","enabled":true,"action":{"kind":"dedup","volume":"vol1"},"trigger":{"kind":"calendar","on_calendar":"*-*-* 01:00:00","persistent":false,"randomized_delay_s":0},"notify":"never"}"#,
         )
         .unwrap();
-        let mut doc = SchedulerConfig { tasks: vec![old], ..Default::default() };
+        let mut doc = SchedulerConfig { tasks: vec![old] };
         assert!(merge(&mut doc, tasks(&Wanted { dedup: Some(dd.clone()), ..Default::default() }), &|_| {}));
         assert!(matches!(&doc.tasks[0].trigger, rynas_api_types::scheduler::TaskTrigger::Window { stop_at_end: true, .. }));
         assert!(!doc.tasks[0].effective_policy().missed.catches_up());

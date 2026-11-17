@@ -130,7 +130,9 @@ pub fn render_service(t: &ScheduledTask, p: &Paths) -> Result<String, String> {
     // a start that may wait in the queue of its volume, disk or the package system: the gate
     // keeps asking while it waits (S4), so the start has no time limit (the run keeps its
     // `RuntimeMaxSec=`)
-    if crate::queue::queueable(&t.action) {
+    // (a snapshot job the user put under the maintenance window waits for it too: only then
+    // does its unit change)
+    if crate::queue::queueable(&t.action) || (t.policy.maintenance == Some(true) && t.action.may_follow_maintenance()) {
         s.push_str(QUEUE_TIMEOUT);
     }
     let internal = t.action.is_internal();

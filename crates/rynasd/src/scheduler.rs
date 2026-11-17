@@ -590,21 +590,21 @@ pub(crate) fn applied_task(p: &Protection, id: &str) -> Res<Option<ScheduledTask
     Ok(t)
 }
 
-/// The global maintenance window of the applied configuration (S5), when set (the value an
-/// apply in progress writes, like [`applied_task`]).
+/// The global maintenance window of the applied configuration (S5, its own key), when set
+/// (the value an apply in progress writes, like [`applied_task`]).
 pub(crate) fn maintenance_window(p: &Protection) -> Option<String> {
-    let value = match p.ops.config.applying(SCHEDULER_KEY) {
+    use rynas_api_types::scheduler::MAINTENANCE_KEY;
+    let value = match p.ops.config.applying(MAINTENANCE_KEY) {
         Some(v) => v,
-        None => p.ops.config.applied(SCHEDULER_KEY).ok()?,
+        None => p.ops.config.applied(MAINTENANCE_KEY).ok()?,
     };
-    let doc: SchedulerConfig = crate::services::from_value(value).ok()?;
-    doc.maintenance.filter(|w| rynas_api_types::scheduler::week_window_valid(w))
+    rynas_scheduler::maintenance::window_of(value.as_ref())
 }
 
 /// A system task whose unit rynas gates (S4: `apt-daily-upgrade`, `mdcheck_*`), as the gate
 /// and the history see it. The automatic updates' start window is left out: Debian's timer
 /// catches a missed run up at any time after boot, and the gate keeps that.
-fn gated_system_task(p: &Protection, id: &str) -> Option<ScheduledTask> {
+pub(crate) fn gated_system_task(p: &Protection, id: &str) -> Option<ScheduledTask> {
     use rynas_api_types::scheduler::system;
     match id {
         system::SYSTEM_UPGRADE => {
@@ -954,9 +954,16 @@ pub(crate) fn record_end(
     if f.result == "exec-condition" {
         return Ok(None);
     }
-    // stopped while it waited in the queue (S4): its gate ended the start, nothing ran
-    if p.gate.ended_waiting(id, &f.invocation_id) {
-        tracing::info!("scheduler: task {id}: stopped while waiting in the queue");
+    // stopped while it waited in the queue (S4): its gate ended the start, nothing ran. When
+    // the NAS is shutting down (or this end comes from a boot before, spooled), the start
+    // stays kept on disk: recorded and started again after the boot (`gate::parked_tick`)
+    let earlier_boot = p.gate.parked().get(id).is_some_and(|w| w.invocation_id == f.invocation_id && w.boot_id != p.gate.boot());
+    let keep = earlier_boot || crate::gate::shutting_down(p);
+    if p.gate.ended_waiting(id, &f.invocation_id, keep) {
+        tracing::info!(
+            "scheduler: task {id}: stopped while waiting in the queue{}",
+            if keep { " by a shutdown: it is started again after the boot when it may still run" } else { "" }
+        );
         return Ok(None);
     }
     let (exit_code, signal) = match f.exit_code.as_str() {

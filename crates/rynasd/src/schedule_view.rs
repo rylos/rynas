@@ -2,12 +2,12 @@
 //!
 //! - `GET /v1/scheduler/overview?from&to`: every job (the Task Scheduler's tasks, the system
 //!   timers rynas gates, the PC agents' backup plans), its starts in the range with systemd's
-//!   calendar rules, its estimated length (median of its last 10 runs), the windows, what it
-//!   claims and the conflicts ([`rynas_scheduler::overview`]);
+//!   calendar rules, its estimated length (median of its last 10 successful runs), the
+//!   windows, what it claims and the conflicts ([`rynas_scheduler::overview`]), from the
+//!   applied configuration only;
 //! - `GET /v1/scheduler/runs?task&outcome&from&limit&before`: the history of every task;
-//! - `GET`/`PUT /v1/scheduler/maintenance-window`: the global maintenance window
-//!   ([`rynas_api_types::scheduler::SchedulerConfig::maintenance`]); a `PUT` applies at once,
-//!   like a pause.
+//! - `GET`/`PUT /v1/scheduler/maintenance-window`: the global maintenance window (its own
+//!   key, [`MAINTENANCE_KEY`]); a `PUT` applies at once, like a pause.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -17,7 +17,7 @@ use axum::http::HeaderMap;
 use axum::routing::get;
 use axum::{Json, Router};
 use rynas_api_types::scheduler::{
-    MaintenanceWindow, OverviewJob, OverviewOwner, RunOutcome, RunsPage, SchedulerConfig, SchedulerOverview, TaskTrigger,
+    MAINTENANCE_KEY, MaintenanceWindow, OverviewJob, OverviewOwner, RunOutcome, RunsPage, ScheduledTask, SchedulerConfig, SchedulerOverview, TaskTrigger,
     week_window_valid,
 };
 use rynas_scheduler::SCHEDULER_KEY;
@@ -45,16 +45,32 @@ struct Range {
 }
 
 /// The overview of `[from, to]` (default: from now, 7 days).
-pub(crate) fn overview_of(p: &Protection, owner: &str, rt: &Runtime, from: u64, to: u64) -> Res<SchedulerOverview> {
+pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> Res<SchedulerOverview> {
     let now = now_ms();
-    let views = crate::scheduler::task_views(p, owner, rt)?;
     let estimates = p.history.estimates(ESTIMATE_RUNS).map_err(Error::internal)?;
     let table = crate::gate::table_now(p);
+    let pause = p.gate.pause();
+    // what runs: the applied tasks (never a user's pending draft), and the system timers rynas
+    // gates while the system has them (they run on the system's schedule even when rynas never
+    // applied their settings)
+    let applied = p.ops.config.applied(SCHEDULER_KEY).map_err(Error::from)?;
+    let mut tasks: Vec<(ScheduledTask, bool)> = rynas_scheduler::domain::tasks_of(applied.as_ref())
+        .into_iter()
+        .map(|mut t| {
+            t.migrate();
+            (t, false)
+        })
+        .collect();
+    for (id, _, timer) in rynas_api_types::scheduler::system::GATED_UNITS {
+        if rt.timers.iter().any(|x| x.unit == *timer)
+            && let Some(t) = crate::scheduler::gated_system_task(p, id)
+        {
+            tasks.push((t, true));
+        }
+    }
     let mut jobs: Vec<JobInput> = Vec::new();
-    // what runs: the applied tasks, and the system timers rynas gates (they run on the
-    // system's schedule even when rynas never applied their settings)
-    for v in views.into_iter().filter(|v| v.status.applied || v.status.system) {
-        let t = v.task;
+    for (t, system) in tasks {
+        let paused = pause.tasks.get(&t.id).is_some_and(|i| i.active(now));
         let claims = crate::claims::claims_of(p, &t);
         let resources: Vec<_> = claims.iter().map(|c| table.resource(c)).collect();
         let (estimate_ms, estimate_runs) = estimates.get(&t.id).map_or((None, 0), |(m, n)| (Some(*m), *n));
@@ -68,8 +84,8 @@ pub(crate) fn overview_of(p: &Protection, owner: &str, rt: &Runtime, from: u64, 
                 owner: OverviewOwner::of(&rynas_api_types::scheduler::TaskOwner::of_action(&t.action)),
                 action: Some(t.action.clone()),
                 enabled: t.enabled,
-                system: v.status.system,
-                paused: v.status.paused.as_ref().is_some_and(|i| i.active(now)),
+                system,
+                paused,
                 estimate_ms,
                 estimate_runs,
                 resources: resources.clone(),
@@ -143,8 +159,32 @@ fn median(mut v: Vec<u64>) -> Option<u64> {
     Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2 })
 }
 
-async fn overview(State(st): State<ProtState>, h: HeaderMap, Query(q): Query<Range>) -> Res<Json<SchedulerOverview>> {
-    let (p, owner) = (prot(&st)?, user(&h)?);
+/// A window stored inside the `scheduler` key (a development build of S5) moves to its own
+/// key: applied there (unless one is set already), then dropped from the `scheduler`
+/// document. Nothing to do otherwise (no apply).
+pub fn migrate_window(cfg: &rynas_config::Config, log: &dyn Fn(&str)) -> Result<(), String> {
+    let cur = cfg.applied(SCHEDULER_KEY).map_err(|e| e.to_string())?;
+    let Some(old) = cur.as_ref().and_then(|v| v.get("maintenance")).and_then(|w| w.as_str()).map(str::to_string) else {
+        return Ok(());
+    };
+    if cfg.applied(MAINTENANCE_KEY).map_err(|e| e.to_string())?.is_none() && week_window_valid(&old) {
+        let v = serde_json::to_value(MaintenanceWindow { window: Some(old) }).map_err(|e| e.to_string())?;
+        cfg.apply_value("rynas", MAINTENANCE_KEY, Some(v), "maintenance window moved to its own key", log)
+            .map_err(|e| e.to_string())?;
+    }
+    cfg.apply_update("rynas", SCHEDULER_KEY, "maintenance window moved to its own key", log, |cur| {
+        let Some(mut v) = cur else { return Ok(None) };
+        match v.as_object_mut().and_then(|o| o.remove("maintenance")) {
+            Some(_) => Ok(Some(v)),
+            None => Ok(None),
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn overview(State(st): State<ProtState>, Query(q): Query<Range>) -> Res<Json<SchedulerOverview>> {
+    let p = prot(&st)?;
     let from = q.from.unwrap_or_else(now_ms);
     let to = q.to.unwrap_or(from + 7 * 86_400_000);
     if to < from {
@@ -154,7 +194,7 @@ async fn overview(State(st): State<ProtState>, h: HeaderMap, Query(q): Query<Ran
         return Err(invalid("the range is at most 35 days"));
     }
     let rt = p.runtime().await;
-    Ok(Json(blocking(&p, move |p| overview_of(p, &owner, &rt, from, to)).await?))
+    Ok(Json(blocking(&p, move |p| overview_of(p, &rt, from, to)).await?))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -230,8 +270,9 @@ async fn get_window(State(st): State<ProtState>) -> Res<Json<MaintenanceWindow>>
     Ok(Json(blocking(&p, |p| Ok(MaintenanceWindow { window: crate::scheduler::maintenance_window(p) })).await?))
 }
 
-/// `PUT /v1/scheduler/maintenance-window`: applied at once (the scheduler's units do not
-/// change: the gate reads the window at every start).
+/// `PUT /v1/scheduler/maintenance-window`: applied at once under its own key (no unit, no
+/// reload, nobody's pending changes of the `scheduler` key touched; the gate reads the window
+/// at every start), with a revision like any apply.
 async fn put_window(
     State(st): State<ProtState>,
     h: HeaderMap,
@@ -247,18 +288,15 @@ async fn put_window(
     let window = want.window.clone();
     blocking(&p, move |p| {
         let comment = if window.is_some() { "maintenance window set" } else { "maintenance window off" };
+        let next = serde_json::to_value(MaintenanceWindow { window: window.clone() }).map_err(Error::internal)?;
         p.ops
             .config
-            .apply_update(&who, SCHEDULER_KEY, comment, &|l| tracing::info!("scheduler: {l}"), |cur| {
-                let mut doc: SchedulerConfig = match cur {
-                    Some(v) => serde_json::from_value(v).map_err(|e| e.to_string())?,
-                    None => SchedulerConfig::default(),
-                };
-                if doc.maintenance == window {
+            .apply_update(&who, MAINTENANCE_KEY, comment, &|l| tracing::info!("scheduler: {l}"), |cur| {
+                let now = rynas_scheduler::maintenance::window_of(cur.as_ref());
+                if now == window && cur.is_some() {
                     return Ok(None);
                 }
-                doc.maintenance = window.clone();
-                serde_json::to_value(doc).map(Some).map_err(|e| e.to_string())
+                Ok(Some(next.clone()))
             })
             .map_err(Error::from)?;
         tracing::info!(

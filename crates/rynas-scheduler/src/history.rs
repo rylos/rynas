@@ -357,15 +357,16 @@ impl History {
             .collect()
     }
 
-    /// How long each task usually runs: the median length of its last `n` runs that ran to
-    /// their end (skipped starts and scrubs that gave way left out), with how many there were.
+    /// How long each task usually runs: the median length of its last `n` successful runs
+    /// (failures, often quick, skipped starts and scrubs that gave way left out), with how
+    /// many there were.
     pub fn estimates(&self, n: usize) -> rusqlite::Result<std::collections::HashMap<String, (u64, u8)>> {
         let db = self.db.lock().unwrap();
         let mut st = db.prepare(
             "SELECT task_id, end_ms - start_ms FROM (
                  SELECT task_id, start_ms, end_ms,
                         row_number() OVER (PARTITION BY task_id ORDER BY id DESC) AS rn
-                 FROM runs WHERE skipped IS NULL AND yielded = 0 AND start_ms IS NOT NULL AND end_ms >= start_ms)
+                 FROM runs WHERE skipped IS NULL AND ok = 1 AND yielded = 0 AND start_ms IS NOT NULL AND end_ms >= start_ms)
              WHERE rn <= ?1",
         )?;
         let mut by: std::collections::HashMap<String, Vec<u64>> = std::collections::HashMap::new();
@@ -647,7 +648,8 @@ mod tests {
         h.record(&run("b", "b1", "exit-code")).unwrap();
         let e = h.estimates(10).unwrap();
         assert_eq!(e["a"], (450_000, 10));
-        assert_eq!(e["b"], (1000, 1));
+        // a failed run (an offline target fails in seconds) is no estimate
+        assert!(!e.contains_key("b"));
         // every task, newest first; filters
         let all = h.all_runs(None, None, None, None, 100).unwrap();
         assert_eq!(all.len(), 15);

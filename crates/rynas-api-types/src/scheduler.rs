@@ -20,16 +20,12 @@ fn default_true() -> bool {
 pub struct SchedulerConfig {
     #[serde(default)]
     pub tasks: Vec<ScheduledTask>,
-    /// The global maintenance window (S5): 168 cells `0`/`1`, Sunday first
-    /// (`window[day * 24 + hour]`), in the NAS's local time, like every weekly grid of rynas.
-    /// `None` (the default): no window, nothing changes. When set, a scheduled start of heavy
-    /// work (a scrub, a backup, a replication, the PC repository maintenance, a SMART long
-    /// test, the md RAID check, system and Docker updates) outside it waits for its next "on"
-    /// hour, or is skipped when that comes after the start's deadline
-    /// ([`RunPolicy::maintenance`] says which tasks follow it).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub maintenance: Option<String>,
 }
+
+/// The configuration key of the global maintenance window ([`MaintenanceWindow`]): its own
+/// key, so that setting it renders no unit, reloads nothing and leaves the users' pending
+/// changes of the `scheduler` key alone.
+pub const MAINTENANCE_KEY: &str = "scheduler.maintenance";
 
 /// Cells of a weekly window (one per hour, Sunday first).
 pub const WEEK_CELLS: usize = 168;
@@ -44,12 +40,15 @@ pub fn week_window_on(w: &str, cell: usize) -> bool {
     w.as_bytes().get(cell % WEEK_CELLS) == Some(&b'1')
 }
 
-/// `GET`/`PUT /api/v1/scheduler/maintenance-window`: the global maintenance window
-/// ([`SchedulerConfig::maintenance`]). A `PUT` applies at once (no pending change), like a
-/// pause.
+/// The global maintenance window (S5), configuration key [`MAINTENANCE_KEY`], and the body
+/// of `GET`/`PUT /api/v1/scheduler/maintenance-window` (a `PUT` applies at once, no pending
+/// change). When set, a scheduled start of a task that follows it
+/// ([`ScheduledTask::follows_maintenance`]) outside it waits for its next "on" hour, or is
+/// skipped when that comes after the start's deadline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MaintenanceWindow {
-    /// 168 cells `0`/`1`, Sunday first; `None`: no window (off).
+    /// 168 cells `0`/`1`, Sunday first (`window[day * 24 + hour]`), in the NAS's local time,
+    /// like every weekly grid of rynas; `None` (the default): no window, nothing waits.
     #[serde(default)]
     pub window: Option<String>,
 }
@@ -164,16 +163,16 @@ impl ScheduledTask {
         }
     }
 
-    /// Its scheduled starts follow the global maintenance window when one is set: heavy work
-    /// ([`TaskAction::heavy`]) on a schedule of its own (not a weekly window), unless the
-    /// policy says otherwise; by default not when the task has a start window of its own.
+    /// Its scheduled starts follow the global maintenance window when one is set. By default
+    /// only maintenance work does ([`TaskAction::maintenance_work`]: a scrub, a SMART long
+    /// test, the md RAID check, system and Docker updates, the PC repository maintenance);
+    /// backups, replications and snapshots only when the user opted in
+    /// ([`RunPolicy::maintenance`]), and nothing on a weekly window of its own.
     pub fn follows_maintenance(&self) -> bool {
-        if !self.action.heavy() || matches!(self.trigger, TaskTrigger::Window { .. }) {
+        if matches!(self.trigger, TaskTrigger::Window { .. }) || !self.action.may_follow_maintenance() {
             return false;
         }
-        self.policy
-            .maintenance
-            .unwrap_or(self.policy.window_min.unwrap_or(0) == 0)
+        self.policy.maintenance.unwrap_or_else(|| self.action.maintenance_work())
     }
 }
 
@@ -314,10 +313,9 @@ pub struct RunPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_min: Option<u32>,
     /// The task's scheduled starts follow the global maintenance window
-    /// ([`SchedulerConfig::maintenance`]) when one is set. Only heavy work can
-    /// ([`TaskAction::heavy`]); absent = it does unless it has a start window of its own
-    /// (Docker's automatic updates keep theirs unless the user opts in), see
-    /// [`ScheduledTask::follows_maintenance`].
+    /// ([`MaintenanceWindow`]) when one is set. Absent = only maintenance work does
+    /// ([`TaskAction::maintenance_work`]); `true` opts a backup, a replication or a snapshot
+    /// job in, `false` takes a task out. See [`ScheduledTask::follows_maintenance`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<bool>,
 }
@@ -597,6 +595,28 @@ impl TaskAction {
                 | TaskAction::MdCheck { .. }
                 | TaskAction::SmartTest { test: SmartTestKind::Long, .. }
         )
+    }
+
+    /// Maintenance work: it follows the global maintenance window by default (a scrub, a
+    /// SMART long test, the md RAID check, system and Docker updates, the PC repository
+    /// maintenance).
+    pub fn maintenance_work(&self) -> bool {
+        matches!(
+            self,
+            TaskAction::Scrub { .. }
+                | TaskAction::PcMaintenance
+                | TaskAction::DockerAutoUpdate
+                | TaskAction::SystemUpgrade
+                | TaskAction::MdCheck { .. }
+                | TaskAction::SmartTest { test: SmartTestKind::Long, .. }
+        )
+    }
+
+    /// It can follow the global maintenance window: maintenance work, and backups,
+    /// replications and snapshots when the user opts in.
+    pub fn may_follow_maintenance(&self) -> bool {
+        self.maintenance_work()
+            || matches!(self, TaskAction::Backup { .. } | TaskAction::Replicate { .. } | TaskAction::Snapshot { .. })
     }
 }
 
@@ -884,6 +904,9 @@ pub enum SkipReason {
     /// Outside the global maintenance window, which opens again only after the start's
     /// deadline (the same deadline as the queue's).
     Maintenance,
+    /// It was waiting (in the queue or for the maintenance window) when the NAS restarted;
+    /// rynas starts it again when it may still run (the detail says).
+    Interrupted,
 }
 
 /// One recorded run (from the `ExecStopPost` hook).
@@ -1158,6 +1181,10 @@ pub struct OverviewRun {
     /// ... and it will be skipped: the window opens after the start's deadline.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skipped: bool,
+    /// Its time comes while an earlier start of the job waits for the window: no start of
+    /// its own (systemd does not start a unit that is starting already).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub merged: bool,
 }
 
 /// What a window of the overview is.

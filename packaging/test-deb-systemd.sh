@@ -298,7 +298,7 @@ MW=$(for i in $(seq 0 167); do [ $((i % 24)) = "$OPEN_H" ] && printf 1 || printf
 api PUT /scheduler/maintenance-window "{\"window\":\"$MW\"}"; expect 200 "set the maintenance window"
 api GET /scheduler/maintenance-window; [ "$(echo "$BODY" | jq -r .window)" = "$MW" ] || fail "window not kept: $BODY"
 api GET /config/pending; expect 200 pending
-! echo "$BODY" | jq -e '.. | objects | select(.key? == "scheduler")' >/dev/null || fail "the window left a pending change: $BODY"
+! echo "$BODY" | jq -e '.. | objects | select(.key? == "scheduler" or .key? == "scheduler.maintenance")' >/dev/null || fail "the window left a pending change: $BODY"
 echo "--- a scheduled scrub outside the window waits for it (not failed, nothing recorded)"
 T=$(date +%s)
 SOON2=$(date -d '+25 seconds' '+%Y-%m-%d %H:%M:%S')
@@ -316,6 +316,24 @@ echo "$BODY" | jq -e 'any(.[]; .task == "mscrub" and .queued.window_opens_ms > 0
 systemctl stop rynas-task-mscrub.service
 ! systemctl is-failed -q rynas-task-mscrub.service || fail "mscrub: failed after a stop while deferred"
 [ "$(rows mscrub 'true')" = 0 ] || fail "mscrub: a deferred start left a row"
+echo "--- a wait cut by a restart of the NAS is recorded and started again"
+# what a waiting start leaves on disk when a shutdown stops it (another boot id)
+printf '{"mscrub":{"invocation_id":"0123456789abcdef0123456789abcdef","since_ms":%s000,"deadline_ms":%s000,"trigger":"timer","attempt":0,"boot_id":"an-earlier-boot","window":true}}' \
+    "$(date +%s)" "$(( $(date +%s) + 3600 ))" > /var/lib/rynas/scheduler/waiting.json
+chmod 600 /var/lib/rynas/scheduler/waiting.json
+T=$(date +%s)
+systemctl restart rynasd.service; sleep 2; relogin
+wait_rows mscrub '.skipped == "interrupted" and (.detail | test(": started again$"))' 1
+wait_journal mscrub "$T" 'deferred: outside the maintenance window' 120
+systemctl stop rynas-task-mscrub.service
+! systemctl is-failed -q rynas-task-mscrub.service || fail "mscrub: failed after the second stop"
+echo "--- the window has its own key: a pending change of the scheduler stays clean"
+mk '{"id":"pend","action":{"kind":"command","command":"true"},"trigger":{"kind":"manual"}}'
+api PUT /scheduler/maintenance-window "{\"window\":\"$MW\"}"; expect 200 "set the window again"
+api GET /config/pending; expect 200 pending
+echo "$BODY" | jq -e '[.. | objects | select(.key? == "scheduler")] | length == 1 and all(.conflict != true)' >/dev/null \
+    || fail "the window made a pending scheduler change a conflict: $BODY"
+api DELETE /scheduler/tasks/pend
 echo "--- Debian's apt-daily-upgrade outside the window waits for it too"
 mkdir -p /run/systemd/system/apt-daily-upgrade.timer.d
 printf '[Timer]\nRandomizedDelaySec=0\n' > /run/systemd/system/apt-daily-upgrade.timer.d/zz-test.conf

@@ -2430,6 +2430,7 @@ body:has(.sysp-overlay), body:has(.sysp-overlay) .main { overflow: hidden; }
 .sv-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); min-width: 0; }
 .sv-item-head .link-strong { overflow-wrap: anywhere; }
 .sv-item-warn { margin: 0; padding-left: var(--s-4); color: var(--warning); font-size: var(--fs-13); overflow-wrap: anywhere; }
+.sv-follow { margin: 0; padding-left: var(--s-4); display: flex; flex-direction: column; gap: var(--s-1); overflow-wrap: anywhere; }
 .sv-legend { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-4); margin: var(--s-3) 0 0; padding: 0; list-style: none; }
 .sv-legend-mw { display: inline-flex; align-items: center; gap: var(--s-2); font-size: var(--fs-13); color: var(--text-muted); }
 .sv-swatch-mw { width: 16px; height: 10px; border-radius: var(--r-xs); background: repeating-linear-gradient(135deg, color-mix(in oklch, var(--accent) 30%, transparent) 0 3px, transparent 3px 6px); box-shadow: inset 0 2px 0 var(--accent); }

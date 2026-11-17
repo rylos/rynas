@@ -343,6 +343,7 @@ fn open_config(
         Arc::new(rynas_backup::BackupDomain),
         Arc::new(rynas_dedup::DedupDomain::with_removed(Arc::new(rynasd::dedup::job_removed))),
         scheduler.clone(),
+        Arc::new(rynas_scheduler::maintenance::MaintenanceDomain),
         Arc::new(rynas_power::PowerDomain {
             rynasctl: PathBuf::from(rynas_btrfs::domain::RYNASCTL),
             state_dir: args.state_dir.clone(),
@@ -1347,6 +1348,9 @@ fn main() -> std::io::Result<()> {
                 loop {
                     let (cfg2, pc_hour) = (cfg.clone(), agent.as_ref().map(|a| a.snapshot().settings.maintenance_hour));
                     let r = tokio::task::spawn_blocking(move || {
+                        if let Err(e) = rynasd::schedule_view::migrate_window(&cfg2, &|l| tracing::info!("scheduler: {l}")) {
+                            tracing::warn!("scheduler: maintenance window: {e}");
+                        }
                         rynasd::system_tasks::ensure(&cfg2, pc_hour, &|l| tracing::info!("scheduler: {l}"))
                     })
                     .await;
