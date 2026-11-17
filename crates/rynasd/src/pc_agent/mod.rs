@@ -479,10 +479,13 @@ impl PcAgent {
         tls: Option<Arc<crate::tls::TlsSvc>>,
         hostname: String,
     ) -> Arc<Self> {
-        let reg = std::fs::read(Self::reg_path(&state_dir))
+        let mut reg: Registry = std::fs::read(Self::reg_path(&state_dir))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
+        // a share of memory left at 0 by an older version is the default it always meant (the
+        // settings shown can then be saved back as they are)
+        reg.settings.maintenance_memory_pct = reg.settings.effective_memory_pct();
         Arc::new(PcAgent {
             ops,
             notifier,
@@ -1136,10 +1139,12 @@ async fn settings_put(
 ) -> Res<StatusCode> {
     let svc = pa(&st)?;
     let who = user(&h)?;
-    let s = json_body(body)?;
+    let mut s = json_body(body)?;
     if s.maintenance_hour > 23 {
         return Err(Error::invalid("maintenance_hour", "0–23"));
     }
+    // 0 (what older versions showed) is the default share
+    s.maintenance_memory_pct = s.effective_memory_pct();
     if !(10..=80).contains(&s.maintenance_memory_pct) {
         return Err(Error::invalid("maintenance_memory_pct", "10–80 %"));
     }

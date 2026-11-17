@@ -206,7 +206,7 @@ impl Default for PcDeviceSettings {
 }
 
 /// Settings of the feature (`PUT /api/v1/pcbackup/settings`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PcAgentSettings {
     /// The folder that holds one repository per backup group; empty: not set up yet.
     #[serde(default)]
@@ -224,6 +224,28 @@ pub struct PcAgentSettings {
     /// Average chunk of new groups' repositories; a repository keeps its own for good.
     #[serde(default)]
     pub chunking: PcChunking,
+}
+
+/// The same defaults as a document without the fields (a derived default gave 0 for the
+/// hour and the share, which the settings then refused to save back).
+impl Default for PcAgentSettings {
+    fn default() -> Self {
+        PcAgentSettings {
+            folder: String::new(),
+            default_quota_gib: 0,
+            maintenance_hour: default_hour(),
+            maintenance_memory_pct: default_memory_pct(),
+            chunking: PcChunking::default(),
+        }
+    }
+}
+
+impl PcAgentSettings {
+    /// The share of memory a maintenance gets: an unset one (0, written by older versions) is
+    /// the default.
+    pub fn effective_memory_pct(&self) -> u8 {
+        if self.maintenance_memory_pct == 0 { default_memory_pct() } else { self.maintenance_memory_pct }
+    }
 }
 
 /// Average chunk of a new group's repository. Smaller chunks deduplicate a little better;

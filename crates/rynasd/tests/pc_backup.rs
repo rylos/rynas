@@ -535,6 +535,28 @@ async fn no_manifest_is_not_ready() {
     assert_eq!(b.missing.iter().map(|g| g.code).collect::<Vec<_>>(), [BareMetalCode::NoManifest]);
 }
 
+/// The PC agent's settings as `GET /v1/pcbackup` shows them can be saved back as they are
+/// (a derived default once showed a share of memory of 0, which the PUT refused), and 0 is
+/// taken as the default share.
+#[tokio::test]
+async fn agent_settings_round_trip() {
+    let (e, _agent) = env_agent();
+    let (s, b) = call(&e, "GET", "/v1/pcbackup", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let o: Value = serde_json::from_slice(&b).unwrap();
+    let settings = o["settings"].clone();
+    assert_eq!(settings["maintenance_memory_pct"], 40, "{settings}");
+    assert_eq!(settings["maintenance_hour"], 4, "{settings}");
+    let (s, b) = call(&e, "PUT", "/v1/pcbackup/settings", Some(settings.clone())).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{}", String::from_utf8_lossy(&b));
+    let mut zero = settings;
+    zero["maintenance_memory_pct"] = json!(0);
+    let (s, b) = call(&e, "PUT", "/v1/pcbackup/settings", Some(zero)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{}", String::from_utf8_lossy(&b));
+    let (_, b) = call(&e, "GET", "/v1/pcbackup", None).await;
+    assert_eq!(serde_json::from_slice::<Value>(&b).unwrap()["settings"]["maintenance_memory_pct"], 40);
+}
+
 // ------------------------------------------------------------------ rynas-agent's btrfs method
 
 /// The memory host plus the agent side (`/v1/pcbackup/…`) linked to it, as rynasd wires them.
