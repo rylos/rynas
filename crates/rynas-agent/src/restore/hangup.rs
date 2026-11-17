@@ -22,7 +22,18 @@
 //!   to answer). Log in again and read the log file, or the PC's page on the NAS.
 //!
 //! The progress lines and the log lines are written without failing on a closed terminal
-//! ([`out`], [`err`]), for the moment between the hangup and the switch to the file.
+//! ([`out`], [`err`]), for the moment between the hangup and the switch to the file. The log
+//! file is opened without following a symlink and only when it is this user's own regular
+//! file ([`open_log`]: the `/tmp` fallback is world-writable). At the end of the writing phase
+//! SIGHUP gets back the disposition it had before (saved with `sigaction`).
+//!
+//! **SIGTERM is not ignored**, also while writing. It is what a deliberate stop sends (`kill`,
+//! a shutdown), and the case it could come from by itself, logind's `KillUserProcesses=yes`
+//! at the end of the SSH session, is off by default on the live systems a restore runs from
+//! (systemd's default, Debian, Ubuntu, Fedora, Arch, SystemRescue). Where it is on, logind
+//! stops the session's whole cgroup and sends SIGKILL after the stop timeout, which no
+//! disposition survives: ignoring SIGTERM would only delay the kill. On such a system run the
+//! restore in its own scope (`systemd-run --scope rynas-agent restore`) or in `tmux`.
 
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -82,28 +93,34 @@ pub struct Writing {
     /// Written to stop the watcher.
     stop: Option<std::os::fd::OwnedFd>,
     watcher: Option<std::thread::JoinHandle<()>>,
+    /// SIGHUP's disposition before the writing phase, put back at its end.
+    before: Option<libc::sigaction>,
 }
 
 /// Enters the writing phase.
 pub fn writing() -> Writing {
-    // SAFETY: changing a signal's disposition to "ignore"
-    unsafe {
-        libc::signal(libc::SIGHUP, libc::SIG_IGN);
-    }
+    // SAFETY: sigaction with zeroed structs; "ignore" needs no handler, the old one is kept
+    let before = unsafe {
+        let mut ign: libc::sigaction = std::mem::zeroed();
+        ign.sa_sigaction = libc::SIG_IGN;
+        libc::sigemptyset(&mut ign.sa_mask);
+        let mut old: libc::sigaction = std::mem::zeroed();
+        (libc::sigaction(libc::SIGHUP, &ign, &mut old) == 0).then_some(old)
+    };
     // SAFETY: isatty on a descriptor number
     if unsafe { libc::isatty(0) } != 1 {
-        return Writing { stop: None, watcher: None };
+        return Writing { stop: None, watcher: None, before };
     }
     let mut fds = [0i32; 2];
     // SAFETY: pipe2 fills two descriptors
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return Writing { stop: None, watcher: None };
+        return Writing { stop: None, watcher: None, before };
     }
     use std::os::fd::FromRawFd;
     // SAFETY: both descriptors were just made by pipe2 and are owned here only
     let (r, w) = unsafe { (std::os::fd::OwnedFd::from_raw_fd(fds[0]), std::os::fd::OwnedFd::from_raw_fd(fds[1])) };
     let watcher = std::thread::spawn(move || watch(r));
-    Writing { stop: Some(w), watcher: Some(watcher) }
+    Writing { stop: Some(w), watcher: Some(watcher), before }
 }
 
 /// Waits for the terminal to go (or the stop pipe), then moves the output to the log file.
@@ -132,11 +149,36 @@ fn watch(stop: std::os::fd::OwnedFd) {
     }
 }
 
+/// The log file, safe in a world-writable folder (the `/tmp` fallback): never through a
+/// symlink (`O_NOFOLLOW`), only a regular file this user owns with one link (no hard link
+/// planted by another user), made 0600 whatever it was. `None`: not usable (the output then
+/// stays where it was).
+fn open_log(path: &std::path::Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let m = f.metadata().ok()?;
+    // SAFETY: geteuid has no preconditions
+    let me = unsafe { libc::geteuid() };
+    if !m.file_type().is_file() || m.uid() != me || m.nlink() != 1 {
+        return None;
+    }
+    // SAFETY: fchmod on a descriptor this function owns
+    if unsafe { libc::fchmod(f.as_raw_fd(), 0o600) } != 0 {
+        return None;
+    }
+    Some(f)
+}
+
 /// Standard output and error into the log file, standard input from `/dev/null`.
 fn detach() {
-    use std::os::unix::fs::OpenOptionsExt;
     let path = log_path();
-    let Ok(log) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&path) else { return };
+    let Some(log) = open_log(&path) else { return };
     let null = std::fs::File::open("/dev/null").ok();
     // SAFETY: dup2 of descriptors this process owns onto 0, 1 and 2 (atomic for writers)
     unsafe {
@@ -161,10 +203,12 @@ impl Drop for Writing {
         if let Some(t) = self.watcher.take() {
             let _ = t.join();
         }
-        // idle again: a hangup ends the process
-        // SAFETY: back to the default disposition
-        unsafe {
-            libc::signal(libc::SIGHUP, libc::SIG_DFL);
+        // idle again: SIGHUP does what it did before (by default it ends the process)
+        if let Some(old) = self.before.take() {
+            // SAFETY: the disposition sigaction gave back when the phase began
+            unsafe {
+                libc::sigaction(libc::SIGHUP, &old, std::ptr::null_mut());
+            }
         }
     }
 }
@@ -184,4 +228,54 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
     drop(w);
     out("the end");
     std::fs::write(done, format!("done {status} {}", hung())).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_log_file_is_never_a_planted_one() {
+        let d = tempfile::tempdir().unwrap();
+        // a symlink (to anything) is never followed
+        let target = d.path().join("elsewhere");
+        std::fs::write(&target, "x").unwrap();
+        let link = d.path().join("link.log");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(open_log(&link).is_none());
+        // a hard link to another file is refused
+        let hard = d.path().join("hard.log");
+        std::fs::hard_link(&target, &hard).unwrap();
+        assert!(open_log(&hard).is_none());
+        // a new file, and an existing one of this user made 0600
+        let new = d.path().join("new.log");
+        assert!(open_log(&new).is_some());
+        let old = d.path().join("old.log");
+        std::fs::write(&old, "before\n").unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(open_log(&old).is_some());
+        assert_eq!(std::fs::metadata(&old).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn the_disposition_before_comes_back() {
+        // SAFETY: test-only disposition changes of SIGHUP
+        let current = || unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut old);
+            old.sa_sigaction
+        };
+        // SAFETY: test-only
+        unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) };
+        let w = writing();
+        assert_eq!(current(), libc::SIG_IGN);
+        drop(w);
+        // ignored before (e.g. started under nohup): still ignored, not the default
+        assert_eq!(current(), libc::SIG_IGN);
+        // SAFETY: test-only
+        unsafe { libc::signal(libc::SIGHUP, libc::SIG_DFL) };
+        drop(writing());
+        assert_eq!(current(), libc::SIG_DFL);
+    }
 }

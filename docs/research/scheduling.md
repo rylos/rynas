@@ -450,6 +450,14 @@ Config-domain migrations in `rynas-config`. Old fields stay readable for one rel
 - **Test**: `packaging/test-pcbackup-schedule.sh` (no root, no disk): the real service loop of `rynas-agent` (`schedule-test`, a stand-in reports each run and reads nothing of the PC) against rynasd's agent routes on 127.0.0.1 (`crates/rynasd/tests/pc_agent_schedule_e2e.rs`): with the window closed it does not start and its skipped start is in the history, with the window open it starts at once and its run is there (trigger `timer`, start inside the window), Pause all reaches the plan with its own revision.
 - Not in S6: a pause of one PC from the Schedule page (the PC's own "Paused" setting does it); the late alert does not know the window (a PC that is off during its whole window is late, as it would be without one).
 
+- **S6 review fixes (2026-11-17).**
+  - The gate gives an interval task's timer start no calendar tolerance (`INTERVAL_ON_TIME_MS` 5 s instead of `ON_TIME_MS` 120 s): with it, a never-run task whose `OnBootSec=` passed long ago (a NAS that upgrades) ran at once instead of after its delay from rynasd's start (the 2 min of the PC retention), and every interval task up to 2 min early. `test-deb-systemd.sh` now waits before the upgrade until the tasks' `OnBootSec=` is past (in a container it counts from the container's systemd start), which made the upgrade check fail whenever the upgrade came less than 2 min after the container started.
+  - The agent counts an overdue backup waiting for its window from now (`next_due(.., now)`): no 5 s polls through the closed window, the right next start in `rynas-agent status`.
+  - The plan carries the NAS's zone also as a POSIX rule (`AgentPlan.tz_posix`, the footer of the zone file, `rynas_tz::system_posix`) for a NAS whose `/etc/localtime` is a copy without a name, `TZ` set to a rule, or a PC without the zone database.
+  - A late PC repository maintenance no longer waits for a PC whose backups Pause all holds (`backup_pending`).
+  - The hidden test commands of the agent (`schedule-test`, `test-run`) run only with `RYNAS_AGENT_STATE` set to a folder other than the service's.
+  - The overview draws an agent older than 0.8.20 (`pcagent::agent_follows_window`) without its window, as it really runs.
+
 S0–S1 can ship in one release without visible change except the new editor. S2 is the risky step and needs systemd integration tests in `packaging/test-deb-systemd.sh`.
 
 ### 3.11 Risks
