@@ -624,6 +624,16 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
             }
             crate::checksum::send(out, &real, req.require("algo")?)
         }
+        "duplicates" => {
+            // read as the user, inside the jail: every folder and file below checked
+            let root = path_param("path")?;
+            refuse_whole_backup(shares, &[req.require("path")?.to_string()])?;
+            if archive::locate(&root).is_some() {
+                return Err(ApiError::read_only(t!("duplicates are not looked for inside an archive")));
+            }
+            let min = req.param("min").and_then(|m| m.parse().ok()).unwrap_or(1);
+            crate::dupes::send(out, &root, req.param("by").unwrap_or("content"), min)
+        }
         "usage" => {
             method(req, "POST")?;
             let body: Paths = req.json()?;

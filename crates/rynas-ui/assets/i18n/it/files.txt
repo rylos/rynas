@@ -682,3 +682,28 @@ files.pane.flat_view	vista piatta
 files.menus.flat_view	Vista piatta (file delle sottocartelle)
 files.settings.flat_view_keys	Vista piatta: tutti i file delle sottocartelle
 files.sidebar.subfolders	Sottocartelle
+files.dupes.find_duplicates	Trova duplicati…
+files.dupes.duplicates_in_x	Duplicati in «{x}»
+files.dupes.compare	Confronta
+files.dupes.by_content	il contenuto (sicuro)
+files.dupes.by_name	nome e dimensione (veloce)
+files.dupes.minimum_size	Dimensione minima
+files.dupes.any_size	qualsiasi
+files.dupes.find	Cerca
+files.dupes.select	Seleziona:
+files.dupes.all_but_oldest	tutti tranne il più vecchio
+files.dupes.all_but_newest	tutti tranne il più recente
+files.dupes.all_but_shortest	tutti tranne il percorso più corto
+files.dupes.none	nessuno
+files.dupes.n_selected_s	{n} selezionati · {s}
+files.dupes.n_copies_of_s	{n} copie da {s}
+files.dupes.show_in_folder	Mostra nella cartella
+files.dupes.one_copy_stays	Una copia di ogni gruppo resta
+files.dupes.reading_folders	Lettura delle cartelle…
+files.dupes.reading_folders_n	Lettura delle cartelle: {n} file
+files.dupes.comparing_a_of_b	Confronto del contenuto: {a} di {b}
+files.dupes.groups_g_files_n_s	{g} tra {n} file · {s} recuperabili
+files.dupes.count.groups.one	{n} gruppo
+files.dupes.count.groups.other	{n} gruppi
+files.dupes.biggest_only	solo i gruppi più grandi
+files.dupes.none_among_n	Nessun duplicato tra {n} file

@@ -28,6 +28,7 @@ pub mod checksum;
 pub mod confine;
 pub mod conn_routes;
 pub mod conns;
+pub mod dupes;
 pub mod edit;
 pub mod fsops;
 pub mod identity;

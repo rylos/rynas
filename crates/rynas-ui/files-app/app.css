@@ -472,6 +472,22 @@ dialog.dlg.wide { max-width: min(94vw, 760px); }
 .rename-dlg .ren-item em { font-style: normal; font-size: 11px; }
 .rename-dlg .ren-sum.err { color: var(--crit); }
 @media (max-width: 600px) { .rename-dlg .ren-grid { grid-template-columns: minmax(0, 1fr); } }
+.dupes-dlg .dup-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; }
+.dupes-dlg .dup-prog { margin: 12px 0 4px; display: flex; flex-direction: column; gap: 6px; }
+.dupes-dlg .dup-phase { font-size: 12.5px; color: var(--muted); }
+.dupes-dlg .dup-res { margin-top: 10px; }
+.dupes-dlg .dup-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; margin-bottom: 6px; }
+.dupes-dlg .dup-pick-l { color: var(--faint); }
+.dupes-dlg .dup-sum { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.dupes-dlg .dup-list { max-height: 48vh; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 4px 10px 8px; }
+.dupes-dlg .dup-gh { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; margin: 8px 0 2px; }
+.dupes-dlg .dup-item { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12.5px; cursor: pointer; min-width: 0; }
+.dupes-dlg .dup-item input { accent-color: var(--crit); flex: none; }
+.dupes-dlg .dup-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
+.dupes-dlg .dup-item:has(input:checked) .dup-path { color: var(--crit); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--crit) 50%, transparent); }
+.dupes-dlg .dup-date { color: var(--faint); font-size: 11.5px; white-space: nowrap; }
+.dupes-dlg .dup-show { width: 24px; height: 24px; flex: none; }
+@media (max-width: 600px) { .dupes-dlg .dup-date { display: none; } }
 .dlg-icon { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
 .dlg-icon.danger { background: var(--crit-soft); color: var(--crit); }
 .dlg-icon svg { width: 19px; height: 19px; }

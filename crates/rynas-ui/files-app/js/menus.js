@@ -13,6 +13,7 @@ import { isRemote } from "./conns.js";
 import { isReadOnly, isBackupTop, hasNoSmbPath } from "./backups.js";
 import { selectByPattern, selectDifferences } from "./select.js";
 import { undo, undoLabel } from "./undo.js";
+import { findDuplicates } from "./dupes.js";
 
 export const menuMethods = {
   contextMenu(pane, entry, x, y) {
@@ -37,6 +38,7 @@ export const menuMethods = {
         { label: prefs.showHidden ? t("files.menus.hide_hidden_files") : t("files.common.show_hidden_files"), icon: prefs.showHidden ? "eyeOff" : "eye", key: "Ctrl+H", action: () => this.toggleHidden() },
         !isBackupTop(pane.path) && { label: t("files.menus.compute_folder_sizes"), icon: "drive", action: () => this.computeSizes(pane, pane.visible) },
       pane.flatAllowed() && { label: (pane.flat ? "✓ " : "") + t("files.menus.flat_view"), icon: "list", key: "Ctrl+Shift+F", action: () => pane.setFlat(!pane.flat) },
+      pane.flatAllowed() && { label: t("files.dupes.find_duplicates"), icon: "copy", action: () => findDuplicates(this, pane.path) },
       pane.path !== "/" && !pane.archive && !remote && !isBackupTop(pane.path) && { label: t("files.common.space_analysis"), icon: "pie", action: () => this.analyseSpace(pane.path) },
         "-",
         !atRoot && { label: t("files.menus.copy_folder_path"), icon: "link", action: () => copyText(this.copyPath(pane.path)) },
@@ -95,6 +97,7 @@ export const menuMethods = {
       "-",
       dir && !whole && { label: t("files.menus.compute_size"), icon: "drive", action: () => this.computeSizes(pane, list) },
       !many && dir && !arch && !remote && !whole && { label: t("files.common.space_analysis"), icon: "pie", action: () => this.analyseSpace(entry.path) },
+      !many && dir && !arch && !remote && !whole && !isBackupTop(entry.path) && { label: t("files.dupes.find_duplicates"), icon: "copy", action: () => findDuplicates(this, entry.path) },
       !remote && { label: t("files.common.copy_path"), icon: "link", key: "Ctrl+Shift+C", action: () => this.copyPaths(list, "nas") },
       !remote && !noSmb && { label: t("files.menus.copy_network_path_nas"), icon: "link", action: () => this.copyPaths(list, "smb") },
       remote && { label: t("files.common.copy_address"), icon: "link", key: "Ctrl+Shift+C", action: () => this.copyPaths(list, "smb") },
@@ -141,6 +144,7 @@ export const menuMethods = {
       })),
       { label: (prefs.foldersFirst ? "✓ " : "") + t("files.common.folders_first"), action: () => save({ foldersFirst: !prefs.foldersFirst }) },
       pane.flatAllowed() && { label: (pane.flat ? "✓ " : "") + t("files.menus.flat_view"), icon: "list", key: "Ctrl+Shift+F", action: () => pane.setFlat(!pane.flat) },
+      pane.flatAllowed() && { label: t("files.dupes.find_duplicates"), icon: "copy", action: () => findDuplicates(this, pane.path) },
       "-",
       { label: (prefs.sidebar ? "✓ " : "") + t("files.common.sidebar"), icon: "sidebar", key: "Ctrl+B", action: () => save({ sidebar: !prefs.sidebar }) },
       !isBackupTop(pane.path) && { label: t("files.menus.compute_folder_sizes"), icon: "drive", action: () => this.computeSizes(pane, pane.visible) },

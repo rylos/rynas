@@ -704,3 +704,30 @@ files.pane.flat_view	плоский вид
 files.menus.flat_view	Плоский вид (файлы подпапок)
 files.settings.flat_view_keys	Плоский вид: все файлы подпапок
 files.sidebar.subfolders	Подпапки
+files.dupes.find_duplicates	Найти дубликаты…
+files.dupes.duplicates_in_x	Дубликаты в «{x}»
+files.dupes.compare	Сравнивать
+files.dupes.by_content	содержимое (надёжно)
+files.dupes.by_name	имя и размер (быстро)
+files.dupes.minimum_size	Минимальный размер
+files.dupes.any_size	любой
+files.dupes.find	Найти
+files.dupes.select	Выделить:
+files.dupes.all_but_oldest	все, кроме самого старого
+files.dupes.all_but_newest	все, кроме самого нового
+files.dupes.all_but_shortest	все, кроме самого короткого пути
+files.dupes.none	ничего
+files.dupes.n_selected_s	Выделено: {n} · {s}
+files.dupes.n_copies_of_s	Копий: {n} по {s}
+files.dupes.show_in_folder	Показать в папке
+files.dupes.one_copy_stays	Одна копия из каждой группы остаётся
+files.dupes.reading_folders	Чтение папок…
+files.dupes.reading_folders_n	Чтение папок: файлов {n}
+files.dupes.comparing_a_of_b	Сравнение содержимого: {a} из {b}
+files.dupes.groups_g_files_n_s	{g} среди {n} файлов · можно освободить {s}
+files.dupes.count.groups.one	{n} группа
+files.dupes.count.groups.few	{n} группы
+files.dupes.count.groups.many	{n} групп
+files.dupes.count.groups.other	{n} группы
+files.dupes.biggest_only	только самые большие группы
+files.dupes.none_among_n	Среди {n} файлов дубликатов нет
