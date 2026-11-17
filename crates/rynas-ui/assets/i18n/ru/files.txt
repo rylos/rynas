@@ -703,3 +703,4 @@ files.pane.reading_subfolders	чтение подпапок…
 files.pane.flat_view	плоский вид
 files.menus.flat_view	Плоский вид (файлы подпапок)
 files.settings.flat_view_keys	Плоский вид: все файлы подпапок
+files.sidebar.subfolders	Подпапки

@@ -206,6 +206,7 @@ class App {
 
   /** Reloads every pane showing one of these folders. */
   refreshFolders(paths) {
+    this.treeForget(paths);
     const set = new Set(paths);
     for (const p of this.allPanes()) if (set.has(p.path)) p.reload();
   }

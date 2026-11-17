@@ -687,4 +687,5 @@ export default {
   "files.pane.flat_view": "flat view",
   "files.menus.flat_view": "Flat view (files of the subfolders)",
   "files.settings.flat_view_keys": "Flat view: every file of the subfolders",
+  "files.sidebar.subfolders": "Subfolders",
 };

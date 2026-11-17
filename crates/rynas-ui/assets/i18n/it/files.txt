@@ -681,3 +681,4 @@ files.pane.reading_subfolders	lettura delle sottocartelle…
 files.pane.flat_view	vista piatta
 files.menus.flat_view	Vista piatta (file delle sottocartelle)
 files.settings.flat_view_keys	Vista piatta: tutti i file delle sottocartelle
+files.sidebar.subfolders	Sottocartelle
