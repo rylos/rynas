@@ -23,7 +23,7 @@ export const KEYS = [
   ["Ctrl+L", "files.settings.type_path"], ["/", "files.settings.fuzzy_filter_folder"], ["Ctrl+F", "files.settings.search_subfolders"],
   ["Ctrl+1 / Ctrl+2 / Ctrl+3", "files.settings.list_grid_columns"], ["Ctrl+B", "files.common.sidebar"], ["Ctrl+R", "files.common.refresh"],
   ["Ctrl+C / Ctrl+X / Ctrl+V", "files.settings.copy_cut_paste"], ["Ctrl+A", "files.common.select_all"], ["Ctrl+Shift+I", "files.common.invert_selection"],
-  ["+ / −", "files.select.select_deselect_pattern"], ["Ctrl+Shift+D", "files.select.select_differences_panes"],
+  ["+ / −", "files.select.select_deselect_pattern"], ["Ctrl+Shift+D", "files.select.select_differences_panes"], ["Ctrl+Z", "files.undo.undo_last"],
   ["Insert", "files.settings.select_move_on"], ["F2", "files.common.rename"], ["Ctrl+Shift+N", "files.common.new_folder"],
   ["Del", "files.common.move_recycle_bin"], ["Shift+Del", "files.common.delete_permanently"], ["Ctrl+D", "files.common.add_favorites"],
   ["Ctrl+Shift+C", "files.common.copy_path"], ["Ctrl+U", "files.settings.upload_files"], ["Ctrl+J", "files.common.transfers"], ["Ctrl+,", "files.common.settings"],

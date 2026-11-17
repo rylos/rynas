@@ -7,6 +7,7 @@ import { openSettings } from "./settings.js";
 import { isRemote } from "./conns.js";
 import { host } from "./host.js";
 import { selectByPattern, selectDifferences } from "./select.js";
+import { undo } from "./undo.js";
 
 export const keyMethods = {
   bindKeys() {
@@ -49,6 +50,7 @@ export const keyMethods = {
       const typingName = Date.now() - pane.typeahead.at < 900;
       if (!ctrl && !e.altKey && (e.code === "NumpadAdd" || (k === "+" && !typingName))) return run(() => selectByPattern(pane, "add"));
       if (!ctrl && !e.altKey && (e.code === "NumpadSubtract" || (k === "-" && !typingName))) return run(() => selectByPattern(pane, "remove"));
+      if (ctrl && !e.shiftKey && !e.altKey && k.toLowerCase() === "z") return run(() => undo());
       if (ctrl && k.toLowerCase() === "i") return run(() => this.toggleInfo());
       if (ctrl && k === "1") return run(() => pane.setView("list"));
       if (ctrl && k === "2") return run(() => pane.setView("grid"));

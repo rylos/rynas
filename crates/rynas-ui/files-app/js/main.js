@@ -11,6 +11,7 @@ import { baseName, parentOf, joinPath } from "./format.js";
 import { svg } from "./icons.js";
 import { $, toast } from "./ui.js";
 import * as transfers from "./transfers.js";
+import { initUndo } from "./undo.js";
 import { openSettings } from "./settings.js";
 import { moveFolderIcons } from "./iconpick.js";
 import { tabMethods } from "./tabs.js";
@@ -71,6 +72,7 @@ class App {
     this.bindGlobalDrop();
     this.bindUploadInputs();
     transfers.init(this);
+    initUndo(this);
     if (!init.shares) this.loadShares();
     if (!init.conns) this.loadConns();
     if (init.whoami) this.checkHealth(init.whoami);

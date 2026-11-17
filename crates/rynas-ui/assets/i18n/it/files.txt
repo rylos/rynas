@@ -628,3 +628,15 @@ files.pane.paste_checksum_compare	Incolla un checksum da confrontare
 files.pane.checksum_match	Uguale
 files.pane.checksum_different	Diverso
 files.pane.incomplete_answer	Risposta incompleta
+files.undo.undo_s	Annulla: {s}
+files.undo.undone_s	Annullato: {s}
+files.undo.nothing_to_undo	Niente da annullare
+files.undo.undo_last	Annulla l'ultima rinomina, cartella nuova, spostamento o copia
+files.undo.undo_copy_ask	Annullare la copia?
+files.undo.copy_n_d	Copia {n} in «{d}»
+files.undo.move_n_d	Sposta {n} in «{d}»
+files.undo.new_folder_n	Nuova cartella «{n}»
+files.undo.rename_a_b	Rinomina «{a}» in «{b}»
+files.undo.transfer_still_running	Il trasferimento è ancora in corso
+files.undo.folder_n_not_empty	La cartella «{n}» non è più vuota
+files.undo.nothing_left_n	Nessuno di questi elementi è più in «{n}»

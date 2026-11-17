@@ -18,6 +18,7 @@ import { mount } from "./host.js";
 import { serverAddress } from "./conns.js";
 import { changed as appChanged } from "./appdata.js";
 import { isReadOnly, readOnlyHere, atBackups, backupsToast, isBackupTop, isWholeBackup } from "./backups.js";
+import { recordRename, recordNewFolder, recordTransfer } from "./undo.js";
 
 export const actionMethods = {
   /** A text file the editor opens: not in an archive nor a read-only folder, 8 MB at most. */
@@ -189,7 +190,7 @@ export const actionMethods = {
   },
 
   /** `verify`: each file is read back and compared (xxHash3); a move deletes the originals only after that. */
-  transfer(op, paths, dest, verify = false) {
+  async transfer(op, paths, dest, verify = false) {
     if (!paths.length || !dest || dest === "/") return;
     if (archiveOf(dest)) return readOnlyToast();
     // a backup takes nothing in and gives nothing away: its files are copied out
@@ -202,7 +203,16 @@ export const actionMethods = {
     }
     if (paths.some((p) => dest === p || dest.startsWith(p + "/"))) return toast(t("files.actions.folder_cannot_go_inside_itself"), { kind: "error" });
     if (op === "move" && paths.every((p) => parentOf(p) === dest)) return;
-    transfers.start({ op, sources: paths, dest, verify });
+    // for Ctrl+Z: only the names the destination did not hold yet are undone
+    let fresh = null;
+    try {
+      const taken = new Set((await api.exists(dest, paths.map(baseName))).taken.map((x) => x.name));
+      fresh = new Set(paths.map(baseName).filter((n) => !taken.has(n)));
+    } catch {
+      // not known: the transfer runs, without an undo
+    }
+    const id = await transfers.start({ op, sources: paths, dest, verify });
+    recordTransfer(id, op, paths, dest, fresh);
   },
 
   async copyTo(pane, op, verify = false) {
@@ -287,6 +297,7 @@ export const actionMethods = {
     if (!name || name === e.name) return;
     try {
       await api.rename(e.path, name);
+      recordRename([[e.path, name]]);
       if (isDirLike(e)) moveFolderIcons(e.path, joinPath(parentOf(e.path), name));
       await pane.reload();
       pane.selectPath(joinPath(parentOf(e.path), name));
@@ -304,6 +315,7 @@ export const actionMethods = {
     if (!name) return;
     try {
       await api.mkdir(pane.path, name);
+      recordNewFolder(joinPath(pane.path, name));
       await pane.reload();
       pane.selectPath(joinPath(pane.path, name));
       appChanged(pane.path);

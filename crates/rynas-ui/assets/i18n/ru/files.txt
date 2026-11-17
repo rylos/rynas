@@ -646,3 +646,15 @@ files.pane.paste_checksum_compare	Вставьте контрольную сум
 files.pane.checksum_match	Совпадает
 files.pane.checksum_different	Не совпадает
 files.pane.incomplete_answer	Неполный ответ
+files.undo.undo_s	Отменить: {s}
+files.undo.undone_s	Отменено: {s}
+files.undo.nothing_to_undo	Нечего отменять
+files.undo.undo_last	Отменить последнее переименование, создание папки, перемещение или копирование
+files.undo.undo_copy_ask	Отменить копирование?
+files.undo.copy_n_d	Копирование ({n}) в «{d}»
+files.undo.move_n_d	Перемещение ({n}) в «{d}»
+files.undo.new_folder_n	Новая папка «{n}»
+files.undo.rename_a_b	Переименование «{a}» в «{b}»
+files.undo.transfer_still_running	Передача ещё выполняется
+files.undo.folder_n_not_empty	Папка «{n}» уже не пуста
+files.undo.nothing_left_n	Ни одного из этих элементов больше нет в «{n}»

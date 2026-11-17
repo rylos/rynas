@@ -12,6 +12,7 @@ import { openSettings } from "./settings.js";
 import { isRemote } from "./conns.js";
 import { isReadOnly, isBackupTop, hasNoSmbPath } from "./backups.js";
 import { selectByPattern, selectDifferences } from "./select.js";
+import { undo, undoLabel } from "./undo.js";
 
 export const menuMethods = {
   contextMenu(pane, entry, x, y) {
@@ -119,7 +120,10 @@ export const menuMethods = {
   moreMenu(pane, anchor) {
     const r = anchor.getBoundingClientRect();
     const fav = (prefs.favorites || []).some((f) => f.path === pane.path);
+    const undoing = undoLabel();
     openMenu(r.right - 240, r.bottom + 4, [
+      { label: undoing ? t("files.undo.undo_s", { s: undoing }) : t("files.undo.nothing_to_undo"), icon: "undo", key: "Ctrl+Z", disabled: !undoing, action: () => undo() },
+      "-",
       { label: t("files.common.select_all"), key: "Ctrl+A", action: () => pane.selectAll() },
       { label: t("files.common.invert_selection"), key: "Ctrl+Shift+I", action: () => pane.invertSelection() },
       { label: t("files.select.select_pattern_menu"), icon: "filter", key: "+", action: () => selectByPattern(pane, "add") },
