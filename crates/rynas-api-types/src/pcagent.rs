@@ -125,6 +125,20 @@ pub struct PcPlan {
     /// time. Agents older than 0.8.20 ignore it and start whenever a backup is due.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<String>,
+    /// Backups at set times instead of every `interval_hours`: a systemd calendar expression
+    /// (`*-*-* 02:00:00`, `Mon..Fri 21:00`), in the NAS's time zone. Due at its first time after
+    /// the last good run, so a time missed while the PC was off is caught up once,
+    /// `start_delay_min` after the agent starts (like `Persistent=true`). `None`: every
+    /// `interval_hours`. Agents older than 0.8.21 ignore it and keep the interval the NAS sends
+    /// them instead (about the calendar's spacing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<String>,
+    /// Also one backup at every start of the PC (`start_delay_min` after it; a restart of the
+    /// agent alone is not a start), however recent the last one, on top of the interval or the
+    /// calendar (after it, the interval counts from that backup; a calendar's next time still
+    /// runs). Off by default. Agents older than 0.8.21 ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub at_boot: bool,
 }
 
 fn default_freeze_max() -> u32 {
@@ -141,6 +155,8 @@ impl Default for PcPlan {
             freeze_max_secs: default_freeze_max(),
             paused: false,
             window: None,
+            calendar: None,
+            at_boot: false,
         }
     }
 }
@@ -729,12 +745,26 @@ impl AgentPlan {
                 every_h: (*hours).max(1),
                 delay_min: *after_boot_min,
                 window: self.plan.window.clone().filter(|w| crate::scheduler::week_window_valid(w)),
+                calendar: None,
+                at_boot: self.plan.at_boot,
+                shared: true,
+            },
+            // set times (0.8.21): the delay after start is the plan's, `interval_hours` the
+            // calendar's spacing (what an older agent follows, and the cap of the retries)
+            Some(crate::scheduler::TaskTrigger::Calendar { on_calendar, .. }) if !on_calendar.trim().is_empty() => AgentSchedule {
+                every_h: self.plan.interval_hours.max(1),
+                delay_min: self.plan.start_delay_min,
+                window: self.plan.window.clone().filter(|w| crate::scheduler::week_window_valid(w)),
+                calendar: Some(on_calendar.trim().to_string()),
+                at_boot: self.plan.at_boot,
                 shared: true,
             },
             _ => AgentSchedule {
                 every_h: self.plan.interval_hours.max(1),
                 delay_min: self.plan.start_delay_min,
                 window: None,
+                calendar: None,
+                at_boot: false,
                 shared: false,
             },
         }
@@ -748,6 +778,10 @@ pub struct AgentSchedule {
     pub delay_min: u32,
     /// The allowed start window (a valid one), when set.
     pub window: Option<String>,
+    /// Set times: a calendar expression (instead of every `every_h`).
+    pub calendar: Option<String>,
+    /// Also one backup at every start of the PC (its boot, not the agent's restart).
+    pub at_boot: bool,
     /// From the shared trigger (a NAS that knows skipped-start reports).
     pub shared: bool,
 }
@@ -759,10 +793,24 @@ pub const WINDOW_AGENT: (u32, u32, u32) = (0, 8, 20);
 /// [`WINDOW_AGENT`] starts whenever a backup is due (the overview draws it so, the settings
 /// warn); an unknown one is taken as current.
 pub fn agent_follows_window(agent_version: &str) -> bool {
+    agent_at_least(agent_version, WINDOW_AGENT)
+}
+
+/// The first agent version that follows [`PcPlan::calendar`].
+pub const CALENDAR_AGENT: (u32, u32, u32) = (0, 8, 21);
+
+/// The agent of this version follows a calendar plan: an older known one runs every
+/// `interval_hours` (the NAS sends it the calendar's spacing); an unknown one is taken as
+/// current.
+pub fn agent_follows_calendar(agent_version: &str) -> bool {
+    agent_at_least(agent_version, CALENDAR_AGENT)
+}
+
+fn agent_at_least(agent_version: &str, min: (u32, u32, u32)) -> bool {
     let mut p = agent_version.trim().trim_start_matches('v').split(['.', '-', '+']);
     let mut num = || p.next().and_then(|x| x.parse::<u32>().ok());
     match (num(), num(), num()) {
-        (Some(a), Some(b), Some(c)) => (a, b, c) >= WINDOW_AGENT,
+        (Some(a), Some(b), Some(c)) => (a, b, c) >= min,
         _ => true,
     }
 }
@@ -1891,7 +1939,7 @@ mod tests {
         // a plan of a 0.8.19 NAS (no trigger, no window, no zone): the old fields, no window
         let old_nas = r#"{"rev":7,"plan":{"interval_hours":6,"start_delay_min":15,"excludes":[],"freeze":"hot","freeze_max_secs":60,"paused":false},"method":"files"}"#;
         let p: AgentPlan = serde_json::from_str(old_nas).unwrap();
-        assert_eq!(p.schedule(), AgentSchedule { every_h: 6, delay_min: 15, window: None, shared: false });
+        assert_eq!(p.schedule(), AgentSchedule { every_h: 6, delay_min: 15, window: None, calendar: None, at_boot: false, shared: false });
         // a plan of an S6 NAS: what an older agent reads (it keeps the two old fields) and
         // what a new one follows (the trigger and the window)
         let window = format!("{}{}", "0".repeat(22), "1".repeat(146));
@@ -1911,7 +1959,7 @@ mod tests {
         assert_eq!(text, golden);
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!((v["plan"]["interval_hours"].as_u64(), v["plan"]["start_delay_min"].as_u64()), (Some(6), Some(15)));
-        assert_eq!(serde_json::from_str::<AgentPlan>(&text).unwrap().schedule(), AgentSchedule { every_h: 6, delay_min: 15, window: Some(window), shared: true });
+        assert_eq!(serde_json::from_str::<AgentPlan>(&text).unwrap().schedule(), AgentSchedule { every_h: 6, delay_min: 15, window: Some(window), calendar: None, at_boot: false, shared: true });
         // a plan without a window serializes as before S6 but for the trigger and the zone
         let plain = AgentPlan { plan: PcPlan::default(), ..new.clone() };
         assert!(!serde_json::to_string(&plain).unwrap().contains("window"));

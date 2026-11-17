@@ -15,6 +15,8 @@ use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 
+use crate::spec::CalendarSpec;
+
 /// Cells of a weekly window (one per hour, Sunday first).
 pub const CELLS: usize = 168;
 
@@ -126,10 +128,74 @@ pub fn interval_starts(
     to_ms: u64,
     max: usize,
 ) -> (Vec<u64>, bool) {
-    let mut out = Vec::new();
     if every_ms == 0 {
-        return (out, false);
+        return (Vec::new(), false);
     }
+    next_starts(first_due_ms, |end| Some(end.saturating_add(every_ms)), length_ms, window, tz, to_ms, max)
+}
+
+/// When a calendar backup is due (ignoring any window), the way `Persistent=true` catches up:
+/// the first time of the calendar after the end of the last good run (a time missed while
+/// the PC was off is due at once, and only once: the run that catches it up moves the base
+/// past every missed time), at least `delay_ms` after the agent started; never backed up:
+/// after the delay. `u64::MAX` when the calendar has no time left.
+pub fn calendar_due(spec: &CalendarSpec, tz: &TimeZone, last_ok_ms: Option<u64>, started_ms: u64, delay_ms: u64) -> u64 {
+    let after_start = started_ms.saturating_add(delay_ms);
+    match last_ok_ms {
+        None => after_start,
+        Some(ok) => next_time(spec, tz, ok).unwrap_or(u64::MAX).max(after_start),
+    }
+}
+
+/// When a backup "at every start of the PC" is due: `delay_ms` after the agent started, unless
+/// a good run ended since the PC booted (`boot_ms`: its boot, not the agent's start, so a
+/// restart of the agent alone runs nothing again); then not before the next boot (`u64::MAX`).
+pub fn boot_due(boot_ms: u64, last_ok_ms: Option<u64>, started_ms: u64, delay_ms: u64) -> u64 {
+    if last_ok_ms.is_some_and(|ok| ok >= boot_ms) {
+        return u64::MAX;
+    }
+    started_ms.saturating_add(delay_ms)
+}
+
+/// The calendar's first time after `ms`.
+fn next_time(spec: &CalendarSpec, tz: &TimeZone, ms: u64) -> Option<u64> {
+    spec.next_after(tz, ts(ms)?).map(|t| t.as_millisecond().max(0) as u64)
+}
+
+/// The next starts of a calendar schedule from `first_due_ms` (see [`interval_starts`]):
+/// each next one at the calendar's first time after the previous run's expected end.
+pub fn calendar_starts(
+    spec: &CalendarSpec,
+    first_due_ms: u64,
+    length_ms: u64,
+    window: Option<&str>,
+    tz: &TimeZone,
+    to_ms: u64,
+    max: usize,
+) -> (Vec<u64>, bool) {
+    next_starts(first_due_ms, |end| next_time(spec, tz, end), length_ms, window, tz, to_ms, max)
+}
+
+/// A PC's backup plan: due by its calendar (when it has one) or every `every_ms`, from the
+/// last good run, not before the delay after the agent's start. One rule for the agent's loop,
+/// the NAS's overview and previews.
+pub fn plan_due(calendar: Option<&CalendarSpec>, every_ms: u64, tz: &TimeZone, last_ok_ms: Option<u64>, started_ms: u64, delay_ms: u64) -> u64 {
+    match calendar {
+        Some(spec) => calendar_due(spec, tz, last_ok_ms, started_ms, delay_ms),
+        None => interval_due(last_ok_ms, every_ms, started_ms, delay_ms),
+    }
+}
+
+fn next_starts(
+    first_due_ms: u64,
+    next_due: impl Fn(u64) -> Option<u64>,
+    length_ms: u64,
+    window: Option<&str>,
+    tz: &TimeZone,
+    to_ms: u64,
+    max: usize,
+) -> (Vec<u64>, bool) {
+    let mut out = Vec::new();
     let mut due = first_due_ms;
     while let Some(at) = start_at(window, tz, due) {
         if at > to_ms {
@@ -139,9 +205,35 @@ pub fn interval_starts(
             return (out, true);
         }
         out.push(at);
-        due = at.saturating_add(length_ms).saturating_add(every_ms);
+        match next_due(at.saturating_add(length_ms)) {
+            Some(d) if d > at => due = d,
+            _ => break,
+        }
     }
     (out, false)
+}
+
+/// The hours between a calendar's next times (the median of the next eight gaps from `now_ms`),
+/// 1 to 168: what an agent that knows only intervals is told instead (older agents).
+pub fn calendar_every_h(spec: &CalendarSpec, tz: &TimeZone, now_ms: u64) -> u32 {
+    let mut times = Vec::new();
+    let mut at = now_ms;
+    while times.len() < 9 {
+        match next_time(spec, tz, at) {
+            Some(t) => {
+                times.push(t);
+                at = t;
+            }
+            None => break,
+        }
+    }
+    let mut gaps: Vec<u64> = times.windows(2).map(|w| w[1] - w[0]).collect();
+    if gaps.is_empty() {
+        return 24;
+    }
+    gaps.sort_unstable();
+    let h = (gaps[gaps.len() / 2] + 1_800_000) / 3_600_000;
+    h.clamp(1, 168) as u32
 }
 
 #[cfg(test)]
@@ -219,5 +311,45 @@ mod tests {
         // the length of a run counts (from the end of the last good one)
         let (s, cut) = interval_starts(0, h, h, None, &tz(), 5 * h, 2);
         assert_eq!((s, cut), (vec![0, 2 * h], true));
+    }
+
+    /// A calendar plan catches a missed time up once (the way `Persistent=true` does), after
+    /// the delay from the agent's start; inside the window when there is one.
+    #[test]
+    fn calendar_rules() {
+        let h = 3_600_000u64;
+        let daily = CalendarSpec::parse("*-*-* 02:00:00").unwrap();
+        // backed up yesterday at 02:10, PC off at 02:00 today, on at 08:00 with 10 min delay:
+        // due at 08:10, once
+        let last = ms("2026-11-16T02:10");
+        let start = ms("2026-11-17T08:00");
+        assert_eq!(calendar_due(&daily, &tz(), Some(last), start, 600_000), start + 600_000);
+        // after that run (08:12 end) the next is tomorrow at 02:00: no second catch-up
+        assert_eq!(calendar_due(&daily, &tz(), Some(start + 720_000), start, 600_000), ms("2026-11-18T02:00"));
+        // up all night: due at 02:00
+        assert_eq!(calendar_due(&daily, &tz(), Some(last), ms("2026-11-16T09:00"), 600_000), ms("2026-11-17T02:00"));
+        // never backed up: after the delay
+        assert_eq!(calendar_due(&daily, &tz(), None, start, 600_000), start + 600_000);
+        // a date in the past: never
+        let gone = CalendarSpec::parse("2020-01-01 00:00:00").unwrap();
+        assert_eq!(calendar_due(&gone, &tz(), Some(last), start, 0), u64::MAX);
+        // next starts: daily, or inside a 22–24 window (02:00 is outside: the next opening)
+        let (s, _) = calendar_starts(&daily, ms("2026-11-17T02:00"), 0, None, &tz(), ms("2026-11-19T12:00"), 10);
+        assert_eq!(s, vec![ms("2026-11-17T02:00"), ms("2026-11-18T02:00"), ms("2026-11-19T02:00")]);
+        let w = nightly(22, 24);
+        let (s, _) = calendar_starts(&daily, ms("2026-11-17T02:00"), 0, Some(&w), &tz(), ms("2026-11-18T23:00"), 10);
+        assert_eq!(s, vec![ms("2026-11-17T22:00"), ms("2026-11-18T22:00")]);
+        // the interval an older agent is told
+        assert_eq!(calendar_every_h(&daily, &tz(), last), 24);
+        assert_eq!(calendar_every_h(&CalendarSpec::parse("Mon *-*-* 03:00:00").unwrap(), &tz(), last), 168);
+        assert_eq!(calendar_every_h(&CalendarSpec::parse("*-*-* 00/6:00:00").unwrap(), &tz(), last), 6);
+        assert_eq!(plan_due(None, 24 * h, &tz(), Some(last), 0, 0), last + 24 * h);
+        // at every start: after the delay, however recent the last run of an earlier boot;
+        // not again in the same boot (an agent restart is not a boot)
+        let boot = ms("2026-11-17T08:00");
+        assert_eq!(boot_due(boot, Some(boot - 60_000), boot + 20_000, 600_000), boot + 620_000);
+        assert_eq!(boot_due(boot, None, boot + 20_000, 600_000), boot + 620_000);
+        assert_eq!(boot_due(boot, Some(boot + 900_000), boot + 3 * h, 600_000), u64::MAX);
+        assert_eq!(plan_due(Some(&daily), 24 * h, &tz(), Some(last), 0, 0), ms("2026-11-17T02:00"));
     }
 }

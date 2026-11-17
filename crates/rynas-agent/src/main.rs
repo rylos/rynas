@@ -345,9 +345,14 @@ fn status() -> Result<(), String> {
     }
     let p = &st.plan.plan;
     let sched = st.plan.schedule();
+    let when_runs = match &sched.calendar {
+        Some(c) => format!("at {c} (NAS time; a missed time {} min after the next start)", sched.delay_min),
+        None => format!("every {} h", sched.every_h),
+    };
+    let when_runs = if sched.at_boot { format!("{when_runs}, and at every start of the PC ({} min after it)", sched.delay_min) } else { when_runs };
     println!(
-        "plan         every {} h{}, {}{}",
-        sched.every_h,
+        "plan         {}{}, {}{}",
+        when_runs,
         if sched.window.is_some() { " inside the allowed window" } else { "" },
         if p.freeze == FreezeMode::Freeze { format!("freeze up to {} s", p.freeze_max_secs) } else { "read in use".into() },
         if p.paused { ", paused" } else { "" }

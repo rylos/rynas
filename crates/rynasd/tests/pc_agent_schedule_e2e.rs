@@ -233,4 +233,108 @@ async fn an_agent_with_a_window_starts_only_inside_it() {
     assert_ne!(held.rev, free.rev);
     gate.set_pause_all(None).unwrap();
     assert_eq!(plan_of().await, free);
+
+    // 4. The delay after start (0.8.21): the plan, and the agent's own record of its last good
+    //    backup (its state), set for each case; `t0` is when the agent starts
+    let plan_with = |f: Box<dyn FnOnce(&mut rynas_api_types::pcagent::PcPlan) + Send>| {
+        let app = app.clone();
+        async move {
+            let (_, b) = call(&app, "GET", "/v1/pcbackup/devices/laptop", None).await;
+            let d: Value = serde_json::from_slice(&b).unwrap();
+            let mut settings: PcDeviceSettings = serde_json::from_value(d["device"]["settings"].clone()).unwrap();
+            settings.plan.window = None;
+            f(&mut settings.plan);
+            let (s, b) = call(&app, "PUT", "/v1/pcbackup/devices/laptop", Some(serde_json::to_value(&settings).unwrap())).await;
+            assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        }
+    };
+    let last_ok = |ms: Option<u64>| {
+        let p = agent_dir.join("state.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        v["last_ok_ms"] = ms.map_or(Value::Null, Value::from);
+        v["failures"] = Value::from(0);
+        v.as_object_mut().unwrap().remove("skip_noted");
+        std::fs::write(&p, v.to_string()).unwrap();
+    };
+    // a run of `secs` seconds: the runs it added, and when the agent started
+    let run_for = |secs: u64| {
+        let (b, d) = (bin.clone(), agent_dir.clone());
+        let before = rows().len();
+        let t0 = rynas_tasks::now_ms();
+        let h = history.clone();
+        async move {
+            tokio::task::spawn_blocking(move || run_agent(&b, &d, secs)).await.unwrap();
+            let all = h.all_runs(Some("pc:laptop"), None, None, None, 100).unwrap();
+            (all[..all.len() - before].to_vec(), t0)
+        }
+    };
+    let boot_ms = std::fs::read_to_string("/proc/stat")
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("btime ")?.trim().parse::<u64>().ok())
+        .unwrap()
+        * 1000;
+    let in_delay = |new: &[TaskRun], t0: u64| {
+        assert_eq!(new.len(), 1, "one run: {new:?}");
+        let s = new[0].start_ms.unwrap();
+        assert!(s >= t0 + 60_000 && s <= t0 + 75_000, "started {} s after the agent", (s - t0) / 1000);
+        assert!(new[0].ok && new[0].trigger == Some(RunTrigger::Timer), "{:?}", new[0]);
+    };
+    // 4a. never backed up, every hour, 1 minute after start: nothing for a minute, then once
+    plan_with(Box::new(|p| {
+        p.interval_hours = 1;
+        p.start_delay_min = 1;
+    }))
+    .await;
+    last_ok(None);
+    let (new, t0) = run_for(80).await;
+    in_delay(&new, t0);
+    // 4b. not due (backed up just now): a start of the agent runs nothing, delay or not
+    plan_with(Box::new(|p| p.start_delay_min = 0)).await;
+    let (new, _) = run_for(8).await;
+    assert!(new.is_empty(), "{new:?}");
+    // 4c. set times, a time missed while the PC was off (last good backup two days ago): caught
+    //     up once, a minute after start, not twice
+    plan_with(Box::new(|p| {
+        p.calendar = Some("*-*-* 03:00:00".into());
+        p.start_delay_min = 1;
+    }))
+    .await;
+    last_ok(Some(rynas_tasks::now_ms() - 2 * 86_400_000));
+    let (new, t0) = run_for(80).await;
+    in_delay(&new, t0);
+    let (new, _) = run_for(8).await;
+    assert!(new.is_empty(), "the next time is tomorrow at 03:00: {new:?}");
+    // 4d. also at every start of the PC: the last good backup just before this boot (an
+    //     earlier boot), every 168 h: without the switch nothing is due; with it one backup a
+    //     minute after start, and none again in the same boot (a restart of the agent)
+    plan_with(Box::new(|p| {
+        p.calendar = None;
+        p.interval_hours = 168;
+        p.start_delay_min = 0;
+        p.at_boot = false;
+    }))
+    .await;
+    last_ok(Some(boot_ms - 60_000));
+    let (new, _) = run_for(8).await;
+    assert!(new.is_empty(), "{new:?}");
+    plan_with(Box::new(|p| {
+        p.at_boot = true;
+        p.start_delay_min = 1;
+    }))
+    .await;
+    let (new, t0) = run_for(80).await;
+    in_delay(&new, t0);
+    plan_with(Box::new(|p| p.start_delay_min = 0)).await;
+    let (new, _) = run_for(8).await;
+    assert!(new.is_empty(), "same boot: {new:?}");
+    // an agent older than 0.8.21 is told the calendar's spacing
+    plan_with(Box::new(|p| {
+        p.at_boot = false;
+        p.calendar = Some("Mon *-*-* 03:00:00".into());
+    }))
+    .await;
+    let weekly = plan_of().await;
+    assert_eq!(weekly.plan.interval_hours, 168);
+    assert!(matches!(weekly.trigger, Some(rynas_api_types::scheduler::TaskTrigger::Calendar { .. })));
 }

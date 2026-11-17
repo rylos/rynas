@@ -1304,6 +1304,19 @@ pub fn check_settings(s: &PcDeviceSettings) -> Res<()> {
     if s.plan.window.as_deref().is_some_and(|w| !rynas_api_types::scheduler::week_window_valid(w)) {
         return Err(Error::invalid("plan.window", "168 cells of 0 or 1 with at least one 1"));
     }
+    // set times: a calendar expression systemd would take, with a time left to run at
+    if let Some(c) = &s.plan.calendar {
+        let c = c.trim();
+        if c.is_empty() || c.len() > 256 {
+            return Err(Error::invalid("plan.calendar", "a calendar expression"));
+        }
+        rynas_scheduler::calendar::plausible_calendar(c).map_err(|e| Error::invalid("plan.calendar", e))?;
+        let spec = rynas_schedule::CalendarSpec::parse_with(c, |z| jiff::tz::TimeZone::get(z).is_ok())
+            .map_err(|e| Error::invalid("plan.calendar", e.to_string()))?;
+        if spec.next_after(&rynas_power::system_tz(), jiff::Timestamp::now()).is_none() {
+            return Err(Error::invalid("plan.calendar", "the expression never runs again"));
+        }
+    }
     if s.plan.excludes.len() > 200
         || s
             .plan
@@ -1844,23 +1857,38 @@ struct PlanQuery {
 }
 
 /// The plan an agent receives: the PC's settings, the shared trigger (S6; the two old fields
-/// stay for older agents, R5), the NAS's zone (the window's), and `paused` while every task
-/// of the NAS is paused (with its own revision, so every agent takes it).
+/// stay for older agents, R5: with set times `interval_hours` is the calendar's spacing), the
+/// NAS's zone (the window's and the calendar's), and `paused`
+/// while every task of the NAS is paused (with its own revision, so every agent takes it).
 fn plan_of(d: &Dev, paused_all: bool) -> AgentPlan {
     let mut plan = d.settings.plan.clone();
     plan.paused |= paused_all;
+    let tz = rynas_power::system_tz();
+    let (trigger, every_h) = plan_trigger(&plan, &tz, now_ms());
+    plan.interval_hours = every_h;
     AgentPlan {
         rev: if paused_all { d.rev | PAUSED_ALL_REV } else { d.rev },
-        trigger: Some(rynas_api_types::scheduler::TaskTrigger::Interval {
-            hours: plan.interval_hours,
-            after_boot_min: plan.start_delay_min,
-        }),
-        tz: rynas_power::system_tz().iana_name().filter(|n| !n.is_empty()).map(str::to_string),
+        trigger: Some(trigger),
+        tz: tz.iana_name().filter(|n| !n.is_empty()).map(str::to_string),
         tz_posix: rynas_power::system_posix(),
         plan,
         command: d.command.clone(),
         method: d.settings.method,
     }
+}
+
+/// A PC plan as the shared trigger (every N hours, or set times) and the interval an agent
+/// that knows only intervals follows instead (older than 0.8.21).
+pub fn plan_trigger(plan: &PcPlan, tz: &jiff::tz::TimeZone, now: u64) -> (rynas_api_types::scheduler::TaskTrigger, u32) {
+    use rynas_api_types::scheduler::TaskTrigger;
+    // ("also at every start of the PC" is the plan's `at_boot`, on top of either)
+    if let Some(c) = plan.calendar.as_deref().map(str::trim).filter(|c| !c.is_empty())
+        && let Ok(spec) = rynas_schedule::CalendarSpec::parse(c)
+    {
+        let every = rynas_schedule::window::calendar_every_h(&spec, tz, now);
+        return (TaskTrigger::Calendar { on_calendar: c.to_string(), cron: None, persistent: true, randomized_delay_s: 0 }, every);
+    }
+    (TaskTrigger::Interval { hours: plan.interval_hours, after_boot_min: plan.start_delay_min }, plan.interval_hours)
 }
 
 async fn plan_get(

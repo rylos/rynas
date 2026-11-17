@@ -1061,7 +1061,12 @@ impl AgentCtl {
             // paused under a stronger chip (failed, unreachable): said on the meta line, with the
             // last success the paused chip would carry
             let paused_chip = paused && p.state != PcState::Failed && !unreachable(&p);
-            let every = if p.settings.plan.window.is_some() { "pcb.agent.every_h_window" } else { "pcb.agent.every_h" };
+            let every = match (p.settings.plan.calendar.is_some(), p.settings.plan.window.is_some()) {
+                (true, true) => "pcb.agent.calendar_window",
+                (true, false) => "pca.f.mode.calendar",
+                (false, true) => "pcb.agent.every_h_window",
+                (false, false) => "pcb.agent.every_h",
+            };
             let plan = if paused { (!paused_chip).then(|| t("pca.f.paused").to_string()) } else { Some(tf(every, &[("n", &p.settings.plan.interval_hours.to_string())])) };
             let last_ok = (!paused_chip).then_some(last_ok);
             let agent = tf("pcb.agent_os", &[("os", &p.os), ("arch", &p.arch), ("v", &p.agent_version)]);

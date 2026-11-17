@@ -272,6 +272,28 @@ pub fn build(
                         }
                     }
                 }
+                // a PC's plan at set times (agents from 0.8.21): the calendar's first time after
+                // the last good backup (a missed one at once), each next one after the run's
+                // end, inside the window ("also at every start of the PC" is not foreseeable)
+                (None, None) => {
+                    let own_window = job.window.clone();
+                    if let Some(TaskTrigger::Calendar { on_calendar, .. }) = job.trigger.clone()
+                        && let Ok(spec) = CalendarSpec::parse(&on_calendar)
+                    {
+                        let window = own_window.as_deref().filter(|w| week_window_valid(w));
+                        let first = rynas_schedule::window::calendar_due(&spec, tz, j.last_ms, 0, 0).max(now.min(to));
+                        let (s, cut) = rynas_schedule::window::calendar_starts(&spec, first, dur.unwrap_or(0), window, tz, to, MAX_RUNS_PER_JOB);
+                        job.truncated = cut;
+                        starts.extend(s.into_iter().filter(|st| *st >= from).map(|st| (st, st + dur.unwrap_or(DEFAULT_MS), dur.is_some())));
+                    }
+                    if let Some(w) = job.window.as_deref().filter(|w| week_window_valid(w))
+                        && job.trigger.is_some()
+                    {
+                        for (s, e) in blocks(w, tz, from, to) {
+                            windows.push(OverviewWindow { kind: OverviewWindowKind::Start, job: Some(job.id.clone()), start_ms: s, end_ms: e });
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -626,6 +648,41 @@ mod tests {
         let starts: Vec<u64> = o.runs.iter().map(|r| r.start_ms).collect();
         assert_eq!(starts, vec![ms("2026-11-17T15:00", &tz), ms("2026-11-17T21:30", &tz)]);
         assert!(o.windows.is_empty());
+    }
+
+    /// A PC's plan at set times: a missed time at once, then the calendar's times.
+    #[test]
+    fn a_pc_plan_at_set_times() {
+        let tz = TimeZone::get("Europe/Rome").unwrap();
+        let from = ms("2026-11-17T12:00", &tz);
+        let pc = |trigger: TaskTrigger| JobInput {
+            job: OverviewJob {
+                id: "pc:laptop".into(),
+                name: "laptop".into(),
+                owner: OverviewOwner::PcBackup,
+                action: None,
+                enabled: true,
+                system: false,
+                paused: false,
+                estimate_ms: Some(600_000),
+                estimate_runs: 3,
+                resources: vec![],
+                maintenance: false,
+                trigger: Some(trigger),
+                every_h: None,
+                window: None,
+                truncated: false,
+            },
+            task: None,
+            claims: vec![],
+            resources: vec![],
+            last_ms: Some(ms("2026-11-16T02:10", &tz)),
+            next_ms: None,
+        };
+        let daily = TaskTrigger::Calendar { on_calendar: "*-*-* 02:00:00".into(), cron: None, persistent: true, randomized_delay_s: 0 };
+        let o = build(vec![pc(daily)], None, &tz, from, ms("2026-11-19T12:00", &tz), from, &|_| vec![]);
+        let starts: Vec<u64> = o.runs.iter().map(|r| r.start_ms).collect();
+        assert_eq!(starts, vec![from, ms("2026-11-18T02:00", &tz), ms("2026-11-19T02:00", &tz)]);
     }
 
     #[test]

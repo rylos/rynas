@@ -5192,6 +5192,7 @@ pcb.agent.title	rynas-agent
 pcb.agent.unpaired	Nessun rynas-agent è ancora abbinato a questo PC. Crea un codice, installa l'agente sul PC ed esegui il comando di abbinamento: il PC prende il nome di questa cartella.
 pcb.agent.every_h	Ogni {n} h
 pcb.agent.every_h_window	Ogni {n} h, dentro la finestra consentita
+pcb.agent.calendar_window	A orari fissi, dentro la finestra consentita
 pcb.agent.last_run	Sottovolumi dell'ultima esecuzione
 pcb.st.no_key	In attesa della chiave
 pcb.last_ok_on	Ultimo riuscito {when}
@@ -5521,6 +5522,13 @@ pca.f.interval	Ogni (ore)
 pca.f.interval_help	1–168.
 pca.f.delay	Dopo l'avvio (minuti)
 pca.f.delay_help	Un backup in scadenza aspetta tanto dopo l'avvio del PC.
+pca.f.delay_calendar_help	Un backup in scadenza aspetta tanto dopo l'avvio del PC. Un orario perso mentre il PC era spento viene recuperato una volta, tanto dopo l'avvio.
+pca.f.when	Quando
+pca.f.mode.every	Ogni N ore
+pca.f.mode.calendar	A orari fissi
+pca.f.at_boot	Anche a ogni avvio del PC
+pca.f.at_boot_help	Un backup in più a ogni avvio del PC, dopo il ritardo dall'avvio, anche se l'ultimo è recente. La pianificazione qui sopra continua a valere. Il solo riavvio dell'agente non conta.
+pca.f.old_agent_mode	L'agente di questo PC ({version}) non conosce gli orari fissi né i backup all'avvio: finché non viene aggiornato alla 0.8.21 o successiva continua a fare backup a intervalli regolari, con frequenza simile.
 pca.f.consistency	Filesystem senza snapshot
 pca.f.read	ext e XFS senza LVM
 pca.f.hot	Lettura in uso

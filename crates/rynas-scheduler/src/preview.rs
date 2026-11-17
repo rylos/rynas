@@ -133,6 +133,29 @@ pub fn preview(req: &SchedulePreviewRequest, nas: &TimeZone, now: Timestamp) -> 
             };
         }
     };
+    // a PC's plan at set times (its last good run or its allowed window given): the agent's
+    // starts, a time missed since the last run at once (`rynas_schedule::window`)
+    let pc_window = req.window.as_deref().map(str::trim).filter(|w| !w.is_empty());
+    if pc_window.is_some() || req.last_ms.is_some() {
+        if pc_window.is_some_and(|w| !rynas_schedule::window::valid(w)) {
+            return invalid(&tz_name, "a weekly window is 168 characters 0/1 with at least one 1");
+        }
+        let now_ms = now.as_millisecond().max(0) as u64;
+        let first = rynas_schedule::window::calendar_due(&spec, &tz, req.last_ms, 0, 0).max(now_ms);
+        let (starts, _) = rynas_schedule::window::calendar_starts(&spec, first, 0, pc_window, &tz, u64::MAX, count);
+        return SchedulePreview {
+            normalized: spec.to_string(),
+            preset: Recurrence::from_spec(&spec),
+            no_next_run: starts.is_empty(),
+            runs: starts
+                .iter()
+                .filter_map(|ms| Timestamp::from_millisecond(i64::try_from(*ms).ok()?).ok())
+                .map(|t| run_of(t, &tz))
+                .collect(),
+            on_calendar: expr,
+            ..ok
+        };
+    }
     let runs = spec.next_runs(&tz, now, count);
     // the zone the expression runs in: its own suffix, else the preview's
     let own = if spec.utc {

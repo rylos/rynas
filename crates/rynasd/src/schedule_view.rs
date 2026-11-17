@@ -117,6 +117,14 @@ pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> R
                 .filter_map(|r| r.ended_ms.checked_sub(r.started_ms))
                 .collect();
             let estimate_ms = median(durations.clone());
+            // what the agent really follows: set times and "at every start" from 0.8.21, the
+            // interval the NAS sends instead to an older one
+            let (shared, every) = crate::pc_agent::plan_trigger(plan, &rynas_power::system_tz(), now);
+            let (trigger, every_h) = match shared {
+                TaskTrigger::Interval { .. } => (None, Some(every)),
+                t if rynas_api_types::pcagent::agent_follows_calendar(&d.agent_version) => (Some(t), None),
+                _ => (None, Some(every)),
+            };
             jobs.push(JobInput {
                 job: OverviewJob {
                     id: crate::pc_agent::task_id_of(name),
@@ -130,8 +138,8 @@ pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> R
                     estimate_runs: durations.len().min(255) as u8,
                     resources: Vec::new(),
                     maintenance: false,
-                    trigger: None,
-                    every_h: Some(plan.interval_hours),
+                    trigger,
+                    every_h,
                     // an agent older than 0.8.20 ignores the window: drawn as it runs
                     window: plan
                         .window

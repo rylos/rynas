@@ -3,7 +3,9 @@
 # service loop against rynasd's agent routes on 127.0.0.1 (crates/rynasd/tests/
 # pc_agent_schedule_e2e.rs). An agent whose allowed window is closed does not start and its
 # skipped start is in the NAS's scheduler history; with the window open it starts at once and
-# its run is there too; Pause all reaches the plan an agent receives.
+# its run is there too; Pause all reaches the plan an agent receives; the delay after start
+# holds (never backed up: one run a minute after start; not due: none), a calendar time missed
+# while the PC was off is caught up once, and "also at every start" runs once per boot.
 #
 #   packaging/test-pcbackup-schedule.sh
 #

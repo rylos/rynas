@@ -33,20 +33,45 @@ pub fn install_signals() {
     }
 }
 
-/// When the next scheduled backup is due (ms), ignoring the pause and the window: the
-/// interval after the last good run, at least the delay after the start, a failed run again
-/// after 5, 10, 20… minutes (never later than the interval). The rules are
+/// When the next scheduled backup is due (ms), ignoring the pause and the window: by the
+/// plan's calendar (its first time after the last good run) or every so many hours after the
+/// last good run, and also at every start of the PC when the plan says so; at least the delay after the start; a failed
+/// run again after 5, 10, 20… minutes (never later than the interval). The rules are
 /// `rynas_schedule::window`'s, the same as the NAS's overview.
 pub fn due_ms(st: &State, started_ms: u64) -> u64 {
+    // the boot unknown: the agent's start stands for it
+    let boot = boot_ms();
+    due_ms_at(st, started_ms, if boot == 0 { started_ms } else { boot })
+}
+
+/// [`due_ms`] with the PC's boot time given.
+pub fn due_ms_at(st: &State, started_ms: u64, boot_ms: u64) -> u64 {
+    use rynas_schedule::window;
     let s = st.plan.schedule();
     let interval = u64::from(s.every_h) * 3_600_000;
-    let due = rynas_schedule::window::interval_due(st.last_ok_ms, interval, started_ms, u64::from(s.delay_min) * 60_000);
+    let delay = u64::from(s.delay_min) * 60_000;
+    // an expression this agent cannot read (it never should): the interval
+    let spec = s.calendar.as_deref().and_then(|c| rynas_schedule::CalendarSpec::parse(c).ok());
+    let mut due = window::plan_due(spec.as_ref(), interval, &zone(&st.plan), st.last_ok_ms, started_ms, delay);
+    // also at every start of the PC: whichever comes first (after the boot's backup the
+    // interval counts from it; a calendar's next time still comes)
+    if s.at_boot {
+        due = due.min(window::boot_due(boot_ms, st.last_ok_ms, started_ms, delay));
+    }
     // a failed run: again after 5, 10, 20… minutes, never later than the interval
     let retry = match (st.failures, st.last_attempt_ms) {
         (n, Some(at)) if n > 0 => at + ((5 * 60_000u64) << n.min(6)).min(interval),
         _ => 0,
     };
     due.max(retry)
+}
+
+/// When the PC booted (ms since the epoch: `btime` of `/proc/stat`), 0 when unknown.
+pub fn boot_ms() -> u64 {
+    std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse::<u64>().ok()))
+        .map_or(0, |s| s * 1000)
 }
 
 /// The zone of the allowed window: the NAS's (sent in the plan: its name, else its POSIX
@@ -470,5 +495,66 @@ mod tests {
         for t in [RunTrigger::Manual, RunTrigger::Retry, RunTrigger::Timer] {
             assert_eq!(trigger_of(Some(trigger_word(t))), t);
         }
+    }
+
+    /// Set times (0.8.21): a time missed while the PC was off is caught up once, the delay
+    /// after the agent's start; a NAS that sends the calendar is followed, the plan's interval
+    /// (the calendar's spacing, for older agents) is not.
+    #[test]
+    fn calendar_plans() {
+        let tz = TimeZone::get("Europe/Rome").unwrap();
+        let mut st = State::default();
+        st.plan.tz = Some("Europe/Rome".into());
+        st.plan.plan.interval_hours = 24;
+        st.plan.plan.start_delay_min = 10;
+        st.plan.trigger = Some(TaskTrigger::Calendar { on_calendar: "*-*-* 02:00:00".into(), cron: None, persistent: true, randomized_delay_s: 0 });
+        // last good backup yesterday 02:05; the PC starts today at 08:00 (02:00 missed)
+        st.last_ok_ms = Some(rome_ms("2026-11-16T02:05"));
+        let start = rome_ms("2026-11-17T08:00");
+        assert_eq!(due_ms_at(&st, start, start), start + 600_000);
+        assert_eq!(decide(&st, start, start + 300_000, &tz), Decision::Idle);
+        assert_eq!(decide(&st, start, start + 600_000, &tz), Decision::Start(RunTrigger::Timer));
+        // that run ends at 08:12: tomorrow at 02:00, no second catch-up
+        st.last_ok_ms = Some(start + 720_000);
+        assert_eq!(next_due(&st, start, start + 720_000), Some(rome_ms("2026-11-18T02:00")));
+        assert_eq!(decide(&st, start, rome_ms("2026-11-17T23:00"), &tz), Decision::Idle);
+        // with a window 22–24 the 02:00 time is outside it: the next opening
+        st.plan.plan.window = Some(night());
+        assert_eq!(next_due(&st, start, start + 720_000), Some(rome_ms("2026-11-18T22:00")));
+    }
+
+    /// Also at every start of the PC (0.8.21, on top of the interval or the calendar): the
+    /// delay after start, however recent the last backup of an earlier boot; once per boot (a
+    /// restart of the agent alone runs nothing); the interval then counts from that backup, a
+    /// calendar's next time still comes.
+    #[test]
+    fn also_at_every_start() {
+        let mut st = State::default();
+        st.plan.plan.start_delay_min = 5;
+        st.plan.plan.interval_hours = 24;
+        st.plan.plan.at_boot = true;
+        st.plan.trigger = Some(TaskTrigger::Interval { hours: 24, after_boot_min: 5 });
+        let boot = rome_ms("2026-11-17T08:00");
+        let started = boot + 20_000;
+        // backed up 10 minutes before this boot: due anyway, after the delay
+        st.last_ok_ms = Some(boot - 600_000);
+        assert_eq!(due_ms_at(&st, started, boot), started + 300_000);
+        // without the switch: 24 h after that backup
+        st.plan.plan.at_boot = false;
+        assert_eq!(due_ms_at(&st, started, boot), boot - 600_000 + 24 * 3_600_000);
+        st.plan.plan.at_boot = true;
+        // the backup of this boot done (08:12): the agent restarted at 11:00 runs nothing new;
+        // the interval counts from that backup
+        st.last_ok_ms = Some(started + 400_000);
+        assert_eq!(due_ms_at(&st, rome_ms("2026-11-17T11:00"), boot), started + 400_000 + 24 * 3_600_000);
+        // with a calendar at 20:00: the boot's backup does not replace it
+        st.plan.trigger = Some(TaskTrigger::Calendar { on_calendar: "*-*-* 20:00:00".into(), cron: None, persistent: true, randomized_delay_s: 0 });
+        st.plan.tz = Some("Europe/Rome".into());
+        assert_eq!(due_ms_at(&st, started, boot), rome_ms("2026-11-17T20:00"));
+        // a failed boot backup is tried again (5, 10, 20… minutes)
+        st.last_ok_ms = Some(boot - 600_000);
+        st.failures = 1;
+        st.last_attempt_ms = Some(started + 300_000);
+        assert_eq!(due_ms_at(&st, started, boot), started + 300_000 + 600_000);
     }
 }

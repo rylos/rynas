@@ -1114,10 +1114,14 @@ fn backup_pending(reg: &Registry, group: &str, now: u64, paused_all: bool) -> bo
         let online = d.last_seen_ms.is_some_and(|t| now.saturating_sub(t) < AGENT_ONLINE_MS);
         // a backup due outside its allowed window waits for the window, not now; while
         // every task is paused the agents' plans are paused too (S6)
-        let due = !d.settings.plan.paused
+        // (the agent's own rules; "also at every start" is not foreseeable here)
+        let p = &d.settings.plan;
+        let tz = rynas_power::system_tz();
+        let spec = p.calendar.as_deref().and_then(|c| rynas_schedule::CalendarSpec::parse(c).ok());
+        let due = !p.paused
             && !paused_all
-            && d.last_ok_ms.is_none_or(|t| now.saturating_sub(t) >= u64::from(d.settings.plan.interval_hours) * 3_600_000)
-            && d.settings.plan.window.as_deref().is_none_or(|w| rynas_schedule::window::is_open(w, &rynas_power::system_tz(), now));
+            && rynas_schedule::window::plan_due(spec.as_ref(), u64::from(p.interval_hours) * 3_600_000, &tz, d.last_ok_ms, 0, 0) <= now
+            && p.window.as_deref().is_none_or(|w| rynas_schedule::window::is_open(w, &tz, now));
         d.group == group && !d.revoked && online && (d.command.is_some() || due)
     })
 }

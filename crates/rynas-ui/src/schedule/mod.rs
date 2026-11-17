@@ -152,6 +152,44 @@ impl ScheduleEditor {
         p.jitter_s = Some(self.random_s.with_untracked(|v| v.trim().parse().unwrap_or(0)));
     }
 
+    /// The calendar to store (`OnCalendar=` text; a crontab line as the preview converted it),
+    /// or the i18n key of what is wrong. For editors made from a calendar trigger.
+    pub fn on_calendar(self) -> Result<String, &'static str> {
+        match self.trigger()? {
+            TaskTrigger::Calendar { on_calendar, cron: None, .. } => Ok(on_calendar),
+            TaskTrigger::Calendar { cron: Some(_), .. } => self
+                .preview
+                .with_untracked(|p| p.as_ref().filter(|p| p.valid && !p.on_calendar.is_empty()).map(|p| p.on_calendar.clone()))
+                .ok_or("sch.v.calendar"),
+            _ => Err("sch.v.calendar"),
+        }
+    }
+
+    /// The calendar expression being edited, read reactively (`None`: not valid yet, or a
+    /// crontab line).
+    pub fn expression_now(self) -> Option<String> {
+        self.draft.with(Draft::expression).ok().filter(|(_, s)| *s == CalendarSyntax::Calendar).map(|(e, _)| e)
+    }
+
+    /// The calendar part alone (presets, fields, errors, the next times), for owners whose
+    /// catch-up and random delay are fixed (a PC's backups: catch-up once at its next start).
+    pub fn view_calendar(self) -> AnyView {
+        let e = self;
+        view! {
+            {select_field(
+                "sch.f.repeat",
+                None,
+                Preset::OPTIONS,
+                Signal::derive(move || e.draft.with(|d| d.preset.code().to_string())),
+                Callback::new(move |v: String| e.draft.update(|d| d.switch_to(Preset::parse(&v)))),
+            )}
+            {fields(e)}
+            {draft_error(e)}
+            {preview(e)}
+        }
+        .into_any()
+    }
+
     /// Trigger kind, preset fields, inline errors, preview of the next runs.
     pub fn view(self, allow_manual: bool) -> AnyView {
         let e = self;
