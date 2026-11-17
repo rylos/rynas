@@ -342,7 +342,7 @@ echo "$BODY" | jq -e 'any(.conflicts[]; .kind == "maintenance" and (.first == "m
 echo "$BODY" | jq -e 'any(.windows[]; .kind == "maintenance")' >/dev/null || fail "overview: no window band"
 echo "$BODY" | jq -e 'any(.jobs[]; .id == "apt-upgrade" and .system)' >/dev/null || fail "overview: apt-upgrade missing"
 api GET '/scheduler/runs?outcome=skipped&limit=200'; expect 200 runs
-echo "$BODY" | jq -e 'any(.runs[]; .task_id == "apt-upgrade" and .skipped == "paused_all") and (.names["apt-upgrade"] | length > 0)' >/dev/null \
+echo "$BODY" | jq -e 'any(.runs[]; .task_id == "slow" and .skipped == "paused") and .names.slow == "slow" and all(.runs[]; .skipped != null)' >/dev/null \
     || fail "runs: $BODY"
 api PUT /scheduler/maintenance-window '{"window":null}'; expect 200 "maintenance window off"
 api DELETE /scheduler/tasks/mx; api DELETE /scheduler/tasks/my; api DELETE /scheduler/tasks/mscrub; apply
