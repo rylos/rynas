@@ -600,6 +600,27 @@ files.appdata.restart	Riavvia
 files.appdata.restarting_s	Riavvio di {s} avviato
 files.transfers.interrupted_restart_nas	Interrotto da un riavvio del NAS
 files.transfers.transfer_speed_chart	Grafico della velocità del trasferimento
+files.select.select_pattern_menu	Seleziona per modello…
+files.select.deselect_pattern_menu	Deseleziona per modello…
+files.select.select_pattern	Seleziona per modello
+files.select.deselect_pattern	Deseleziona per modello
+files.select.select_deselect_pattern	Seleziona o deseleziona per modello
+files.select.select_differences	Seleziona le differenze
+files.select.select_differences_panes	Seleziona le differenze tra i due pannelli
+files.select.pattern	Modello
+files.select.pattern_hint	* qualsiasi testo, ? un carattere, [abc] uno di questi, [!abc] nessuno di questi; più modelli separati da ;
+files.select.regex	Espressione regolare
+files.select.invalid_regex	Espressione regolare non valida
+files.select.files_only	Solo file, non cartelle
+files.select.add	Aggiungi
+files.select.only_these	Solo questi
+files.select.remove	Togli
+files.select.select	Seleziona
+files.select.deselect	Deseleziona
+files.select.count.matches.one	{n} elemento corrisponde
+files.select.count.matches.other	{n} elementi corrispondono
+files.select.differences_a_b	Differenze: {a} a sinistra, {b} a destra
+files.select.same_items	Le due cartelle contengono gli stessi elementi
 files.pane.checksum	Checksum
 files.pane.algorithm	Algoritmo
 files.pane.checksum_copied	Checksum copiato

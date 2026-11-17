@@ -6,6 +6,7 @@ import * as transfers from "./transfers.js";
 import { openSettings } from "./settings.js";
 import { isRemote } from "./conns.js";
 import { host } from "./host.js";
+import { selectByPattern, selectDifferences } from "./select.js";
 
 export const keyMethods = {
   bindKeys() {
@@ -43,6 +44,11 @@ export const keyMethods = {
       if (typing) return;
 
       if (ctrl && k.toLowerCase() === "i" && e.shiftKey) return run(() => pane.invertSelection());
+      if (ctrl && e.shiftKey && k.toLowerCase() === "d" && this.isSplit()) return run(() => selectDifferences(...this.current.panes));
+      // + and -: not in the middle of a name being typed (letters jump to a name)
+      const typingName = Date.now() - pane.typeahead.at < 900;
+      if (!ctrl && !e.altKey && (e.code === "NumpadAdd" || (k === "+" && !typingName))) return run(() => selectByPattern(pane, "add"));
+      if (!ctrl && !e.altKey && (e.code === "NumpadSubtract" || (k === "-" && !typingName))) return run(() => selectByPattern(pane, "remove"));
       if (ctrl && k.toLowerCase() === "i") return run(() => this.toggleInfo());
       if (ctrl && k === "1") return run(() => pane.setView("list"));
       if (ctrl && k === "2") return run(() => pane.setView("grid"));

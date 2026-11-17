@@ -616,6 +616,29 @@ files.appdata.restart	Перезапустить
 files.appdata.restarting_s	Перезапуск {s}
 files.transfers.interrupted_restart_nas	Прервано перезапуском NAS
 files.transfers.transfer_speed_chart	График скорости передачи
+files.select.select_pattern_menu	Выделить по шаблону…
+files.select.deselect_pattern_menu	Снять выделение по шаблону…
+files.select.select_pattern	Выделить по шаблону
+files.select.deselect_pattern	Снять выделение по шаблону
+files.select.select_deselect_pattern	Выделить или снять выделение по шаблону
+files.select.select_differences	Выделить различия
+files.select.select_differences_panes	Выделить различия между двумя панелями
+files.select.pattern	Шаблон
+files.select.pattern_hint	* любой текст, ? один символ, [abc] один из этих, [!abc] ни один из этих; несколько шаблонов через ;
+files.select.regex	Регулярное выражение
+files.select.invalid_regex	Недопустимое регулярное выражение
+files.select.files_only	Только файлы, без папок
+files.select.add	Добавить
+files.select.only_these	Только эти
+files.select.remove	Убрать
+files.select.select	Выделить
+files.select.deselect	Снять выделение
+files.select.count.matches.one	{n} элемент подходит
+files.select.count.matches.few	{n} элемента подходят
+files.select.count.matches.many	{n} элементов подходят
+files.select.count.matches.other	{n} элемента подходят
+files.select.differences_a_b	Различия: слева {a}, справа {b}
+files.select.same_items	В обеих папках одинаковые элементы
 files.pane.checksum	Контрольная сумма
 files.pane.algorithm	Алгоритм
 files.pane.checksum_copied	Контрольная сумма скопирована

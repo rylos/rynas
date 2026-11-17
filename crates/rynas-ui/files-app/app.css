@@ -447,6 +447,10 @@ dialog.dlg.wide { max-width: min(94vw, 760px); }
 .check { display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 6px 0; }
 .check input { accent-color: var(--accent); width: 15px; height: 15px; }
 .hint { color: var(--faint); font-size: 12px; }
+.select-dlg .seg { display: flex; flex-wrap: wrap; margin-top: 6px; max-width: 100%; }
+.select-dlg .seg button { flex: 1 1 auto; padding: 6px 10px; min-width: 0; white-space: normal; }
+.select-dlg .found { margin-top: 8px; }
+.select-dlg .found.err { color: var(--crit); }
 .dlg-icon { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
 .dlg-icon.danger { background: var(--crit-soft); color: var(--crit); }
 .dlg-icon svg { width: 19px; height: 19px; }

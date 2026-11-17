@@ -11,6 +11,7 @@ import { openMenu, copyText } from "./ui.js";
 import { openSettings } from "./settings.js";
 import { isRemote } from "./conns.js";
 import { isReadOnly, isBackupTop, hasNoSmbPath } from "./backups.js";
+import { selectByPattern, selectDifferences } from "./select.js";
 
 export const menuMethods = {
   contextMenu(pane, entry, x, y) {
@@ -121,6 +122,9 @@ export const menuMethods = {
     openMenu(r.right - 240, r.bottom + 4, [
       { label: t("files.common.select_all"), key: "Ctrl+A", action: () => pane.selectAll() },
       { label: t("files.common.invert_selection"), key: "Ctrl+Shift+I", action: () => pane.invertSelection() },
+      { label: t("files.select.select_pattern_menu"), icon: "filter", key: "+", action: () => selectByPattern(pane, "add") },
+      { label: t("files.select.deselect_pattern_menu"), key: "−", action: () => selectByPattern(pane, "remove") },
+      this.isSplit() && { label: t("files.select.select_differences"), icon: "split", key: "Ctrl+Shift+D", action: () => selectDifferences(...this.current.panes) },
       this.clipboard && !isReadOnly(pane) && { label: t("files.common.paste"), icon: "paste", key: "Ctrl+V", action: () => this.paste(pane) },
       this.clipboard && !isReadOnly(pane) && { label: t("files.common.paste_verification"), icon: "shield", key: "Ctrl+Shift+V", action: () => this.paste(pane, pane.path, true) },
       "-",
