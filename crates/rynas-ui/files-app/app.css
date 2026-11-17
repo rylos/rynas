@@ -328,6 +328,8 @@ svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-widt
 .sz .n-t, .sz .u-t { color: var(--t-purple); }
 .sz .dash { color: var(--t-gray); font-weight: 700; }
 .dt { color: var(--t-blue); }
+/* the dates line up in columns (ezaDate pads with spaces): spaces kept, cut at the end */
+.cell.dt { white-space: pre; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .no-ll .pm *, .no-ll .sz *, .no-ll .dt { color: inherit !important; font-weight: inherit !important; text-decoration: none !important; }
 .no-ll .dt, .no-ll .cell.r { color: var(--muted); }
 

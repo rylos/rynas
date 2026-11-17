@@ -92,7 +92,59 @@ export function ezaDate(sec) {
   if (!sec) return "-";
   const d = new Date(sec * 1000);
   const recent = Math.abs(Date.now() - d) < 180 * 86400 * 1000;
-  return dateFormat(recent ? { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" } : { day: "numeric", month: "short", year: "numeric" }).format(d);
+  // in columns, as eza lines them up: the day padded to two places, the month name to the
+  // longest one ("Sept"), an older date's year to the end of a recent date's time; the cell
+  // keeps the spaces (white-space: pre, a monospace font)
+  const s = ezaParts(d, recent);
+  if (recent) return s;
+  const want = recentWidth();
+  const year = s.search(/\d{4}/);
+  return year > 0 && [...s].length < want ? s.slice(0, year) + " ".repeat(want - [...s].length) + s.slice(year) : s;
+}
+
+const RECENT = { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" };
+const OLDER = { day: "numeric", month: "short", year: "numeric" };
+
+/** A date's parts in the locale, the day padded to two places and the month name to the
+ * longest one (the padding after the punctuation that follows it: "3 Nov, " not "3 Nov ,"). */
+function ezaParts(d, recent) {
+  const parts = dateFormat(recent ? RECENT : OLDER).formatToParts(d);
+  let out = "";
+  let owed = 0;
+  for (const p of parts) {
+    if (p.type === "day") out += p.value.padStart(2, " ");
+    else if (p.type === "month") {
+      const [name, width] = month(d.getMonth());
+      out += name;
+      owed = width - [...name].length;
+      continue;
+    } else out += p.value;
+    if (owed && p.type === "literal") {
+      // the punctuation right after the month first, then the padding
+      const lead = p.value.match(/^\S*/)[0];
+      out = out.slice(0, out.length - p.value.length) + lead + " ".repeat(owed) + p.value.slice(lead.length);
+      owed = 0;
+    }
+  }
+  return (out + " ".repeat(owed)).trimEnd();
+}
+
+/** The short name of month `i` (0–11) as a date shows it, and the longest of the locale. */
+function month(i) {
+  const m = intl();
+  if (!m.months) {
+    const f = dateFormat({ day: "numeric", month: "short" });
+    m.months = Array.from({ length: 12 }, (_, k) => f.formatToParts(new Date(2001, k, 15)).find((p) => p.type === "month")?.value || "");
+    m.monthWidth = Math.max(...m.months.map((x) => [...x].length));
+  }
+  return [m.months[i], m.monthWidth];
+}
+
+/** How wide a recent date is (every one is, once padded). */
+function recentWidth() {
+  const m = intl();
+  m.recentWidth ??= [...ezaParts(new Date(2001, 0, 15, 23, 58), true)].length;
+  return m.recentWidth;
 }
 
 /** Date and time with seconds: "13 nov 2026, 17:05:09" / "Nov 13, 2026, 5:05:09 PM". */
