@@ -240,7 +240,7 @@ fn pair(args: &[String]) -> Result<(), String> {
 }
 
 /// One backup (in the foreground, or as the service's child with `--service`).
-fn backup_cmd(_args: &[String]) -> Result<(), String> {
+fn backup_cmd(args: &[String]) -> Result<(), String> {
     root_only()?;
     // before any thread: this process gets mounts of its own
     backup::private_mounts()?;
@@ -268,7 +268,7 @@ fn backup_cmd(_args: &[String]) -> Result<(), String> {
         s.plan = st.plan.clone();
         s.last_attempt_ms = st.last_attempt_ms;
     });
-    let run = backup::run(&st);
+    let run = backup::run(&st, scheduler::trigger_of(opt(args, "--trigger").as_deref()));
     // saved after the thaw (never during a freeze)
     let _ = State::update(|s| {
         if run.ok {
@@ -294,6 +294,32 @@ fn backup_cmd(_args: &[String]) -> Result<(), String> {
     }
 }
 
+/// Hidden, tests (`schedule-test`): a stand-in for a backup run. It reports a good run with
+/// its trigger after two seconds and keeps the outcome in the state as a backup does; it
+/// reads and sends nothing of the PC.
+fn test_run(args: &[String]) -> Result<(), String> {
+    let st = State::load()?;
+    let started_ms = now_ms();
+    let _ = State::update(|s| s.last_attempt_ms = Some(started_ms));
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let run = rynas_api_types::pcagent::PcRun {
+        run_id: format!("run-{started_ms}"),
+        started_ms,
+        ended_ms: now_ms(),
+        ok: true,
+        trigger: Some(scheduler::trigger_of(opt(args, "--trigger").as_deref())),
+        ..Default::default()
+    };
+    let r = rynas_api_types::pcagent::AgentReport { run: run.clone(), manifest: None, agent_version: env!("CARGO_PKG_VERSION").into(), root_btrfs: None };
+    backup::client_of(&st)?.post_json::<_, serde_json::Value>("/api/v1/pcbackup/agent/report", &r)?;
+    let _ = State::update(|s| {
+        s.last_ok_ms = Some(run.ended_ms);
+        s.failures = 0;
+    });
+    println!("test run reported");
+    Ok(())
+}
+
 fn status() -> Result<(), String> {
     let st = State::load()?;
     println!("NAS          {} ({})", st.url, st.nas_name);
@@ -309,9 +335,11 @@ fn status() -> Result<(), String> {
         }
     }
     let p = &st.plan.plan;
+    let sched = st.plan.schedule();
     println!(
-        "plan         every {} h, {}{}",
-        p.interval_hours,
+        "plan         every {} h{}, {}{}",
+        sched.every_h,
+        if sched.window.is_some() { " inside the allowed window" } else { "" },
         if p.freeze == FreezeMode::Freeze { format!("freeze up to {} s", p.freeze_max_secs) } else { "read in use".into() },
         if p.paused { ", paused" } else { "" }
     );
@@ -451,7 +479,12 @@ fn main() {
             Ok(())
         }
         "pair" => pair(&args),
-        "run" => root_only().and_then(|_| scheduler::run_service()),
+        "run" => root_only().and_then(|_| scheduler::run_service(scheduler::Mode::default())),
+        // hidden, tests: the service's schedule against a NAS, with a stand-in for each run
+        // (`test-run`: it reports a run and backs nothing up), for `--for` seconds; the state
+        // is `$RYNAS_AGENT_STATE`
+        "schedule-test" => scheduler::run_service(scheduler::Mode { fake: true, for_s: Some(opt(&args, "--for").and_then(|s| s.parse().ok()).unwrap_or(60)) }),
+        "test-run" => test_run(&args),
         "backup" => backup_cmd(&args),
         "status" => status(),
         "set-server" => set_server(&args),

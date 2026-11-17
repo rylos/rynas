@@ -95,6 +95,26 @@ pub fn preview(req: &SchedulePreviewRequest, nas: &TimeZone, now: Timestamp) -> 
         TaskTrigger::Interval { hours, .. } if *hours == 0 || *hours > 8760 => {
             return invalid(&tz_name, "the interval is 1 to 8760 hours");
         }
+        // every so many hours from the last good run (or now), only inside the allowed
+        // window when there is one: the PC agents' rules (S6, `rynas_schedule::window`)
+        TaskTrigger::Interval { hours, .. } => {
+            let window = req.window.as_deref().map(str::trim).filter(|w| !w.is_empty());
+            if window.is_some_and(|w| !rynas_schedule::window::valid(w)) {
+                return invalid(&tz_name, "a weekly window is 168 characters 0/1 with at least one 1");
+            }
+            let now_ms = now.as_millisecond().max(0) as u64;
+            let every = u64::from(*hours) * 3_600_000;
+            let first = req.last_ms.map_or(now_ms, |l| l.saturating_add(every)).max(now_ms);
+            let (runs, _) = rynas_schedule::window::interval_starts(first, every, 0, window, &tz, u64::MAX, count);
+            return SchedulePreview {
+                runs: runs
+                    .iter()
+                    .filter_map(|ms| Timestamp::from_millisecond(i64::try_from(*ms).ok()?).ok())
+                    .map(|t| run_of(t, &tz))
+                    .collect(),
+                ..ok
+            };
+        }
         // boot, manual, interval (from the last success), after a task: no calendar
         _ => return ok,
     };
@@ -449,10 +469,32 @@ mod tests {
             recurrence: Recurrence::Daily { days: Weekdays(0), times: vec![] },
         });
         assert!(!p.valid);
-        for t in [TaskTrigger::Manual, TaskTrigger::Boot { delay_s: 60 }, TaskTrigger::Interval { hours: 24, after_boot_min: 10 }] {
+        for t in [TaskTrigger::Manual, TaskTrigger::Boot { delay_s: 60 }] {
             let p = trig(t);
             assert!(p.valid && p.runs.is_empty() && !p.no_next_run);
         }
+        // an interval (a PC's plan, S6): from the last good run, inside the allowed window
+        let every6 = TaskTrigger::Interval { hours: 6, after_boot_min: 10 };
+        let p = trig(every6.clone());
+        let locals: Vec<&str> = p.runs.iter().map(|r| r.local.as_str()).collect();
+        assert_eq!(locals, ["2026-11-13 12:00:00", "2026-11-13 18:00:00", "2026-11-14 00:00:00", "2026-11-14 06:00:00", "2026-11-14 12:00:00"]);
+        let mut night = vec![b'0'; 168];
+        for d in 0..7 {
+            for h in 22..24 {
+                night[d * 24 + h] = b'1';
+            }
+        }
+        let night = String::from_utf8(night).unwrap();
+        let last = at("2026-11-13 09:00", "Europe/Rome").as_millisecond() as u64;
+        let p = preview(
+            &SchedulePreviewRequest { trigger: Some(every6.clone()), window: Some(night), last_ms: Some(last), count: Some(3), ..Default::default() },
+            &rome(),
+            from,
+        );
+        let locals: Vec<&str> = p.runs.iter().map(|r| r.local.as_str()).collect();
+        assert_eq!(locals, ["2026-11-13 22:00:00", "2026-11-14 22:00:00", "2026-11-15 22:00:00"]);
+        let p = preview(&SchedulePreviewRequest { trigger: Some(every6), window: Some("1".into()), ..Default::default() }, &rome(), from);
+        assert!(!p.valid);
         assert!(!trig(TaskTrigger::Interval { hours: 0, after_boot_min: 0 }).valid);
         // Friday 13 November 2026 12:00: window Saturday 01:00-05:00 and Monday 22:00-24:00
         let mut w = vec![b'0'; 168];

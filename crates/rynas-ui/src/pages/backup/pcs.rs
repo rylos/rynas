@@ -34,7 +34,7 @@ use rynas_api_types::snapshots::{Retention, RetentionPreset};
 use rynas_api_types::TaskStatus;
 
 use crate::api;
-use crate::form::{In, SaveBar, area_field, form_error, number_field, save_bar_with, segmented, select_field, spinner, switch, text_field};
+use crate::form::{In, SaveBar, area_field, form_error, number_field, save_bar_with, segmented, spinner, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use rynas_api_types::pcagent::{PcDevice, PcMethod};
@@ -1026,9 +1026,11 @@ fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyVie
     let live = agent_dev.filter(|d| p.agent && !d.revoked);
     let has_agent = live.is_some();
     let plan = live.as_ref().map(|d| d.settings.plan.clone()).unwrap_or_default();
-    let interval = RwSignal::new(plan.interval_hours.to_string());
-    let delay = RwSignal::new(plan.start_delay_min.to_string());
-    let paused = RwSignal::new(if plan.paused { "paused" } else { "on" }.to_string());
+    let sched = crate::schedule::interval::IntervalEditor::new(
+        &plan,
+        live.as_ref().and_then(|d| d.last_ok_ms),
+        live.as_ref().map(|d| d.agent_version.as_str()).unwrap_or_default(),
+    );
     // a subvolume left out = its mount point in the agent's excludes and no alert for it on
     // the NAS; excludes that name no known subvolume stay as written
     // (a nested subvolume without a mount: its place inside its parent, `/home/games`)
@@ -1078,12 +1080,16 @@ fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyVie
             pcs.saved.update(|n| *n += 1);
         });
         // the agent's schedule first (answers at once), then the folder (a task)
+        if is_agent
+            && has_agent
+            && let Some(k) = sched.problem()
+        {
+            error.set(Some(t(k).to_string()));
+            return;
+        }
         let agent_settings = agent_body.clone().filter(|_| is_agent).map(|mut s| {
-            let n = |s: RwSignal<String>| s.get_untracked().trim().parse::<u32>().unwrap_or(0);
             s.description = description;
-            s.plan.interval_hours = n(interval);
-            s.plan.start_delay_min = n(delay);
-            s.plan.paused = paused.get_untracked() == "paused";
+            sched.apply(&mut s.plan);
             let ignored = f.ignored.get_untracked();
             let mut ex: Vec<String> = other.get_untracked().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
             for (n, m) in mounts.get_value() {
@@ -1157,16 +1163,11 @@ fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyVie
     }
     let groups: Vec<String> = groups.into_iter().collect();
     const HOWS: &[(&str, &str)] = &[("agent", "pcb.how.agent"), ("ssh", "pcb.how.ssh")];
-    const PAUSED: &[(&str, &str)] = &[("on", "pca.f.scheduled"), ("paused", "pca.f.paused")];
     let schedule = has_agent.then(|| {
         view! {
             <Show when=move || agent.get()>
                 <h3 class="mini-title">{tr("pca.f.schedule")}</h3>
-                {select_field("pca.f.state", None, PAUSED, paused.into(), Callback::new(move |v| paused.set(v)))}
-                <div class="form-row">
-                    {number_field("pca.f.interval", Some("pca.f.interval_help"), interval.into(), Callback::new(move |v| interval.set(v)), 1, 168)}
-                    {number_field("pca.f.delay", Some("pca.f.delay_help"), delay.into(), Callback::new(move |v| delay.set(v)), 0, 1440)}
-                </div>
+                {sched.view()}
             </Show>
         }
     });

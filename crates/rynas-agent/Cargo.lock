@@ -1856,11 +1856,13 @@ version = "0.8.19"
 dependencies = [
  "bytes",
  "crossterm",
+ "jiff",
  "libc",
  "ratatui",
  "rustic_core",
  "rustls",
  "rynas-api-types",
+ "rynas-schedule",
  "rynas-tls",
  "serde",
  "serde_json",
@@ -1883,6 +1885,7 @@ dependencies = [
 name = "rynas-schedule"
 version = "0.8.19"
 dependencies = [
+ "jiff",
  "serde",
 ]
 

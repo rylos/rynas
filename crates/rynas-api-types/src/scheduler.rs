@@ -1160,6 +1160,10 @@ pub struct OverviewJob {
     /// A PC's backup plan: every so many hours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every_h: Option<u32>,
+    /// A PC's backup plan: its allowed start window (168 cells, the NAS's local time), when
+    /// set. Drawn as the job's start band; its starts come only inside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
     /// The overview could not list every start of the range (a job every few minutes).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
@@ -1374,6 +1378,14 @@ pub struct SchedulePreviewRequest {
     /// Number of next runs (default 5, at most 20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u32>,
+    /// An interval trigger's allowed start window (a PC's backup plan, S6): its starts come
+    /// only inside it (168 cells, Sunday first, local time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+    /// An interval trigger's last good run (its end): the next start is due an interval
+    /// later; absent: due now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ms: Option<u64>,
 }
 
 /// Answer of `POST /api/v1/scheduler/preview` (always 200; `valid: false` with `error`).

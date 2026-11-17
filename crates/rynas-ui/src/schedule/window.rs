@@ -118,22 +118,28 @@ pub struct NextRuns {
 impl NextRuns {
     /// `trigger`: the schedule now (`None`: nothing to show).
     pub fn new(trigger: impl Fn() -> Option<TaskTrigger> + Send + Sync + 'static) -> Self {
+        Self::of_request(move || trigger().map(|t| SchedulePreviewRequest { trigger: Some(t), ..Default::default() }))
+    }
+
+    /// `request`: the preview to ask now (an interval with its allowed window and last run);
+    /// the number of runs is this list's.
+    pub fn of_request(request: impl Fn() -> Option<SchedulePreviewRequest> + Send + Sync + 'static) -> Self {
         let n = NextRuns { preview: RwSignal::new(None), seq: StoredValue::new(0) };
         Effect::new(move |_| {
-            let trig = trigger();
+            let req = request();
             n.seq.update_value(|s| *s += 1);
             let mine = n.seq.get_value();
-            let Some(trig) = trig else {
+            let Some(mut req) = req else {
                 n.preview.set(None);
                 return;
             };
+            req.count = Some(RUNS);
             set_timeout(
                 move || {
                     if n.seq.get_value() != mine {
                         return;
                     }
                     spawn_local(async move {
-                        let req = SchedulePreviewRequest { trigger: Some(trig), count: Some(RUNS), ..Default::default() };
                         let r = api::post::<_, SchedulePreview>("/api/v1/scheduler/preview", Some(&req)).await;
                         if n.seq.get_value() == mine {
                             n.preview.set(r.ok().filter(|p| p.valid));

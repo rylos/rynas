@@ -600,7 +600,12 @@ fn run_item(r: &OverviewRun, j: &OverviewJob, o: &SchedulerOverview, open: Callb
     let res: Vec<String> = j.resources.iter().map(resource_words).collect();
     let name = job_name(j);
     let link = opener(j, open, "link-strong".to_string(), name.clone(), String::new(), String::new(), view! { {name.clone()} }.into_any());
-    let sched = j.trigger.as_ref().map(trigger_text).or_else(|| j.every_h.map(|h| tf("sv.every_h", &[("h", &h.to_string())]))).unwrap_or_default();
+    let sched = j
+        .trigger
+        .as_ref()
+        .map(trigger_text)
+        .or_else(|| j.every_h.map(|h| tf(if j.window.is_some() { "sv.every_h_window" } else { "sv.every_h" }, &[("h", &h.to_string())])))
+        .unwrap_or_default();
     let warn = (!cs.is_empty()).then(|| {
         let lines = cs.iter().map(|c| view! { <li>{conflict_text(c, &o.jobs)}</li> }).collect_view();
         view! { <ul class="sv-item-warn">{lines}</ul> }
@@ -753,6 +758,7 @@ fn history_panel(tasks: Remote<Vec<TaskView>>, show: Callback<String>) -> AnyVie
                 let origin = run_origin(r);
                 let id = r.task_id.clone();
                 let label = ui::verb_name("sch.history", &name);
+                let pc_label = ui::verb_name("sv.h.open_pc", &name);
                 ui::row(vec![
                     ui::cell("sch.col.started", "tnum", view! {
                         <div class="cell-main">
@@ -764,12 +770,22 @@ fn history_panel(tasks: Remote<Vec<TaskView>>, show: Callback<String>) -> AnyVie
                     ui::cell("sch.col.task", "", view! { <span class="wrap-anywhere">{name}</span> }.into_any()),
                     ui::cell("sch.col.duration", "num tnum", view! { {dur} }.into_any()),
                     ui::cell("sch.col.result", "", ui::status(tone, text)),
-                    ui::actions(view! {
-                        <button class="icon-btn sm" title=tr("sch.history") aria-label=label on:click=move |_| show.run(id.clone())>
-                            <Icon icon=icons::FILE_TEXT size=16 />
-                        </button>
-                    }
-                    .into_any()),
+                    // a PC's backup: its history and details are on the PC backups page
+                    ui::actions(if id.starts_with("pc:") {
+                        view! {
+                            <a class="icon-btn sm" href="/backup" title=tr("sv.h.open_pc") aria-label=pc_label>
+                                <Icon icon=icons::CHEVRON_RIGHT size=16 />
+                            </a>
+                        }
+                        .into_any()
+                    } else {
+                        view! {
+                            <button class="icon-btn sm" title=tr("sch.history") aria-label=label on:click=move |_| show.run(id.clone())>
+                                <Icon icon=icons::FILE_TEXT size=16 />
+                            </button>
+                        }
+                        .into_any()
+                    }),
                 ])
             })
             .collect::<Vec<_>>();

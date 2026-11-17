@@ -1204,6 +1204,10 @@ fn main() -> std::io::Result<()> {
             if let Some(pb) = state.pc_backup.clone() {
                 agent.bind_btrfs(pb);
             }
+            // the scheduler's history (the runs of every PC) and its Pause all (S6)
+            if let Some(p) = state.protection.as_ref() {
+                agent.bind_scheduler(p.history.clone(), p.gate.clone());
+            }
             rynasd::pc_agent::maint::spawn_watch(agent.clone());
             {
                 let a = agent.clone();

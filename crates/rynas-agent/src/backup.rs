@@ -25,6 +25,7 @@ use rustic_core::{
     Repository, RepositoryOptions, RusticProgress, SnapshotOptions,
 };
 use rynas_api_types::pcagent::*;
+use rynas_api_types::scheduler::RunTrigger;
 
 use crate::http::Client;
 use crate::mounts::{self, Mount};
@@ -466,12 +467,13 @@ pub fn client_of(st: &State) -> Result<Arc<Client>, String> {
 
 /// One backup, start to report. `private_mounts` must have run already (the caller does it
 /// first thing, before any thread).
-pub fn run(st: &State) -> PcRun {
+pub fn run(st: &State, trigger: RunTrigger) -> PcRun {
     let started_ms = now_ms();
     let run_id = format!("run-{started_ms}");
     let mut out = PcRun {
         run_id: run_id.clone(),
         started_ms,
+        trigger: Some(trigger),
         ..Default::default()
     };
     let client = match client_of(st) {
@@ -501,6 +503,7 @@ pub fn run(st: &State) -> PcRun {
         Ok((r, manifest)) => {
             out = r;
             out.ok = true;
+            out.trigger = Some(trigger);
             send_report(&client, out.clone(), manifest);
         }
         Err(f) => {
@@ -697,6 +700,9 @@ fn run_inner(
             error: None,
             captures: caps,
             restore: false,
+            // set by the caller
+            trigger: None,
+            skipped: None,
         },
         Some(man),
     ))

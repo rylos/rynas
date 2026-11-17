@@ -1261,6 +1261,7 @@ async fn pause_all(
     tracing::info!("scheduler: every task paused by {who}");
     let out = p.gate.set_pause_all(Some(info))?;
     p.invalidate();
+    wake_agents(&p);
     Ok(Json(out))
 }
 
@@ -1270,7 +1271,15 @@ async fn resume_all(State(st): State<ProtState>, h: HeaderMap) -> Res<Json<Sched
     tracing::info!("scheduler: tasks resumed by {who}");
     let out = p.gate.set_pause_all(None)?;
     p.invalidate();
+    wake_agents(&p);
     Ok(Json(out))
+}
+
+/// The PC agents' long polls answer at once: their plans follow Pause all (S6).
+fn wake_agents(p: &Protection) {
+    if let Some(a) = p.ops.pc_agent.get().and_then(std::sync::Weak::upgrade) {
+        a.changed.notify_waiters();
+    }
 }
 
 /// `POST /v1/scheduler/tasks/{id}/pause`: the task's scheduled starts are skipped (recorded

@@ -114,9 +114,17 @@ pub struct PcPlan {
     /// Longest freeze in seconds (5–3600).
     #[serde(default = "default_freeze_max")]
     pub freeze_max_secs: u32,
-    /// No scheduled backups ("Back up now" still runs).
+    /// No scheduled backups ("Back up now" still runs). In the plan an agent receives it is
+    /// also set while every scheduled task of the NAS is paused (Schedule › Pause all).
     #[serde(default)]
     pub paused: bool,
+    /// Allowed start window (S6 of `docs/research/scheduling.md`): 168 cells `0`/`1`, Sunday
+    /// first (`window[day * 24 + hour]`), in the NAS's local time like every weekly grid of
+    /// rynas (the agent receives the NAS's zone in [`AgentPlan::tz`]). A due backup starts
+    /// only while it is open (a run already going is not stopped at its end). `None`: any
+    /// time. Agents older than 0.8.20 ignore it and start whenever a backup is due.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
 }
 
 fn default_freeze_max() -> u32 {
@@ -132,6 +140,7 @@ impl Default for PcPlan {
             freeze: FreezeMode::Hot,
             freeze_max_secs: default_freeze_max(),
             paused: false,
+            window: None,
         }
     }
 }
@@ -397,6 +406,17 @@ pub struct PcRun {
     /// A bare-metal restore from the live system (not a backup).
     #[serde(default)]
     pub restore: bool,
+    /// How the run started (S6: `timer` on schedule, `retry` after a failed run, `manual`
+    /// for "Back up now"); absent from older agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<crate::scheduler::RunTrigger>,
+    /// Not a run: a scheduled start the agent skipped (S6: `paused`, or `window` when a
+    /// backup came due outside the allowed window and waits for it), sent only to a NAS that
+    /// gave the plan a shared trigger ([`AgentPlan::trigger`]). Recorded in the scheduler's
+    /// history only; the PC's own history, its last good run and its alerts stay as they
+    /// are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<crate::scheduler::SkipReason>,
 }
 
 /// Why a PC is (not) ready for a bare-metal restore.
@@ -658,6 +678,52 @@ pub struct AgentPlan {
     /// What a backup run does (an older agent ignores it and runs the files method).
     #[serde(default)]
     pub method: PcMethod,
+    /// The schedule in the shared model (S6): [`TaskTrigger::Interval`] from the plan's
+    /// `interval_hours` and `start_delay_min`, which the NAS keeps sending for older agents
+    /// (R5). An agent that finds it follows it with the rules of `rynas-schedule` (the same
+    /// as the NAS's overview), the plan's allowed window included, and reports the starts it
+    /// skips; absent (an older NAS): the two plan fields, no window, no skipped starts
+    /// reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<crate::scheduler::TaskTrigger>,
+    /// The NAS's time zone (IANA name): the zone of the allowed window. Absent or unknown on
+    /// the PC: the PC's own zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz: Option<String>,
+}
+
+impl AgentPlan {
+    /// The schedule an agent follows: every so many hours from the last good run, the first
+    /// so many minutes after the agent started, and the allowed window. The shared trigger
+    /// when the NAS sent one (an interval), else the plan's two old fields without a window
+    /// (an older NAS).
+    pub fn schedule(&self) -> AgentSchedule {
+        match &self.trigger {
+            Some(crate::scheduler::TaskTrigger::Interval { hours, after_boot_min }) => AgentSchedule {
+                every_h: (*hours).max(1),
+                delay_min: *after_boot_min,
+                window: self.plan.window.clone().filter(|w| crate::scheduler::week_window_valid(w)),
+                shared: true,
+            },
+            _ => AgentSchedule {
+                every_h: self.plan.interval_hours.max(1),
+                delay_min: self.plan.start_delay_min,
+                window: None,
+                shared: false,
+            },
+        }
+    }
+}
+
+/// What [`AgentPlan::schedule`] gives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSchedule {
+    pub every_h: u32,
+    pub delay_min: u32,
+    /// The allowed start window (a valid one), when set.
+    pub window: Option<String>,
+    /// From the shared trigger (a NAS that knows skipped-start reports).
+    pub shared: bool,
 }
 
 /// `GET /api/v1/pcbackup/agent/btrfs/snapshots` (device token, btrfs method): what the PC's
@@ -1766,6 +1832,56 @@ mod tests {
         assert!(!valid_device("-pc"));
         assert!(!valid_device("PC"));
         assert!(!valid_device(&"a".repeat(33)));
+    }
+
+    /// R5 of `docs/research/scheduling.md`: plans and reports between agents and NAS of
+    /// different versions. Golden texts of 0.8.19 (before S6) and of S6.
+    #[test]
+    fn plans_and_reports_across_versions() {
+        use crate::scheduler::{RunTrigger, SkipReason, TaskTrigger};
+        // a plan of a 0.8.19 NAS (no trigger, no window, no zone): the old fields, no window
+        let old_nas = r#"{"rev":7,"plan":{"interval_hours":6,"start_delay_min":15,"excludes":[],"freeze":"hot","freeze_max_secs":60,"paused":false},"method":"files"}"#;
+        let p: AgentPlan = serde_json::from_str(old_nas).unwrap();
+        assert_eq!(p.schedule(), AgentSchedule { every_h: 6, delay_min: 15, window: None, shared: false });
+        // a plan of an S6 NAS: what an older agent reads (it keeps the two old fields) and
+        // what a new one follows (the trigger and the window)
+        let window = format!("{}{}", "0".repeat(22), "1".repeat(146));
+        let new = AgentPlan {
+            rev: 8,
+            plan: PcPlan { interval_hours: 6, start_delay_min: 15, window: Some(window.clone()), ..PcPlan::default() },
+            command: None,
+            method: PcMethod::Files,
+            trigger: Some(TaskTrigger::Interval { hours: 6, after_boot_min: 15 }),
+            tz: Some("Europe/Rome".into()),
+        };
+        let text = serde_json::to_string(&new).unwrap();
+        let golden = format!(
+            r#"{{"rev":8,"plan":{{"interval_hours":6,"start_delay_min":15,"excludes":[],"freeze":"hot","freeze_max_secs":60,"paused":false,"window":"{window}"}},"method":"files","trigger":{{"kind":"interval","hours":6,"after_boot_min":15}},"tz":"Europe/Rome"}}"#
+        );
+        assert_eq!(text, golden);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!((v["plan"]["interval_hours"].as_u64(), v["plan"]["start_delay_min"].as_u64()), (Some(6), Some(15)));
+        assert_eq!(serde_json::from_str::<AgentPlan>(&text).unwrap().schedule(), AgentSchedule { every_h: 6, delay_min: 15, window: Some(window), shared: true });
+        // a plan without a window serializes as before S6 but for the trigger and the zone
+        let plain = AgentPlan { plan: PcPlan::default(), ..new.clone() };
+        assert!(!serde_json::to_string(&plain).unwrap().contains("window"));
+        // an invalid window is no window
+        let bad = AgentPlan { plan: PcPlan { window: Some("1".into()), ..PcPlan::default() }, ..new };
+        assert_eq!(bad.schedule().window, None);
+        // a report of a 0.8.19 agent: no trigger, never skipped
+        let old_agent = r#"{"run_id":"run-1","started_ms":1,"ended_ms":2,"ok":true,"files":3,"bytes_read":4,"bytes_added":5,"changed_during":[],"changed_count":0,"captures":[],"restore":false,"agent_version":"0.8.19"}"#;
+        let r: AgentReport = serde_json::from_str(old_agent).unwrap();
+        assert_eq!((r.run.trigger, r.run.skipped), (None, None));
+        assert_eq!(serde_json::to_string(&r).unwrap(), old_agent);
+        // a skipped start of a new agent: what a 0.8.19 NAS ignores (unknown fields)
+        let skip = AgentReport {
+            run: PcRun { run_id: "skip-9".into(), started_ms: 9, ended_ms: 9, trigger: Some(RunTrigger::Timer), skipped: Some(SkipReason::Window), ..PcRun::default() },
+            agent_version: "0.8.20".into(),
+            ..AgentReport::default()
+        };
+        let t = serde_json::to_string(&skip).unwrap();
+        assert!(t.contains(r#""trigger":"timer""#) && t.contains(r#""skipped":"window""#), "{t}");
+        assert_eq!(serde_json::from_str::<AgentReport>(&t).unwrap(), skip);
     }
 
     #[test]

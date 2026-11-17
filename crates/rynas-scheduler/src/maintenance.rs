@@ -9,21 +9,8 @@
 //! Local hours follow the clock on the wall: on the spring-forward night the missing hour has
 //! no cell to be in, and the repeated hour of the fall-back night is the same cell twice.
 
-use jiff::Timestamp;
-use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
-use rynas_api_types::scheduler::{MAINTENANCE_KEY, MaintenanceWindow, RunTrigger, ScheduledTask, week_window_on, week_window_valid};
-
-/// How far ahead [`opens_at`] looks (a week and a day: every cell is met).
-const LOOK_AHEAD_H: u64 = 8 * 24;
-
-fn ts(ms: u64) -> Option<Timestamp> {
-    Timestamp::from_millisecond(i64::try_from(ms).ok()?).ok()
-}
-
-fn cell_of(dt: &DateTime) -> usize {
-    dt.weekday().to_sunday_zero_offset() as usize * 24 + dt.hour() as usize
-}
+use rynas_api_types::scheduler::{MAINTENANCE_KEY, MaintenanceWindow, RunTrigger, ScheduledTask, week_window_valid};
 
 /// The configuration domain of the window (key [`MAINTENANCE_KEY`]): no file, no reload. The
 /// gate reads the applied value at every start; the engine keeps the revisions, the audit and
@@ -63,39 +50,24 @@ pub fn window_of(value: Option<&serde_json::Value>) -> Option<String> {
         .filter(|w| week_window_valid(w))
 }
 
-/// The window is open at `ms`.
+/// The window is open at `ms` (the rule shared with the PC agents: [`rynas_schedule::window`]).
 pub fn is_open(window: &str, tz: &TimeZone, ms: u64) -> bool {
-    ts(ms).is_some_and(|t| week_window_on(window, cell_of(&t.to_zoned(tz.clone()).datetime())))
+    rynas_schedule::window::is_open(window, tz, ms)
 }
 
 /// When the window is open next, at or after `ms`: `ms` itself when it is open now, else the
 /// start of its next "on" hour. `None` for a window without any "on" cell.
 pub fn opens_at(window: &str, tz: &TimeZone, ms: u64) -> Option<u64> {
-    let mut at = ms;
-    for _ in 0..LOOK_AHEAD_H + 2 {
-        let t = ts(at)?;
-        let local = t.to_zoned(tz.clone()).datetime();
-        if week_window_on(window, cell_of(&local)) {
-            return Some(at);
-        }
-        // the start of the next local hour (a gap hour: the moment after the jump)
-        let hour = local.with().minute(0).second(0).subsec_nanosecond(0).build().ok()?;
-        let next = hour
-            .checked_add(jiff::ToSpan::hour(1))
-            .ok()
-            .and_then(|n| tz.to_ambiguous_zoned(n).compatible().ok())
-            .map(|z| z.timestamp().as_millisecond().max(0) as u64);
-        at = match next {
-            Some(n) if n > at => n,
-            _ => at + 3_600_000,
-        };
-    }
-    None
+    rynas_schedule::window::opens_at(window, tz, ms)
 }
 
 /// A moment in the NAS's local time, for the journal: "Wed 01:00 CET".
 pub fn wall_clock(tz: &TimeZone, ms: u64) -> String {
-    ts(ms).map(|t| t.to_zoned(tz.clone()).strftime("%a %H:%M %Z").to_string()).unwrap_or_default()
+    i64::try_from(ms)
+        .ok()
+        .and_then(|m| jiff::Timestamp::from_millisecond(m).ok())
+        .map(|t| t.to_zoned(tz.clone()).strftime("%a %H:%M %Z").to_string())
+        .unwrap_or_default()
 }
 
 /// Starts the window holds back: those of the schedule (its timer, a catch-up, a queued
@@ -136,6 +108,7 @@ pub fn defer(window: Option<&str>, t: &ScheduledTask, trigger: RunTrigger, since
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiff::civil::DateTime;
     use rynas_api_types::scheduler::{RunPolicy, SmartTestKind, TaskAction, TaskTrigger};
 
     /// Every day from `from` to `to` (hours, `to` excluded).

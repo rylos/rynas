@@ -18,7 +18,7 @@ use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 use rynas_api_types::scheduler::{
     ConflictKind, ConflictOutcome, OverviewConflict, OverviewJob, OverviewRun, OverviewWindow, OverviewWindowKind, Resource, RunTrigger,
-    ScheduledTask, SchedulerOverview, TaskAction, TaskTrigger, week_window_on,
+    ScheduledTask, SchedulerOverview, TaskAction, TaskTrigger, week_window_on, week_window_valid,
 };
 use rynas_schedule::CalendarSpec;
 
@@ -256,12 +256,21 @@ pub fn build(
                     }
                     TaskTrigger::After { .. } | TaskTrigger::Boot { .. } | TaskTrigger::Manual => {}
                 },
+                // a PC's backup plan: the agent's own rules (S6, `rynas_schedule::window`):
+                // due every so many hours after the end of the last good run, started only
+                // inside its allowed window (drawn as its start band)
                 (None, Some(h)) if h > 0 => {
                     let every = u64::from(h) * 3_600_000;
                     let first = j.last_ms.map(|l| l + every).unwrap_or(now).max(now.min(to));
-                    let (s, cut) = every_starts(first, every, from, to, MAX_RUNS_PER_JOB);
+                    let window = job.window.as_deref().filter(|w| week_window_valid(w));
+                    let (s, cut) = rynas_schedule::window::interval_starts(first, every, dur.unwrap_or(0), window, tz, to, MAX_RUNS_PER_JOB);
                     job.truncated = cut;
-                    starts.extend(s.into_iter().map(|st| (st, st + dur.unwrap_or(DEFAULT_MS), dur.is_some())));
+                    starts.extend(s.into_iter().filter(|st| *st >= from).map(|st| (st, st + dur.unwrap_or(DEFAULT_MS), dur.is_some())));
+                    if let Some(w) = window {
+                        for (s, e) in blocks(w, tz, from, to) {
+                            windows.push(OverviewWindow { kind: OverviewWindowKind::Start, job: Some(job.id.clone()), start_ms: s, end_ms: e });
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -535,6 +544,7 @@ mod tests {
                 maintenance: t.follows_maintenance(),
                 trigger: Some(t.trigger.clone()),
                 every_h: None,
+                window: None,
                 truncated: false,
             },
             task: Some(t),
@@ -566,6 +576,56 @@ mod tests {
         assert_eq!(c[0].outcome, ConflictOutcome::GivesWay);
         assert_eq!(c[0].affected, "scrub-data");
         assert_eq!(c[0].sentence, "Scrub of data (≈9 h) overlaps the backup offsite at Wed 02:00 on /srv/data; Scrub of data will give way and resume after it");
+    }
+
+    /// S6: a PC's backup plan with an allowed window starts only inside it (the agent's rules)
+    /// and draws the window as its start band; without one, every interval from the last
+    /// good run's end plus the run's length.
+    #[test]
+    fn a_pc_plan_with_an_allowed_window() {
+        let tz = TimeZone::get("Europe/Rome").unwrap();
+        let from = ms("2026-11-17T12:00", &tz);
+        let to = ms("2026-11-20T00:00", &tz);
+        let mut w = vec![b'0'; 168];
+        for d in 0..7 {
+            for h in 22..24 {
+                w[d * 24 + h] = b'1';
+            }
+        }
+        let pc = |window: Option<String>| JobInput {
+            job: OverviewJob {
+                id: "pc:laptop".into(),
+                name: "laptop".into(),
+                owner: OverviewOwner::PcBackup,
+                action: None,
+                enabled: true,
+                system: false,
+                paused: false,
+                estimate_ms: Some(1_800_000),
+                estimate_runs: 3,
+                resources: vec![],
+                maintenance: false,
+                trigger: None,
+                every_h: Some(6),
+                window,
+                truncated: false,
+            },
+            task: None,
+            claims: vec![],
+            resources: vec![],
+            last_ms: Some(ms("2026-11-17T09:00", &tz)),
+            next_ms: None,
+        };
+        let o = build(vec![pc(Some(String::from_utf8(w).unwrap()))], None, &tz, from, to, from, &|_| vec![]);
+        let starts: Vec<u64> = o.runs.iter().map(|r| r.start_ms).collect();
+        assert_eq!(starts, vec![ms("2026-11-17T22:00", &tz), ms("2026-11-18T22:00", &tz), ms("2026-11-19T22:00", &tz)]);
+        let bands: Vec<(u64, u64)> = o.windows.iter().filter(|x| x.kind == OverviewWindowKind::Start).map(|x| (x.start_ms, x.end_ms)).collect();
+        assert_eq!(bands.len(), 3);
+        assert_eq!(bands[0], (ms("2026-11-17T22:00", &tz), ms("2026-11-18T00:00", &tz)));
+        let o = build(vec![pc(None)], None, &tz, from, ms("2026-11-18T00:00", &tz), from, &|_| vec![]);
+        let starts: Vec<u64> = o.runs.iter().map(|r| r.start_ms).collect();
+        assert_eq!(starts, vec![ms("2026-11-17T15:00", &tz), ms("2026-11-17T21:30", &tz)]);
+        assert!(o.windows.is_empty());
     }
 
     #[test]

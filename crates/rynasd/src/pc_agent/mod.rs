@@ -443,7 +443,24 @@ pub struct PcAgent {
     /// The btrfs method's folders ([`crate::pc_backup`]): PCs with [`PcMethod::Btrfs`] send
     /// into the folder of their name there. Set once at start.
     pub btrfs: std::sync::OnceLock<Arc<crate::pc_backup::PcBackup>>,
+    /// The scheduler's history and gate ([`PcAgent::bind_scheduler`]). Set once at start.
+    pub scheduler: std::sync::OnceLock<SchedulerLink>,
 }
+
+/// What the PC agents share with the scheduler (S6).
+pub struct SchedulerLink {
+    pub history: Arc<rynas_scheduler::history::History>,
+    pub gate: Arc<crate::gate::Gate>,
+}
+
+/// The id of a PC's backup plan in the scheduler's history and overview.
+pub fn task_id_of(device: &str) -> String {
+    format!("pc:{device}")
+}
+
+/// Bit set in the revision an agent sees while every task is paused: the plan changes (an
+/// agent that compares revisions, any version, takes it), and changes back when resumed.
+const PAUSED_ALL_REV: u64 = 1 << 62;
 
 pub type PaState = Option<Arc<PcAgent>>;
 
@@ -486,7 +503,20 @@ impl PcAgent {
             mem_used: Mutex::new(0),
             changed: tokio::sync::Notify::new(),
             btrfs: std::sync::OnceLock::new(),
+            scheduler: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Wires the scheduler (once, at start; S6 of `docs/research/scheduling.md`): the runs
+    /// the agents report go into its history (task `pc:<device>`), and its "Pause all"
+    /// reaches the agents' plans.
+    pub fn bind_scheduler(&self, history: Arc<rynas_scheduler::history::History>, gate: Arc<crate::gate::Gate>) {
+        let _ = self.scheduler.set(SchedulerLink { history, gate });
+    }
+
+    /// Every scheduled task of the NAS is paused now (Schedule › Pause all).
+    pub fn paused_all(&self) -> bool {
+        self.scheduler.get().is_some_and(|s| s.gate.pause().all.is_some_and(|a| a.active(now_ms())))
     }
 
     /// Wires the btrfs method's side (once, at start): PCs of that method send into its
@@ -1266,6 +1296,9 @@ pub fn check_settings(s: &PcDeviceSettings) -> Res<()> {
     if !(5..=3600).contains(&s.plan.freeze_max_secs) {
         return Err(Error::invalid("plan.freeze_max_secs", "5–3600 seconds"));
     }
+    if s.plan.window.as_deref().is_some_and(|w| !rynas_api_types::scheduler::week_window_valid(w)) {
+        return Err(Error::invalid("plan.window", "168 cells of 0 or 1 with at least one 1"));
+    }
     if s.plan.excludes.len() > 200
         || s
             .plan
@@ -1805,10 +1838,20 @@ struct PlanQuery {
     wait: Option<u64>,
 }
 
-fn plan_of(d: &Dev) -> AgentPlan {
+/// The plan an agent receives: the PC's settings, the shared trigger (S6; the two old fields
+/// stay for older agents, R5), the NAS's zone (the window's), and `paused` while every task
+/// of the NAS is paused (with its own revision, so every agent takes it).
+fn plan_of(d: &Dev, paused_all: bool) -> AgentPlan {
+    let mut plan = d.settings.plan.clone();
+    plan.paused |= paused_all;
     AgentPlan {
-        rev: d.rev,
-        plan: d.settings.plan.clone(),
+        rev: if paused_all { d.rev | PAUSED_ALL_REV } else { d.rev },
+        trigger: Some(rynas_api_types::scheduler::TaskTrigger::Interval {
+            hours: plan.interval_hours,
+            after_boot_min: plan.start_delay_min,
+        }),
+        tz: rynas_power::system_tz().iana_name().map(str::to_string),
+        plan,
         command: d.command.clone(),
         method: d.settings.method,
     }
@@ -1840,10 +1883,12 @@ async fn plan_get(
                 }
             });
         }
-        if q.rev != Some(d.rev) || Instant::now() >= deadline {
-            return Ok(Json(plan_of(&d)));
+        let plan = plan_of(&d, svc.paused_all());
+        if q.rev != Some(plan.rev) || Instant::now() >= deadline {
+            return Ok(Json(plan));
         }
-        let left = deadline.saturating_duration_since(Instant::now());
+        // a pause of every task that ends by itself wakes nobody: looked at again within 10 s
+        let left = deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(10));
         let _ = tokio::time::timeout(left, notified).await;
     }
 }

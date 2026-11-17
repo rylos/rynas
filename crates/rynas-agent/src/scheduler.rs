@@ -12,7 +12,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use rynas_api_types::pcagent::{AgentCommand, AgentPlan};
+use jiff::tz::TimeZone;
+use rynas_api_types::pcagent::{AgentCommand, AgentPlan, AgentReport, PcRun};
+use rynas_api_types::scheduler::{RunTrigger, SkipReason};
 
 use crate::backup::client_of;
 use crate::state::{State, now_ms};
@@ -31,24 +33,93 @@ pub fn install_signals() {
     }
 }
 
-/// When the next scheduled backup is due (ms), `None` when paused.
-pub fn next_due(st: &State, started_ms: u64) -> Option<u64> {
-    let p = &st.plan.plan;
-    if p.paused {
-        return None;
-    }
-    let interval = u64::from(p.interval_hours.max(1)) * 3_600_000;
-    let after_start = started_ms + u64::from(p.start_delay_min) * 60_000;
-    let due = match st.last_ok_ms {
-        Some(ok) => ok + interval,
-        None => 0,
-    };
+/// When the next scheduled backup is due (ms), ignoring the pause and the window: the
+/// interval after the last good run, at least the delay after the start, a failed run again
+/// after 5, 10, 20… minutes (never later than the interval). The rules are
+/// `rynas_schedule::window`'s, the same as the NAS's overview.
+pub fn due_ms(st: &State, started_ms: u64) -> u64 {
+    let s = st.plan.schedule();
+    let interval = u64::from(s.every_h) * 3_600_000;
+    let due = rynas_schedule::window::interval_due(st.last_ok_ms, interval, started_ms, u64::from(s.delay_min) * 60_000);
     // a failed run: again after 5, 10, 20… minutes, never later than the interval
     let retry = match (st.failures, st.last_attempt_ms) {
         (n, Some(at)) if n > 0 => at + ((5 * 60_000u64) << n.min(6)).min(interval),
         _ => 0,
     };
-    Some(due.max(after_start).max(retry))
+    due.max(retry)
+}
+
+/// The zone of the allowed window: the NAS's (sent in the plan), else this PC's, else UTC.
+pub fn zone(plan: &AgentPlan) -> TimeZone {
+    plan.tz
+        .as_deref()
+        .and_then(|z| TimeZone::get(z).ok())
+        .or_else(|| TimeZone::try_system().ok())
+        .unwrap_or(TimeZone::UTC)
+}
+
+/// When the next scheduled backup starts (ms): when it is due, or when the allowed window
+/// opens after that. `None` when paused.
+pub fn next_due(st: &State, started_ms: u64) -> Option<u64> {
+    if st.plan.plan.paused {
+        return None;
+    }
+    let s = st.plan.schedule();
+    rynas_schedule::window::start_at(s.window.as_deref(), &zone(&st.plan), due_ms(st, started_ms))
+}
+
+/// What the service does about the schedule now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// Nothing due (or a skipped start already reported for this wait).
+    Idle,
+    /// A backup starts.
+    Start(RunTrigger),
+    /// A backup is due but cannot start: reported to the NAS once per wait (and again after
+    /// a day, or the interval when longer, of waiting, or for another reason).
+    Skip(SkipReason),
+}
+
+/// [`Decision`] at `now_ms`. Skipped starts are reported only to a NAS that sent the shared
+/// trigger (an older one would count them as failed runs).
+pub fn decide(st: &State, started_ms: u64, now_ms: u64, tz: &TimeZone) -> Decision {
+    let s = st.plan.schedule();
+    if now_ms < due_ms(st, started_ms) {
+        return Decision::Idle;
+    }
+    let again = (u64::from(s.every_h) * 3_600_000).max(86_400_000);
+    let may_report = |reason: SkipReason| {
+        s.shared && st.skip_noted.is_none_or(|(at, r)| r != reason || now_ms >= at.saturating_add(again))
+    };
+    let blocked = if st.plan.plan.paused {
+        Some(SkipReason::Paused)
+    } else if let Some(w) = s.window.as_deref()
+        && !rynas_schedule::window::is_open(w, tz, now_ms)
+    {
+        Some(SkipReason::Window)
+    } else {
+        None
+    };
+    match blocked {
+        Some(r) if may_report(r) => Decision::Skip(r),
+        Some(_) => Decision::Idle,
+        None if st.failures > 0 => Decision::Start(RunTrigger::Retry),
+        None => Decision::Start(RunTrigger::Timer),
+    }
+}
+
+/// A skipped start, told to the NAS (its scheduler history): not a run.
+fn report_skip(st: &State, reason: SkipReason, now: u64) -> Result<(), String> {
+    let run = PcRun {
+        run_id: format!("skip-{now}"),
+        started_ms: now,
+        ended_ms: now,
+        trigger: Some(RunTrigger::Timer),
+        skipped: Some(reason),
+        ..PcRun::default()
+    };
+    let r = AgentReport { run, manifest: None, agent_version: env!("CARGO_PKG_VERSION").into(), root_btrfs: None };
+    client_of(st)?.post_json::<_, serde_json::Value>("/api/v1/pcbackup/agent/report", &r).map(|_| ())
 }
 
 struct Running {
@@ -57,13 +128,45 @@ struct Running {
     since: Instant,
 }
 
-fn start_backup() -> Result<Running, String> {
+/// How the service runs: for real (`rynas-agent run`), or the hidden test of the schedule
+/// (`schedule-test`: a stand-in run instead of a backup, for a while).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Mode {
+    /// Each run is `rynas-agent test-run` (it only reports a run), and no sleep lock.
+    pub fake: bool,
+    /// The service ends after this many seconds.
+    pub for_s: Option<u64>,
+}
+
+fn trigger_word(t: RunTrigger) -> &'static str {
+    match t {
+        RunTrigger::Manual => "manual",
+        RunTrigger::Retry => "retry",
+        _ => "timer",
+    }
+}
+
+/// The `--trigger` of a run (`timer` when absent or unknown).
+pub fn trigger_of(word: Option<&str>) -> RunTrigger {
+    match word {
+        Some("manual") => RunTrigger::Manual,
+        Some("retry") => RunTrigger::Retry,
+        _ => RunTrigger::Timer,
+    }
+}
+
+fn start_backup(trigger: RunTrigger, mode: Mode) -> Result<Running, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let args: &[&str] = if mode.fake { &["test-run"] } else { &["backup", "--service"] };
     let child = Command::new(&exe)
-        .args(["backup", "--service"])
+        .args(args)
+        .args(["--trigger", trigger_word(trigger)])
         .stdin(Stdio::null())
         .spawn()
         .map_err(|e| format!("cannot start the backup: {e}"))?;
+    if mode.fake {
+        return Ok(Running { child, inhibit: None, since: Instant::now() });
+    }
     // no sleep while it runs (when systemd-logind is there)
     let inhibit = Command::new("systemd-inhibit")
         .args([
@@ -147,9 +250,11 @@ fn refresh_trust(st: &mut State) -> u64 {
     }
 }
 
-pub fn run_service() -> Result<(), String> {
+pub fn run_service(mode: Mode) -> Result<(), String> {
     install_signals();
-    crate::backup::cleanup_leftovers();
+    if !mode.fake {
+        crate::backup::cleanup_leftovers();
+    }
     let started = now_ms();
     let mut st = State::load()?;
     eprintln!("rynas-agent {}: PC {} on {}", env!("CARGO_PKG_VERSION"), st.device, st.url);
@@ -157,12 +262,20 @@ pub fn run_service() -> Result<(), String> {
     let mut last_poll_error: Option<Instant> = None;
     // the trust and addresses: at the first contact, then every few hours
     let mut trust_due = 0u64;
-    while !STOP.load(Ordering::SeqCst) {
-        // a short poll while a backup runs (to see Cancel), a long one otherwise
-        let wait = if running.is_some() { 5 } else { 50 };
+    let end = mode.for_s.map(|s| Instant::now() + Duration::from_secs(s));
+    while !STOP.load(Ordering::SeqCst) && end.is_none_or(|e| Instant::now() < e) {
+        // a short poll while a backup runs (to see Cancel), a long one otherwise, ending when
+        // the next scheduled start comes (its due time, or the window opening)
+        let wait = if running.is_some() {
+            5
+        } else {
+            next_due(&st, started).map_or(50, |d| (d.saturating_sub(now_ms()) / 1000).clamp(5, 50))
+        };
+        let wait = end.map_or(wait, |e| wait.min(e.saturating_duration_since(Instant::now()).as_secs().max(1)));
         match poll(&st, wait) {
             Ok((plan, url)) => {
-                if plan.rev != st.plan.rev {
+                // the whole plan: a NAS whose zone changed sends the same revision
+                if plan.rev != st.plan.rev || plan != st.plan {
                     st.plan = plan.clone();
                     let plan = plan.clone();
                     let _ = State::update(|s| s.plan = plan);
@@ -183,7 +296,7 @@ pub fn run_service() -> Result<(), String> {
                         let _ = State::update(|s| s.handled_command = id);
                         if running.is_none() {
                             eprintln!("back up now (from the NAS)");
-                            running = start_backup().map_err(|e| eprintln!("{e}")).ok();
+                            running = start_backup(RunTrigger::Manual, mode).map_err(|e| eprintln!("{e}")).ok();
                         }
                     }
                     Some(AgentCommand::Cancel { id }) if id > st.handled_command => {
@@ -224,12 +337,31 @@ pub fn run_service() -> Result<(), String> {
             eprintln!("backup finished ({status}) in {took} s");
             running = None;
         }
-        if running.is_none()
-            && let Some(due) = next_due(&st, started)
-            && now_ms() >= due
-        {
-            eprintln!("scheduled backup");
-            running = start_backup().map_err(|e| eprintln!("{e}")).ok();
+        if running.is_none() {
+            let now = now_ms();
+            match decide(&st, started, now, &zone(&st.plan)) {
+                Decision::Idle => {}
+                Decision::Start(trigger) => {
+                    eprintln!("scheduled backup");
+                    running = start_backup(trigger, mode).map_err(|e| eprintln!("{e}")).ok();
+                    if running.is_some() && st.skip_noted.is_some() {
+                        st.skip_noted = None;
+                        let _ = State::update(|s| s.skip_noted = None);
+                    }
+                }
+                Decision::Skip(reason) => {
+                    match reason {
+                        SkipReason::Paused => eprintln!("a backup is due, but scheduled backups are paused"),
+                        _ => eprintln!("a backup is due outside the allowed window: it starts when the window opens"),
+                    }
+                    if let Err(e) = report_skip(&st, reason, now) {
+                        eprintln!("report to the NAS: {e}");
+                    }
+                    // noted even when the NAS did not answer: one report per wait
+                    st.skip_noted = Some((now, reason));
+                    let _ = State::update(|s| s.skip_noted = Some((now, reason)));
+                }
+            }
         }
     }
     if let Some(r) = &mut running {
@@ -242,6 +374,7 @@ pub fn run_service() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rynas_api_types::scheduler::TaskTrigger;
 
     #[test]
     fn due_times() {
@@ -257,5 +390,75 @@ mod tests {
         assert_eq!(next_due(&st, 0), Some(200_000_000 + 600_000));
         st.plan.plan.paused = true;
         assert_eq!(next_due(&st, 0), None);
+    }
+
+    fn rome_ms(s: &str) -> u64 {
+        let dt: jiff::civil::DateTime = s.parse().unwrap();
+        TimeZone::get("Europe/Rome").unwrap().to_ambiguous_zoned(dt).compatible().unwrap().timestamp().as_millisecond() as u64
+    }
+
+    /// 22:00–24:00 every day.
+    fn night() -> String {
+        let mut w = vec![b'0'; 168];
+        for d in 0..7 {
+            w[d * 24 + 22] = b'1';
+            w[d * 24 + 23] = b'1';
+        }
+        String::from_utf8(w).unwrap()
+    }
+
+    /// S6 (R5): an older NAS (no trigger) = the old fields and no window, even when the plan
+    /// carries one; a new NAS = the trigger and its window, in the NAS's zone.
+    #[test]
+    fn the_window_and_older_nas() {
+        let tz = TimeZone::get("Europe/Rome").unwrap();
+        let mut st = State::default();
+        st.plan.plan.interval_hours = 6;
+        st.plan.plan.start_delay_min = 0;
+        st.plan.plan.window = Some(night());
+        st.last_ok_ms = Some(rome_ms("2026-11-17T08:00"));
+        let afternoon = rome_ms("2026-11-17T15:00");
+        // older NAS: due at 14:00, started at once, no skipped starts ever reported
+        assert_eq!(next_due(&st, 0), Some(rome_ms("2026-11-17T14:00")));
+        assert_eq!(decide(&st, 0, afternoon, &tz), Decision::Start(RunTrigger::Timer));
+        st.plan.plan.paused = true;
+        assert_eq!(decide(&st, 0, afternoon, &tz), Decision::Idle);
+        st.plan.plan.paused = false;
+        // new NAS: the trigger wins over the old fields; waits for 22:00 in the NAS's zone
+        st.plan.trigger = Some(TaskTrigger::Interval { hours: 6, after_boot_min: 0 });
+        st.plan.tz = Some("Europe/Rome".into());
+        st.plan.plan.interval_hours = 99;
+        assert_eq!(next_due(&st, 0), Some(rome_ms("2026-11-17T22:00")));
+        assert_eq!(decide(&st, 0, afternoon, &tz), Decision::Skip(SkipReason::Window));
+        // reported once per wait
+        st.skip_noted = Some((afternoon, SkipReason::Window));
+        assert_eq!(decide(&st, 0, afternoon + 3_600_000, &tz), Decision::Idle);
+        // the window opens: the backup starts (a retry after a failure)
+        assert_eq!(decide(&st, 0, rome_ms("2026-11-17T22:00"), &tz), Decision::Start(RunTrigger::Timer));
+        st.failures = 1;
+        st.last_attempt_ms = Some(rome_ms("2026-11-17T22:00"));
+        assert_eq!(decide(&st, 0, rome_ms("2026-11-17T22:05"), &tz), Decision::Idle);
+        assert_eq!(decide(&st, 0, rome_ms("2026-11-17T22:10"), &tz), Decision::Start(RunTrigger::Retry));
+        // a retry due after the window closed waits for the next night
+        assert_eq!(decide(&st, 0, rome_ms("2026-11-18T00:10"), &tz), Decision::Idle);
+        // still waiting a day later: reported again; another reason at once
+        assert_eq!(decide(&st, 0, afternoon + 86_400_000, &tz), Decision::Skip(SkipReason::Window));
+        st.plan.plan.paused = true;
+        assert_eq!(decide(&st, 0, afternoon + 86_400_000 + 60_000, &tz), Decision::Skip(SkipReason::Paused));
+        assert_eq!(next_due(&st, 0), None);
+        // the zone: the NAS's, else the PC's
+        assert_eq!(zone(&st.plan).iana_name(), Some("Europe/Rome"));
+        st.plan.tz = Some("Not/AZone".into());
+        assert_eq!(zone(&st.plan), TimeZone::try_system().unwrap_or(TimeZone::UTC));
+    }
+
+    #[test]
+    fn triggers_of_runs() {
+        assert_eq!(trigger_of(Some("manual")), RunTrigger::Manual);
+        assert_eq!(trigger_of(Some("retry")), RunTrigger::Retry);
+        assert_eq!(trigger_of(None), RunTrigger::Timer);
+        for t in [RunTrigger::Manual, RunTrigger::Retry, RunTrigger::Timer] {
+            assert_eq!(trigger_of(Some(trigger_word(t))), t);
+        }
     }
 }

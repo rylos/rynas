@@ -8,6 +8,7 @@
 //! and times of the other pages that schedule something are in [`window`].
 
 pub mod draft;
+pub mod interval;
 pub mod window;
 
 use std::time::Duration;

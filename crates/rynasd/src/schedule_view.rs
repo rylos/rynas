@@ -92,6 +92,7 @@ pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> R
                 maintenance: t.follows_maintenance(),
                 trigger: Some(t.trigger.clone()),
                 every_h: None,
+                window: None,
                 truncated: false,
             },
             task: Some(t),
@@ -101,12 +102,12 @@ pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> R
             next_ms,
         });
     }
-    // the PC agents' backup plans (they run on the PCs, by their own clock)
+    // the PC agents' backup plans (they run on the PCs, by their own clock and the rules of
+    // `rynas_schedule::window`, the same as the overview's)
     if let Some(agent) = p.ops.pc_agent.get().and_then(std::sync::Weak::upgrade) {
         let reg = agent.snapshot();
         for (name, d) in reg.devices.iter().filter(|(_, d)| !d.revoked) {
             let plan = &d.settings.plan;
-            let shown = if d.settings.description.is_empty() { d.hostname.clone() } else { d.settings.description.clone() };
             let durations: Vec<u64> = d
                 .history
                 .iter()
@@ -118,8 +119,8 @@ pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> R
             let estimate_ms = median(durations.clone());
             jobs.push(JobInput {
                 job: OverviewJob {
-                    id: format!("pc:{name}"),
-                    name: if shown.is_empty() { name.clone() } else { shown },
+                    id: crate::pc_agent::task_id_of(name),
+                    name: pc_name(name, d),
                     owner: OverviewOwner::PcBackup,
                     action: None,
                     enabled: !plan.paused,
@@ -131,6 +132,7 @@ pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> R
                     maintenance: false,
                     trigger: None,
                     every_h: Some(plan.interval_hours),
+                    window: plan.window.clone().filter(|w| week_window_valid(w)),
                     truncated: false,
                 },
                 task: None,
@@ -148,6 +150,13 @@ pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> R
     let mut out = build(jobs, window.as_deref(), &tz, from, to, now, &disks);
     out.paused = p.gate.pause().all.filter(|a| a.active(now));
     Ok(out)
+}
+
+/// How a PC is named on the Schedule page: its description, else its host name, else its
+/// device name.
+fn pc_name(device: &str, d: &crate::pc_agent::Dev) -> String {
+    let shown = if d.settings.description.is_empty() { d.hostname.clone() } else { d.settings.description.clone() };
+    if shown.is_empty() { device.to_string() } else { shown }
 }
 
 fn median(mut v: Vec<u64>) -> Option<u64> {
@@ -217,6 +226,7 @@ async fn runs(State(st): State<ProtState>, Query(q): Query<RunsQuery>) -> Res<Js
     };
     if let Some(t) = q.task.as_deref().filter(|t| !t.is_empty())
         && !rynas_scheduler::domain::valid_task_id(t)
+        && !t.strip_prefix("pc:").is_some_and(rynas_api_types::pcagent::valid_device)
     {
         return Err(Error::bad_request("invalid task id"));
     }
@@ -246,9 +256,16 @@ fn names_of(p: &Protection, runs: &[rynas_api_types::scheduler::TaskRun]) -> BTr
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     let known: HashMap<&str, &str> = doc.tasks.iter().map(|t| (t.id.as_str(), t.name.as_str())).collect();
+    // the PCs' backups (`pc:<device>`): the PC's description or host name, as the overview
+    let pcs = p.ops.pc_agent.get().and_then(std::sync::Weak::upgrade).map(|a| a.snapshot());
     let mut out = BTreeMap::new();
     for r in runs {
         if out.contains_key(&r.task_id) {
+            continue;
+        }
+        if let Some(device) = r.task_id.strip_prefix("pc:") {
+            let d = pcs.as_ref().and_then(|reg| reg.devices.get(device));
+            out.insert(r.task_id.clone(), d.map(|d| pc_name(device, d)).unwrap_or_else(|| device.to_string()));
             continue;
         }
         let name = match known.get(r.task_id.as_str()) {

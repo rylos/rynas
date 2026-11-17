@@ -52,6 +52,10 @@ pub struct State {
     /// The last command of the NAS that was carried out.
     #[serde(default)]
     pub handled_command: u64,
+    /// The skipped start last reported to the NAS while a due backup waits (paused, outside
+    /// the allowed window), and why: one report per wait. Cleared when a backup starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_noted: Option<(u64, rynas_api_types::scheduler::SkipReason)>,
 }
 
 pub fn dir() -> PathBuf {

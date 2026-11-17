@@ -360,6 +360,8 @@ pub fn run_status(r: &TaskRun) -> (Tone, String) {
             SkipReason::Missed => (Tone::Warn, "sch.skip.missed"),
             SkipReason::Overlap => (Tone::Unknown, "sch.skip.overlap"),
             SkipReason::Running => (Tone::Unknown, "sch.skip.running"),
+            // a PC's backup (S6): due outside its allowed window, it waits for the window
+            SkipReason::Window if r.task_id.starts_with("pc:") => (Tone::Unknown, "sch.skip.allowed"),
             SkipReason::Window => (Tone::Unknown, "sch.skip.window"),
             SkipReason::NotDue => (Tone::Unknown, "sch.skip.not_due"),
             SkipReason::Busy => (Tone::Warn, "sch.skip.busy"),

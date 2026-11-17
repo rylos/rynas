@@ -2446,6 +2446,14 @@ sch.skip.missed_detail	Non recuperata: oltre {deadline} di ritardo
 sch.skip.overlap	Saltata: l'esecuzione precedente era in corso
 sch.skip.running	Saltata: già in esecuzione
 sch.skip.window	Saltata: fuori dalla sua finestra
+sch.skip.allowed	In attesa: in scadenza fuori dalla finestra consentita
+sch.allowed.switch	Avvia solo dentro una finestra consentita
+sch.allowed.help	Un backup che scade fuori dalla finestra aspetta che si apra. Un backup ancora in corso quando la finestra si chiude prosegue fino alla fine.
+sch.allowed.title	Finestra consentita
+sch.allowed.grid_help	Colora le ore in cui i backup di questo PC possono partire, nell'ora locale del NAS.
+sch.allowed.old_agent	L'agente di questo PC ({version}) ignora la finestra e parte appena un backup è in scadenza: aggiornalo alla 0.8.20 o successiva.
+sch.allowed.empty	Apri almeno un'ora della finestra consentita, oppure disattiva la finestra.
+sch.allowed.paused_help	In pausa: nessun backup parte secondo la pianificazione. Esegui backup ora funziona comunque.
 sch.skip.not_due	Saltata: non ancora dovuta
 sch.skip.busy	Saltata: è rimasta troppo in coda
 sch.run.yielded	Ha ceduto il passo, riprenderà
@@ -2529,6 +2537,7 @@ sv.nothing_24h	Niente di pianificato nelle prossime 24 ore.
 sv.usual	di solito dura {d}
 sv.no_estimate	durata non ancora nota
 sv.every_h	Ogni {h} h
+sv.every_h_window	Ogni {h} h, dentro la finestra consentita
 sv.starts.one	{n} avvio
 sv.starts.other	{n} avvii
 sv.uses	Usa {res}
@@ -2540,6 +2549,7 @@ sv.h.skipped	Saltati
 sv.h.yielded	Hanno ceduto il passo
 sv.h.all_tasks	Tutte le attività
 sv.h.none	Nessuna esecuzione corrisponde a questi filtri.
+sv.h.open_pc	Apri i backup dei PC
 sch.trigger.catch_up	Recupero dopo lo spegnimento
 sch.trigger.boot	All'avvio
 sch.trigger.manual	Esegui ora
@@ -5181,6 +5191,7 @@ pcb.first_run_no_manifest	Quali sottovolumi aspettarsi lo dice il manifest della
 pcb.agent.title	rynas-agent
 pcb.agent.unpaired	Nessun rynas-agent è ancora abbinato a questo PC. Crea un codice, installa l'agente sul PC ed esegui il comando di abbinamento: il PC prende il nome di questa cartella.
 pcb.agent.every_h	Ogni {n} h
+pcb.agent.every_h_window	Ogni {n} h, dentro la finestra consentita
 pcb.agent.last_run	Sottovolumi dell'ultima esecuzione
 pcb.st.no_key	In attesa della chiave
 pcb.last_ok_on	Ultimo riuscito {when}

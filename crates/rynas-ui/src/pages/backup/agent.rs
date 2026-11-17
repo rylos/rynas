@@ -1061,7 +1061,8 @@ impl AgentCtl {
             // paused under a stronger chip (failed, unreachable): said on the meta line, with the
             // last success the paused chip would carry
             let paused_chip = paused && p.state != PcState::Failed && !unreachable(&p);
-            let plan = if paused { (!paused_chip).then(|| t("pca.f.paused").to_string()) } else { Some(tf("pcb.agent.every_h", &[("n", &p.settings.plan.interval_hours.to_string())])) };
+            let every = if p.settings.plan.window.is_some() { "pcb.agent.every_h_window" } else { "pcb.agent.every_h" };
+            let plan = if paused { (!paused_chip).then(|| t("pca.f.paused").to_string()) } else { Some(tf(every, &[("n", &p.settings.plan.interval_hours.to_string())])) };
             let last_ok = (!paused_chip).then_some(last_ok);
             let agent = tf("pcb.agent_os", &[("os", &p.os), ("arch", &p.arch), ("v", &p.agent_version)]);
             // the last contact matters when the PC is late
@@ -1223,12 +1224,10 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
     let s = p.settings.clone();
     let method = s.method;
     let description = RwSignal::new(s.description.clone());
-    let interval = RwSignal::new(s.plan.interval_hours.to_string());
-    let delay = RwSignal::new(s.plan.start_delay_min.to_string());
+    let schedule = crate::schedule::interval::IntervalEditor::new(&s.plan, p.last_ok_ms, &p.agent_version);
     let freeze = RwSignal::new(if s.plan.freeze == FreezeMode::Freeze { "freeze" } else { "hot" }.to_string());
     let freeze_max = RwSignal::new(s.plan.freeze_max_secs.to_string());
     let excludes = RwSignal::new(s.plan.excludes.join("\n"));
-    let paused = RwSignal::new(if s.plan.paused { "paused" } else { "on" }.to_string());
     let r = s.retention;
     let (last, daily, weekly, monthly, yearly) = (RwSignal::new(r.last.to_string()), RwSignal::new(r.daily.to_string()), RwSignal::new(r.weekly.to_string()), RwSignal::new(r.monthly.to_string()), RwSignal::new(r.yearly.to_string()));
     let min_age = RwSignal::new(s.min_age_days.to_string());
@@ -1239,16 +1238,20 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
     let dev = StoredValue::new(p.device.clone());
     let save = move |_| {
         let n = |s: RwSignal<String>| s.get_untracked().trim().parse::<u32>().unwrap_or(0);
+        if let Some(k) = schedule.problem() {
+            error.set(Some(t(k).to_string()));
+            return;
+        }
+        let mut plan = PcPlan {
+            excludes: excludes.get_untracked().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
+            freeze: if freeze.get_untracked() == "freeze" { FreezeMode::Freeze } else { FreezeMode::Hot },
+            freeze_max_secs: n(freeze_max),
+            ..PcPlan::default()
+        };
+        schedule.apply(&mut plan);
         let body = PcDeviceSettings {
             description: description.get_untracked().trim().to_string(),
-            plan: PcPlan {
-                interval_hours: n(interval),
-                start_delay_min: n(delay),
-                excludes: excludes.get_untracked().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
-                freeze: if freeze.get_untracked() == "freeze" { FreezeMode::Freeze } else { FreezeMode::Hot },
-                freeze_max_secs: n(freeze_max),
-                paused: paused.get_untracked() == "paused",
-            },
+            plan,
             retention: Retention { last: n(last), hourly: 0, daily: n(daily), weekly: n(weekly), monthly: n(monthly), yearly: n(yearly) },
             min_age_days: n(min_age),
             alert_hours: n(alert),
@@ -1271,7 +1274,6 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
         });
     };
     const FREEZE: &[(&str, &str)] = &[("hot", "pca.f.hot"), ("freeze", "pca.f.freeze")];
-    const PAUSED: &[(&str, &str)] = &[("on", "pca.f.scheduled"), ("paused", "pca.f.paused")];
     let files_only = {
         view! {
             <h3 class="mini-title">{tr("pca.f.consistency")}</h3>
@@ -1302,11 +1304,7 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
     let body = view! {
         {text_field("bk.f.description", description.into(), Callback::new(move |v| description.set(v)), Signal::stored(None), In { maxlength: 120, ..In::default() })}
         <h3 class="mini-title">{tr("pca.f.schedule")}</h3>
-        {select_field("pca.f.state", None, PAUSED, paused.into(), Callback::new(move |v| paused.set(v)))}
-        <div class="form-row">
-            {number_field("pca.f.interval", Some("pca.f.interval_help"), interval.into(), Callback::new(move |v| interval.set(v)), 1, 168)}
-            {number_field("pca.f.delay", Some("pca.f.delay_help"), delay.into(), Callback::new(move |v| delay.set(v)), 0, 1440)}
-        </div>
+        {schedule.view()}
         {files_only}
         {form_error(error)}
     }

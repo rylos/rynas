@@ -6,7 +6,9 @@
 //! - [`next`] (feature `next`): when an expression elapses, with systemd's DST behaviour;
 //! - [`recurrence`]: the preset schedules of the editor, to and from `OnCalendar=`;
 //! - [`describe`]: a schedule as structured words the interface translates;
-//! - [`cal`]: the Task Scheduler's calendar builder (moved from the web interface).
+//! - [`cal`]: the Task Scheduler's calendar builder (moved from the web interface);
+//! - [`window`] (feature `next`): weekly windows (open, opens at, closes at) and the PC
+//!   agents' interval schedule, shared by the NAS and `rynas-agent`.
 //!
 //! The DST rules systemd applies (checked on Debian trixie's systemd 257, golden files in
 //! `tests/golden/`): a local time that does not exist on the spring-forward day is skipped
@@ -19,6 +21,8 @@ pub mod describe;
 pub mod next;
 pub mod recurrence;
 pub mod spec;
+#[cfg(feature = "next")]
+pub mod window;
 
 pub use describe::{Description, describe};
 #[cfg(feature = "next")]

@@ -419,11 +419,11 @@ fn pair_btrfs(svc: &Arc<PcAgent>, p: &Pairing, target: &str, req: &PairRequest) 
                 old.command = None;
                 old.command_at_ms = None;
                 old.rev += 1;
-                Ok(super::plan_of(old))
+                Ok(super::plan_of(old, svc.paused_all()))
             }
             Some(_) => Err(Error::new(StatusCode::CONFLICT, error_codes::ALREADY_EXISTS, format!("a PC named {target} is already paired"))),
             None => {
-                let plan = super::plan_of(&dev);
+                let plan = super::plan_of(&dev, svc.paused_all());
                 r.devices.insert(target.to_string(), dev);
                 Ok(plan)
             }
@@ -531,7 +531,7 @@ pub async fn pair(svc: &Arc<PcAgent>, p: &Pairing, settings: &PcAgentSettings, r
         rev: 1,
         ..Default::default()
     };
-    let plan = super::plan_of(&dev);
+    let plan = super::plan_of(&dev, svc.paused_all());
     // the name is picked again against the registry as it is now: another pairing may have
     // taken it meanwhile (two PCs with the same host name at once)
     let stored = svc.edit(|r| {
@@ -714,6 +714,13 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
     if run.snapshot.as_ref().is_some_and(|s| s.len() > 64 || !s.bytes().all(|b| b.is_ascii_hexdigit())) {
         run.snapshot = None;
     }
+    // a scheduled start the agent skipped (S6): one row in the scheduler's history, nothing
+    // else changes (not a run: no version, no alert, the command stays)
+    if let Some(reason) = run.skipped {
+        svc.device(device)?;
+        record_skip(svc, device, &run, reason);
+        return Ok(());
+    }
     let manifest = r.manifest.and_then(|m| {
         let b = serde_json::to_vec(&m).ok()?;
         (b.len() <= MAX_MANIFEST).then_some((m, b))
@@ -727,6 +734,7 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
     }
     let ok = run.ok;
     let err = run.error.clone();
+    let run_row = run.clone();
     let alerted = svc.edit(|reg| {
         let d = reg.devices.get_mut(device).ok_or_else(|| Error::internal("device vanished"))?;
         if ok {
@@ -755,6 +763,7 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
     })?;
     svc.clear_progress(device);
     svc.changed.notify_waiters();
+    record_run(svc, device, &run_row);
     let key = format!("pcbackup:agent-failed:{device}");
     if !ok && !alerted {
         let mut ev = firing(
@@ -771,6 +780,64 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
         svc.notifier.emit(field(code(ev, "pcbackup.agent_resumed"), "device", device));
     }
     Ok(())
+}
+
+/// A run of a PC's backup in the scheduler's history (task `pc:<device>`, S6): the unified
+/// history of the Schedule page and the lengths of the overview. Reported twice (the agent
+/// retries a report it saw fail), it is recorded once.
+fn record_run(svc: &PcAgent, device: &str, run: &PcRun) {
+    let Some(link) = svc.scheduler.get() else { return };
+    let row = rynas_scheduler::history::NewRun {
+        task_id: super::task_id_of(device),
+        invocation_id: format!("{}:{}", super::task_id_of(device), run.run_id),
+        start_ms: Some(run.started_ms),
+        end_ms: run.ended_ms.max(run.started_ms),
+        result: if run.ok { "success".into() } else { "failed".into() },
+        trigger: run.trigger,
+        detail: run.error.clone(),
+        ..Default::default()
+    };
+    if let Err(e) = link.history.record_once(&row) {
+        tracing::warn!("PC backup {device}: scheduler history: {e}");
+    }
+}
+
+/// A scheduled start the agent skipped, in the scheduler's history: paused (by the PC's own
+/// pause or Pause all on the NAS), or due outside the allowed window (it waits for it).
+fn record_skip(svc: &PcAgent, device: &str, run: &PcRun, reason: rynas_api_types::scheduler::SkipReason) {
+    use rynas_api_types::scheduler::{RunTrigger, SkipReason};
+    let Some(link) = svc.scheduler.get() else { return };
+    let at = if run.started_ms > 0 { run.started_ms } else { now_ms() };
+    let (reason, detail) = match reason {
+        SkipReason::Paused | SkipReason::PausedAll if svc.paused_all() => (SkipReason::PausedAll, None),
+        SkipReason::Paused | SkipReason::PausedAll => (SkipReason::Paused, None),
+        SkipReason::Window => {
+            let tz = rynas_power::system_tz();
+            let opens = svc
+                .device(device)
+                .ok()
+                .and_then(|d| d.settings.plan.window)
+                .and_then(|w| rynas_schedule::window::opens_at(&w, &tz, at));
+            let detail = match opens {
+                Some(o) => format!("due outside the allowed window: waits until it opens ({})", rynas_scheduler::maintenance::wall_clock(&tz, o)),
+                None => "due outside the allowed window: waits until it opens".to_string(),
+            };
+            (SkipReason::Window, Some(detail))
+        }
+        // nothing else is a reason an agent gives
+        _ => return,
+    };
+    let row = rynas_scheduler::history::NewRun::skipped(
+        &super::task_id_of(device),
+        &format!("{}:{}", super::task_id_of(device), run.run_id),
+        at,
+        run.trigger.unwrap_or(RunTrigger::Timer),
+        reason,
+        detail,
+    );
+    if let Err(e) = link.history.record_once(&row) {
+        tracing::warn!("PC backup {device}: scheduler history: {e}");
+    }
 }
 
 // ------------------------------------------------------------------ maintenance
@@ -1056,8 +1123,10 @@ fn maint_due(hour: u8, now: jiff::Timestamp, tz: &jiff::tz::TimeZone) -> Option<
 fn backup_pending(reg: &Registry, group: &str, now: u64) -> bool {
     reg.devices.values().any(|d| {
         let online = d.last_seen_ms.is_some_and(|t| now.saturating_sub(t) < AGENT_ONLINE_MS);
+        // a backup due outside its allowed window waits for the window, not now (S6)
         let due = !d.settings.plan.paused
-            && d.last_ok_ms.is_none_or(|t| now.saturating_sub(t) >= u64::from(d.settings.plan.interval_hours) * 3_600_000);
+            && d.last_ok_ms.is_none_or(|t| now.saturating_sub(t) >= u64::from(d.settings.plan.interval_hours) * 3_600_000)
+            && d.settings.plan.window.as_deref().is_none_or(|w| rynas_schedule::window::is_open(w, &rynas_power::system_tz(), now));
         d.group == group && !d.revoked && online && (d.command.is_some() || due)
     })
 }
