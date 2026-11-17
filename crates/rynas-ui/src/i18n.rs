@@ -3178,7 +3178,7 @@ dict! { BLOB, LENS;
     "sv.mw.saved" => "Maintenance window saved";
     "sv.mw.enabled" => "Use a maintenance window";
     "sv.mw.enabled_help" => "Off: nothing waits for a window.";
-    "sv.mw.grid_help" => "Paint the hours when heavy work may start, in the NAS's local time.";
+    "sv.mw.grid_help" => "Paint the hours when the jobs that wait for the window may start, in the NAS's local time.";
     "sv.mw.empty" => "Open at least one hour, or turn the window off.";
     "sv.f.volume" => "Volume";
     "sv.f.all_volumes" => "All volumes";

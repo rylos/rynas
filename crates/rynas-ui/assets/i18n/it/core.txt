@@ -2516,7 +2516,7 @@ sch.interrupted.not_again	Era in attesa quando il NAS si è riavviato; non avvia
 sv.mw.saved	Finestra di manutenzione salvata
 sv.mw.enabled	Usa una finestra di manutenzione
 sv.mw.enabled_help	Spenta: niente attende una finestra.
-sv.mw.grid_help	Colora le ore in cui il lavoro pesante può partire, nell'ora locale del NAS.
+sv.mw.grid_help	Colora le ore in cui i lavori che attendono la finestra possono partire, nell'ora locale del NAS.
 sv.mw.empty	Apri almeno un'ora, oppure spegni la finestra.
 sv.f.volume	Volume
 sv.f.all_volumes	Tutti i volumi
