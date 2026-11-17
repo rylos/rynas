@@ -137,6 +137,7 @@ export class Pane {
           <button data-v="list" title="${t("files.common.list")} (Ctrl+1)">${svg("list")}</button>
           <button data-v="grid" title="${t("files.pane.grid")} (Ctrl+2)">${svg("grid")}</button>
           <button data-v="columns" title="${t("files.common.columns")} (Ctrl+3)">${svg("columns")}</button>
+          <button class="b-flat" title="${t("files.menus.flat_view")} (Ctrl+Shift+F)" aria-label="${t("files.menus.flat_view")}">${svg("layers")}</button>
         </div>
         <button class="icon-btn b-hidden" title="${t("files.pane.hidden_files")} (Ctrl+H)">${svg("eye")}</button>
         <button class="icon-btn b-split" title="${t("files.common.dual_pane")} (F3)">${svg("split")}</button>
@@ -176,7 +177,8 @@ export class Pane {
     $(".b-info", this.el).onclick = () => this.app.toggleInfo();
     $(".b-new", this.el).onclick = (e) => this.app.newMenu(this, e.currentTarget);
     $(".b-more", this.el).onclick = (e) => this.app.moreMenu(this, e.currentTarget);
-    this.el.querySelectorAll(".views button").forEach((b) => (b.onclick = () => this.setView(b.dataset.v)));
+    this.el.querySelectorAll(".views button[data-v]").forEach((b) => (b.onclick = () => this.setView(b.dataset.v)));
+    $(".b-flat", this.el).onclick = () => this.setFlat(!this.flat);
     $(".filter-box .mode", this.el).onclick = (e) => {
       e.preventDefault();
       this.setSearchMode(!this.searchMode);
@@ -412,6 +414,8 @@ export class Pane {
   }
 
   setView(view) {
+    // the columns view is a folder at a time: the flat view goes
+    if (view === "columns" && this.flat) this.setFlat(false);
     this.view = view;
     $(".empty-state", this.el)?.remove();
     this.app.rememberView(view, this);
@@ -444,6 +448,11 @@ export class Pane {
     }
     if (on === this.flat) return;
     this.flat = on;
+    // a list of files from many folders: never in columns
+    if (on && this.view === "columns") {
+      this.view = "list";
+      this.app.rememberView("list", this);
+    }
     this.searchMode = false;
     $(".filter-box .mode", this.el).classList.remove("on");
     this.filterInput.placeholder = t("files.pane.filter");
@@ -679,7 +688,12 @@ export class Pane {
     $(".b-back", this.el).disabled = !this.back.length;
     $(".b-fwd", this.el).disabled = !this.fwd.length;
     $(".b-up", this.el).disabled = this.path === "/";
-    this.el.querySelectorAll(".views button").forEach((b) => b.classList.toggle("on", b.dataset.v === this.view));
+    // the flat view lights up instead of the view under it
+    this.el.querySelectorAll(".views button[data-v]").forEach((b) => b.classList.toggle("on", !this.flat && b.dataset.v === this.view));
+    const flatBtn = $(".b-flat", this.el);
+    flatBtn.classList.toggle("on", this.flat);
+    flatBtn.setAttribute("aria-pressed", String(this.flat));
+    flatBtn.disabled = !this.flatAllowed();
     const hb = $(".b-hidden", this.el);
     hb.classList.toggle("on", prefs.showHidden);
     hb.innerHTML = svg(prefs.showHidden ? "eye" : "eyeOff");
@@ -752,7 +766,7 @@ export class Pane {
     if (this.view === "columns") return [{ key: "name", label: "files.common.name", width: "minmax(0, 1fr)" }];
     // a search or the flat view adds the Folder column: it gives way first, Name next
     const cols = [{ key: "name", label: "files.common.name", width: this.search ? "minmax(120px, 1fr)" : "minmax(160px, 1fr)" }];
-    if (this.search) cols.push({ key: "dir", label: "files.common.folder", width: "minmax(60px, .6fr)", cls: "" });
+    if (this.search) cols.push({ key: "dir", label: "files.common.folder", width: "minmax(70px, .6fr)", cls: "" });
     // a PC's snapshots on a narrow screen: the room goes to their names, not to permissions
     const narrowPc = isPcFolder(this.path) && this.el.clientWidth > 0 && this.el.clientWidth < 600;
     for (const [key, c] of Object.entries(COLS)) {
