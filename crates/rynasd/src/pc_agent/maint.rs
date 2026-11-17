@@ -1109,11 +1109,13 @@ fn maint_due(hour: u8, now: jiff::Timestamp, tz: &jiff::tz::TimeZone) -> Option<
 /// good version for its interval, plan not paused). A catch-up maintenance waits for it:
 /// it would lock the repository right when the backup starts. A running backup or a recent
 /// upload is refused by [`take`] already.
-fn backup_pending(reg: &Registry, group: &str, now: u64) -> bool {
+fn backup_pending(reg: &Registry, group: &str, now: u64, paused_all: bool) -> bool {
     reg.devices.values().any(|d| {
         let online = d.last_seen_ms.is_some_and(|t| now.saturating_sub(t) < AGENT_ONLINE_MS);
-        // a backup due outside its allowed window waits for the window, not now (S6)
+        // a backup due outside its allowed window waits for the window, not now; while
+        // every task is paused the agents' plans are paused too (S6)
         let due = !d.settings.plan.paused
+            && !paused_all
             && d.last_ok_ms.is_none_or(|t| now.saturating_sub(t) >= u64::from(d.settings.plan.interval_hours) * 3_600_000)
             && d.settings.plan.window.as_deref().is_none_or(|w| rynas_schedule::window::is_open(w, &rynas_power::system_tz(), now));
         d.group == group && !d.revoked && online && (d.command.is_some() || due)
@@ -1211,7 +1213,7 @@ fn maintain_due(svc: &Arc<PcAgent>, day: i64, late: bool) -> (Vec<(String, Strin
         }
         // a catch-up never takes the repository from a PC about to back up: tried again
         // in five minutes, until the catch-up window ends
-        let r = if late && backup_pending(&reg, n, now_ms()) {
+        let r = if late && backup_pending(&reg, n, now_ms(), svc.paused_all()) {
             Err(Error::new(StatusCode::CONFLICT, error_codes::BUSY, "a PC of the group is about to back up (late maintenance gives way)".into()))
         } else {
             start(svc, n, "rynas", true)
@@ -1564,20 +1566,30 @@ mod tests {
         let mut reg = Registry::default();
         // online, last good version 2 h ago, daily plan: not due
         reg.devices.insert("a".into(), dev("g", Some(now - 60_000), Some(now - 2 * hour)));
-        assert!(!backup_pending(&reg, "g", now));
+        assert!(!backup_pending(&reg, "g", now, false));
         // due (25 h) but offline: nothing will start
         reg.devices.insert("b".into(), dev("g", Some(now - 2 * hour), Some(now - 25 * hour)));
-        assert!(!backup_pending(&reg, "g", now));
+        assert!(!backup_pending(&reg, "g", now, false));
         // online and due: about to back up
         reg.devices.get_mut("b").unwrap().last_seen_ms = Some(now - 60_000);
-        assert!(backup_pending(&reg, "g", now));
-        assert!(!backup_pending(&reg, "other", now), "another group's PC");
+        assert!(backup_pending(&reg, "g", now, false));
+        assert!(!backup_pending(&reg, "other", now, false), "another group's PC");
+        // every task paused on the NAS: the PC's plan is paused too
+        assert!(!backup_pending(&reg, "g", now, true));
+        // its allowed window closed now: it waits for the window
+        let closed: String = {
+            let cell = rynas_schedule::window::cell_of(&jiff::Timestamp::from_millisecond(now as i64).unwrap().to_zoned(rynas_power::system_tz()).datetime());
+            (0..168).map(|c| if c == cell { '0' } else { '1' }).collect()
+        };
+        reg.devices.get_mut("b").unwrap().settings.plan.window = Some(closed);
+        assert!(!backup_pending(&reg, "g", now, false));
+        reg.devices.get_mut("b").unwrap().settings.plan.window = None;
         // paused plan: no scheduled backup
         reg.devices.get_mut("b").unwrap().settings.plan.paused = true;
-        assert!(!backup_pending(&reg, "g", now));
+        assert!(!backup_pending(&reg, "g", now, false));
         // a command waiting ("Back up now") for an online PC
         reg.devices.get_mut("a").unwrap().command = Some(AgentCommand::BackupNow { id: 1 });
-        assert!(backup_pending(&reg, "g", now));
+        assert!(backup_pending(&reg, "g", now, false));
     }
 
     #[test]
