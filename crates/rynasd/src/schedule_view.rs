@@ -132,7 +132,11 @@ pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> R
                     maintenance: false,
                     trigger: None,
                     every_h: Some(plan.interval_hours),
-                    window: plan.window.clone().filter(|w| week_window_valid(w)),
+                    // an agent older than 0.8.20 ignores the window: drawn as it runs
+                    window: plan
+                        .window
+                        .clone()
+                        .filter(|w| week_window_valid(w) && rynas_api_types::pcagent::agent_follows_window(&d.agent_version)),
                     truncated: false,
                 },
                 task: None,

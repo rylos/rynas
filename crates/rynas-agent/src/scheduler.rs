@@ -49,11 +49,13 @@ pub fn due_ms(st: &State, started_ms: u64) -> u64 {
     due.max(retry)
 }
 
-/// The zone of the allowed window: the NAS's (sent in the plan), else this PC's, else UTC.
+/// The zone of the allowed window: the NAS's (sent in the plan: its name, else its POSIX
+/// rule when the name is missing or this PC has no zone database), else this PC's, else UTC.
 pub fn zone(plan: &AgentPlan) -> TimeZone {
     plan.tz
         .as_deref()
         .and_then(|z| TimeZone::get(z).ok())
+        .or_else(|| plan.tz_posix.as_deref().and_then(|p| TimeZone::posix(p).ok()))
         .or_else(|| TimeZone::try_system().ok())
         .unwrap_or(TimeZone::UTC)
 }
@@ -453,6 +455,11 @@ mod tests {
         assert_eq!(zone(&st.plan).iana_name(), Some("Europe/Rome"));
         st.plan.tz = Some("Not/AZone".into());
         assert_eq!(zone(&st.plan), TimeZone::try_system().unwrap_or(TimeZone::UTC));
+        // no name the PC knows: the NAS's POSIX rule
+        st.plan.tz_posix = Some("CET-1CEST,M3.5.0,M10.5.0/3".into());
+        let z = zone(&st.plan);
+        assert!(!rynas_schedule::window::is_open(&night(), &z, rome_ms("2026-07-01T21:30")));
+        assert!(rynas_schedule::window::is_open(&night(), &z, rome_ms("2026-07-01T22:30")));
     }
 
     #[test]

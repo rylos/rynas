@@ -686,10 +686,14 @@ pub struct AgentPlan {
     /// reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<crate::scheduler::TaskTrigger>,
-    /// The NAS's time zone (IANA name): the zone of the allowed window. Absent or unknown on
-    /// the PC: the PC's own zone.
+    /// The NAS's time zone (IANA name): the zone of the allowed window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tz: Option<String>,
+    /// The same zone as a POSIX TZ rule (`CET-1CEST,M3.5.0,M10.5.0/3`, from the zone file):
+    /// used when the name is absent (a NAS whose `/etc/localtime` is a copy, or `TZ` set to a
+    /// rule) or unknown on the PC (no zone database). Neither: the PC's own zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz_posix: Option<String>,
 }
 
 impl AgentPlan {
@@ -724,6 +728,21 @@ pub struct AgentSchedule {
     pub window: Option<String>,
     /// From the shared trigger (a NAS that knows skipped-start reports).
     pub shared: bool,
+}
+
+/// The first agent version that follows [`PcPlan::window`] (S6).
+pub const WINDOW_AGENT: (u32, u32, u32) = (0, 8, 20);
+
+/// The agent of this version follows the allowed window: a known version older than
+/// [`WINDOW_AGENT`] starts whenever a backup is due (the overview draws it so, the settings
+/// warn); an unknown one is taken as current.
+pub fn agent_follows_window(agent_version: &str) -> bool {
+    let mut p = agent_version.trim().trim_start_matches('v').split(['.', '-', '+']);
+    let mut num = || p.next().and_then(|x| x.parse::<u32>().ok());
+    match (num(), num(), num()) {
+        (Some(a), Some(b), Some(c)) => (a, b, c) >= WINDOW_AGENT,
+        _ => true,
+    }
 }
 
 /// `GET /api/v1/pcbackup/agent/btrfs/snapshots` (device token, btrfs method): what the PC's
@@ -1834,6 +1853,14 @@ mod tests {
         assert!(!valid_device(&"a".repeat(33)));
     }
 
+    #[test]
+    fn agents_that_follow_the_window() {
+        assert!(!agent_follows_window("0.8.19"));
+        assert!(agent_follows_window("0.8.20"));
+        assert!(agent_follows_window("v0.9.0-rc1"));
+        assert!(agent_follows_window(""));
+    }
+
     /// R5 of `docs/research/scheduling.md`: plans and reports between agents and NAS of
     /// different versions. Golden texts of 0.8.19 (before S6) and of S6.
     #[test]
@@ -1853,10 +1880,11 @@ mod tests {
             method: PcMethod::Files,
             trigger: Some(TaskTrigger::Interval { hours: 6, after_boot_min: 15 }),
             tz: Some("Europe/Rome".into()),
+            tz_posix: Some("CET-1CEST,M3.5.0,M10.5.0/3".into()),
         };
         let text = serde_json::to_string(&new).unwrap();
         let golden = format!(
-            r#"{{"rev":8,"plan":{{"interval_hours":6,"start_delay_min":15,"excludes":[],"freeze":"hot","freeze_max_secs":60,"paused":false,"window":"{window}"}},"method":"files","trigger":{{"kind":"interval","hours":6,"after_boot_min":15}},"tz":"Europe/Rome"}}"#
+            r#"{{"rev":8,"plan":{{"interval_hours":6,"start_delay_min":15,"excludes":[],"freeze":"hot","freeze_max_secs":60,"paused":false,"window":"{window}"}},"method":"files","trigger":{{"kind":"interval","hours":6,"after_boot_min":15}},"tz":"Europe/Rome","tz_posix":"CET-1CEST,M3.5.0,M10.5.0/3"}}"#
         );
         assert_eq!(text, golden);
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();

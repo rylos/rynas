@@ -28,7 +28,7 @@ pub fn system_tz() -> jiff::tz::TimeZone {
     rynas_tz::system_tz()
 }
 
-pub use rynas_tz::zone_name;
+pub use rynas_tz::{system_posix, zone_name};
 
 /// IANA name of a zone, "UTC" when unknown.
 pub fn tz_name(tz: &jiff::tz::TimeZone) -> String {

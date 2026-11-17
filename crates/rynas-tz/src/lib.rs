@@ -119,6 +119,32 @@ pub fn zone_name(target: &Path) -> Option<String> {
     (!name.is_empty() && !name.contains("..")).then(|| name.to_string())
 }
 
+/// The POSIX TZ rule of a TZif file (v2 and later end with `\n<rule>\n`), e.g.
+/// `CET-1CEST,M3.5.0,M10.5.0/3`: what a machine without the zone database (or without this
+/// zone's name) can still compute the local time with. `None`: a v1 file or no rule.
+pub fn posix_footer(data: &[u8]) -> Option<String> {
+    if !data.starts_with(b"TZif") {
+        return None;
+    }
+    let body = data.strip_suffix(b"\n")?;
+    let start = body.iter().rposition(|b| *b == b'\n')? + 1;
+    let rule = std::str::from_utf8(&body[start..]).ok()?.trim();
+    (!rule.is_empty() && rule.len() <= 128 && rule.is_ascii() && TimeZone::posix(rule).is_ok()).then(|| rule.to_string())
+}
+
+/// The system zone's POSIX TZ rule: `TZ` when it is one, else the footer of the zone file
+/// (`TZ=:/path` or `/etc/localtime`). Sent where the zone's name may be missing (a copied
+/// `/etc/localtime`, `TZ` set to a rule).
+pub fn system_posix() -> Option<String> {
+    let file = match std::env::var("TZ").ok().filter(|v| !v.is_empty()) {
+        Some(v) if v.starts_with(':') || v.starts_with('/') => PathBuf::from(v.trim_start_matches(':')),
+        Some(v) if TimeZone::posix(&v).is_ok() => return Some(v),
+        Some(v) => Path::new("/usr/share/zoneinfo").join(v),
+        None => PathBuf::from(LOCALTIME),
+    };
+    posix_footer(&std::fs::read(file).ok()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +172,16 @@ mod tests {
 
     fn offset(tz: &TimeZone) -> i32 {
         tz.to_offset(jiff::Timestamp::UNIX_EPOCH).seconds()
+    }
+
+    #[test]
+    fn posix_rules_of_zone_files() {
+        assert_eq!(posix_footer(&tzif(3)).as_deref(), Some("XYZ-3"));
+        assert_eq!(posix_footer(b"TZif1 no rule"), None);
+        assert_eq!(posix_footer(b"not a zone file\nCET-1\n"), None);
+        if let Ok(rome) = std::fs::read("/usr/share/zoneinfo/Europe/Rome") {
+            assert_eq!(posix_footer(&rome).as_deref(), Some("CET-1CEST,M3.5.0,M10.5.0/3"));
+        }
     }
 
     #[test]

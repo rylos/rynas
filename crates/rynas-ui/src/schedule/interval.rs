@@ -22,23 +22,14 @@ const LEVELS: &[GridLevel] = &[
 
 const PAUSED: &[(&str, &str)] = &[("on", "pca.f.scheduled"), ("paused", "pca.f.paused")];
 
-/// The first agent version that follows an allowed window.
-const WINDOW_AGENT: (u32, u32, u32) = (0, 8, 20);
-
 /// A new window: every night 22:00–06:00.
 pub fn default_window() -> String {
     (0..168).map(|c| if !(6..22).contains(&(c % 24)) { '1' } else { '0' }).collect()
 }
 
-/// `major.minor.patch` of an agent version (`None`: unknown or not a version).
-fn version(v: &str) -> Option<(u32, u32, u32)> {
-    let mut p = v.trim().trim_start_matches('v').split(['.', '-', '+']);
-    Some((p.next()?.parse().ok()?, p.next()?.parse().ok()?, p.next()?.parse().ok()?))
-}
-
 /// The agent is known and older than the first one that follows a window.
 pub fn ignores_window(agent_version: &str) -> bool {
-    version(agent_version).is_some_and(|v| v < WINDOW_AGENT)
+    !rynas_api_types::pcagent::agent_follows_window(agent_version)
 }
 
 /// State of a PC's schedule in a settings dialog.
