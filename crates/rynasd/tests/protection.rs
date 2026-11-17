@@ -630,7 +630,7 @@ async fn heavy_work_queues_per_volume_and_a_scrub_yields() {
     // a scrub gives way to more urgent work on its volume (a backup run started by hand)...
     let guard = rynasd::fslock::FsLocks::global().heavy_paths(&["/"], "backup.run").await;
     rynasd::gate::tick(&e.prot);
-    let cancel = "run btrfs scrub cancel /";
+    let cancel = "run systemctl kill --kill-whom=all --signal=SIGINT rynas-task-scrub-b.service";
     assert!(e.sys.state().calls.iter().any(|c| c == cancel), "{:?}", e.sys.state().calls);
     let y = view("scrub-b").await.status.yielded.expect("giving way");
     assert!(!y.stopped);
@@ -700,6 +700,12 @@ async fn heavy_work_queues_per_volume_and_a_scrub_yields() {
     let s2 = gate_ask_body(&e, "smart-b", json!({"invocation_id": "cd05", "can_wait": true})).await;
     assert!(s2.run && s2.trigger == RunTrigger::Manual, "{s2:?}");
     gate_end(&e, "smart-b", "cd05", "success").await;
+    // a start stopped while it waits (its gate exits 0 so the unit never fails): no row
+    let s3 = gate_ask_body(&e, "smart-c", json!({"invocation_id": "cd06", "can_wait": true})).await;
+    assert!(s3.wait, "{s3:?}");
+    gate_end(&e, "smart-c", "cd06", "success").await;
+    assert!(e.prot.history.by_invocation("cd06").unwrap().is_none());
+    assert!(view("smart-c").await.status.queued.is_none());
     gate_end(&e, "smart-a", "cd01", "success").await;
 }
 

@@ -469,9 +469,11 @@ fn gate(socket: &PathBuf, state: &std::path::Path, id: &str) -> ExitCode {
                 let until = std::time::Instant::now() + WAIT_POLL;
                 while std::time::Instant::now() < until {
                     if STOP.load(Ordering::SeqCst) {
-                        // stopped while it waited: skipped, not a failure
-                        say("rynas: stopped while waiting in the queue: start skipped");
-                        return ExitCode::from(1);
+                        // stopped while it waited: systemd is stopping the unit, nothing
+                        // starts after this; exit 0, since any other exit (or dying by the
+                        // signal) during a stop marks the unit failed (systemd 257)
+                        say("rynas: stopped while waiting in the queue: nothing started");
+                        return ExitCode::SUCCESS;
                     }
                     std::thread::sleep(Duration::from_millis(200));
                 }

@@ -35,7 +35,8 @@
 //!   its turn comes or it has waited past its deadline (`busy`, recorded). Run now confirmed
 //!   by the user goes ahead of it. The lease then carries the claims.
 //! - **Yield** (S4): a scheduled scrub holding a volume that more urgent work holds or waits
-//!   for is cancelled (`btrfs scrub cancel`: the position is kept), after an entry in
+//!   for is cancelled (SIGINT to its unit: `btrfs scrub start -B` cancels and keeps the
+//!   position), after an entry in
 //!   [`YIELD_FILE`] that tells the unit its end is not a failure; once nothing more urgent
 //!   holds or waits for the volume the watch loop starts it again (`btrfs scrub resume`).
 
@@ -297,6 +298,17 @@ impl Gate {
             WaitEntry { waiter, invocation_id: invocation_id.to_string(), seen: Instant::now(), blocker: Some(blocker), trigger, attempt, skip: false },
         );
         changed
+    }
+
+    /// The start `invocation_id` of `id` was waiting in the queue when its unit ended (stopped
+    /// while queued: nothing ran); its place goes. `true` when it was.
+    pub fn ended_waiting(&self, id: &str, invocation_id: &str) -> bool {
+        let mut m = self.waiting.lock().unwrap();
+        if m.get(id).is_some_and(|w| w.invocation_id == invocation_id) {
+            m.remove(id);
+            return true;
+        }
+        false
     }
 
     /// A start of `id` waits in the queue now.
@@ -1161,7 +1173,8 @@ const YIELD_RETRY: Duration = Duration::from_secs(60);
 const YIELD_LOST_MS: u64 = 120_000;
 
 /// The queue's turn of the watch loop (S4): a running scrub gives way to more urgent work on
-/// its volume (`btrfs scrub cancel`: its position is kept), and a scrub that gave way resumes
+/// its volume (SIGINT to its unit: btrfs-progs cancels and keeps its position), and a scrub
+/// that gave way resumes
 /// once nothing more urgent holds or waits for its volume.
 fn queue_tick(p: &Protection, applied: &[ScheduledTask], now: u64) {
     let leases = p.gate.lease_views();
@@ -1205,18 +1218,20 @@ fn queue_tick(p: &Protection, applied: &[ScheduledTask], now: u64) {
         p.gate.change_yields(|m| {
             m.insert(id.to_string(), entry);
         });
-        let r = p
-            .ops
-            .config
-            .system()
-            .run(&Cmd::new("btrfs").args(["scrub", "cancel"]).arg(filesystem).env_clear());
+        // SIGINT to the unit's processes: `btrfs scrub start -B` cancels its scrub and records
+        // the position for `btrfs scrub resume` itself (its own SIGINT handler), inside the
+        // unit, which sees the volume as it is; rynasctl, the main process, waits for it
+        let unit = service_name(id);
+        let r = p.ops.config.system().run(
+            &Cmd::new("systemctl").args(["kill", "--kill-whom=all", "--signal=SIGINT", &unit]),
+        );
         let ok = matches!(&r, Ok(o) if o.success());
         if !ok {
             let why = match r {
                 Ok(o) => format!("exit code {:?}: {}", o.code, o.stderr.trim()),
                 Err(e) => e.to_string(),
             };
-            tracing::warn!("scheduler: task {id}: btrfs scrub cancel {filesystem}: {why}");
+            tracing::warn!("scheduler: task {id}: stopping the scrub of {filesystem}: {why}");
             p.gate.yield_failed.lock().unwrap().insert(id.to_string(), Instant::now());
             p.gate.drop_yield(id);
         }

@@ -942,6 +942,11 @@ pub(crate) fn record_end(
     if f.result == "exec-condition" {
         return Ok(None);
     }
+    // stopped while it waited in the queue (S4): its gate ended the start, nothing ran
+    if p.gate.ended_waiting(id, &f.invocation_id) {
+        tracing::info!("scheduler: task {id}: stopped while waiting in the queue");
+        return Ok(None);
+    }
     let (exit_code, signal) = match f.exit_code.as_str() {
         "exited" => (f.exit_status.parse().ok(), None),
         "killed" | "dumped" => (None, Some(f.exit_status.clone()).filter(|s| !s.is_empty())),
