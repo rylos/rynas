@@ -682,4 +682,9 @@ export default {
   "files.rename.n_not_renamed": "{n} not renamed: {e}",
   "files.rename.count.renamed.one": "{n} item renamed",
   "files.rename.count.renamed.other": "{n} items renamed",
+  "files.pane.flat_view_nas_folders": "The flat view works in the folders of the NAS",
+  "files.pane.reading_subfolders": "reading the subfolders…",
+  "files.pane.flat_view": "flat view",
+  "files.menus.flat_view": "Flat view (files of the subfolders)",
+  "files.settings.flat_view_keys": "Flat view: every file of the subfolders",
 };

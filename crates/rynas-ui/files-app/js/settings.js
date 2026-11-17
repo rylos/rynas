@@ -20,7 +20,7 @@ export const KEYS = [
   ["F3", "files.common.dual_pane"], ["Tab", "files.settings.other_pane_dual_pane"], ["F5 / F6", "files.settings.copy_move_other_pane"], ["Shift+F5 / Shift+F6", "files.settings.copy_move_verification"], ["Ctrl+Shift+V", "files.common.paste_verification"],
   ["Enter", "files.common.open"], ["Backspace / Alt+↑", "files.common.parent_folder"], ["Alt+← / Alt+→", "files.settings.back_forward"],
   ["Space", "files.settings.quick_look"], ["Ctrl+I", "files.common.info_panel"], ["Ctrl+H", "files.settings.show_hide_hidden_files"],
-  ["Ctrl+L", "files.settings.type_path"], ["/", "files.settings.fuzzy_filter_folder"], ["Ctrl+F", "files.settings.search_subfolders"],
+  ["Ctrl+L", "files.settings.type_path"], ["/", "files.settings.fuzzy_filter_folder"], ["Ctrl+F", "files.settings.search_subfolders"], ["Ctrl+Shift+F", "files.settings.flat_view_keys"],
   ["Ctrl+1 / Ctrl+2 / Ctrl+3", "files.settings.list_grid_columns"], ["Ctrl+B", "files.common.sidebar"], ["Ctrl+R", "files.common.refresh"],
   ["Ctrl+C / Ctrl+X / Ctrl+V", "files.settings.copy_cut_paste"], ["Ctrl+A", "files.common.select_all"], ["Ctrl+Shift+I", "files.common.invert_selection"],
   ["+ / −", "files.select.select_deselect_pattern"], ["Ctrl+Shift+D", "files.select.select_differences_panes"], ["Ctrl+Z", "files.undo.undo_last"],

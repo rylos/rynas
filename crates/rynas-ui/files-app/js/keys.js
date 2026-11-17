@@ -34,6 +34,7 @@ export const keyMethods = {
       if (e.altKey && /^[1-9]$/.test(k)) return run(() => this.switchTab(this.tabs[Math.min(+k, this.tabs.length) - 1]));
       if (ctrl && k === ",") return run(() => openSettings());
       if (ctrl && k.toLowerCase() === "j") return run(() => transfers.showDrawer());
+      if (ctrl && e.shiftKey && k.toLowerCase() === "f") return run(() => pane.setFlat(!pane.flat));
       if (ctrl && k.toLowerCase() === "f") return run(() => {
         pane.setSearchMode(true);
         pane.filterInput.focus();

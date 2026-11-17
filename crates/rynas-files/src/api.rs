@@ -702,9 +702,11 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
                 return Err(ApiError::read_only(t!("subfolder search does not work inside an archive")));
             }
             let pattern = fsops::Pattern::new(req.require("q")?);
-            let limit = req.param("limit").and_then(|l| l.parse().ok()).unwrap_or(2000).min(10000);
+            // the flat view: every file below, folders walked but not listed, more rows
+            let files_only = req.param("files") == Some("1");
+            let limit = req.param("limit").and_then(|l| l.parse().ok()).unwrap_or(2000).min(if files_only { 50000 } else { 10000 });
             let budget = req.param("budget").and_then(|b| b.parse().ok()).unwrap_or(15u64).clamp(1, 60);
-            let mut found = fsops::search(&root, &pattern, limit, Duration::from_secs(budget));
+            let mut found = fsops::search(&root, &pattern, limit, Duration::from_secs(budget), files_only);
             if r.share.read_only {
                 found.hits.iter_mut().for_each(|h| h.entry.readonly = true);
             }

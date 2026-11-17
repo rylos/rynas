@@ -171,7 +171,7 @@ export const api = {
   mkdir: (path, name, parents) => call("mkdir", { params: { path, name, parents: parents ? 1 : undefined }, body: {} }),
   rename: (path, name) => call("rename", { params: { path, name }, body: {} }),
   renames: (path, pairs) => call("renames", { params: { path }, body: { pairs } }),
-  search: (path, q, signal) => call("search", { params: { path, q }, signal }),
+  search: (path, q, signal, extra = {}) => call("search", { params: { path, q, ...extra }, signal }),
   text: (path) => call("text", { params: { path } }),
   editOpen: (path) => call("edit", { params: { path } }),
   editSave: (path, text, stamp, force) => call("edit/save", { params: { path, stamp, force: force ? 1 : undefined }, body: text, raw: true }),

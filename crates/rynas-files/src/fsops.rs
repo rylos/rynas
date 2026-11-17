@@ -499,7 +499,8 @@ fn glob_match(p: &[char], s: &[char]) -> bool {
 
 /// Walks below `root` breadth first, so near results come first, and
 /// returns the matches with their directory relative to `root`.
-pub fn search(root: &Path, pattern: &Pattern, limit: usize, budget: Duration) -> SearchResult {
+/// `files_only`: folders are walked but not listed (the flat view).
+pub fn search(root: &Path, pattern: &Pattern, limit: usize, budget: Duration, files_only: bool) -> SearchResult {
     let deadline = Instant::now() + budget;
     let mut hits = Vec::new();
     let mut scanned = 0u64;
@@ -519,7 +520,7 @@ pub fn search(root: &Path, pattern: &Pattern, limit: usize, budget: Duration) ->
             if kind.is_dir() {
                 queue.push_back(rel.join(&name));
             }
-            if pattern.matches(&name) {
+            if pattern.matches(&name) && !(files_only && kind.is_dir()) {
                 let Ok(meta) = fs::symlink_metadata(item.path()) else { continue };
                 hits.push(Hit { dir: rel.to_string_lossy().into_owned(), entry: entry(&item.path(), name, &meta) });
             }
@@ -772,6 +773,24 @@ mod tests {
         assert!(!dir.join("fine").exists() && !dir.parent().unwrap().join("out").exists());
         // nothing hidden left behind
         assert!(fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with('.')));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flat_search_lists_files_only() {
+        let dir = std::env::temp_dir().join(format!("rynas-files-flat-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        fs::create_dir_all(dir.join("#recycle")).unwrap();
+        fs::write(dir.join("top.txt"), "x").unwrap();
+        fs::write(dir.join("a/b/deep.txt"), "x").unwrap();
+        fs::write(dir.join("#recycle/gone.txt"), "x").unwrap();
+        let all = Pattern::new("*");
+        let mut flat: Vec<String> = search(&dir, &all, 100, Duration::from_secs(5), true).hits.iter().map(|h| format!("{}/{}", h.dir, h.entry.name)).collect();
+        flat.sort();
+        assert_eq!(flat, ["/top.txt", "a/b/deep.txt"]);
+        let found = search(&dir, &all, 100, Duration::from_secs(5), false);
+        assert_eq!(found.hits.len(), 4, "folders a and a/b listed too");
         let _ = fs::remove_dir_all(&dir);
     }
 }

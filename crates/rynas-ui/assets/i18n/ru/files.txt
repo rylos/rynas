@@ -698,3 +698,8 @@ files.rename.count.renamed.one	Переименован {n} элемент
 files.rename.count.renamed.few	Переименовано {n} элемента
 files.rename.count.renamed.many	Переименовано {n} элементов
 files.rename.count.renamed.other	Переименовано {n} элемента
+files.pane.flat_view_nas_folders	Плоский вид работает в папках NAS
+files.pane.reading_subfolders	чтение подпапок…
+files.pane.flat_view	плоский вид
+files.menus.flat_view	Плоский вид (файлы подпапок)
+files.settings.flat_view_keys	Плоский вид: все файлы подпапок

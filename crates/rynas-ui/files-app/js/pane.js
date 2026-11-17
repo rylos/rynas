@@ -98,7 +98,8 @@ export class Pane {
     this.anchor = 0;
     this.filter = "";
     this.searchMode = false;
-    this.search = null; // {query, results, partial, controller}
+    this.search = null; // {query, results, partial, controller}; flat: true for the flat view
+    this.flat = false; // the flat view: every file below this folder (setFlat)
     this.loading = false;
     this.error = null;
     this.writable = false;
@@ -241,6 +242,7 @@ export class Pane {
       this.view = own?.view || prefs.view;
       this.sort = { ...(own?.sort || prefs.sort) };
     }
+    this.flat = false;
     this.clearFilter(false);
     this.sel.clear();
     this.cursor = 0;
@@ -276,6 +278,7 @@ export class Pane {
     const keep = new Set(this.sel);
     const cursorPath = this.visible[this.cursor]?.path;
     await this.load();
+    if (this.flat) await this.runFlat();
     this.sel = new Set([...keep].filter((p) => this.visible.some((e) => e.path === p)));
     const i = this.visible.findIndex((e) => e.path === cursorPath);
     if (i >= 0) this.cursor = i;
@@ -429,7 +432,65 @@ export class Pane {
     this.render();
   }
 
+  /** The flat view: every file below this folder in one list, with the folder each is in. */
+  flatAllowed() {
+    return this.path !== "/" && !this.archive && !isRemote(this.path) && !isBackupTop(this.path);
+  }
+
+  setFlat(on) {
+    if (on && !this.flatAllowed()) {
+      toast(t("files.pane.flat_view_nas_folders"));
+      on = false;
+    }
+    if (on === this.flat) return;
+    this.flat = on;
+    this.searchMode = false;
+    $(".filter-box .mode", this.el).classList.remove("on");
+    this.filterInput.placeholder = t("files.pane.filter");
+    this.search?.controller?.abort();
+    this.search = null;
+    this.sel.clear();
+    this.cursor = 0;
+    if (on) this.runFlat();
+    else {
+      this.refilter();
+      this.render();
+    }
+    this.app.paneChanged(this);
+  }
+
+  /** Reads the flat view's files (the search route with files=1); the filter stays fuzzy, on them. */
+  async runFlat() {
+    this.search?.controller?.abort();
+    const controller = new AbortController();
+    const flat = { flat: true, query: "", results: [], partial: false, controller, running: true };
+    this.search = flat;
+    this.loading = true;
+    this.refilter();
+    this.render();
+    try {
+      const r = await api.search(this.path, "*", controller.signal, { files: 1, limit: 50000, budget: 40 });
+      if (this.search !== flat) return;
+      flat.results = r.hits.map((hit) => {
+        const dir = hit.dir ? joinPath(this.path, hit.dir) : this.path;
+        return { ...hit, dir: hit.dir || ".", path: joinPath(dir, hit.name) };
+      });
+      flat.partial = r.partial;
+      flat.scanned = r.scanned;
+    } catch (e) {
+      if (e.name !== "AbortError") errorToast(e);
+    } finally {
+      if (this.search === flat) {
+        flat.running = false;
+        this.loading = false;
+        this.refilter();
+        this.render();
+      }
+    }
+  }
+
   setSearchMode(on) {
+    if (on) this.flat = false;
     if (on && isRemote(this.path)) {
       toast(t("files.pane.remote_connections_folder_filter_only"));
       on = false;
@@ -480,6 +541,17 @@ export class Pane {
   }
 
   clearFilter(render = true) {
+    // the flat view: Escape clears the filter first, and leaves the view the next time
+    if (this.flat && render) {
+      if (this.filter) {
+        this.filterInput.value = "";
+        this.filter = "";
+        this.refilter();
+        this.render();
+        return;
+      }
+      return this.setFlat(false);
+    }
     this.filterInput.value = "";
     this.filter = "";
     this.search?.controller?.abort();
@@ -978,7 +1050,9 @@ export class Pane {
       const bytes = selList.reduce((a, e) => a + (isDirLike(e) ? this.dirSizes.get(e.path)?.bytes || 0 : e.size), 0);
       html += `<span><b>${count(selList.length, "files.pane.count.selected", int)}</b> · ${size(bytes)}</span>`;
     }
-    if (this.search) {
+    if (this.search?.flat) {
+      html += `<span>${this.search.running ? t("files.pane.reading_subfolders") : t("files.pane.flat_view")}${this.search.partial ? " · " + t("files.pane.partial_results") : ""}</span>`;
+    } else if (this.search) {
       html += `<span>${this.search.running ? t("files.pane.searching") : t("files.pane.n_items_scanned", { n: int(this.search.scanned || 0) })}${this.search.partial ? " · " + t("files.pane.partial_results") : ""}</span>`;
     }
     html += `<span class="grow"></span>`;
