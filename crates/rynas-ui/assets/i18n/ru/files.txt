@@ -731,3 +731,36 @@ files.dupes.count.groups.many	{n} групп
 files.dupes.count.groups.other	{n} группы
 files.dupes.biggest_only	только самые большие группы
 files.dupes.none_among_n	Среди {n} файлов дубликатов нет
+files.sync.sync_folders	Синхронизация папок
+files.sync.sync_folders_menu	Синхронизировать папки…
+files.sync.swap	Поменять стороны
+files.sync.update	Обновить →
+files.sync.mirror	Зеркало →
+files.sync.both	В обе стороны ↔
+files.sync.update_hint	Копирует вправо то, что слева новое или новее
+files.sync.mirror_hint	Делает правую сторону такой же, как левая: лишнее справа уходит в корзину
+files.sync.both_hint	Копирует в обе стороны: побеждает более новый
+files.sync.compare	Сравнить
+files.sync.synchronize	Синхронизировать
+files.sync.only_left	только слева
+files.sync.only_right	только справа
+files.sync.newer_left	новее слева
+files.sync.newer_right	новее справа
+files.sync.same_date_other_size	та же дата, другой размер: решите сами
+files.sync.file_and_folder	файл с одной стороны, папка с другой
+files.sync.n_to_right	Копировать вправо: {n}
+files.sync.n_to_left	Копировать влево: {n}
+files.sync.n_off_right	Убрать справа: {n}
+files.sync.comparing	Сравнение…
+files.sync.comparing_n	Сравнение: папок {n}
+files.sync.count.differences.one	{n} различие
+files.sync.count.differences.few	{n} различия
+files.sync.count.differences.many	{n} различий
+files.sync.count.differences.other	{n} различия
+files.sync.first_only	только первые
+files.sync.folders_same	Папки одинаковые
+files.sync.n_extra_go_recycle	Отсутствующие слева ({n}) будут перемещены в корзину общей папки справа, откуда их можно восстановить.
+files.sync.nothing_to_do	Нечего делать
+files.transfers.syncing	Синхронизация
+files.transfers.sync_complete	Синхронизация завершена
+files.transfers.op.sync	Синхронизация

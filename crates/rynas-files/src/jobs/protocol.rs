@@ -17,6 +17,9 @@ pub enum Op {
     Extract,
     /// after a restart: the temporary files of an interrupted job go
     Cleanup,
+    /// folder synchronization: `members`, paths below the one source, copied into `dest`
+    /// at the same paths (folders made as needed), replacing what is there
+    Sync,
 }
 
 /// What to do when the destination already has an item of that name.
@@ -67,7 +70,8 @@ pub struct Spec {
     /// extract: the archive's password
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
-    /// extract: only these items (paths inside the archive), each into dest
+    /// extract: only these items (paths inside the archive), each into dest; sync: the
+    /// paths below the source to copy (plain components only)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<String>,
     /// the remote connections the paths name (`/:<id>/…`), secrets included

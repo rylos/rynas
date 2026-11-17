@@ -378,6 +378,8 @@ fn kind_of(op: Op) -> &'static str {
         Op::Compress => "files.compress",
         Op::Extract => "files.extract",
         Op::Cleanup => "files.cleanup",
+        // a synchronization copies: it is shown among the copies in the task list
+        Op::Sync => "files.copy",
     }
 }
 
@@ -836,6 +838,7 @@ fn describe_job(v: &JobView) -> String {
         Op::Compress => "compress",
         Op::Extract => "extract",
         Op::Cleanup => "clean-up",
+        Op::Sync => "sync",
     };
     let first = v.info.sources.first().map(String::as_str).unwrap_or_default();
     let more = v.info.sources.len().saturating_sub(1);

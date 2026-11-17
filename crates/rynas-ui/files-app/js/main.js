@@ -217,6 +217,8 @@ class App {
     // a deletion fills or empties a bin: the share's top shows which
     if (job.op === "delete") for (const p of job.info.sources) dirs.add("/" + p.split("/")[1]);
     if (job.info.dest) dirs.add(job.info.dest);
+    // a synchronization wrote anywhere below its destination
+    if (job.op === "sync") for (const p of this.allPanes()) if (p.path.startsWith(job.info.dest + "/")) dirs.add(p.path);
     this.refreshFolders([...dirs]);
     this.loadShares();
     // what the job changed in an app's folder: the destination, and the sources it removed

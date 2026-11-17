@@ -167,6 +167,7 @@ export const api = {
   media: (path, signal) => call("media", { params: { path }, signal }),
   checksum: (path, algo, onLine, signal) => stream("checksum", { path, algo }, onLine, signal),
   duplicates: (path, by, min, onLine, signal) => stream("duplicates", { path, by, min }, onLine, signal),
+  compare: (a, b, onLine, signal) => stream("compare", { a, b }, onLine, signal),
   usage: (paths) => call("usage", { body: { paths } }),
   space: (path) => call("space", { params: { path } }),
   mkdir: (path, name, parents) => call("mkdir", { params: { path, name, parents: parents ? 1 : undefined }, body: {} }),

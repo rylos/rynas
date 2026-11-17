@@ -417,6 +417,10 @@ impl Engine {
                 self.fail(c::INVALID_VALUE, t!("archives: copy the files to the NAS first"));
                 Ok(())
             }
+            Op::Sync => {
+                self.fail(c::INVALID_VALUE, t!("synchronization is between folders of the NAS"));
+                Ok(())
+            }
         }
     }
 

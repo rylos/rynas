@@ -488,6 +488,24 @@ dialog.dlg.wide { max-width: min(94vw, 760px); }
 .dupes-dlg .dup-date { color: var(--faint); font-size: 11.5px; white-space: nowrap; }
 .dupes-dlg .dup-show { width: 24px; height: 24px; flex: none; }
 @media (max-width: 600px) { .dupes-dlg .dup-date { display: none; } }
+.sync-dlg .sync-ends { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; align-items: center; font: 12px var(--mono); margin-bottom: 10px; }
+.sync-dlg .sync-ends span { padding: 6px 9px; border-radius: 7px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sync-dlg .sync-opts { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.sync-dlg .seg { flex-wrap: wrap; max-width: 100%; }
+.sync-dlg .seg button { padding: 5px 10px; font-size: 12.5px; white-space: nowrap; }
+.sync-dlg .sync-mode-hint { margin-top: 6px; }
+.sync-dlg .sync-prog { margin-top: 10px; }
+.sync-dlg .sync-res { margin-top: 10px; }
+.sync-dlg .sync-sum { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.sync-dlg .sync-list { max-height: 48vh; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 4px 10px; }
+.sync-dlg .sync-item { display: grid; grid-template-columns: 16px 18px minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 2px 0; font-size: 12px; cursor: pointer; }
+.sync-dlg .sync-arrow { text-align: center; font-weight: 700; }
+.sync-dlg .act-a2b .sync-arrow, .sync-dlg .act-b2a .sync-arrow { color: var(--accent); }
+.sync-dlg .act-del .sync-arrow { color: var(--crit); }
+.sync-dlg .act-none { color: var(--muted); }
+.sync-dlg .sync-path { font-family: var(--mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-dlg .sync-side { color: var(--faint); font-size: 11px; white-space: nowrap; min-width: 150px; text-align: right; }
+@media (max-width: 700px) { .sync-dlg .sync-side { display: none; } .sync-dlg .sync-item { grid-template-columns: 16px 18px minmax(0, 1fr); } }
 .dlg-icon { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
 .dlg-icon.danger { background: var(--crit-soft); color: var(--crit); }
 .dlg-icon svg { width: 19px; height: 19px; }

@@ -389,6 +389,14 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
             Ok((crate::conns::join(&id, &parts), top))
         }))
     };
+    if body.op == Op::Sync {
+        if body.sources.len() != 1 || body.members.is_empty() || body.dest.is_none() {
+            return Err(ApiError::invalid("members", t!("invalid synchronization")));
+        }
+        if body.sources.iter().chain(&body.dest).any(|p| crate::conns::split(p).is_some()) {
+            return Err(ApiError::invalid("sources", t!("synchronization is between folders of the NAS")));
+        }
+    }
     if matches!(body.op, Op::Compress | Op::Extract) && body.sources.iter().chain(&body.dest).any(|p| crate::conns::split(p).is_some()) {
         return Err(ApiError::invalid("sources", t!("archives: copy the files to the NAS first")));
     }
@@ -402,7 +410,8 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
             continue;
         }
         let r = shares::resolve(shares, vpath)?;
-        if r.is_root() {
+        // a synchronization reads a whole shared folder, it does not move it
+        if r.is_root() && body.op != Op::Sync {
             return Err(ApiError::share_root(t!("a shared folder cannot be copied, moved or deleted from here")));
         }
         if body.op == Op::Delete && !body.permanent && r.share.recycle {
@@ -470,6 +479,12 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
     }
     if body.format.as_deref().is_some_and(|f| !matches!(f, "zip" | "tar.zst")) {
         return Err(ApiError::invalid("format", t!("unknown archive format")));
+    }
+    if body.op == Op::Sync
+        && let Some(d) = &dest
+        && (d.starts_with(&sources[0]) || sources[0].starts_with(d))
+    {
+        return Err(ApiError::invalid("dest", t!("a folder is not synchronized with one inside it or holding it")));
     }
     if body.op == Op::Extract && sources.len() != 1 {
         return Err(ApiError::invalid("sources", t!("one archive at a time")));
@@ -623,6 +638,20 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
                 return Err(ApiError::read_only(t!("a checksum is not computed inside an archive")));
             }
             crate::checksum::send(out, &real, req.require("algo")?)
+        }
+        "compare" => {
+            // two folders of the NAS, for a synchronization: both read as the user, in the jail
+            for key in ["a", "b"] {
+                if crate::conns::split(req.require(key)?).is_some() {
+                    return Err(ApiError::invalid(key, t!("synchronization is between folders of the NAS")));
+                }
+            }
+            refuse_whole_backup(shares, &[req.require("a")?.to_string(), req.require("b")?.to_string()])?;
+            let (a, b) = (path_param("a")?, path_param("b")?);
+            if archive::locate(&a).is_some() || archive::locate(&b).is_some() {
+                return Err(ApiError::read_only(t!("nothing is synchronized inside an archive")));
+            }
+            crate::compare::send(out, &a, &b)
         }
         "duplicates" => {
             // read as the user, inside the jail: every folder and file below checked
@@ -916,6 +945,32 @@ mod tests {
         assert_eq!(roots("copy", &["/@apps/immich/a"], Some("/Photos")), vec![photos.clone()]);
         assert!(roots("copy", &["/Photos/a.jpg"], Some("/@apps/immich")).is_empty());
         assert!(roots("delete", &["/@apps/immich/x"], None).is_empty());
+    }
+
+    #[test]
+    fn synchronizations_are_checked() {
+        let mut shares = with_apps();
+        shares.push(Share { name: "Docs".into(), path: "/srv/vol2/Docs".into(), ..Default::default() });
+        let sync = |sources: &[&str], dest: &str, members: &[&str]| {
+            let body: NewJob = serde_json::from_value(json!({ "op": "sync", "sources": sources, "dest": dest, "members": members, "conflict": "overwrite" })).unwrap();
+            job_spec(&shares, &[], &body)
+        };
+        // a whole shared folder may be the source; it writes in the destination only
+        let spec = sync(&["/Photos"], "/Docs/copy", &["2024/a.jpg", "b.jpg"]).unwrap();
+        assert_eq!(spec.op, Op::Sync);
+        assert_eq!(spec.sources, [PathBuf::from("/srv/vol1/Photos")]);
+        assert_eq!(spec.write_roots, [PathBuf::from("/srv/vol2/Docs")]);
+        assert_eq!(spec.members, ["2024/a.jpg", "b.jpg"]);
+        // never out of the source through the members
+        for bad in ["../x", "a/../../x", "a/./b", "a\0b", "/", ""] {
+            assert!(sync(&["/Photos"], "/Docs", &[bad]).is_err(), "{bad:?}");
+        }
+        // one source, some members, folders apart, no servers
+        assert!(sync(&["/Photos", "/Docs"], "/Docs/x", &["a"]).is_err());
+        assert!(sync(&["/Photos"], "/Docs", &[]).is_err());
+        assert!(sync(&["/Photos"], "/Photos/sub", &["a"]).is_err());
+        assert!(sync(&["/Photos/sub"], "/Photos", &["a"]).is_err());
+        assert!(sync(&["/Photos"], "/:abc/share", &["a"]).is_err());
     }
 
     #[test]

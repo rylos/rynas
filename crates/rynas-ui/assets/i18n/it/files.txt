@@ -707,3 +707,34 @@ files.dupes.count.groups.one	{n} gruppo
 files.dupes.count.groups.other	{n} gruppi
 files.dupes.biggest_only	solo i gruppi più grandi
 files.dupes.none_among_n	Nessun duplicato tra {n} file
+files.sync.sync_folders	Sincronizza le cartelle
+files.sync.sync_folders_menu	Sincronizza le cartelle…
+files.sync.swap	Scambia i lati
+files.sync.update	Aggiorna →
+files.sync.mirror	Specchio →
+files.sync.both	Entrambe ↔
+files.sync.update_hint	Copia a destra quello che a sinistra è nuovo o più recente
+files.sync.mirror_hint	Rende la destra uguale alla sinistra: quello che a destra c'è in più va nel cestino
+files.sync.both_hint	Copia in tutte e due le direzioni: vince il più recente
+files.sync.compare	Confronta
+files.sync.synchronize	Sincronizza
+files.sync.only_left	solo a sinistra
+files.sync.only_right	solo a destra
+files.sync.newer_left	più recente a sinistra
+files.sync.newer_right	più recente a destra
+files.sync.same_date_other_size	stessa data, dimensione diversa: decidi tu
+files.sync.file_and_folder	file da una parte, cartella dall'altra
+files.sync.n_to_right	{n} da copiare a destra
+files.sync.n_to_left	{n} da copiare a sinistra
+files.sync.n_off_right	{n} da togliere a destra
+files.sync.comparing	Confronto in corso…
+files.sync.comparing_n	Confronto in corso: {n} cartelle
+files.sync.count.differences.one	{n} differenza
+files.sync.count.differences.other	{n} differenze
+files.sync.first_only	solo le prime
+files.sync.folders_same	Le due cartelle sono uguali
+files.sync.n_extra_go_recycle	{n} che a sinistra non ci sono finiranno nel cestino della cartella condivisa di destra, da dove si possono recuperare.
+files.sync.nothing_to_do	Niente da fare
+files.transfers.syncing	Sincronizzazione in corso
+files.transfers.sync_complete	Sincronizzazione completata
+files.transfers.op.sync	Sincronizzazione

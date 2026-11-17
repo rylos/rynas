@@ -33,6 +33,7 @@ const OP = {
   upload: { icon: "upload", running: "files.transfers.uploading", done: "files.transfers.upload_complete", noun: "files.transfers.upload" },
   compress: { icon: "archive", running: "files.transfers.compressing", done: "files.transfers.archive_created", noun: "files.common.compression" },
   extract: { icon: "archive", running: "files.transfers.extracting", done: "files.transfers.extraction_complete", noun: "files.transfers.extraction" },
+  sync: { icon: "refresh", running: "files.transfers.syncing", done: "files.transfers.sync_complete", noun: "files.transfers.op.sync" },
 };
 const STATE = {
   queued: "files.transfers.state.queued", running: "files.transfers.state.running", paused: "files.transfers.state.paused", conflict: "files.transfers.state.conflict",
@@ -45,6 +46,7 @@ const PHASES = {
   upload: [["copy", "files.transfers.sending"], ["end", "files.transfers.done"]],
   compress: [["scan", "files.transfers.scan"], ["compress", "files.common.compression"], ["end", "files.transfers.done"]],
   extract: [["extract", "files.transfers.extraction"], ["end", "files.transfers.done"]],
+  sync: [["scan", "files.transfers.scan"], ["copy", "files.common.copy"], ["verify", "files.transfers.phase.verify"], ["end", "files.transfers.done"]],
 };
 const LIMITS = [0, 5, 10, 25, 50, 100, 200, 500];
 // speed samples kept per job: past this the older ones are thinned out (the NAS keeps as many)
@@ -127,7 +129,7 @@ function route(job) {
   const from = job.info.sources.length ? show(parentOf(job.info.sources[0])) : "";
   if (job.op === "delete") return { from, to: job.info.permanent ? t("files.transfers.deleted_permanently") : t("files.transfers.recycle_bin") };
   if (job.op === "upload") return { from: t("files.transfers.computer"), to: show(job.info.dest) };
-  if (job.op === "extract") return { from: show(job.info.sources[0]), to: show(job.info.dest) };
+  if (job.op === "extract" || job.op === "sync") return { from: show(job.info.sources[0]), to: show(job.info.dest) };
   return { from, to: show(job.info.dest) };
 }
 

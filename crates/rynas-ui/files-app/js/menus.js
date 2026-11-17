@@ -14,6 +14,7 @@ import { isReadOnly, isBackupTop, hasNoSmbPath } from "./backups.js";
 import { selectByPattern, selectDifferences } from "./select.js";
 import { undo, undoLabel } from "./undo.js";
 import { findDuplicates } from "./dupes.js";
+import { syncFolders } from "./sync.js";
 
 export const menuMethods = {
   contextMenu(pane, entry, x, y) {
@@ -39,6 +40,7 @@ export const menuMethods = {
         !isBackupTop(pane.path) && { label: t("files.menus.compute_folder_sizes"), icon: "drive", action: () => this.computeSizes(pane, pane.visible) },
       pane.flatAllowed() && { label: (pane.flat ? "✓ " : "") + t("files.menus.flat_view"), icon: "list", key: "Ctrl+Shift+F", action: () => pane.setFlat(!pane.flat) },
       pane.flatAllowed() && { label: t("files.dupes.find_duplicates"), icon: "copy", action: () => findDuplicates(this, pane.path) },
+      this.canSync() && { label: t("files.sync.sync_folders_menu"), icon: "refresh", action: () => syncFolders(this, ...this.current.panes) },
       pane.path !== "/" && !pane.archive && !remote && !isBackupTop(pane.path) && { label: t("files.common.space_analysis"), icon: "pie", action: () => this.analyseSpace(pane.path) },
         "-",
         !atRoot && { label: t("files.menus.copy_folder_path"), icon: "link", action: () => copyText(this.copyPath(pane.path)) },
@@ -122,6 +124,15 @@ export const menuMethods = {
     ]);
   },
 
+  /** Both panes on folders of the NAS one may write in, neither inside the other. */
+  canSync() {
+    const other = this.other();
+    if (!this.isSplit() || !other) return false;
+    const ok = (p) => p.path !== "/" && !p.archive && !isRemote(p.path) && !isReadOnly(p) && !isBackupTop(p.path);
+    const [a, b] = [this.pane.path, other.path];
+    return ok(this.pane) && ok(other) && a !== b && !a.startsWith(b + "/") && !b.startsWith(a + "/");
+  },
+
   moreMenu(pane, anchor) {
     const r = anchor.getBoundingClientRect();
     const fav = (prefs.favorites || []).some((f) => f.path === pane.path);
@@ -134,6 +145,7 @@ export const menuMethods = {
       { label: t("files.select.select_pattern_menu"), icon: "filter", key: "+", action: () => selectByPattern(pane, "add") },
       { label: t("files.select.deselect_pattern_menu"), key: "−", action: () => selectByPattern(pane, "remove") },
       this.isSplit() && { label: t("files.select.select_differences"), icon: "split", key: "Ctrl+Shift+D", action: () => selectDifferences(...this.current.panes) },
+      this.canSync() && { label: t("files.sync.sync_folders_menu"), icon: "refresh", action: () => syncFolders(this, ...this.current.panes) },
       this.clipboard && !isReadOnly(pane) && { label: t("files.common.paste"), icon: "paste", key: "Ctrl+V", action: () => this.paste(pane) },
       this.clipboard && !isReadOnly(pane) && { label: t("files.common.paste_verification"), icon: "shield", key: "Ctrl+Shift+V", action: () => this.paste(pane, pane.path, true) },
       "-",

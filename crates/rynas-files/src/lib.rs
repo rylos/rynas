@@ -25,6 +25,7 @@ pub mod api;
 pub mod archive;
 pub mod caps;
 pub mod checksum;
+pub mod compare;
 pub mod confine;
 pub mod conn_routes;
 pub mod conns;

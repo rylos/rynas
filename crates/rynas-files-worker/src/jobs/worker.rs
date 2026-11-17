@@ -227,7 +227,8 @@ fn confine_spec(mut spec: Spec) -> io::Result<(Spec, Vec<(PathBuf, io::Error)>)>
             sources.push(src);
             continue;
         }
-        match resolve(&src, false) {
+        // a synchronization's source is the folder it reads from: followed, as a destination
+        match resolve(&src, spec.op == Op::Sync) {
             Ok(real) => sources.push(real),
             Err(e) => refused.push((src, e)),
         }
@@ -451,6 +452,7 @@ impl Engine {
         match self.spec.op {
             Op::Delete => self.delete(),
             Op::Copy | Op::Move => self.transfer(),
+            Op::Sync => self.sync(),
             Op::Compress => self.compress(),
             Op::Extract => self.extract(),
             Op::Cleanup => {
@@ -487,6 +489,19 @@ impl Engine {
             if let Some(name) = src.file_name() {
                 stack.push(dest.join(name));
             }
+        }
+        // the clean-up of a synchronization (its op is Cleanup by now, its members kept):
+        // it wrote at its members' paths, deep in dest — their folders at their top level,
+        // the folders it was copying in full (only leftovers ever go, see `leftover`)
+        {
+            let rels: Vec<PathBuf> = self.spec.members.iter().filter_map(|m| plain_rel(m)).collect();
+            let mut dirs: Vec<PathBuf> = rels.iter().filter_map(|r| r.parent().map(|p| dest.join(p))).collect();
+            dirs.sort();
+            dirs.dedup();
+            for d in dirs {
+                clean(&d, false, &mut stack, &mut seen);
+            }
+            stack.extend(rels.iter().map(|r| dest.join(r)).filter(|p| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())));
         }
         while let Some(dir) = stack.pop() {
             if seen > 500_000 {
@@ -586,6 +601,79 @@ impl Engine {
         for src in slow {
             let Some(name) = src.file_name().map(OsStr::to_os_string) else { continue };
             self.item(&src, &dest, &name, moving, true)?;
+        }
+        self.p.current.clear();
+        self.p.current_size = 0;
+        self.p.current_done = 0;
+        Ok(())
+    }
+
+    /// Folder synchronization: each of `members`, a path below the one source, copied to
+    /// the same path below dest (its folders made as needed), replacing a file there.
+    /// Nothing is deleted here: what the other side lacks goes with a deletion job of its
+    /// own. Every member is resolved inside the source's share and every folder made or
+    /// entered in dest inside its share ([`confine`]): a link planted on the way leads
+    /// nowhere else.
+    fn sync(&mut self) -> Step<()> {
+        let (Some(dest), [root]) = (self.spec.dest.clone(), self.spec.sources.as_slice()) else {
+            self.fail(c::INVALID_VALUE, t!("invalid synchronization"));
+            return Ok(());
+        };
+        let root = root.clone();
+        if !self.can_write(&dest) {
+            return Ok(());
+        }
+        let (src_real, dest_real) = (fs::canonicalize(&root).unwrap_or_else(|_| root.clone()), fs::canonicalize(&dest).unwrap_or_else(|_| dest.clone()));
+        if src_real.starts_with(&dest_real) || dest_real.starts_with(&src_real) {
+            self.fail(c::INVALID_VALUE, t!("a folder is not synchronized with one inside it or holding it"));
+            return Ok(());
+        }
+        let share = match share_of(&src_real, &src_real) {
+            Ok(share) => share,
+            Err(e) => {
+                self.fail(crate::fsops::io_code(&e), describe(&e));
+                return Ok(());
+            }
+        };
+        // plain relative paths only, each resolved inside the source's share
+        let mut items: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for m in self.spec.members.clone() {
+            let Some(rel) = plain_rel(&m) else {
+                self.error_msg(&root.join(&m), t!("invalid path"));
+                continue;
+            };
+            let joined = root.join(&rel);
+            let found = share.rel_of(&joined).ok_or_else(confine::outside).and_then(|r| share.resolve(r, false));
+            match found {
+                Ok(src) => items.push((rel, src)),
+                Err(e) => self.error(&joined, &e),
+            }
+        }
+        let sources: Vec<PathBuf> = items.iter().map(|(_, src)| src.clone()).collect();
+        self.scan(&sources)?;
+        if !self.room_for(&sources, &dest) {
+            return Ok(());
+        }
+        self.p.phase = "copy".into();
+        for (rel, src) in items {
+            let Some(name) = rel.file_name().map(OsStr::to_os_string) else { continue };
+            let made = match rel.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => sync_dir(&dest, parent),
+                _ => Ok(dest.clone()),
+            };
+            let dest_dir = match made {
+                Ok(d) => d,
+                Err(e) => {
+                    self.error(&dest.join(rel.parent().unwrap_or(Path::new(""))), &e);
+                    match fs::symlink_metadata(&src) {
+                        Ok(meta) if meta.is_dir() => self.skip_tree(&src),
+                        Ok(meta) => self.skip(&meta),
+                        Err(_) => {}
+                    }
+                    continue;
+                }
+            };
+            self.item(&src, &dest_dir, &name, false, false)?;
         }
         self.p.current.clear();
         self.p.current_size = 0;
@@ -2096,6 +2184,54 @@ pub fn archive_stem(name: &str) -> &str {
 }
 
 /// Hidden name a copy is written under before the rename into place.
+/// The admitted share root that holds `real`; outside a jail (tests), a root at `fallback`.
+fn share_of(real: &Path, fallback: &Path) -> io::Result<Arc<confine::Root>> {
+    match confine::root_of(real) {
+        Some(root) => Ok(root),
+        None if !confine::active() => Ok(Arc::new(confine::Root::open(fallback)?)),
+        None => Err(confine::outside()),
+    }
+}
+
+/// A synchronization's member as a relative path of plain components (never `..`, `.`,
+/// a root, or an empty path); `None` for anything else.
+fn plain_rel(member: &str) -> Option<PathBuf> {
+    let rel = PathBuf::from(member);
+    let plain = !member.is_empty() && !member.contains('\0') && rel.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+    plain.then_some(rel)
+}
+
+/// The folder `parent` (plain components) below `dest`, made as needed: each folder made is
+/// checked to lie in the jail ([`confine::made_dir`]); an existing link on the way is
+/// followed only while it stays inside its share ([`confine::Root::resolve`]); a file in
+/// the way is an error.
+fn sync_dir(dest: &Path, parent: &Path) -> io::Result<PathBuf> {
+    let mut at = dest.to_path_buf();
+    for part in parent.components() {
+        let std::path::Component::Normal(name) = part else { return Err(io::Error::from(io::ErrorKind::InvalidInput)) };
+        let next = at.join(name);
+        match fs::symlink_metadata(&next) {
+            Ok(meta) if meta.is_dir() => at = next,
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let root = share_of(&at, dest)?;
+                let real = root.resolve(root.rel_of(&next).ok_or_else(confine::outside)?, true)?;
+                if !fs::symlink_metadata(&real)?.is_dir() {
+                    return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+                }
+                at = real;
+            }
+            Ok(_) => return Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&next)?;
+                confine::made_dir(&next)?;
+                at = next;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(at)
+}
+
 fn part_name(name: &OsStr) -> OsString {
     crate::names::part_os(name, PART_TAG)
 }
@@ -2279,6 +2415,45 @@ mod tests {
             assert_eq!(e.p.errors, 1);
             fs::set_permissions(dest.join("a"), fs::Permissions::from_mode(0o755)).unwrap();
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn syncs_members_at_their_paths_and_never_out() {
+        let dir = scratch("sync");
+        let (a, b, outside) = (dir.join("a"), dir.join("b"), dir.join("outside"));
+        for d in [&a, &b, &outside] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::create_dir_all(a.join("sub/deep")).unwrap();
+        fs::write(a.join("sub/deep/f.txt"), b"deep").unwrap();
+        fs::create_dir_all(a.join("newdir/in")).unwrap();
+        fs::write(a.join("newdir/in/g.txt"), b"g").unwrap();
+        fs::write(a.join("top.txt"), b"new").unwrap();
+        fs::write(b.join("top.txt"), b"old").unwrap();
+        fs::write(outside.join("secret"), b"s").unwrap();
+        std::os::unix::fs::symlink(&outside, a.join("link")).unwrap();
+        fs::create_dir_all(a.join("evil")).unwrap();
+        fs::write(a.join("evil/x.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(&outside, b.join("evil")).unwrap();
+        let members = ["sub/deep/f.txt", "newdir", "top.txt", "../outside/secret", "link/secret", "evil/x.txt"];
+        let spec: Spec = serde_json::from_value(serde_json::json!({ "op": "sync", "sources": [&a], "dest": &b, "members": members, "conflict": "overwrite" })).unwrap();
+        let mut e = engine(spec);
+        assert!(e.sync().is_ok());
+        assert_eq!(fs::read(b.join("sub/deep/f.txt")).unwrap(), b"deep");
+        assert_eq!(fs::read(b.join("newdir/in/g.txt")).unwrap(), b"g");
+        assert_eq!(fs::read(b.join("top.txt")).unwrap(), b"new");
+        // a member with "..", one through a link out of the source, one into a link out of
+        // the destination: each an error, nothing read or written out there
+        assert_eq!(e.p.errors, 3, "{:?}", e.p);
+        assert!(!b.join("secret").exists() && !b.join("link").exists());
+        assert!(!outside.join("x.txt").exists());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+        // nested folders are refused whole
+        let spec: Spec = serde_json::from_value(serde_json::json!({ "op": "sync", "sources": [&a], "dest": a.join("sub"), "members": ["top.txt"], "conflict": "overwrite" })).unwrap();
+        let mut e = engine(spec);
+        assert!(e.sync().is_ok());
+        assert!(!a.join("sub/top.txt").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
