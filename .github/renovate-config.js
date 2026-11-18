@@ -19,6 +19,9 @@ module.exports = {
   // at once without branch protection)
   platformAutomerge: false,
   prHourlyLimit: 0,
+  // rebase only on conflicts: rebasing every PR after each push to main restarted their
+  // tests at every run, and nothing was ever merged
+  rebaseWhen: "conflicted",
   // ghcr.io gives no release date: without this its images would never pass minimumReleaseAge
   // and their PRs would stay pending for good (Docker Hub dates still count)
   minimumReleaseAgeBehaviour: "timestamp-optional",
