@@ -107,6 +107,18 @@ nev.storage.btrfs_errors.body	Dispositivo {device} del volume {volume}: errori d
 nev.storage.btrfs_errors_cleared.title	Volume {volume}: contatori di errore del dispositivo azzerati
 nev.storage.btrfs_missing.title	Volume {volume}: dispositivo {devid} mancante
 nev.storage.btrfs_back.title	Volume {volume}: dispositivo {devid} di nuovo presente
+nev.storage.btrfs_unmounted.title	Il volume {volume} non può essere montato: mancano dispositivi
+nev.storage.btrfs_unmounted.body	Mancano {missing} dei {total} dispositivi del volume {volume}, quindi non è stato montato. Ricollegali, oppure monta il volume in modalità degradata da Archiviazione se ogni chunk ha ancora una copia, poi sostituisci il dispositivo mancante.
+nev.storage.btrfs_unmounted_ok.title	Il volume {volume} è montato
+nev.storage.btrfs_weak_chunks.title	Volume {volume}: chunk con meno ridondanza
+nev.storage.btrfs_weak_chunks.body	Il volume {volume} ha chunk scritti con un profilo più debole mentre era degradato ({chunks}). Riconvertili da Archiviazione, così la perdita di un dispositivo non costa dati.
+nev.storage.btrfs_weak_chunks_ok.title	Volume {volume}: ridondanza ripristinata
+nev.storage.btrfs_mounted_degraded.title	Volume {volume} montato in modalità degradata
+nev.storage.btrfs_mounted_degraded.body	Il volume {volume} era rimasto smontato dopo l'avvio perché mancano dei dispositivi, quindi è stato montato in modalità degradata sui {present} dei suoi {total} dispositivi presenti: lì ogni chunk ha ancora una copia. Finché il dispositivo mancante non viene sostituito o rimosso (Archiviazione, pagina del volume), la perdita di un altro dispositivo può costare dati e i nuovi dati possono essere scritti con meno ridondanza; la riparazione li riconverte.
+nev.storage.btrfs_mount_failed.title	Il volume {volume} non è stato montato in modalità degradata
+nev.storage.btrfs_mount_failed.body	Il volume {volume} era rimasto smontato dopo l'avvio perché mancano dei dispositivi, e il montaggio in modalità degradata sui {present} dispositivi presenti non è riuscito: {error}. Il kernel rifiuta un montaggio degradato quando un chunk non ha più una copia completa: ricollega i dispositivi mancanti.
+nev.storage.btrfs_split_brain.title	Volume {volume} non montato: i suoi dispositivi possono avere dati più vecchi
+nev.storage.btrfs_split_brain.body	I dispositivi del volume {volume} presenti ora erano quelli mancanti all'ultimo montaggio degradato: possono avere dati più vecchi degli altri, e montarli in modalità degradata farebbe divergere per sempre le due metà. Ricollega i dispositivi dell'ultimo montaggio degradato. Solo se sono persi per sempre, monta questi a mano (vedi la documentazione sui volumi btrfs degradati).
 nev.storage.volume_full.title	Volume {volume}: {used_pct}% occupato
 nev.storage.volume_full.body	{volume} usa {used_gib} GiB, circa {free_gib} GiB liberi ({used_pct}%).
 nev.storage.volume_ok.title	Volume {volume} di nuovo sotto soglia: {used_pct}% (limite {limit_pct}%)
@@ -435,6 +447,10 @@ task.storage.lock	Blocco volume
 task.storage.subvolume-create	Creazione sottovolume
 task.storage.subvolume-delete	Eliminazione sottovolume
 task.storage.subvolume-settings	Modifica impostazioni sottovolume
+task.storage.btrfs-replace	Sostituzione di un dispositivo mancante
+task.storage.btrfs-remove-missing	Rimozione di un dispositivo mancante
+task.storage.btrfs-convert	Ripristino della ridondanza
+task.storage.btrfs-mount-degraded	Montaggio di un volume in modalità degradata
 task.snapshot.run	Creazione snapshot
 task.snapshot.restore	Ripristino da snapshot
 task.snapshot.rollback	Ritorno alla versione precedente
@@ -1354,6 +1370,51 @@ sto.sub_delete	Elimina {name}
 sto.sub_delete_text	Il sottovolume e tutti i file che contiene vengono eliminati. L'operazione non può essere annullata.
 sto.tuning	Ottimizzazione RAID
 sto.stripe_text	Una stripe cache più grande accelera scritture e ricostruzioni RAID 5/6 a spese della memoria.
+sto.bt.title	Dispositivi
+sto.bt.profiles	Profili
+sto.bt.data	dati
+sto.bt.metadata	metadati
+sto.bt.devices	Dispositivi
+sto.bt.present	{present} di {total} presenti
+sto.bt.devid	Dispositivo {n}
+sto.bt.missing	Mancante
+sto.bt.unmounted	Questo volume non è montato: mancano {n} dei suoi {total} dispositivi.
+sto.bt.unmounted_some	Questo volume non è montato: mancano dei dispositivi.
+sto.bt.mount_hint	Montalo in modalità degradata per raggiungere i dati, poi sostituisci il dispositivo mancante. Il kernel rifiuta se un chunk non ha più una copia completa.
+sto.bt.degraded	Dispositivi mancanti: {n}. Il volume funziona in modalità degradata e la perdita di un altro dispositivo può costare dati: sostituisci il dispositivo mancante, oppure rimuovilo se gli altri dischi possono contenere i suoi dati.
+sto.bt.lost	Dati senza una copia completa: {items}. Ricollega i dispositivi mancanti se puoi; una riparazione non può leggere questi dati.
+sto.bt.weak	Chunk scritti con meno ridondanza mentre il volume era degradato: {items}. Riconvertili al profilo del volume.
+sto.bt.system	Questo è il file system radice del sistema. Finché il dispositivo mancante non viene sostituito, il NAS si avvia solo aggiungendo rootflags=degraded alla riga di comando del kernel nel boot loader. Un disco sostitutivo non riceve una partizione di avvio: configura a parte il boot loader su di esso.
+sto.bt.remove_blocked	Non è possibile rimuovere il dispositivo mancante:
+sto.bt.blocker.incomplete	alcuni dati non hanno più una copia completa.
+sto.bt.blocker.too_few_devices	i dischi rimasti sono meno di quelli richiesti dai suoi profili. Sostituisci invece il dispositivo mancante.
+sto.bt.blocker.no_space	i dischi rimasti non hanno spazio libero per i suoi dati. Sostituisci invece il dispositivo mancante.
+sto.bt.blocker.split_brain	I dispositivi presenti erano quelli mancanti all'ultimo montaggio degradato e possono avere dati più vecchi: ricollega gli altri.
+sto.bt.blocker.disabled	Il montaggio degradato dopo l'avvio è disattivato per questo volume.
+sto.bt.blocker.no_devices	Nessun dispositivo di questo volume è presente.
+sto.bt.blocker.asleep	Un disco di questo volume è in standby: riprova tra un momento.
+sto.bt.blocker.other	lo stato dei dischi ora non è noto; riprova tra un momento.
+sto.bt.mount	Monta in modalità degradata
+sto.bt.replace	Sostituisci dispositivo
+sto.bt.remove	Rimuovi dispositivo mancante
+sto.bt.convert	Ripristina la ridondanza
+sto.bt.mount_title	Montare {name} in modalità degradata?
+sto.bt.replace_title	Sostituisci un dispositivo di {name}
+sto.bt.remove_title	Rimuovere il dispositivo mancante di {name}?
+sto.bt.convert_title	Ripristina la ridondanza di {name}
+sto.bt.mount_text	Il volume viene montato sui dischi presenti. I dati scritti mentre è degradato possono avere meno ridondanza finché il dispositivo mancante non viene sostituito o rimosso.
+sto.bt.replace_text	Il dispositivo mancante viene ricostruito sul nuovo disco dalle copie sugli altri: viene usato l'intero disco, che viene cancellato. Dopo, i chunk scritti con meno ridondanza vengono riconvertiti.
+sto.bt.remove_text	Il dispositivo mancante lascia il volume per sempre: i suoi dati vengono copiati dalle copie rimaste sugli altri dischi. Richiede ore e spazio libero su di essi.
+sto.bt.convert_text	Un bilanciamento riscrive con il profilo del volume i chunk scritti con un profilo più debole; il resto non viene toccato.
+sto.bt.missing_device	Dispositivo mancante
+sto.bt.min_size	Il nuovo disco deve avere almeno {size}.
+sto.bt.go_mount	Monta
+sto.bt.go_replace	Sostituisci
+sto.bt.go_remove	Rimuovi
+sto.bt.go_convert	Converti
+sto.bt.boot	Dopo l'avvio
+sto.bt.auto	Monta automaticamente in modalità degradata dopo l'avvio
+sto.bt.auto_text	Se all'avvio manca un dispositivo e ogni chunk ha ancora una copia, il volume viene montato in modalità degradata così resta disponibile, e gli amministratori vengono avvisati. Se disattivato, attende un amministratore.
 sto.proposal	Proposta di rynas
 sto.stripe	Stripe cache (voci)
 sto.kernel_default	Predefinito del kernel (256)
@@ -5686,6 +5747,12 @@ plan.s.bitmap_on	Riattiva la bitmap write-intent di {subject}
 plan.s.add_partition_live	Fai vedere al kernel la nuova partizione {subject}
 plan.s.delete_partitions	Elimina le partizioni {items} di {subject} (le altre partizioni restano)
 plan.s.remove_partition_live	Fai dimenticare al kernel la partizione eliminata {subject}
+plan.s.btrfs_mount_degraded	Monta {subject} in modalità degradata, sui dispositivi presenti ({n})
+plan.s.btrfs_replace	Ricostruisci il dispositivo mancante {other} su {subject}
+plan.s.btrfs_wait_replace	Attendi la fine della ricostruzione su {subject}
+plan.s.btrfs_resize	Estendi il dispositivo {other} di {subject} a tutto il disco
+plan.s.btrfs_remove_missing	Rimuovi i dispositivi mancanti di {subject} (gli altri dischi prendono i loro dati)
+plan.s.btrfs_convert	Riconverti a {items} i chunk di {subject} scritti con un profilo più debole
 plan.w.flex_leftover_disk	{subject} ha ancora vecchie parti di questo volume che nessuna fascia usa e non viene cancellato: aggiungilo a un volume o cancellalo, perché una vecchia copia di una fascia può disturbare l'avvio del volume
 plan.w.flex_unused_space	{items}: {size} inutilizzati finché un altro disco non raggiunge la stessa dimensione
 plan.w.flex_long_reshape	Le fasce vengono rimodellate una alla volta: {size} da spostare, circa {n} h in tutto; il volume resta disponibile

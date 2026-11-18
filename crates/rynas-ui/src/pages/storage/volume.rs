@@ -331,6 +331,8 @@ struct Stable {
     encrypted: bool,
     subvolumes: bool,
     raid56: bool,
+    /// A btrfs data volume of several devices: the UUID its degraded-mount setting is for.
+    btrfs_boot: Option<String>,
 }
 
 #[component]
@@ -354,6 +356,13 @@ pub fn VolumePage() -> impl IntoView {
                     && !v.locked
                     && !v.tiered
                     && v.md.as_ref().and_then(md_level).is_some_and(|l| matches!(l, RaidLevel::Raid5 | RaidLevel::Raid6)),
+                // the root filesystem is mounted by the boot loader's command line, not by rynas
+                btrfs_boot: v
+                    .fs
+                    .as_ref()
+                    .filter(|f| super::btrfs::multi_device(f) && !f.mountpoints.iter().any(|m| m == "/"))
+                    .filter(|f| f.repair.as_ref().is_none_or(|r| !r.system))
+                    .map(|f| f.uuid.clone()),
             })
         })
     });
@@ -381,6 +390,7 @@ pub fn VolumePage() -> impl IntoView {
                         {st.encrypted.then(|| crypt_card(&st.id, st.locked, st.managed, modal))}
                         {st.raid56.then(|| view! { <StripeCache id=st.id.clone() /> })}
                         {st.subvolumes.then(|| view! { <Subvolumes id=st.id.clone() /> })}
+                        {st.btrfs_boot.clone().map(|uuid| view! { <super::btrfs::DegradedSetting uuid=uuid /> })}
                     </div>
                 })}
             </Show>
@@ -393,6 +403,7 @@ pub fn VolumePage() -> impl IntoView {
                 Open::Unlock => view! { <UnlockDialog id=current().id on_close=close /> }.into_any(),
                 Open::Lock => view! { <LockDialog id=current().id on_close=close /> }.into_any(),
                 Open::Reveal => view! { <RevealDialog id=current().id on_close=close /> }.into_any(),
+                Open::Btrfs(what) => view! { <super::btrfs::RepairDialog vol=current() what=what on_close=close /> }.into_any(),
             }}
             {move || selected.get().map(|name| view! { <super::disks::DiskDrawer name=name on_close=Callback::new(move |_| selected.set(None)) /> })}
         </div>
@@ -410,6 +421,8 @@ enum Open {
     Unlock,
     Lock,
     Reveal,
+    /// A repair of a btrfs volume of several devices.
+    Btrfs(super::btrfs::Repair),
 }
 
 fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String>>) -> AnyView {
@@ -433,6 +446,8 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
     let flex = vol.flex.clone().filter(|_| !vol.locked);
     let pending = flex.as_ref().is_some_and(|f| !f.pending.is_empty()) && actions;
     let blockers = flex.as_ref().map(blocker_texts).unwrap_or_default();
+    // a btrfs volume left unmounted by a missing device: no usage, no scrub
+    let waiting = vol.fs.as_ref().and_then(|f| f.repair.as_ref()).is_some_and(|r| !r.mounted);
     view! {
         <header class="page-head">
             <a class="icon-btn" href="/storage" aria-label=tr("sto.back_storage")><Icon icon=icons::ARROW_LEFT size=18 /></a>
@@ -466,12 +481,15 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
             </span>
         }.into_any()))}
         <div class="grid vol-detail">
-            {(!vol.locked).then(|| usage_card(&vol))}
+            {(!vol.locked && !waiting).then(|| usage_card(&vol))}
             {match flex {
                 Some(f) => flex_card(f, vol.disks.clone(), selected),
                 None => vol.md.clone().map(|a| raid_card(a, selected)).into_any(),
             }}
-            {(!vol.locked && vol.fs.is_some()).then(|| scrub_card(&vol, modal))}
+            {vol.fs.as_ref().filter(|f| super::btrfs::multi_device(f)).map(|_| {
+                super::btrfs::devices_card(&vol, Callback::new(move |r| modal.set(Open::Btrfs(r))), selected)
+            })}
+            {(!vol.locked && !waiting && vol.fs.is_some()).then(|| scrub_card(&vol, modal))}
             {(!vol.locked && vol.mountpoint.is_some()).then(|| view! { <super::dedup::DedupCard key=vol.id.clone() /> })}
         </div>
     }

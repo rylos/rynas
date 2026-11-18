@@ -1,0 +1,383 @@
+//! A btrfs volume of several devices (its own RAID profile, not md): the devices, what is
+//! missing, and the repairs: mount it degraded when it stayed unmounted, replace the
+//! missing device, remove it, convert the chunks written with a weaker profile back; plus
+//! the per-volume setting of the degraded mount after boot (`docs/phase2/btrfs-degraded.md`).
+//!
+//! The repairs follow the storage flow: review the plan (`dry_run`), confirm, follow the
+//! task. Only the replace erases a drive, so only it asks for the typed name and serial.
+
+use leptos::prelude::*;
+use leptos::task::spawn_local;
+use rynas_api_types::storage::{BtrfsBlocker, BtrfsFilesystem, BtrfsRepair, BtrfsSettings, BtrfsSettingsState, StoragePlan};
+use serde_json::{Value, json};
+
+use super::volume::{Flow, Stage, start_task};
+use super::{Vol, disk_title, free_disks, serial_of};
+use crate::api;
+use crate::form::{SaveBar, form_error, save_bar_with, spinner};
+use crate::i18n::{self, t, tf, tr};
+use crate::icons::{self, Icon};
+use crate::ui::{self, ErrorBox, Modal, Skeleton, Status, Tone, WidgetHead, kv_row};
+
+/// A repair started from the devices card.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Repair {
+    Mount,
+    Replace,
+    Remove,
+    Convert,
+}
+
+fn url(uuid: &str, what: &str) -> String {
+    format!("/api/v1/storage/btrfs/{}/{what}", api::encode(uuid))
+}
+
+/// A btrfs filesystem of several devices, or one with something to repair.
+pub fn multi_device(fs: &BtrfsFilesystem) -> bool {
+    fs.devices.len() > 1 || fs.repair.is_some()
+}
+
+/// The whole disk (among the volume's `disks`) a device is or is a partition of:
+/// `/dev/sdb1` → `sdb`, `/dev/nvme0n1p2` → `nvme0n1`.
+pub fn disk_of(dev: &str, disks: &[String]) -> Option<String> {
+    let p = dev.trim_start_matches("/dev/");
+    disks
+        .iter()
+        .filter(|d| {
+            p == d.as_str()
+                || p.strip_prefix(d.as_str()).is_some_and(|rest| {
+                    let n = rest.strip_prefix('p').unwrap_or(rest);
+                    !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+                })
+        })
+        .max_by_key(|d| d.len())
+        .cloned()
+}
+
+/// The text of a blocker.
+fn blocker_key(b: BtrfsBlocker) -> &'static str {
+    match b {
+        BtrfsBlocker::Incomplete => "sto.bt.blocker.incomplete",
+        BtrfsBlocker::TooFewDevices => "sto.bt.blocker.too_few_devices",
+        BtrfsBlocker::NoSpace => "sto.bt.blocker.no_space",
+        BtrfsBlocker::SplitBrain => "sto.bt.blocker.split_brain",
+        BtrfsBlocker::Disabled => "sto.bt.blocker.disabled",
+        BtrfsBlocker::NoDevices => "sto.bt.blocker.no_devices",
+        BtrfsBlocker::Asleep => "sto.bt.blocker.asleep",
+        BtrfsBlocker::Other => "sto.bt.blocker.other",
+    }
+}
+
+/// "data raid1, metadata raid1c3": the strongest profile of each kind in use.
+fn profiles(fs: &BtrfsFilesystem) -> String {
+    let mut v: Vec<String> = Vec::new();
+    for kind in ["data", "metadata"] {
+        if let Some(p) = fs.profiles.iter().find(|p| p.kind == kind) {
+            v.push(format!("{} {}", t(if kind == "data" { "sto.bt.data" } else { "sto.bt.metadata" }), p.profile));
+        }
+    }
+    v.join(", ")
+}
+
+/// The state of the devices as (tone, key).
+fn state(r: Option<&BtrfsRepair>) -> (Tone, &'static str) {
+    match r {
+        Some(r) if !r.mounted => (Tone::Err, "rm.not_mounted"),
+        Some(r) if !r.lost.is_empty() => (Tone::Err, "health.failed"),
+        Some(r) if r.degraded() => (Tone::Warn, "health.degraded"),
+        Some(r) if !r.convert.is_empty() => (Tone::Warn, "sto.h.warning"),
+        _ => (Tone::Ok, "health.healthy"),
+    }
+}
+
+/// The devices of a multi-device btrfs volume and its repairs.
+pub fn devices_card(v: &Vol, open: Callback<Repair>, selected: RwSignal<Option<String>>) -> AnyView {
+    let Some(fs) = v.fs.clone() else { return ().into_any() };
+    let s = super::sto();
+    let r = fs.repair.clone();
+    let (tone, key) = state(r.as_ref());
+    let total = r.as_ref().map(|r| r.total_devices).filter(|n| *n > 0).unwrap_or(fs.devices.len() as u32);
+    let present = fs.devices.iter().filter(|d| !d.missing).count();
+    let btn = move |what: Repair, icon: &'static str, key: &'static str, primary: bool| {
+        view! {
+            <button class=if primary { "btn primary sm" } else { "btn ghost sm" } type="button" on:click=move |_| open.run(what)>
+                <Icon icon=icon size=14 />{tr(key)}
+            </button>
+        }
+    };
+    let notes = r.clone().map(|r| {
+        let mut out: Vec<AnyView> = Vec::new();
+        if r.system && r.degraded() {
+            out.push(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("sto.bt.system")} }.into_any()));
+        }
+        if !r.mounted {
+            let text = if r.total_devices > 0 {
+                tf("sto.bt.unmounted", &[("n", &r.missing_count.to_string()), ("total", &r.total_devices.to_string())])
+            } else {
+                t("sto.bt.unmounted_some").to_string()
+            };
+            let why = r.mount.filter(|b| *b != BtrfsBlocker::Disabled);
+            out.push(ui::note(Tone::Err, icons::CIRCLE_X, view! {
+                <span>{text}" "{match why { Some(b) => t(blocker_key(b)).to_string(), None => t("sto.bt.mount_hint").to_string() }}</span>
+            }.into_any()));
+        } else if !r.lost.is_empty() {
+            out.push(ui::note(Tone::Err, icons::CIRCLE_X, view! { {tf("sto.bt.lost", &[("items", &r.lost.join(", "))])} }.into_any()));
+        } else if r.degraded() {
+            out.push(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tf("sto.bt.degraded", &[("n", &r.missing_count.to_string())])} }.into_any()));
+            if let Some(b) = r.remove {
+                out.push(view! { <p class="muted small">{tr("sto.bt.remove_blocked")}" "{tr(blocker_key(b))}</p> }.into_any());
+            }
+        } else if !r.convert.is_empty() {
+            let items: Vec<String> = r.convert.iter().map(|c| format!("{} {}", c.kind, c.from.join("/"))).collect();
+            out.push(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tf("sto.bt.weak", &[("items", &items.join(", "))])} }.into_any()));
+        }
+        out.collect_view()
+    });
+    let actions = r.clone().map(|r| {
+        let mount = !r.mounted && matches!(r.mount, None | Some(BtrfsBlocker::Disabled));
+        let degraded = r.mounted && r.degraded() && r.lost.is_empty();
+        let remove = degraded && r.remove.is_none();
+        let convert = r.mounted && !r.degraded() && !r.convert.is_empty();
+        (mount || degraded || convert).then(|| view! {
+            <div class="card-actions">
+                {mount.then(|| btn(Repair::Mount, icons::PLAY, "sto.bt.mount", true))}
+                {degraded.then(|| btn(Repair::Replace, icons::REFRESH_CW, "sto.bt.replace", true))}
+                {remove.then(|| btn(Repair::Remove, icons::UNPLUG, "sto.bt.remove", false))}
+                {convert.then(|| btn(Repair::Convert, icons::SHIELD_CHECK, "sto.bt.convert", true))}
+            </div>
+        })
+    });
+    let missing_ids: Vec<u64> = {
+        let mut v: Vec<u64> = fs.devices.iter().filter(|d| d.missing).map(|d| d.devid).collect();
+        if let Some(r) = &r {
+            v.extend(r.missing.iter().filter(|id| !fs.devices.iter().any(|d| d.devid == **id)));
+        }
+        v
+    };
+    let unknown_missing = r.as_ref().map(|r| (r.missing_count as usize).saturating_sub(missing_ids.len())).unwrap_or(0);
+    let prof = profiles(&fs);
+    view! {
+        <section class="card widget w-6">
+            <WidgetHead icon=icons::LAYERS title="sto.bt.title"><Status tone=tone text=t(key).to_string() /></WidgetHead>
+            <dl class="kvs">
+                {(!prof.is_empty()).then(|| kv_row("sto.bt.profiles", Signal::stored(prof.clone()), ""))}
+                {kv_row("sto.bt.devices", Signal::stored(tf("sto.bt.present", &[("present", &present.to_string()), ("total", &total.to_string())])), "tnum")}
+            </dl>
+            <ul class="members-list">
+                {fs.devices.iter().filter(|d| !d.missing).map(|d| {
+                    let disk = disk_of(&d.path, &v.disks);
+                    let info = disk.as_ref().and_then(|n| s.disk(n));
+                    let d2 = disk.clone();
+                    let name = d.path.trim_start_matches("/dev/").to_string();
+                    view! {
+                        <li>
+                            <button class="cell-btn" type="button" disabled=d2.is_none() on:click=move |_| selected.set(d2.clone())>
+                                <span class="mono strong">{name}</span>
+                                <span class="muted small ellipsis">{info.map(|x| disk_title(&x)).unwrap_or_else(|| tf("sto.bt.devid", &[("n", &d.devid.to_string())]))}</span>
+                            </button>
+                            <span class="row-end"><Status tone=Tone::Ok text=t("sto.r.active").to_string() /></span>
+                        </li>
+                    }
+                }).collect_view()}
+                {missing_ids.into_iter().map(|id| view! {
+                    <li>
+                        <span class="strong">{tf("sto.bt.devid", &[("n", &id.to_string())])}</span>
+                        <span class="row-end"><Status tone=Tone::Err text=t("sto.bt.missing").to_string() /></span>
+                    </li>
+                }).collect_view()}
+                {(unknown_missing > 0).then(|| view! {
+                    <li class="warn tone-text small"><Icon icon=icons::TRIANGLE_ALERT size=14 />{tf("sto.missing_members", &[("n", &unknown_missing.to_string())])}</li>
+                })}
+            </ul>
+            {notes}
+            {actions}
+        </section>
+    }
+    .into_any()
+}
+
+/// A repair of a btrfs volume: its form (only the replace has one), the plan, the task.
+#[component]
+pub fn RepairDialog(vol: Vol, what: Repair, on_close: Callback<()>) -> impl IntoView {
+    let s = super::sto();
+    let stage = RwSignal::new(Stage::Form);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let fs = vol.fs.clone().unwrap_or_default();
+    let r = fs.repair.clone().unwrap_or_default();
+    let id = StoredValue::new(vol.id.clone());
+    let (path, title, text, go) = match what {
+        Repair::Mount => ("mount-degraded", "sto.bt.mount_title", "sto.bt.mount_text", "sto.bt.go_mount"),
+        Repair::Replace => ("replace", "sto.bt.replace_title", "sto.bt.replace_text", "sto.bt.go_replace"),
+        Repair::Remove => ("remove-missing", "sto.bt.remove_title", "sto.bt.remove_text", "sto.bt.go_remove"),
+        Repair::Convert => ("convert", "sto.bt.convert_title", "sto.bt.convert_text", "sto.bt.go_convert"),
+    };
+    let target = StoredValue::new(url(&fs.uuid, path));
+    // the replace: which missing device, onto which drive
+    let missing: Vec<u64> = r.missing.clone();
+    let devid = RwSignal::new(missing.first().copied().unwrap_or(0));
+    let new_disk = RwSignal::new(String::new());
+    let free = free_disks(s);
+    if let Some(d) = free.iter().find(|d| d.size >= r.missing_bytes).or(free.first()) {
+        new_disk.set(d.name.clone());
+    }
+    let body = move |dry: bool| -> Value {
+        match what {
+            Repair::Replace => {
+                let nd = new_disk.get_untracked();
+                let serials: Vec<String> = s.disk(&nd).map(|d| vec![serial_of(&d)]).unwrap_or_else(|| vec![nd.clone()]);
+                json!({"devid": devid.get_untracked(), "new_disk": nd, "confirm": id.get_value(), "serials": serials, "dry_run": dry})
+            }
+            _ => json!({"confirm": id.get_value(), "dry_run": dry}),
+        }
+    };
+    let review = move |_| {
+        busy.set(true);
+        error.set(None);
+        let b = body(true);
+        spawn_local(async move {
+            let r = api::post::<_, StoragePlan>(&target.get_value(), Some(&b)).await;
+            let _ = busy.try_set(false);
+            match r {
+                Ok(p) => {
+                    let _ = stage.try_set(Stage::Plan(p));
+                }
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
+                }
+            }
+        });
+    };
+    let exec = move |_: (String, Vec<String>)| start_task(target.get_value(), Some(body(false)), false, stage, busy, error);
+    let replace = what == Repair::Replace;
+    // only the replace erases a drive: the typed name and its serial
+    let flow = Flow::new(stage, replace.then(|| id.get_value()), false, go, busy, error, Callback::new(exec), on_close)
+        .with_own(Signal::derive(move || vec![new_disk.get()]));
+    let free = StoredValue::new(free);
+    let missing = StoredValue::new(missing);
+    let foot = move || match stage.get() {
+        Stage::Form => save_bar_with(SaveBar {
+            can_save: Signal::derive(move || !replace || (!new_disk.with(String::is_empty) && devid.get() > 0)),
+            ..SaveBar::new(busy, "sto.review_plan", on_close, Callback::new(review))
+        }),
+        _ => flow.foot(),
+    };
+    let size = r.missing_bytes;
+    view! {
+        <Modal title=tf(title, &[("name", &vol.id)]) on_close=on_close wide=replace foot=foot>
+            {move || match stage.get() {
+                Stage::Form => view! {
+                    <p class="muted small">{tr(text)}</p>
+                    {replace.then(|| view! {
+                        <label class="field">
+                            <span class="field-label">{tr("sto.bt.missing_device")}</span>
+                            <select class="input" prop:value=move || devid.get().to_string() on:change=move |ev| devid.set(event_target_value(&ev).parse().unwrap_or(0))>
+                                {missing.get_value().into_iter().map(|d| view! { <option value=d.to_string()>{tf("sto.bt.devid", &[("n", &d.to_string())])}</option> }).collect_view()}
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span class="field-label">{tr("sto.replace_new")}</span>
+                            <select class="input" prop:value=move || new_disk.get() on:change=move |ev| new_disk.set(event_target_value(&ev))>
+                                {free.get_value().into_iter().map(|d| view! { <option value=d.name.clone()>{disk_title(&d)}</option> }).collect_view()}
+                            </select>
+                        </label>
+                        {(size > 0).then(|| view! { <p class="muted small">{tf("sto.bt.min_size", &[("size", &i18n::bytes_si(size))])}</p> })}
+                        {free.with_value(Vec::is_empty).then(|| view! { <p class="muted small">{tr("sto.no_free")}</p> })}
+                    })}
+                    {form_error(error)}
+                }
+                .into_any(),
+                _ => flow.body(),
+            }}
+        </Modal>
+    }
+}
+
+/// The degraded mount after boot of one volume: on (the default) or off.
+#[component]
+pub fn DegradedSetting(uuid: String) -> impl IntoView {
+    let target = StoredValue::new(url(&uuid, "settings"));
+    let state = RwSignal::new(None::<Result<BtrfsSettingsState, String>>);
+    let auto = RwSignal::new(true);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let fill = move |st: &BtrfsSettingsState| auto.set(st.pending.clone().unwrap_or_else(|| st.applied.clone()).auto_degraded);
+    let load = move || {
+        spawn_local(async move {
+            let r = api::get::<BtrfsSettingsState>(&target.get_value()).await;
+            if let Ok(st) = &r {
+                fill(st);
+            }
+            let _ = state.try_set(Some(r.map_err(|e| e.code().to_string())));
+        });
+    };
+    load();
+    let save = move |_| {
+        busy.set(true);
+        error.set(None);
+        let body = BtrfsSettings { auto_degraded: auto.get_untracked() };
+        spawn_local(async move {
+            match api::put::<_, BtrfsSettingsState>(&target.get_value(), &body).await {
+                Ok(st) => {
+                    fill(&st);
+                    let _ = state.try_set(Some(Ok(st)));
+                    // Save applies at once (guidelines A19b)
+                    if crate::config::apply_now(&[crate::config::keys::DISKS], error).await {
+                        crate::toast::saved_applied();
+                        load();
+                    }
+                }
+                Err(e) => error.set(Some(e.text())),
+            }
+            let _ = busy.try_set(false);
+        });
+    };
+    view! {
+        <section class="card widget w-6">
+            <WidgetHead icon=icons::SETTINGS title="sto.bt.boot" />
+            {move || match state.get() {
+                None => view! { <Skeleton lines=2 /> }.into_any(),
+                Some(Err(code)) => view! { <ErrorBox code=code on_retry=Callback::new(move |_| load()) /> }.into_any(),
+                Some(Ok(st)) => view! {
+                    <p class="muted small">{tr("sto.bt.auto_text")}</p>
+                    {st.pending.is_some().then(|| ui::note(Tone::Info, icons::HISTORY, view! { {tr("sto.pending_note")} }.into_any()))}
+                    <label class="check"><input type="checkbox" prop:checked=move || auto.get() on:change=move |ev| auto.set(event_target_checked(&ev)) />{tr("sto.bt.auto")}</label>
+                    {form_error(error)}
+                    <div class="card-actions"><button class="btn primary sm" type="button" disabled=move || busy.get() on:click=save>{spinner(busy)}{tr("save")}</button></div>
+                }
+                .into_any(),
+            }}
+        </section>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_to_disk() {
+        let disks: Vec<String> = ["sdb", "sdb1x", "nvme0n1", "loop1"].map(String::from).into();
+        assert_eq!(disk_of("/dev/sdb2", &disks).as_deref(), Some("sdb"));
+        assert_eq!(disk_of("/dev/nvme0n1p2", &disks).as_deref(), Some("nvme0n1"));
+        assert_eq!(disk_of("/dev/loop1", &disks).as_deref(), Some("loop1"));
+        assert_eq!(disk_of("/dev/sdc1", &disks), None);
+        assert_eq!(disk_of("/dev/mapper/x", &disks), None);
+    }
+
+    #[test]
+    fn device_states() {
+        let r = |mounted, missing_count, lost: &[&str], convert: bool| BtrfsRepair {
+            mounted,
+            missing_count,
+            lost: lost.iter().map(|s| s.to_string()).collect(),
+            convert: if convert { vec![Default::default()] } else { Vec::new() },
+            ..Default::default()
+        };
+        assert_eq!(state(None), (Tone::Ok, "health.healthy"));
+        assert_eq!(state(Some(&r(false, 1, &[], false))), (Tone::Err, "rm.not_mounted"));
+        assert_eq!(state(Some(&r(true, 2, &["data raid1"], false))), (Tone::Err, "health.failed"));
+        assert_eq!(state(Some(&r(true, 1, &[], true))), (Tone::Warn, "health.degraded"));
+        assert_eq!(state(Some(&r(true, 0, &[], true))), (Tone::Warn, "sto.h.warning"));
+    }
+}
