@@ -38,10 +38,6 @@ module.exports = {
       automerge: true,
       automergeType: "pr",
       minimumReleaseAge: "3 days",
-      // take the newest release that is old enough: with "strict" an image that releases more
-      // often than every three days (Home Assistant, Immich, Redis) never gets its branch
-      // updated, and the PR stays on its first, still pending status for good
-      internalChecksFilter: "flexible",
     },
     {
       matchUpdateTypes: ["major"],
