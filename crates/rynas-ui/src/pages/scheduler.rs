@@ -942,16 +942,21 @@ fn task_row(
                 </div>
             }
             .into_any()),
+            // the pills on one line (short words); what a queued or yielded start waits for on
+            // the line below
             ui::cell("sch.col.last", "", view! {
+                <div class="cell-main">
                 <div class="chips">
                     {st.paused.is_some().then(|| ui::status(Tone::Warn, t("sch.paused").to_string()))}
                     {st.retry.map(|r| ui::status(Tone::Info, tf("sch.retry_at", &[("n", &r.attempt.to_string()), ("of", &r.attempts.to_string()), ("when", &i18n::short_when(r.due_ms))])))}
                     {st.running.then(|| ui::status(Tone::Info, t("sch.running").to_string()))}
-                    {st.queued.as_ref().filter(|_| !st.running).map(|q| ui::status(Tone::Unknown, queued_text(q)))}
-                    {st.yielded.as_ref().filter(|_| !st.running).map(|y| ui::status(Tone::Unknown, yielded_text(y)))}
+                    {st.queued.as_ref().filter(|_| !st.running).map(|_| ui::status(Tone::Unknown, t("sch.q.queued").to_string()))}
+                    {st.yielded.as_ref().filter(|_| !st.running && st.queued.is_none()).map(|_| ui::status(Tone::Unknown, t("sch.y.short").to_string()))}
                     {if st.running { None } else { last.map(|l| l.into_any()) }}
                     {ui::pending_status(st.pending)}
                     {(st.last_run.is_none() && !st.running && st.pending.is_none()).then(|| view! { <span class="muted small">{tr("never_run")}</span> })}
+                </div>
+                {(!st.running).then(|| st.queued.as_ref().map(queued_text).or_else(|| st.yielded.as_ref().map(yielded_text))).flatten().map(|s| view! { <span class="cell-sub small">{s}</span> })}
                 </div>
             }
             .into_any()),

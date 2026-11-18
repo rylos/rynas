@@ -2534,6 +2534,7 @@ sch.q.queued	In coda
 sch.y.gave_way	Ha ceduto il passo a {who} ({res}): riprende da sola
 sch.y.stopping	Cede il passo a un lavoro più urgente: si sta fermando
 sch.y.will_resume	Ha ceduto il passo: riprende da sola
+sch.y.short	Ha ceduto il passo
 sch.res.every	tutti i volumi
 sch.res.disk	disco {disk}
 sch.res.packages	sistema dei pacchetti
@@ -5366,6 +5367,7 @@ bkpc.delete_snap_title	Eliminare {name}?
 bkpc.delete_snap_text	Lo snapshot viene eliminato dal NAS e il suo spazio liberato in background. Gli altri snapshot e il prossimo invio incrementale del PC non ne risentono.
 bkpc.deleted_snap	{name} eliminato
 task.pcbackup.create	Aggiunta di una destinazione di backup per PC
+bkpc.run.partial	Parziale
 task.pcbackup.update	Modifica delle impostazioni del backup di un PC
 task.pcbackup.remove	Rimozione di una destinazione di backup per PC
 task.pcbackup.usage	Misura dei backup di un PC

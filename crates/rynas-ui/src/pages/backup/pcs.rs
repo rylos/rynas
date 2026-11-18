@@ -1506,7 +1506,8 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                     } else if r.incomplete {
                         ui::status(Tone::Warn, t("bk.snap.incomplete").to_string())
                     } else if !r.lacks.is_empty() {
-                        ui::status(Tone::Info, tf("bkpc.run.lacks", &[("names", &r.lacks.join(", "))]))
+                        // the pill stays short: the missing names are on the line below
+                        ui::status(Tone::Info, t("bkpc.run.partial").to_string())
                     } else {
                         ui::status(Tone::Ok, t("pca.h.ok").to_string())
                     };
@@ -1518,6 +1519,9 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 Item::Failed(h) => {
                     let body = ui::note(Tone::Err, icons::TRIANGLE_ALERT, ui::breakable(h.error.as_deref().unwrap_or_default(), "small"));
                     let sent = if h.bytes_added > 0 { tf("pcb.sent_size", &[("size", &i18n::bytes(h.bytes_added))]) } else { String::new() };
+                    if !r.lacks.is_empty() && !r.incomplete && !h.is_some_and(|h| !h.ok) {
+                        sub.push(tf("bkpc.run.lacks", &[("names", &r.lacks.join(", "))]));
+                    }
                     group(format!("failed:{}", h.run_id), view! { <span class="pcb-group-title tnum">{i18n::datetime(h.started_ms)}</span> }.into_any(), sent, Some(ui::status(Tone::Err, t("pca.st.failed").to_string())), body)
                 }
             })

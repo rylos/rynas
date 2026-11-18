@@ -45,7 +45,8 @@ pub fn Status(#[prop(into)] tone: Signal<Tone>, #[prop(into)] text: Signal<Strin
     view! {
         <span class=move || format!("status {}", tone.get().class())>
             {move || view! { <Icon icon=tone.get().icon() size=14 /> }}
-            <span>{text}</span>
+            // one line always: a text cut by the cell's width stays whole in the tooltip
+            <span title=text>{text}</span>
         </span>
     }
 }

@@ -714,7 +714,8 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
             let failed = r.outcome == TestOutcome::Failed;
             view! {
                 <div class="bk-test" aria-live="polite">
-                    {ui::status(tone, text)}
+                    // a sentence: a note, not a status pill (pills stay on one line)
+                    {ui::note(tone, tone.icon(), ui::text(text))}
                     {(!r.message.is_empty() && failed).then(|| ui::tech_detail(r.message.clone()))}
                     {(!r.message.is_empty() && !failed).then(|| view! { <p class="small bk-wrap">{r.message.clone()}</p> })}
                 </div>

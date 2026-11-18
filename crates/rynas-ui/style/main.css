@@ -703,12 +703,18 @@ kbd {
   display: inline-flex; align-items: center; gap: var(--s-1);
   height: 22px; padding: 0 var(--s-2) 0 var(--s-2); border-radius: var(--r-pill);
   font-size: var(--fs-12); font-weight: 600; white-space: nowrap;
+  max-width: 100%; min-width: 0;
   --tone: var(--text-subtle);
   color: var(--tone);
   background: color-mix(in oklch, var(--tone) 13%, var(--surface));
 }
 .ok { --tone: var(--success); } .warn { --tone: var(--warning); } .err { --tone: var(--danger); }
 .info { --tone: var(--info); } .unknown { --tone: var(--text-subtle); }
+/* a status pill never wraps its text: the column gives room or the row reflows; a text wider
+   than the whole cell (never in practice: long words go to the line under the pill) ends in an
+   ellipsis, the full text in its tooltip */
+.status > svg { flex: none; }
+.status > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 .chip {
   display: inline-flex; align-items: center; gap: var(--s-1);
@@ -790,7 +796,6 @@ kbd {
 .kv:has(> dd > .cell-main) dt { white-space: normal; }
 .kv dd:has(> .cell-main) { flex-shrink: 0; max-width: 60%; }
 .kv dd > .cell-main { align-items: flex-end; }
-.kv dd > .cell-main > .status { white-space: nowrap; }
 .sys-hero { padding: var(--s-1) 0 var(--s-2); }
 .sys-model { font-size: var(--fs-20); font-weight: 600; letter-spacing: -.01em; }
 .sys-host { color: var(--text-subtle); margin-top: var(--s-1); }
@@ -995,9 +1000,6 @@ kbd {
    instead of widening the card; the power pill keeps its size */
 .disk-card-bottom > .status { flex: none; }
 .disk-card-health { display: flex; min-width: 0; }
-.disk-card-health .status { min-width: 0; max-width: 100%; }
-.disk-card-health .status > svg { flex: none; }
-.disk-card-health .status > span { overflow: hidden; text-overflow: ellipsis; }
 
 .arrays { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--s-3); }
 .array { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3) var(--s-4); border-radius: var(--r-md); border: 1px solid var(--border); border-left: 3px solid var(--tone); background: var(--surface-striped); }
@@ -2188,10 +2190,6 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .kv-act > .kv-below { flex: 1 0 100%; text-align: left; }
 .tip-wrap { display: inline-flex; }
 .status-card-head .link-btn { margin-left: 0; }
-/* a long status (paused or unreachable with its date) wraps inside the card instead of leaving it */
-.status-card-head > .status, .cell-main > .status { height: auto; min-height: 22px; white-space: normal; max-width: 100%; }
-/* long chips (a queued task: what it waits for) wrap instead of widening the cell */
-.chips > .status { height: auto; min-height: 22px; white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
 /* ui::fold: a folded part (advanced options, history, a log, rare actions): chevron, title, an
    optional state after it. Inside .folds they are separated by rules; .fold.sub is the small
    one inside a card (the last run's notes). */
@@ -2228,7 +2226,6 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .bk-checks .check { align-items: baseline; flex-wrap: wrap; }
 .bk-test { display: flex; flex-direction: column; gap: var(--s-2); }
 /* the test's verdict is a sentence: it wraps instead of widening the drawer on a phone */
-.bk-test > .status { height: auto; min-height: 22px; white-space: normal; align-self: flex-start; max-width: 100%; padding-block: var(--s-1); border-radius: var(--r-md); }
 .bk-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .bk-list > li { border-top: 1px solid var(--border); }
 .bk-list > li:first-child { border-top: 0; }
@@ -2255,7 +2252,6 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .app-icon-none { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; color: var(--text-subtle); }
 .app-sum { margin: 0; color: var(--text-muted); font-size: var(--fs-13); flex: 1; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .app-card-foot { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--s-2); margin-top: auto; }
-.app-card .status { height: auto; min-height: 22px; max-width: 100%; white-space: normal; --lh: 1.3; }
 .app-detail { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; }
 .app-detail h4.mini-title { margin: var(--s-2) 0 0; }
 .md { font-size: var(--fs-14); overflow-wrap: anywhere; }

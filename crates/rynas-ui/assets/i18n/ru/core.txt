@@ -2554,6 +2554,7 @@ sch.q.queued	В очереди
 sch.y.gave_way	Уступила: {who} ({res}); продолжится сама
 sch.y.stopping	Уступает более срочному процессу: останавливается
 sch.y.will_resume	Уступила: продолжится сама
+sch.y.short	Уступила
 sch.res.every	все тома
 sch.res.disk	диск {disk}
 sch.res.packages	система пакетов
@@ -5387,6 +5388,7 @@ bkpc.delete_snap_title	Удалить {name}?
 bkpc.delete_snap_text	Снимок удаляется с NAS, а его место освобождается в фоне. Другие снимки и следующая инкрементная отправка ПК не затрагиваются.
 bkpc.deleted_snap	{name}: удалено
 task.pcbackup.create	Добавление цели резервного копирования ПК
+bkpc.run.partial	Неполная
 task.pcbackup.update	Изменение настроек резервного копирования ПК
 task.pcbackup.remove	Удаление цели резервного копирования ПК
 task.pcbackup.usage	Измерение резервных копий ПК
