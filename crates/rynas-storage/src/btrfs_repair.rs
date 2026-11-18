@@ -284,7 +284,7 @@ pub fn remove_blocker(usage: &[DevUsage]) -> Option<BtrfsBlocker> {
         return Some(BtrfsBlocker::TooFewDevices);
     }
     let moved: u64 = usage.iter().filter(|d| d.missing).map(DevUsage::allocated).sum();
-    let mut frees: Vec<u64> = present.iter().map(|d| d.unallocated.saturating_sub(REMOVE_ROOM)).collect();
+    let frees: Vec<u64> = present.iter().map(|d| d.unallocated.saturating_sub(REMOVE_ROOM)).collect();
     if moved > frees.iter().sum::<u64>() {
         return Some(BtrfsBlocker::NoSpace);
     }
