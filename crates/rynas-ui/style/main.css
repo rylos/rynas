@@ -785,6 +785,12 @@ kbd {
 /* values wrap instead of ending in an ellipsis: a cut "Unknown (local or proxied…" or a cut list of
    mount points loses the information (most values fit one line anyway) */
 .kv dd { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+/* a value with a status chip and lines under it (the bare-metal row): the long label wraps,
+   the chip stays whole (it broke letter by letter at 390 px) */
+.kv:has(> dd > .cell-main) dt { white-space: normal; }
+.kv dd:has(> .cell-main) { flex-shrink: 0; max-width: 60%; }
+.kv dd > .cell-main { align-items: flex-end; }
+.kv dd > .cell-main > .status { white-space: nowrap; }
 .sys-hero { padding: var(--s-1) 0 var(--s-2); }
 .sys-model { font-size: var(--fs-20); font-weight: 600; letter-spacing: -.01em; }
 .sys-host { color: var(--text-subtle); margin-top: var(--s-1); }

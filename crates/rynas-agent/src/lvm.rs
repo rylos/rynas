@@ -32,25 +32,43 @@ impl Snap {
     }
 }
 
+/// Why there is no snapshot of a volume.
+#[derive(Debug)]
+pub enum SnapError {
+    /// Its group has too little free space for a classic snapshot ([`cow_room`]).
+    NoSpace,
+    /// A tool failed (its message).
+    Failed(String),
+}
+
+impl std::fmt::Display for SnapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SnapError::NoSpace => write!(f, "too little free space in the volume group for a snapshot"),
+            SnapError::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// A snapshot of `vg/lv`, or why there is none.
-pub fn snapshot(vg: &str, lv: &str) -> Result<Snap, String> {
-    let info = lvm(&["lvs", "--noheadings", "--units", "b", "--nosuffix", "-o", "lv_size,segtype,vg_free", &format!("{vg}/{lv}")])?;
+pub fn snapshot(vg: &str, lv: &str) -> Result<Snap, SnapError> {
+    let info = lvm(&["lvs", "--noheadings", "--units", "b", "--nosuffix", "-o", "lv_size,segtype,vg_free", &format!("{vg}/{lv}")]).map_err(SnapError::Failed)?;
     let f: Vec<&str> = info.split_whitespace().collect();
     if f.len() < 3 {
-        return Err(format!("lvs {vg}/{lv}: unexpected answer"));
+        return Err(SnapError::Failed(format!("lvs {vg}/{lv}: unexpected answer")));
     }
     let size: u64 = f[0].parse().unwrap_or(0);
     let thin = f[1] == "thin";
     let free: u64 = f[2].parse().unwrap_or(0);
     let name = format!("{lv}{SUFFIX}");
     if thin {
-        lvm(&["lvcreate", "-s", "-n", &name, &format!("{vg}/{lv}")])?;
-        lvm(&["lvchange", "-ay", "-K", &format!("{vg}/{name}")])?;
+        lvm(&["lvcreate", "-s", "-n", &name, &format!("{vg}/{lv}")]).map_err(SnapError::Failed)?;
+        lvm(&["lvchange", "-ay", "-K", &format!("{vg}/{name}")]).map_err(SnapError::Failed)?;
     } else {
         let Some(want) = cow_room(size, free) else {
-            return Err(format!("volume group {vg} has too little free space for a snapshot of {lv}"));
+            return Err(SnapError::NoSpace);
         };
-        lvm(&["lvcreate", "-s", "-n", &name, "-L", &format!("{want}b"), &format!("{vg}/{lv}")])?;
+        lvm(&["lvcreate", "-s", "-n", &name, "-L", &format!("{want}b"), &format!("{vg}/{lv}")]).map_err(SnapError::Failed)?;
     }
     Ok(Snap {
         vg: vg.to_string(),

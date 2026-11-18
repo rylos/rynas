@@ -200,6 +200,9 @@ pub struct Dev {
     pub manifest_ms: Option<u64>,
     #[serde(default)]
     pub manifest_reasons: Vec<ReadyReason>,
+    /// What makes the layout need manual steps (the LVM groups the restore refuses, and why).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manifest_details: Vec<String>,
     #[serde(default)]
     pub revoked: bool,
     /// The btrfs method's folder this PC sends into ([`crate::pc_backup::PcBackup::agent_folder_id`]),
@@ -964,9 +967,11 @@ pub fn ready_of(d: &Dev, kit: Option<u64>) -> BareMetalReady {
         reasons.push(ReadyReason::NoRecoveryKit);
     }
     reasons.dedup();
+    let details = if reasons.contains(&ReadyReason::ManualLayout) { d.manifest_details.clone() } else { Vec::new() };
     BareMetalReady {
         ready: reasons.is_empty(),
         reasons,
+        details,
     }
 }
 

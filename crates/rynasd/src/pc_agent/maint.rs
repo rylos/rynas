@@ -753,6 +753,10 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
         if let Some((m, _)) = &manifest {
             d.manifest_ms = Some(m.written_at_ms);
             d.manifest_reasons = m.ready_reasons();
+            // the lines behind "manual layout": which group or volume, and why
+            d.manifest_details = if m.md.is_empty() { Vec::new() } else { vec!["md RAID arrays are not made again by the restore".to_string()] };
+            d.manifest_details.extend(m.lvm_unsupported());
+            d.manifest_details.truncate(20);
         }
         d.command = None;
         d.rev += 1;

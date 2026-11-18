@@ -715,12 +715,21 @@ fn drawer(tab: Tab, device: String) -> AnyView {
         let ready = if p.bare_metal.ready {
             ui::status(Tone::Ok, t("pca.ready.yes").to_string())
         } else {
-            view! { <div class="cell-main">{ui::status(Tone::Warn, t("bkpc.bm.not_ready").to_string())}{p.bare_metal.reasons.iter().map(|r| view! { <span class="cell-sub small">{tr(reason_text(*r))}</span> }).collect_view()}</div> }.into_any()
+            // a manual layout says which group or volume and why (the NAS's lines, shown below
+            // the list at full width), when known
+            let has_details = !p.bare_metal.details.is_empty();
+            view! {
+                <div class="cell-main">
+                    {ui::status(Tone::Warn, t("bkpc.bm.not_ready").to_string())}
+                    {p.bare_metal.reasons.iter().filter(|r| !(has_details && **r == ReadyReason::ManualLayout)).map(|r| view! { <span class="cell-sub small">{tr(reason_text(*r))}</span> }).collect_view()}
+                </div>
+            }
+            .into_any()
         };
         let captures = run.as_ref().map(|r| {
             r.captures
                 .iter()
-                .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{c.fstype.clone()}" · "{tr(method_text(c.method))}{agent_note(c.btrfs.as_ref(), |s| s.snapshot.as_str(), c.note.as_deref()).map(|n| format!(" ({n})"))}</li> })
+                .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{c.fstype.clone()}" · "{tr(method_text(c.method))}{c.note_code.as_ref().map(capture_note_text).or_else(|| agent_note(c.btrfs.as_ref(), |s| s.snapshot.as_str(), c.note.as_deref())).map(|n| format!(" ({n})"))}</li> })
                 .collect_view()
         });
         let history = d
@@ -756,6 +765,12 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                 {last_error.map(|e| ui::kv("pca.last_error", ui::breakable(e.as_str(), "small")))}
                 {run.as_ref().filter(|r| r.changed_count > 0).map(|r| ui::kv("pca.changed", ui::text(tf("pca.changed_n", &[("n", &i18n::count(r.changed_count))]))))}
             </dl>
+            {(!p.bare_metal.details.is_empty()).then(|| view! {
+                <div class="small">
+                    <p>{tr("pca.ready.manual_these")}</p>
+                    <ul class="mono bk-wrap">{p.bare_metal.details.iter().map(|l| view! { <li>{l.clone()}</li> }).collect_view()}</ul>
+                </div>
+            })}
             {progress}
             {captures.map(|c| view! { {ui::fold(None, "pca.how_read", false, None, view! { <ul class="small">{c}</ul> }.into_any())} })}
             {run.as_ref().filter(|r| !r.changed_during.is_empty()).map(|r| view! {
@@ -802,11 +817,16 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                     ui::row(vec![
                         ui::text_cell("pca.col.when", "tnum", i18n::datetime(v.time_ms)),
                         ui::text_cell("pca.col.files", "num tnum", v.files.map(i18n::count).unwrap_or_default()),
-                        ui::text_cell("pca.col.size", "num tnum", v.bytes.map(i18n::bytes).unwrap_or_default()),
+                        ui::text_cell("pca.col.on_pc", "num tnum", v.bytes.map(i18n::bytes).unwrap_or_default()),
                         ui::actions(view! { <button class="icon-btn sm" title=tr("bk.browse") aria-label=label on:click=move |_| browse.set(Some(id.clone()))><Icon icon=icons::FOLDER_OPEN size=16 /></button> }.into_any()),
                     ])
                 }).collect::<Vec<_>>();
-                ui::table("pca-versions", &["pca.col.when", "#pca.col.files", "#pca.col.size", ""], rows)
+                view! {
+                    {ui::table("pca-versions", &["pca.col.when", "#pca.col.files", "#pca.col.on_pc", ""], rows)}
+                    // what each size means: read from the PC, new before compression, sent
+                    <p class="field-help">{tr("pca.sizes_help")}</p>
+                }
+                .into_any()
             })}
             {(!history.is_empty()).then(|| view! {
                 <h3 class="mini-title">{tr("pca.history")}</h3>
@@ -1062,7 +1082,7 @@ impl AgentCtl {
             let captures = run.as_ref().filter(|r| !r.captures.is_empty()).map(|r| {
                 r.captures
                     .iter()
-                    .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{tr(method_text(c.method))}{agent_note(c.btrfs.as_ref(), |s| s.snapshot.as_str(), c.note.as_deref()).map(|n| format!(" ({n})"))}</li> })
+                    .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{tr(method_text(c.method))}{c.note_code.as_ref().map(capture_note_text).or_else(|| agent_note(c.btrfs.as_ref(), |s| s.snapshot.as_str(), c.note.as_deref())).map(|n| format!(" ({n})"))}</li> })
                     .collect_view()
             });
             // the error of the last run while it is the news: failed, nothing running
@@ -1224,6 +1244,18 @@ fn phase_text(p: AgentPhase) -> &'static str {
         // not shown: the status says it (see `progress_view`)
         AgentPhase::Uploading => "pca.st.running",
         AgentPhase::Finishing => "pca.phase.finishing",
+    }
+}
+
+/// Why a filesystem was read the way it was, in the interface's language (agents from 0.8.21;
+/// older ones: their English text through [`agent_note`]).
+pub(super) fn capture_note_text(n: &CaptureNote) -> String {
+    match n {
+        CaptureNote::LvmNoSpace { vg, lv } => tf("pca.note.lvm_no_space", &[("vg", vg), ("lv", lv)]),
+        CaptureNote::LvmFailed { error } => tf("pca.note.lvm_failed", &[("error", error)]),
+        CaptureNote::BtrfsFailed { error } => tf("pca.note.btrfs_failed", &[("error", error)]),
+        CaptureNote::MountPointMissing => t("pca.note.mount_missing").to_string(),
+        CaptureNote::FreezeRefused { error } => tf("pca.note.freeze_refused", &[("error", error)]),
     }
 }
 

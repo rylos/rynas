@@ -223,7 +223,7 @@ struct Source {
     nested: Vec<(String, PathBuf)>,
     snaps: Vec<PathBuf>,
     lvm: Option<lvm::Snap>,
-    note: Option<String>,
+    note: Option<CaptureNote>,
 }
 
 fn lvm_of(m: &Mount) -> Option<(String, String)> {
@@ -281,7 +281,7 @@ fn prepare(mounts: &[Mount], plan: &PcPlan, run: &str) -> Vec<Source> {
                 }
                 Err(e) => {
                     say(format!("{}: no snapshot ({e}); read in use", m.path));
-                    s.note = Some(e);
+                    s.note = Some(CaptureNote::BtrfsFailed { error: e });
                 }
             },
             "vfat" => s.method = CaptureMethod::Files,
@@ -294,7 +294,10 @@ fn prepare(mounts: &[Mount], plan: &PcPlan, run: &str) -> Vec<Source> {
                         }
                         Err(e) => {
                             say(format!("{}: no LVM snapshot ({e})", m.path));
-                            s.note = Some(e);
+                            s.note = Some(match e {
+                                lvm::SnapError::NoSpace => CaptureNote::LvmNoSpace { vg: vg.clone(), lv: lv.clone() },
+                                lvm::SnapError::Failed(error) => CaptureNote::LvmFailed { error },
+                            });
                         }
                     }
                 }
@@ -317,8 +320,8 @@ fn build_stage(sources: &mut [Source]) -> Result<(), String> {
         let dst = stage_path(&s.mount.path);
         if !dst.is_dir() {
             s.method = CaptureMethod::Skipped;
-            s.note = Some("its mount point is missing in the parent filesystem".into());
-            say(format!("{}: left out ({})", s.mount.path, s.note.as_deref().unwrap_or("")));
+            s.note = Some(CaptureNote::MountPointMissing);
+            say(format!("{}: left out ({})", s.mount.path, CaptureNote::MountPointMissing.text()));
             continue;
         }
         if let Some(l) = &s.lvm {
@@ -580,7 +583,8 @@ fn run_inner(
                 path: s.mount.path.clone(),
                 fstype: s.mount.fstype.clone(),
                 method: s.method,
-                note: s.note.clone(),
+                note: s.note.as_ref().map(CaptureNote::text),
+                note_code: s.note.clone(),
                 btrfs: None,
             })
             .collect()
@@ -600,7 +604,7 @@ fn run_inner(
                 Ok(f) => frozen.push(f),
                 Err(e) => {
                     s.method = CaptureMethod::Hot;
-                    s.note = Some(format!("freeze refused: {e}"));
+                    s.note = Some(CaptureNote::FreezeRefused { error: e.to_string() });
                 }
             }
         }

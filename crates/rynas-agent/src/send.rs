@@ -800,7 +800,7 @@ pub fn run(st: &crate::state::State, client: &Arc<Client>, counters: &Arc<Counte
                 format!("error: {e}")
             }
         };
-        captures.push(Capture { path: s.mount.clone(), fstype: "btrfs".into(), method: CaptureMethod::BtrfsSnapshot, note: Some(note), btrfs: Some(step) });
+        captures.push(Capture { path: s.mount.clone(), fstype: "btrfs".into(), method: CaptureMethod::BtrfsSnapshot, note: Some(note), note_code: None, btrfs: Some(step) });
     }
     set_phase(AgentPhase::Finishing);
     // the excludes this method could not apply, on the root's line (where the NAS shows it)

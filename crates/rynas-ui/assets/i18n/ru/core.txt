@@ -5414,7 +5414,7 @@ pca.empty_text	Добавьте ПК: вы получите одноразовы
 pca.col.pc	ПК
 pca.col.group	Группа
 pca.col.versions	Версии
-pca.col.uploaded	Отправлено
+pca.col.uploaded	Отправлено (сжато)
 pca.col.pcs	ПК
 pca.col.size	Размер
 pca.col.maintenance	Обслуживание
@@ -5422,7 +5422,7 @@ pca.col.expires	Действует до
 pca.col.when	Когда
 pca.col.what	Что
 pca.col.files	Файлы
-pca.col.added	Новые данные
+pca.col.added	Новые (без сжатия)
 pca.st.running	Идёт резервное копирование
 pca.st.late	Задерживается
 pca.st.unreachable	Недоступен
@@ -5496,6 +5496,14 @@ pca.ready.loader	Загрузчик неизвестен
 pca.ready.no_table	Таблица разделов не прочитана
 pca.ready.no_kit	У группы нет комплекта восстановления
 pca.ready.manual	LVM или md: перед восстановлением воссоздаются вручную
+pca.ready.manual_these	Восстановление не создаёт их заново; сначала создайте их вручную:
+pca.col.on_pc	Размер на ПК
+pca.sizes_help	Размер на ПК: что содержит версия, как прочитано с ПК. Новые: данные, которых ещё не было на NAS, до сжатия. Отправлено: сколько ПК отправил всего, сжато и без дубликатов, до удаления старых версий.
+pca.note.lvm_no_space	в группе томов {vg} слишком мало свободного места для снимка {lv}
+pca.note.lvm_failed	нет снимка LVM: {error}
+pca.note.btrfs_failed	нет снимка btrfs: {error}
+pca.note.mount_missing	его точка монтирования отсутствует в родительской файловой системе
+pca.note.freeze_refused	заморозка отклонена: {error}
 pca.last_error	Последняя ошибка
 pca.changed	Файлы, изменённые во время чтения
 pca.changed_n	Файлов: {n}

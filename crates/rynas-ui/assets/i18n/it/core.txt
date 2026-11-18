@@ -5393,7 +5393,7 @@ pca.empty_text	Aggiungi un PC: ricevi un codice valido una volta e il comando da
 pca.col.pc	PC
 pca.col.group	Gruppo
 pca.col.versions	Versioni
-pca.col.uploaded	Inviati
+pca.col.uploaded	Inviati (compressi)
 pca.col.pcs	PC
 pca.col.size	Dimensione
 pca.col.maintenance	Manutenzione
@@ -5401,7 +5401,7 @@ pca.col.expires	Valido fino a
 pca.col.when	Quando
 pca.col.what	Cosa
 pca.col.files	File
-pca.col.added	Dati nuovi
+pca.col.added	Nuovi (non compressi)
 pca.st.running	Backup in corso
 pca.st.late	In ritardo
 pca.st.unreachable	Non raggiungibile
@@ -5475,6 +5475,14 @@ pca.ready.loader	Il boot loader è sconosciuto
 pca.ready.no_table	Nessuna tabella delle partizioni letta
 pca.ready.no_kit	Il gruppo non ha un kit di ripristino
 pca.ready.manual	md, o LVM diverso da volumi lineari: da ricreare a mano prima del ripristino
+pca.ready.manual_these	Il ripristino non li ricrea; ricreali a mano prima:
+pca.col.on_pc	Dimensione sul PC
+pca.sizes_help	Dimensione sul PC: quanto contiene la versione, letto dal PC. Nuovi: dati che il NAS non aveva ancora, prima della compressione. Inviati: quanto il PC ha inviato in tutto, compresso e senza duplicati, prima che le versioni vecchie vengano eliminate.
+pca.note.lvm_no_space	il gruppo di volumi {vg} ha troppo poco spazio libero per uno snapshot di {lv}
+pca.note.lvm_failed	nessuno snapshot LVM: {error}
+pca.note.btrfs_failed	nessuno snapshot btrfs: {error}
+pca.note.mount_missing	il suo punto di montaggio manca nel filesystem che lo contiene
+pca.note.freeze_refused	congelamento rifiutato: {error}
 pca.last_error	Ultimo errore
 pca.changed	File cambiati durante la lettura
 pca.changed_n	{n} file

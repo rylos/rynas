@@ -409,12 +409,45 @@ pub struct Capture {
     pub path: String,
     pub fstype: String,
     pub method: CaptureMethod,
-    /// Free text (English) for older interfaces.
+    /// Free text (English) for older interfaces; [`Self::note_code`] says the same in fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Why this filesystem was read the way it was, for the interface to put into words
+    /// (agents from 0.8.21; older ones send only [`Self::note`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_code: Option<CaptureNote>,
     /// The btrfs method: what was sent for this subvolume, in fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub btrfs: Option<BtrfsStep>,
+}
+
+/// Why a filesystem was not read from a snapshot (or not at all), in fields
+/// ([`Capture::note_code`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum CaptureNote {
+    /// The volume group has too little free space for a snapshot of the volume: read in use.
+    LvmNoSpace { vg: String, lv: String },
+    /// An LVM snapshot failed (the tool's own message): read in use.
+    LvmFailed { error: String },
+    /// A btrfs snapshot failed: read in use.
+    BtrfsFailed { error: String },
+    /// Its mount point is missing in the parent filesystem: left out.
+    MountPointMissing,
+    /// The filesystem refused to freeze: read in use.
+    FreezeRefused { error: String },
+}
+
+impl CaptureNote {
+    /// The English sentence older interfaces show ([`Capture::note`]).
+    pub fn text(&self) -> String {
+        match self {
+            CaptureNote::LvmNoSpace { vg, lv } => format!("volume group {vg} has too little free space for a snapshot of {lv}"),
+            CaptureNote::LvmFailed { error } | CaptureNote::BtrfsFailed { error } => error.clone(),
+            CaptureNote::MountPointMissing => "its mount point is missing in the parent filesystem".into(),
+            CaptureNote::FreezeRefused { error } => format!("freeze refused: {error}"),
+        }
+    }
 }
 
 /// One run of the agent.
@@ -482,6 +515,10 @@ pub struct BareMetalReady {
     pub ready: bool,
     #[serde(default)]
     pub reasons: Vec<ReadyReason>,
+    /// With [`ReadyReason::ManualLayout`]: which volume group, volume or physical volume, and
+    /// why (technical lines, English).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
