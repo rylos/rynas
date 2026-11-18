@@ -1,0 +1,33 @@
+Overall:
+    Device size:		        3221225472
+    Device allocated:		        2494693376
+    Device unallocated:		         726532096
+    Device missing:		        1073741824
+    Device slack:		                 0
+    Used:			         315506688
+    Free (estimated):		        1038090240	(min: 917001557)
+    Free (statfs, df):		         799604736
+    Data ratio:			              2.00
+    Metadata ratio:		              3.00
+    Global reserve:		           5767168	(used: 0)
+    Multiple profiles:		                no
+
+Data,RAID1: Size:832110592, Used:157286400 (18.90%)
+   /dev/loop0	 671088640
+   /dev/loop1	 496566272
+   missing	 496566272
+
+Metadata,RAID1C3: Size:268435456, Used:294912 (0.11%)
+   /dev/loop0	 268435456
+   /dev/loop1	 268435456
+   missing	 268435456
+
+System,RAID1C3: Size:8388608, Used:16384 (0.20%)
+   /dev/loop0	   8388608
+   /dev/loop1	   8388608
+   missing	   8388608
+
+Unallocated:
+   /dev/loop0	 125829120
+   /dev/loop1	 300351488
+   missing	 300351488

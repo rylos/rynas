@@ -75,6 +75,8 @@ struct MdCache {
 struct FsCache {
     read_ms: u64,
     usage: Option<Usage>,
+    /// `btrfs device usage` of a filesystem of several devices (or one missing a device).
+    dev_usage: Vec<crate::btrfs_repair::DevUsage>,
     subvolumes: Vec<Subvolume>,
     readonly: HashSet<u64>,
 }
@@ -723,9 +725,18 @@ impl Storage {
                                 .run_ok("btrfs", &["subvolume", "list", "-r", mnt], T_BTRFS)
                                 .map(|s| btrfs::readonly_ids(&s))
                                 .unwrap_or_default();
+                            // several devices: what each holds, for the repair facts
+                            let dev_usage = if sh.devices.len() > 1 || sh.missing {
+                                self.run_ok("btrfs", &["device", "usage", "-b", mnt], T_BTRFS)
+                                    .map(|s| crate::btrfs_repair::parse_device_usage(&s))
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
                             let c = FsCache {
                                 read_ms: now,
                                 usage,
+                                dev_usage,
                                 subvolumes,
                                 readonly,
                             };
@@ -762,7 +773,40 @@ impl Storage {
                     cache_entry.as_ref().map(|c| c.read_ms).unwrap_or(now),
                 );
                 f.stale = stale;
+                if f.devices.len() > 1 || f.devices.iter().any(|d| d.missing) {
+                    let du = cache_entry.as_ref().map(|c| c.dev_usage.as_slice()).unwrap_or_default();
+                    f.repair = crate::btrfs_repair::repair_of(&f, du);
+                }
                 f
+            })
+            .collect()
+    }
+
+    /// The configured btrfs volumes (`/etc/fstab`, mount point `/<label>`) that are not
+    /// mounted because devices are missing ([`crate::btrfs_repair::unmounted_filesystem`]).
+    /// The superblocks of the members present are read only while no disk under them sleeps.
+    fn unmounted_with(&self, g: &BlockGraph, mounts: &[Mount], mounted: &[BtrfsFilesystem]) -> Vec<BtrfsFilesystem> {
+        use crate::btrfs_repair::{parse_dump_super, parse_fstab, unmounted, unmounted_filesystem};
+        let Some(fstab) = self.host.read("/etc/fstab") else { return Vec::new() };
+        unmounted(&parse_fstab(&fstab), g, mounts, mounted)
+            .iter()
+            .filter_map(|u| {
+                let sleeping = u
+                    .present
+                    .iter()
+                    .flat_map(|(k, _)| g.disks_under(k))
+                    .filter_map(|d| g.get(&d))
+                    .any(|d| asleep(self.power_of(d)));
+                let supers: Option<Vec<(String, crate::btrfs_repair::Super)>> = (!sleeping && !u.present.is_empty()).then(|| {
+                    u.present
+                        .iter()
+                        .filter_map(|(_, path)| {
+                            let s = self.run_ok("btrfs", &["inspect-internal", "dump-super", path], T_BTRFS)?;
+                            parse_dump_super(&s).filter(|x| x.fsid.eq_ignore_ascii_case(&u.uuid)).map(|x| (path.clone(), x))
+                        })
+                        .collect()
+                });
+                unmounted_filesystem(u, supers.as_deref())
             })
             .collect()
     }
@@ -770,7 +814,11 @@ impl Storage {
     /// `GET /api/v1/storage/filesystems`
     pub fn filesystems(&self) -> Result<Vec<BtrfsFilesystem>, StorageError> {
         let g = self.graph()?;
-        Ok(self.filesystems_with(&g, &self.mounts()))
+        let mounts = self.mounts();
+        let mut v = self.filesystems_with(&g, &mounts);
+        let unmounted = self.unmounted_with(&g, &mounts, &v);
+        v.extend(unmounted);
+        Ok(v)
     }
 
     /// Everything at once, from a single lsblk run.
@@ -779,7 +827,9 @@ impl Storage {
         let mounts = self.mounts();
         let disks = self.summaries(&graph).into_iter().map(|(s, _)| s).collect();
         let arrays = self.arrays_with(&graph);
-        let filesystems = self.filesystems_with(&graph, &mounts);
+        let mut filesystems = self.filesystems_with(&graph, &mounts);
+        let unmounted = self.unmounted_with(&graph, &mounts, &filesystems);
+        filesystems.extend(unmounted);
         let (lvm, lvm_stale) = self.lvm_with(&graph);
         let mut inv = Inventory {
             graph,

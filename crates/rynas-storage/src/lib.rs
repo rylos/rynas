@@ -14,6 +14,7 @@
 //!   (smartmontools 7.4, mdadm 4.4, btrfs-progs 6.14, util-linux 2.41).
 
 pub mod btrfs;
+pub mod btrfs_repair;
 pub mod domain;
 pub mod exec;
 pub mod flex;

@@ -70,7 +70,10 @@ pub fn parse_show(s: &str) -> Vec<ShowFs> {
                 .split_once(" path ")
                 .map(|(_, p)| p.trim().to_string())
                 .unwrap_or_default();
-            let missing = path.contains("missing") || path.is_empty();
+            // `<missing disk #2> MISSING` (not mounted), `path  MISSING` (mounted degraded:
+            // the path is empty)
+            let missing = path.is_empty() || path.to_ascii_lowercase().contains("missing");
+            let path = if missing { String::new() } else { path };
             fs.devices.push(ShowDev {
                 devid: w.first().and_then(|n| n.parse().ok()).unwrap_or(0),
                 size: get("size"),

@@ -1,0 +1,6 @@
+warning, device 3 is missing
+Label: 'fxvol'  uuid: de89be44-41d2-4fad-ae56-9a2c5b027c0e
+	Total devices 3 FS bytes used 105119744
+	devid    1 size 1073741824 used 947912704 path /dev/loop0
+	devid    2 size 1073741824 used 773390336 path /dev/loop1
+	*** Some devices missing

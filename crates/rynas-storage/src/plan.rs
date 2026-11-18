@@ -177,6 +177,25 @@ pub(crate) fn step_english(kind: PlanStepKind, a: &PlanArgs) -> String {
         K::RemovePartitionLive => {
             return format!("Tell the kernel that the partition {s} is gone (the disk is in use)");
         }
+        K::BtrfsMountDegraded => {
+            let n = a.count.unwrap_or(0);
+            return format!("Mount {s} degraded, on the {n} device{} present", if n == 1 { "" } else { "s" });
+        }
+        K::BtrfsReplace => {
+            let o = a.other.as_deref().unwrap_or("");
+            return format!("Rebuild missing device {o} on {s}");
+        }
+        K::BtrfsWaitReplace => return format!("Wait for the rebuild on {s} to finish"),
+        K::BtrfsResize => {
+            let o = a.other.as_deref().unwrap_or("");
+            return format!("Grow device {o} of {s} to the whole disk");
+        }
+        K::BtrfsRemoveMissing => {
+            return format!("Remove the missing devices of {s} (the others take their data)");
+        }
+        K::BtrfsConvert => {
+            return format!("Convert the chunks of {s} written with a weaker profile back to {}", a.items.join(", "));
+        }
         K::WaitUdev => "Wait for udev to create the partition nodes",
         K::RecordArray => "Record the array so it is assembled at boot",
         K::LuksFormat => "Format the array as LUKS2 (Argon2id, 256 MiB memory, 4 KiB sectors)",

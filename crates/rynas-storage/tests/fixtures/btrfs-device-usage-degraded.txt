@@ -1,0 +1,24 @@
+/dev/loop0, ID: 1
+   Device size:          1073741824
+   Device slack:                  0
+   Data,RAID1:            671088640
+   Metadata,RAID1C3:      268435456
+   System,RAID1C3:          8388608
+   Unallocated:           125829120
+
+/dev/loop1, ID: 2
+   Device size:          1073741824
+   Device slack:                  0
+   Data,RAID1:            496566272
+   Metadata,RAID1C3:      268435456
+   System,RAID1C3:          8388608
+   Unallocated:           300351488
+
+missing, ID: 3
+   Device size:                   0
+   Device slack:                  0
+   Data,RAID1:            496566272
+   Metadata,RAID1C3:      268435456
+   System,RAID1C3:          8388608
+   Unallocated:           300351488
+

@@ -710,6 +710,17 @@ impl Applier for TuningDomain {
                 .into());
             }
         }
+        for u in c.btrfs_manual.iter_mut() {
+            *u = u.to_ascii_lowercase();
+            let ok = u.len() == 36
+                && u.split('-').map(str::len).eq([8, 4, 4, 4, 12])
+                && u.chars().all(|ch| ch == '-' || ch.is_ascii_hexdigit());
+            if !ok {
+                return Err(format!("invalid btrfs filesystem UUID {u:?}").into());
+            }
+        }
+        c.btrfs_manual.sort();
+        c.btrfs_manual.dedup();
         serde_json::to_value(c).map_err(|e| e.to_string().into())
     }
 
@@ -889,6 +900,7 @@ mod tests {
                 md_uuid: "0a1b2c3d:4e5f6071:8293a4b5:c6d7e8f9".into(),
                 stripe_cache_size: 4096,
             }],
+            ..Default::default()
         };
         let r = render_rules(&c);
         assert!(r.contains("KERNEL==\"sd*\", ATTR{queue/rotational}==\"1\", ATTR{queue/scheduler}=\"mq-deadline\"\n"), "{r}");
@@ -912,6 +924,7 @@ mod tests {
                 },
             }],
             arrays: vec![],
+            ..Default::default()
         };
         assert!(
             TuningDomain
@@ -924,6 +937,7 @@ mod tests {
                 settings: DiskSettings::default(),
             }],
             arrays: vec![],
+            ..Default::default()
         };
         let v = TuningDomain
             .validate(serde_json::to_value(empty).unwrap())
@@ -936,6 +950,26 @@ mod tests {
                 .validate(serde_json::to_value(big).unwrap())
                 .is_err()
         );
+    }
+
+    /// btrfs filesystems with the degraded mount after boot turned off: UUIDs only, kept
+    /// sorted, lower case and once; they change no udev rule.
+    #[test]
+    fn btrfs_manual_uuids() {
+        let c = StorageTuning {
+            btrfs_manual: vec![
+                "DE89BE44-41D2-4FAD-AE56-9A2C5B027C0E".into(),
+                "0a000000-41d2-4fad-ae56-9a2c5b027c0e".into(),
+                "de89be44-41d2-4fad-ae56-9a2c5b027c0e".into(),
+            ],
+            ..Default::default()
+        };
+        let v = TuningDomain.validate(serde_json::to_value(&c).unwrap()).unwrap();
+        let back = parse_tuning(Some(&v)).unwrap();
+        assert_eq!(back.btrfs_manual, ["0a000000-41d2-4fad-ae56-9a2c5b027c0e", "de89be44-41d2-4fad-ae56-9a2c5b027c0e"]);
+        assert_eq!(render_rules(&back), render_rules(&StorageTuning::default()));
+        let bad = StorageTuning { btrfs_manual: vec!["../etc".into()], ..Default::default() };
+        assert!(TuningDomain.validate(serde_json::to_value(bad).unwrap()).is_err());
     }
 
     #[test]

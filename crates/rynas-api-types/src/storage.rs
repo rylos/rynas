@@ -616,6 +616,153 @@ pub struct BtrfsFilesystem {
     /// Details come from the cache because an underlying disk is in standby.
     pub stale: bool,
     pub read_ms: u64,
+    /// A filesystem of several devices that lost one, or that kept chunks of a weaker profile
+    /// from a degraded mount: what is missing and what can be done ([`BtrfsRepair`]). Also
+    /// set for a configured volume that cannot be mounted because devices are missing (then
+    /// `mountpoint` is `None` and `devices` lists the ones present).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<BtrfsRepair>,
+}
+
+// ------------------------------------------------------------------ btrfs with missing devices
+//
+// | Method | Path | Body | Response |
+// |---|---|---|---|
+// | POST | `/api/v1/storage/btrfs/{uuid}/replace` | [`BtrfsReplaceRequest`] | 202 `TaskStarted`, or 200 [`StoragePlan`] with `dry_run` |
+// | POST | `/api/v1/storage/btrfs/{uuid}/remove-missing` | [`BtrfsRepairRequest`] | 202 / 200 (dry run) |
+// | POST | `/api/v1/storage/btrfs/{uuid}/convert` | [`BtrfsRepairRequest`] | 202 / 200 (dry run) |
+// | POST | `/api/v1/storage/btrfs/{uuid}/mount-degraded` | [`BtrfsRepairRequest`] | 202 / 200 (dry run) |
+// | GET/PUT | `/api/v1/storage/btrfs/{uuid}/settings` | [`BtrfsSettings`] | [`BtrfsSettingsState`] |
+//
+// `uuid` is the filesystem UUID; `confirm` is the filesystem label, or its UUID when it has
+// none (what the storage pages name the volume). See `docs/phase2/btrfs-degraded.md`.
+
+/// Why a repair, or a degraded mount, of a btrfs filesystem cannot run now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BtrfsBlocker {
+    /// Some chunks ([`BtrfsRepair::lost`]) have no complete copy on the devices present: the
+    /// data would be incomplete.
+    Incomplete,
+    /// The devices left are fewer than a profile in use needs (raid1 two, raid1c3 three...).
+    TooFewDevices,
+    /// The devices left lack the unallocated space for the missing device's chunks.
+    NoSpace,
+    /// The devices present are the ones that were missing at the last degraded mount: they
+    /// hold older data than the others (a split brain if both sides were written).
+    SplitBrain,
+    /// The degraded mount after boot is turned off for this filesystem.
+    Disabled,
+    /// No device of the filesystem is present.
+    NoDevices,
+    /// A disk of the filesystem sleeps: its superblock was not read.
+    Asleep,
+    /// A reason this client does not know (newer server).
+    #[serde(other)]
+    Other,
+}
+
+/// Chunks of one kind to bring back to the volume's profile with a soft balance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BtrfsConvert {
+    /// "data", "metadata" or "system".
+    pub kind: String,
+    /// The weaker profiles found besides `to`, e.g. `["single"]`.
+    pub from: Vec<String>,
+    /// The profile of the kind (the most redundant one in use), e.g. "raid1".
+    pub to: String,
+}
+
+/// A device of a btrfs filesystem as its superblock names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BtrfsMember {
+    pub devid: u64,
+    pub path: String,
+    /// Transaction generation of its superblock.
+    pub generation: u64,
+}
+
+/// What a multi-device btrfs filesystem lacks and what can be done ([`BtrfsFilesystem::repair`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BtrfsRepair {
+    pub mounted: bool,
+    /// Mounted with `-o degraded`.
+    pub degraded_mount: bool,
+    /// The root filesystem: the system starts with it only with `rootflags=degraded`.
+    pub system: bool,
+    /// Devices the filesystem has (superblock `num_devices`); 0 when unknown.
+    pub total_devices: u32,
+    /// Device ids known missing (a mounted filesystem names them).
+    pub missing: Vec<u64>,
+    /// Devices missing (`missing` may be empty for a filesystem that is not mounted).
+    pub missing_count: u32,
+    /// Size of the largest missing device: the smallest replacement.
+    pub missing_bytes: u64,
+    /// Chunk kinds and profiles without a complete copy, e.g. `"data single"`.
+    pub lost: Vec<String>,
+    /// Chunks to convert back to the profile of their kind.
+    pub convert: Vec<BtrfsConvert>,
+    /// Why the missing devices cannot be removed (the others keeping the profile); `None`
+    /// when they can.
+    pub remove: Option<BtrfsBlocker>,
+    /// Not mounted: why it cannot be mounted degraded; `None` when it can.
+    pub mount: Option<BtrfsBlocker>,
+    /// Not mounted: the devices present, from their superblocks.
+    pub present: Vec<BtrfsMember>,
+}
+
+impl BtrfsRepair {
+    /// Devices are missing (not only weaker chunks left over).
+    pub fn degraded(&self) -> bool {
+        self.missing_count > 0
+    }
+}
+
+/// `POST /api/v1/storage/btrfs/{uuid}/replace`: rebuild missing device `devid` on a new
+/// disk (`btrfs replace start <devid> /dev/<new_disk> <mnt>`, then the size grown to the
+/// disk and weaker chunks converted back). Destructive for the new disk: `confirm` and its
+/// serial in `serials`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BtrfsReplaceRequest {
+    pub devid: u64,
+    pub new_disk: String,
+    #[serde(default)]
+    pub confirm: String,
+    #[serde(default)]
+    pub serials: Vec<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `POST /api/v1/storage/btrfs/{uuid}/{remove-missing,convert,mount-degraded}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BtrfsRepairRequest {
+    #[serde(default)]
+    pub confirm: String,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `PUT /api/v1/storage/btrfs/{uuid}/settings`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BtrfsSettings {
+    /// Mount the filesystem degraded after boot when a device is missing and every chunk
+    /// still has a copy (default on).
+    pub auto_degraded: bool,
+}
+
+impl Default for BtrfsSettings {
+    fn default() -> Self {
+        Self { auto_degraded: true }
+    }
+}
+
+/// `GET /api/v1/storage/btrfs/{uuid}/settings`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BtrfsSettingsState {
+    pub applied: BtrfsSettings,
+    /// What the session user has staged.
+    pub pending: Option<BtrfsSettings>,
 }
 
 impl BtrfsFilesystem {
@@ -1464,6 +1611,19 @@ pub enum PlanStepKind {
     /// Flexible RAID: tell the kernel that partition `subject`, deleted on a disk in use, is
     /// gone.
     RemovePartitionLive,
+    /// btrfs: mount `subject` (a mount point) with `-o degraded`, devices missing.
+    BtrfsMountDegraded,
+    /// btrfs: rebuild missing device `other` (a devid) on disk `subject`.
+    BtrfsReplace,
+    /// btrfs: wait for the rebuild on `subject` to end.
+    BtrfsWaitReplace,
+    /// btrfs: grow device `other` (a devid) of `subject` to the whole disk.
+    BtrfsResize,
+    /// btrfs: remove the missing devices of `subject`, the others keeping its profile.
+    BtrfsRemoveMissing,
+    /// btrfs: convert the weaker chunks of `subject` back to the profiles `items` (`data
+    /// raid1`...), a soft balance.
+    BtrfsConvert,
     /// A kind this client does not know (newer server): show the English text.
     #[serde(other)]
     Other,
@@ -1761,6 +1921,10 @@ pub struct StorageTuning {
     pub disks: Vec<DiskOverride>,
     #[serde(default)]
     pub arrays: Vec<ArrayTuning>,
+    /// btrfs filesystems (UUIDs) not mounted degraded after boot when a device is missing:
+    /// an administrator mounts them ([`BtrfsSettings::auto_degraded`] off).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub btrfs_manual: Vec<String>,
 }
 
 /// `GET/PUT /api/v1/storage/disks/{name}/settings`.

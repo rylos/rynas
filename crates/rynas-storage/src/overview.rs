@@ -1,6 +1,7 @@
 //! The cheap, unprivileged storage overview of the dashboard (`GET /api/v1/storage`, served by
 //! rynas-web without rynasd): disks from `/sys/block` + the udev database, md arrays from
-//! `/proc/mdstat` + sysfs, btrfs RAID filesystems from `/sys/fs/btrfs`, mounted filesystems
+//! `/proc/mdstat` + sysfs, btrfs RAID filesystems from `/sys/fs/btrfs` (and configured ones
+//! left unmounted by a missing device, from the udev database and `/etc/fstab`), mounted filesystems
 //! from `/proc/self/mountinfo` (flagged when on a removable/USB disk). No command, no
 //! SMART, no ioctl: nothing here wakes a disk, and nothing needs root.
 //!
@@ -239,6 +240,7 @@ pub fn arrays(host: &dyn Host) -> Vec<RaidArray> {
         links.get(md).cloned()
     });
     v.extend(btrfs_arrays(host));
+    v.extend(btrfs_waiting(host));
     v
 }
 
@@ -485,6 +487,58 @@ pub fn btrfs_arrays(host: &dyn Host) -> Vec<RaidArray> {
                 sync_pct: None,
                 tiers: Vec::new(),
             })
+        })
+        .collect()
+}
+
+/// Configured btrfs volumes that are not mounted because a device is missing, without a
+/// command or a disk read: udev's `btrfs ready` marks each member of a multi-device btrfs
+/// whose devices are not all there (`ID_BTRFS_READY=0` in `/run/udev/data`), the filesystem
+/// is not mounted (no `/sys/fs/btrfs/<uuid>`), and `/etc/fstab` mounts it at `/<label>` (by
+/// `UUID=` or `LABEL=`). Each is an array in state "inactive" (a failure) with the members
+/// present; the full inventory of rynasd says how many are missing.
+pub fn btrfs_waiting(host: &dyn Host) -> Vec<RaidArray> {
+    use crate::btrfs_repair::parse_fstab;
+    let fstab = parse_fstab(&host.read("/etc/fstab").unwrap_or_default());
+    let volumes: Vec<&crate::btrfs_repair::FstabEntry> = fstab
+        .iter()
+        .filter(|e| e.fstype == "btrfs" && e.mountpoint.strip_prefix('/').is_some_and(crate::plan::valid_label))
+        .collect();
+    if volumes.is_empty() {
+        return Vec::new();
+    }
+    // uuid → (label, members)
+    let mut found: std::collections::BTreeMap<String, (Option<String>, Vec<String>)> = Default::default();
+    let mut names = host.list("/sys/class/block");
+    names.sort();
+    for name in names {
+        let Some(dev) = host.read(&format!("/sys/class/block/{name}/dev")) else { continue };
+        let Some(db) = host.read(&format!("/run/udev/data/b{}", dev.trim())) else { continue };
+        if udev_prop(&db, "ID_FS_TYPE") != Some("btrfs") || udev_prop(&db, "ID_BTRFS_READY") != Some("0") {
+            continue;
+        }
+        let Some(uuid) = udev_prop(&db, "ID_FS_UUID") else { continue };
+        let e = found.entry(uuid.to_ascii_lowercase()).or_default();
+        e.0 = udev_prop(&db, "ID_FS_LABEL").map(str::to_string).filter(|l| !l.is_empty());
+        e.1.push(name);
+    }
+    found
+        .into_iter()
+        .filter(|(uuid, _)| host.list(&format!("/sys/fs/btrfs/{uuid}")).is_empty())
+        .filter(|(uuid, (label, _))| {
+            volumes.iter().any(|e| {
+                e.spec.strip_prefix("UUID=").is_some_and(|u| u.trim_matches('"').eq_ignore_ascii_case(uuid))
+                    || e.spec.strip_prefix("LABEL=").is_some_and(|l| label.as_deref() == Some(l.trim_matches('"')))
+            })
+        })
+        .map(|(uuid, (label, members))| RaidArray {
+            name: label.unwrap_or_else(|| uuid.chars().take(8).collect()),
+            level: "btrfs".into(),
+            size: 0,
+            members,
+            state: "inactive".into(),
+            sync_pct: None,
+            tiers: Vec::new(),
         })
         .collect()
 }
@@ -1020,6 +1074,45 @@ mod tests {
         assert_eq!(btrfs_usable("raid5", &[4, 4, 4]), 8);
         assert_eq!(btrfs_usable("raid6", &[4, 4, 4, 4]), 8);
         assert_eq!(btrfs_usable("raid1c3", &[3, 3, 3]), 3);
+    }
+
+    /// A configured volume whose members udev holds back (`ID_BTRFS_READY=0`) and that is not
+    /// mounted is a failed array; a mounted one, one fstab does not mount at `/<label>`, or a
+    /// complete one is not.
+    #[test]
+    fn btrfs_volume_waiting_for_a_device() {
+        let mut h = FakeHost::default();
+        let member = |h: &mut FakeHost, name: &str, majmin: &str, uuid: &str, label: &str, ready: &str| {
+            h.file(&format!("/sys/class/block/{name}/dev"), &format!("{majmin}\n"));
+            h.file(
+                &format!("/run/udev/data/b{majmin}"),
+                &format!("E:ID_FS_TYPE=btrfs\nE:ID_FS_UUID={uuid}\nE:ID_FS_LABEL={label}\nE:ID_BTRFS_READY={ready}\n"),
+            );
+        };
+        h.file(
+            "/etc/fstab",
+            "UUID=AAAA1111-0000-0000-0000-000000000000 /photos btrfs noatime,nofail 0 0\nLABEL=media /media2 btrfs nofail 0 0\nUUID=cccc3333-0000-0000-0000-000000000000 /mnt/x btrfs nofail 0 0\n",
+        );
+        member(&mut h, "sdb1", "8:17", "aaaa1111-0000-0000-0000-000000000000", "photos", "0");
+        member(&mut h, "sdc1", "8:33", "aaaa1111-0000-0000-0000-000000000000", "photos", "0");
+        // by label; mounted meanwhile
+        member(&mut h, "sdd1", "8:49", "bbbb2222-0000-0000-0000-000000000000", "media", "0");
+        h.file("/sys/fs/btrfs/bbbb2222-0000-0000-0000-000000000000/label", "media\n");
+        // not a volume mount point
+        member(&mut h, "sde1", "8:65", "cccc3333-0000-0000-0000-000000000000", "x", "0");
+        // complete
+        member(&mut h, "sdf1", "8:81", "dddd4444-0000-0000-0000-000000000000", "ok", "1");
+        let v = btrfs_waiting(&h);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].name, "photos");
+        assert_eq!(v[0].level, "btrfs");
+        assert_eq!(v[0].state, "inactive");
+        assert_eq!(v[0].members, ["sdb1", "sdc1"]);
+        // the dashboard's array list carries it
+        assert!(arrays(&h).iter().any(|a| a.name == "photos" && a.state == "inactive"));
+        // no fstab: nothing
+        h.files.remove("/etc/fstab");
+        assert!(btrfs_waiting(&h).is_empty());
     }
 
     #[test]

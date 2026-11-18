@@ -445,6 +445,12 @@ pub fn tree(inv: &Inventory) -> StorageTree {
             health: HealthVerdict::Healthy,
             ..Default::default()
         };
+        // devices missing: degraded while mounted, failed while it cannot be mounted
+        match &f.repair {
+            Some(r) if !r.mounted => v.health = HealthVerdict::Failing,
+            Some(r) if r.degraded() => v.health = HealthVerdict::Warning,
+            _ => {}
+        }
         for dev in &f.devices {
             if total_errors(&dev.errors) > 0 || dev.missing {
                 v.health = worst(v.health, HealthVerdict::Warning);
