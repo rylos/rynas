@@ -91,6 +91,18 @@ fn folder_status(p: &PcTarget) -> AnyView {
     state_status(p.state)
 }
 
+/// Without a live agent nothing tells whether the PC is on: once nothing arrived for the
+/// folder's alert time (three days when off) a neutral "Not seen for…" chip, never a late one.
+fn quiet_chip(p: &PcTarget) -> Option<AnyView> {
+    let last = p.last_received_ms?;
+    let off = (js_sys::Date::now() as u64).saturating_sub(last);
+    let hours = match p.alert_after_hours() {
+        0 => super::agent::not_seen_after_h(0),
+        h => u64::from(h),
+    };
+    (!p.receiving && p.state == ReceiveState::Ok && off >= hours * 3_600_000).then(|| super::agent::not_seen_view(off))
+}
+
 /// The civil time in a btrbk snapshot name (`<prefix>.YYYYMMDD`, `…THHMM`,
 /// `…THHMMSS±hhmm`, each with an optional `_N`): prefix, year, month, day, hour and minute
 /// when the format has them, and the `_N` suffix. The PC's clock, shown as written (no time
@@ -522,18 +534,19 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                         // backup running: its progress instead of the last date
                         let paired = p.agent.then(|| device_of(&p.device)).flatten();
                         let progress = paired.as_ref().and_then(|d| d.progress.clone());
-                        let chip = match &paired {
-                            _ if progress.is_some() => ui::status(Tone::Info, t("pca.st.running").to_string()),
-                            Some(d) => super::agent::device_chip(d),
-                            None => folder_status(p),
+                        let (chip, not_seen, off) = match &paired {
+                            _ if progress.is_some() => (ui::status(Tone::Info, t("pca.st.running").to_string()), None, None),
+                            Some(d) => (super::agent::device_chip(d), super::agent::not_seen_chip(d), super::agent::off_note(d)),
+                            None => (folder_status(p), quiet_chip(p), None),
                         };
+                        // the chips on one line, then the progress, how long the PC has been
+                        // off, or when the last backup arrived
                         view! {
                             <div class="cell-main">
-                                {chip}
-                                {problem}
+                                <div class="chips">{chip}{not_seen}{problem}</div>
                                 {match progress {
                                     Some(pr) => super::agent::progress_view(&pr),
-                                    None => view! { <span class="cell-sub small">{when(p.last_received_ms)}</span> }.into_any(),
+                                    None => view! { <span class="cell-sub small">{off.unwrap_or_else(|| when(p.last_received_ms))}</span> }.into_any(),
                                 }}
                             </div>
                         }
@@ -691,7 +704,14 @@ impl Fields {
                 {area_field("bk.f.key", self.key.into(), Callback::new(move |v| { self.key_err.set(None); self.key.set(v); }), Some("bk.f.key_help"), "ssh-ed25519 AAAA… btrbk@pc")}
                 {form_error(self.key_err)}
             </Show>
-            {number_field("bkpc.f.alert_hours", Some("bkpc.f.alert_hours_help"), self.alert.into(), Callback::new(move |v| self.alert.set(v)), 0, 8760)}
+            // rynas-agent: a warning only when the PC was on while a backup was due; btrbk: a
+            // notice, the NAS cannot tell a PC that is off from one whose backups stopped
+            <Show
+                when=move || agent.get()
+                fallback=move || number_field("bkpc.f.alert_hours", Some("bkpc.f.alert_hours_help"), self.alert.into(), Callback::new(move |v| self.alert.set(v)), 0, 8760)
+            >
+                {number_field("bkpc.f.alert_hours_agent", Some("bkpc.f.alert_hours_agent_help"), self.alert.into(), Callback::new(move |v| self.alert.set(v)), 0, 8760)}
+            </Show>
             {ignored}
             {extra}
             <h3 class="mini-title">{tr("bk.f.rules")}</h3>
@@ -1357,7 +1377,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             };
             view! {
                 <section class="status-card">
-                    <div class="status-card-head">{folder_status(&p)}</div>
+                    <div class="status-card-head">{folder_status(&p)}{quiet_chip(&p)}</div>
                     <p class="status-meta small"><span>{last}</span><span>{t("pcb.via.ssh")}</span></p>
                 </section>
             }
@@ -1498,6 +1518,9 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                     if let Some(h) = h.filter(|h| h.bytes_added > 0) {
                         sub.push(tf("pcb.sent_size", &[("size", &i18n::bytes(h.bytes_added))]));
                     }
+                    if !r.lacks.is_empty() && !r.incomplete && !h.is_some_and(|h| !h.ok) {
+                        sub.push(tf("bkpc.run.lacks", &[("names", &r.lacks.join(", "))]));
+                    }
                     if let Some(x) = r.exclusive_bytes {
                         sub.push(i18n::bytes(x));
                     }
@@ -1519,9 +1542,6 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 Item::Failed(h) => {
                     let body = ui::note(Tone::Err, icons::TRIANGLE_ALERT, ui::breakable(h.error.as_deref().unwrap_or_default(), "small"));
                     let sent = if h.bytes_added > 0 { tf("pcb.sent_size", &[("size", &i18n::bytes(h.bytes_added))]) } else { String::new() };
-                    if !r.lacks.is_empty() && !r.incomplete && !h.is_some_and(|h| !h.ok) {
-                        sub.push(tf("bkpc.run.lacks", &[("names", &r.lacks.join(", "))]));
-                    }
                     group(format!("failed:{}", h.run_id), view! { <span class="pcb-group-title tnum">{i18n::datetime(h.started_ms)}</span> }.into_any(), sent, Some(ui::status(Tone::Err, t("pca.st.failed").to_string())), body)
                 }
             })
@@ -1696,7 +1716,14 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 {kv_act("bk.col.space", Some(ui::text(usage)), Some(measure_btn), has_snaps.then(|| view! { <span class="small muted">{size_note}</span> }.into_any()))}
                 {kv_act("bk.f.rules", None, prune_btn, Some(ui::text(rules)))}
                 {last_prune.filter(|_| nas).map(|l| kv("bkpc.last_prune", ui::text(l)))}
-                {kv("bkpc.alert", ui::text(alert))}
+                // what the alert time does: with rynas-agent a warning only when the PC was on
+                // while a backup was due; with btrbk a notice, nothing tells whether it is on
+                {kv_act(
+                    if agent { "bkpc.alert_agent" } else { "bkpc.alert" },
+                    Some(ui::text(alert)),
+                    None,
+                    Some(view! { <span class="small muted">{tr(if agent { "bkpc.alert_agent_text" } else { "bkpc.alert_ssh_text" })}</span> }.into_any()),
+                )}
                 // a reinstalled PC: a new code that keeps folder, history and settings (in the
                 // status card instead while the PC is unreachable)
                 {agent.then_some(move || (ctl.away() == Some(false)).then(|| {

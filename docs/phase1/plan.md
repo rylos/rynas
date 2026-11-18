@@ -1049,6 +1049,7 @@ schema 2 added the `code` and `body_format` columns.
 | `apps.catalog_updates` | `apps`, `serial` | App updates available: {apps} (a new online catalogue, `../phase2/docker-apps.md` §6.12) |
 | `apps.catalog_refused` / `apps.catalog_ok` | `reason`, `code` (refused) | Online app catalogue refused / verified again |
 | `web_access.cert_expires_soon` / `web_access.cert_renewal_overdue` / `web_access.cert_failed` / `web_access.cert_expired` / `web_access.cert_ok` | `name`, `cert` | The certificate for {name} expires soon / is not being renewed / could not be obtained / has expired / is fine again (`../phase2/docker-apps.md` §5.4) |
+| `pcbackup.quiet` | `device`, `hours`, `alert_hours` | Nothing received from {device} for {hours} hours (btrbk folders, info: the NAS cannot tell a PC that is off) |
 | `pcbackup.late` / `pcbackup.resumed` | `device`, `days` (empty under 48 h), `hours`, `alert_hours`, `alert_days` (late) | No backup from {device} for {days} days (or {hours} hours) / Backups from {device} arrive again (`../research/pc-backup.md` §10, §11.8) |
 | `pcbackup.subvolume_late` / `pcbackup.subvolume_resumed` | `device`, `subject` (btrbk name) | {subject} of {device} is not backed up any more / is backed up again (§11.8) |
 | `pcbackup.receive_failed` / `pcbackup.receive_stuck` / `pcbackup.receive_ok` | `device`, `subject` (snapshot) | A backup from {device} was interrupted / has been running for over a day / is received normally again (§11.8) |
@@ -1885,7 +1886,7 @@ takes the repository from the day's PC backups; past 6 hours it waits for the ne
 | POST | `/api/v1/pcbackup/devices/{device}/restore-code` | — | 201 `RestoreCodeCreated` {code, expires_ms, device}: for a PC with file backups, a folder of btrfs snapshots (`device` = the folder's name, agent or btrbk over SSH, also without a paired PC), or both; 404 for an unknown name, 409 for a PC with neither. A new code replaces the PC's earlier ones. The administrator login of the TUI (`restore-choice`) lists the same PCs |
 
 `PcDevice`: {device, description, hostname, os, arch, agent_version, created_ms,
-last_seen_ms?, state waiting\|ok\|running\|late\|critical\|failed, last_ok_ms?, last_run?
+last_seen_ms?, state waiting\|ok\|running\|late\|critical\|failed (late and critical only when a backup was due while the PC was online, see below), next_due_ms? (the next scheduled backup as the agent counts it, without the start delay: past = missed while off, caught up after the PC starts; none while paused), last_ok_ms?, last_run?
 `PcRun`, progress? `PcProgress`, group, uploaded_bytes, versions, settings, bare_metal
 `BareMetalReady` {ready, reasons}, command?, command_at_ms? (when the command was queued: pending while last_seen_ms is older; the agent's next poll refreshes last_seen_ms at once), revoked}. `PcGroup`: {group, settings,
 repository, created_ms, devices, used_bytes, maintenance `PcMaintenance` {last_ms?, ok,
@@ -1893,6 +1894,8 @@ running, error?, freed_bytes, removed_versions, estimate_bytes, blobs, postponed
 recovery_kit_ms?}. Notifications `pcbackup.agent_late` (warning) / `pcbackup.agent_critical`
 (critical) close with `pcbackup.agent_resumed`; a failed run raises `pcbackup.agent_failed`
 once per failure streak.
+
+**Late means online while due** (both methods with rynas-agent): the NAS keeps, per PC, the start of its current stretch online (`online_since_ms`: the first contact after more than 5 min without one). A backup is missed when the agent would have started it (`rynas_schedule::window::agent_due` from the last good run, at least the plan's delay after the stretch began, then the allowed window) and the PC was still seen 30 min (`LATE_MARGIN_MS`) after that; the schedule is the one the agent's version follows (before 0.8.20 the interval only, 0.8.20 no set times). "Also at every start" is never judged (a boot cannot be told from a resume). Then the state is late, critical once the last good version is older than `critical_hours`; `agent_late` fires once it is older than `alert_hours`. A PC that is off keeps its state: the console shows how long it has been off, "catches up at start" or the next backup, and a neutral "Not seen for…" after `critical_hours`, with no notification. A btrfs folder fed by rynas-agent follows its agent the same way (`pcbackup.late`, warning); a btrbk folder cannot tell a PC that is off, so it is never late and raises `pcbackup.quiet` (info) after its alert time instead.
 
 ### Agent
 

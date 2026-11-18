@@ -5341,10 +5341,15 @@ bkpc.owner.nas_help	Il PC può solo aggiungere snapshot, quindi un PC rubato o g
 bkpc.owner.pc_help	btrbk sul PC elimina quello che il suo target_preserve non tiene più, entro le regole del NAS qui sotto.
 bkpc.f.keep_nas_help	Per sottovolume, secondo quando il NAS li ha ricevuti, qualunque cosa dicano i numeri.
 bkpc.f.min_age_nas_help	Contati da quando il NAS ha ricevuto lo snapshot.
-bkpc.f.alert_hours	Avviso dopo ore senza backup
-bkpc.f.alert_hours_help	Una notifica quando non arriva niente per queste ore, anche quando si ferma un solo sottovolume; 0 la disattiva.
+bkpc.f.alert_hours	Avviso informativo dopo ore senza backup
+bkpc.f.alert_hours_help	Il NAS non distingue un PC spento da uno i cui backup si sono fermati: un avviso informativo quando non arriva niente per queste ore, un avvertimento quando si ferma un solo sottovolume. 0 lo disattiva.
+bkpc.f.alert_hours_agent	Avvisa dopo ore senza backup
+bkpc.f.alert_hours_agent_help	Solo se il PC era acceso quando un backup era dovuto e non è arrivato niente, anche quando si ferma un solo sottovolume. Un PC spento mostra solo «Non visto da…». 0 lo disattiva.
 bkpc.alert_hours	Dopo {n} ore
-bkpc.alert	Avviso se non arriva niente
+bkpc.alert	Avviso informativo se non arriva niente
+bkpc.alert_ssh_text	Un avviso informativo, non un avvertimento: il NAS non distingue un PC spento da uno i cui backup si sono fermati.
+bkpc.alert_agent	Avvertimento se non arriva niente
+bkpc.alert_agent_text	Solo se il PC era acceso quando un backup era dovuto. Un PC spento mostra solo «Non visto da…».
 bkpc.f.ignored	Sottovolumi che il PC non invia più
 bkpc.f.ignored_help	Nessun avviso per loro e non previsti in una serie completa. I loro snapshot restano.
 bkpc.ret.nas	Gestita dal NAS: conserva {counts}, e tutto ciò che ha meno di {min}
@@ -5362,12 +5367,12 @@ bkpc.size_text	{ref} · {excl} propri
 bkpc.sizes_quota	Le dimensioni arrivano in tempo reale dai gruppi di quota del volume.
 bkpc.sizes_note	Dimensione: quanto lo snapshot referenzia (circa quanto trasferisce un ripristino) · quanto contiene solo lui (circa quanto libera eliminarlo da solo). La misura legge gli extent di ogni file a bassa priorità e può richiedere tempo; ogni snapshot viene misurato una volta sola.
 bkpc.run.lacks	Manca {names}
+bkpc.run.partial	Parziale
 bkpc.delete_snap	Elimina lo snapshot
 bkpc.delete_snap_title	Eliminare {name}?
 bkpc.delete_snap_text	Lo snapshot viene eliminato dal NAS e il suo spazio liberato in background. Gli altri snapshot e il prossimo invio incrementale del PC non ne risentono.
 bkpc.deleted_snap	{name} eliminato
 task.pcbackup.create	Aggiunta di una destinazione di backup per PC
-bkpc.run.partial	Parziale
 task.pcbackup.update	Modifica delle impostazioni del backup di un PC
 task.pcbackup.remove	Rimozione di una destinazione di backup per PC
 task.pcbackup.usage	Misura dei backup di un PC
@@ -5383,8 +5388,10 @@ task.files.extract	Estrazione di un archivio
 task.files.cleanup	Pulizia dopo un trasferimento
 nev.pcbackup.late.title	Nessun backup da {device} da {days} giorni
 nev.pcbackup.late.title_2	Nessun backup da {device} da {hours} ore
-nev.pcbackup.late.body	Niente ricevuto da {days} giorni (avviso dopo {alert_days}).
-nev.pcbackup.late.body_2	Niente ricevuto da {hours} ore (avviso dopo {alert_hours} ore).
+nev.pcbackup.late.body	Un backup era dovuto mentre {device} era acceso e non arriva niente da {days} giorni (avviso dopo {alert_days}).
+nev.pcbackup.late.body_2	Un backup era dovuto mentre {device} era acceso e non arriva niente da {hours} ore (avviso dopo {alert_hours} ore).
+nev.pcbackup.quiet.title	Niente ricevuto da {device} da {hours} ore
+nev.pcbackup.quiet.body	Il NAS non sa se {device} è spento o se i suoi backup si sono fermati (avviso dopo {alert_hours} ore).
 nev.pcbackup.subvolume_late.title	{subject} di {device} non viene più salvato
 nev.pcbackup.subvolume_late.body	{device} invia ancora altri sottovolumi, ma niente di nuovo di {subject}.
 nev.pcbackup.subvolume_resumed.title	{subject} di {device} viene di nuovo salvato
@@ -5475,7 +5482,10 @@ pca.col.files	File
 pca.col.added	Nuovi (non compressi)
 pca.st.running	Backup in corso
 pca.st.late	In ritardo
-pca.st.unreachable	Non raggiungibile
+pca.off_for	Spento da {time}
+pca.catch_up	recupera all'avvio
+pca.next_backup	prossimo backup {when}
+pca.not_seen	Non visto da {time}
 pca.waiting_pc	In attesa del PC
 pca.starts_on_contact	Il backup parte quando il PC si ricollega
 pca.pair_again	Abbina di nuovo
@@ -5628,9 +5638,10 @@ pca.f.yearly	Annuali
 pca.f.min_age	Mai eliminare prima di (giorni)
 pca.f.min_age_help	Protegge da una modifica sbagliata della conservazione.
 pca.f.alerts	Avvisi
-pca.f.alert	In ritardo dopo (ore)
-pca.f.alert_help	0: nessun avviso.
+pca.f.alert	Avvisa dopo (ore)
+pca.f.alert_help	Solo se un backup era dovuto mentre il PC era acceso e non è partito, quando l'ultima versione riuscita è più vecchia di così. Un PC spento non è mai in ritardo. 0: nessuna notifica.
 pca.f.critical	Molto in ritardo dopo (ore)
+pca.f.critical_help	In ritardo e senza versioni riuscite da così tanto: critico. Un PC che resta spento così a lungo mostra solo «Non visto da…».
 pca.download	Scarica
 pca.zip_folder	Scarica questa cartella (zip)
 pca.zip_selected	Scarica i {n} selezionati (zip)
@@ -5642,9 +5653,9 @@ task.pcbackup.nightly	Manutenzione notturna dei backup dei PC
 task.pcbackup.retention	Applicazione della conservazione dei backup dei PC
 task.pcbackup.delete-group	Eliminazione di un gruppo di backup dei PC
 nev.pcbackup.agent_late.title	Nessun backup da {device} da {hours} ore
-nev.pcbackup.agent_late.body	L'ultima versione riuscita di {device} è più vecchia di {hours} ore.
+nev.pcbackup.agent_late.body	Un backup era dovuto mentre {device} era acceso e non è partito; l'ultima versione riuscita è più vecchia di {hours} ore.
 nev.pcbackup.agent_critical.title	Nessun backup da {device} da {hours} ore
-nev.pcbackup.agent_critical.body	{device} non ha una versione riuscita da {hours} ore.
+nev.pcbackup.agent_critical.body	Un backup era dovuto mentre {device} era acceso e non è partito; nessuna versione riuscita da {hours} ore.
 nev.pcbackup.agent_resumed.title	I backup da {device} arrivano di nuovo
 nev.pcbackup.agent_resumed.body	{device} ha una nuova versione riuscita.
 nev.pcbackup.agent_failed.title	Il backup di {device} non è riuscito

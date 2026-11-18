@@ -136,7 +136,7 @@ Rule taken: **the manifest stores the kernel command line, and the restore write
 - **Second layer:** read-only btrfs snapshots of the `pcbackup` subvolume (D-SNAP). The restic copy of the NAS elsewhere (D-BACKUP) can include the PC repositories, with `restic copy` or a copy of the folder.
 - **Console** (Backup › PC backup), one card per PC:
   - last good version and next run;
-  - state: ok, late after 26 h, critical after 72 h;
+  - state: ok; late only when a backup was due while the PC was on and none ran (notification after 26 h without a good version), critical after 72 h; a PC that is off stays as its last backup left it, with "off for …", "catches up at start" or the next backup, and a neutral "Not seen for …" after 72 h (see `docs/phase1/plan.md`, "Late means online while due");
   - size and quota, speed, live progress, last error, files changed during the backup;
   - the **"Bare-metal ready"** check: recent manifest, every volume covered, boot loader known, restore code and recovery kit available.
 

@@ -85,25 +85,58 @@ fn command_waiting(p: &PcDevice) -> bool {
 }
 
 /// The one status chip of a PC fed by rynas-agent, the same in the lists and in the drawer:
-/// revoked, a backup running, the last backup failed, unreachable, late or critical unless
-/// paused, paused with the last success, else its state (up to date, waiting). Mounted
-/// subvolumes left out do not change it: that is a choice made in Settings.
+/// the state of its backups, not of the connection: revoked, a backup running, the last
+/// backup failed, late or critical (the NAS says so only when a backup was due while the PC
+/// was on and none ran) unless paused, paused, else its state (up to date, waiting). A PC
+/// that is off keeps the chip its last backup left; [`off_note`] and [`not_seen_chip`] say
+/// the rest. Mounted subvolumes left out do not change it: that is a choice made in Settings.
 pub(super) fn device_chip(p: &PcDevice) -> AnyView {
     let paused = p.settings.plan.paused && !p.revoked && p.state != PcState::Running;
     match p.state {
         _ if p.revoked => state_view(p.state, true),
         PcState::Running | PcState::Failed => state_view(p.state, false),
-        _ if unreachable(p) => ui::status(Tone::Warn, format!("{} · {}", t("pca.st.unreachable"), tf("pcb.last_seen_on", &[("when", &when(p.last_seen_ms))]))),
         PcState::Late | PcState::Critical if !paused => state_view(p.state, false),
-        _ if paused => {
-            let last_ok = match p.last_ok_ms {
-                Some(ms) => tf("pcb.last_ok_on", &[("when", &i18n::datetime(ms))]),
-                None => t("pcb.never").to_string(),
-            };
-            ui::status(Tone::Info, format!("{} · {last_ok}", t("pca.f.paused")))
-        }
+        _ if paused => ui::status(Tone::Info, t("pca.f.paused").to_string()),
         s => state_view(s, false),
     }
+}
+
+/// How long the PC has been off (see [`unreachable`]), `None` while it is on.
+fn off_for_ms(p: &PcDevice) -> Option<u64> {
+    let now = js_sys::Date::now() as u64;
+    unreachable(p).then(|| now.saturating_sub(p.last_seen_ms.unwrap_or(now)))
+}
+
+/// The grey line under the chip of a PC that is off: for how long, and what its next start
+/// brings: a backup missed while it was off is caught up once, the plan's delay after the PC
+/// starts; else when the next one is due. `None` while the PC is on.
+pub(super) fn off_note(p: &PcDevice) -> Option<String> {
+    let off = off_for_ms(p)?;
+    let off = tf("pca.off_for", &[("time", &i18n::approx(off / 1000))]);
+    let now = js_sys::Date::now() as u64;
+    Some(match p.next_due_ms {
+        Some(d) if d <= now => format!("{off} · {}", t("pca.catch_up")),
+        Some(d) => format!("{off} · {}", tf("pca.next_backup", &[("when", &i18n::datetime(d))])),
+        None => off,
+    })
+}
+
+/// Hours off after which a PC also gets a neutral "Not seen for…" chip: its critical hours,
+/// else three days.
+pub(super) fn not_seen_after_h(critical_hours: u32) -> u64 {
+    u64::from(if critical_hours > 0 { critical_hours } else { 72 })
+}
+
+/// A neutral chip next to the state once a PC has been off for longer than its critical
+/// hours ([`not_seen_after_h`]): a fact, not an error (no notification either).
+pub(super) fn not_seen_chip(p: &PcDevice) -> Option<AnyView> {
+    let off = off_for_ms(p)?;
+    (off >= not_seen_after_h(p.settings.critical_hours) * 3_600_000).then(|| not_seen_view(off))
+}
+
+/// The neutral "Not seen for…" chip, `off_ms` since the last contact.
+pub(super) fn not_seen_view(off_ms: u64) -> AnyView {
+    ui::status(Tone::Unknown, tf("pca.not_seen", &[("time", &i18n::approx(off_ms / 1000))]))
 }
 
 fn reason_text(r: ReadyReason) -> &'static str {
@@ -250,7 +283,14 @@ pub fn panel(header: RwSignal<Option<bool>>, to_btrfs: Callback<()>) -> AnyView 
                     });
                     ui::row(vec![
                         ui::cell("pca.col.pc", "wrap", ui::two_lines(view! { <strong>{d.device.clone()}</strong> }.into_any(), sub, "cell-sub small")),
-                        ui::cell("col.status", "wrap", view! { <div class="cell-main">{device_chip(d)}<span class="cell-sub small">{progress.unwrap_or_else(|| when(d.last_ok_ms))}</span></div> }.into_any()),
+                        // the chips on one line, then one grey line: the progress, how long the PC
+                        // has been off, or the last good backup
+                        ui::cell("col.status", "wrap", view! {
+                            <div class="cell-main">
+                                <div class="chips">{device_chip(d)}{not_seen_chip(d)}</div>
+                                <span class="cell-sub small">{progress.or_else(|| off_note(d)).unwrap_or_else(|| when(d.last_ok_ms))}</span>
+                            </div>
+                        }.into_any()),
                         ui::text_cell("pca.col.group", "mono small", d.group.clone()),
                         ui::text_cell("pca.col.versions", "num tnum", i18n::count(u64::from(d.versions))),
                         ui::text_cell("pca.col.uploaded", "num tnum", i18n::bytes(d.uploaded_bytes)),
@@ -754,7 +794,12 @@ fn drawer(tab: Tab, device: String) -> AnyView {
         view! {
             {p.revoked.then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("pca.revoked_note").to_string())))}
             <dl class="kvs">
-                {ui::kv("col.status", device_chip(&p))}
+                {ui::kv("col.status", view! {
+                    <div class="cell-main">
+                        <div class="chips">{device_chip(&p)}{not_seen_chip(&p)}</div>
+                        {off_note(&p).map(|n| view! { <span class="cell-sub small">{n}</span> })}
+                    </div>
+                }.into_any())}
                 {ui::kv("pca.last_ok", ui::text(when(p.last_ok_ms)))}
                 {ui::kv("pca.col.group", ui::text(p.group.clone()))}
                 {ui::kv("pca.col.versions", ui::text(i18n::count(u64::from(p.versions))))}
@@ -1101,9 +1146,8 @@ impl AgentCtl {
             let paused = p.settings.plan.paused && !p.revoked && p.state != PcState::Running;
             let chip = device_chip(&p);
             let resume = paused.then(|| view! { <button type="button" class="link-btn" on:click=move |_| settings.run(())>{tr("pcb.resume")}</button> });
-            // paused under a stronger chip (failed, unreachable): said on the meta line, with the
-            // last success the paused chip would carry
-            let paused_chip = paused && p.state != PcState::Failed && !unreachable(&p);
+            // paused under a stronger chip (failed): said on the meta line
+            let paused_chip = paused && p.state != PcState::Failed;
             let every = match (p.settings.plan.calendar.is_some(), p.settings.plan.window.is_some()) {
                 (true, true) => "pcb.agent.calendar_window",
                 (true, false) => "pca.f.mode.calendar",
@@ -1111,17 +1155,19 @@ impl AgentCtl {
                 (false, false) => "pcb.agent.every_h",
             };
             let plan = if paused { (!paused_chip).then(|| t("pca.f.paused").to_string()) } else { Some(tf(every, &[("n", &p.settings.plan.interval_hours.to_string())])) };
-            let last_ok = (!paused_chip).then_some(last_ok);
             let agent = tf("pcb.agent_os", &[("os", &p.os), ("arch", &p.arch), ("v", &p.agent_version)]);
-            // the last contact matters when the PC is late
-            let seen = matches!(p.state, PcState::Late | PcState::Critical).then(|| tf("pcb.last_seen_on", &[("when", &when(p.last_seen_ms))]));
+            // the last contact matters when the PC is late; a PC that is off says so under the chip
+            let off = off_note(&p);
+            let seen = (off.is_none() && matches!(p.state, PcState::Late | PcState::Critical)).then(|| tf("pcb.last_seen_on", &[("when", &when(p.last_seen_ms))]));
+            let not_seen = not_seen_chip(&p);
             view! {
                 {p.revoked.then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("pcb.agent.revoked").to_string())))}
-                <div class="status-card-head">{chip}{resume}</div>
+                <div class="status-card-head">{chip}{not_seen}{resume}</div>
+                {off.map(|n| view! { <p class="cell-sub small">{n}</p> })}
                 {progress}
                 {unsent_note}
                 {last_error.map(|e| ui::note(Tone::Err, icons::TRIANGLE_ALERT, ui::breakable(e.as_str(), "small")))}
-                <p class="status-meta small">{last_ok.map(|s| view! { <span>{s}</span> })}{plan.map(|s| view! { <span>{s}</span> })}<span>{agent}</span>{seen.map(|s| view! { <span>{s}</span> })}</p>
+                <p class="status-meta small"><span>{last_ok}</span>{plan.map(|s| view! { <span>{s}</span> })}<span>{agent}</span>{seen.map(|s| view! { <span>{s}</span> })}</p>
                 {captures.map(|c| view! { <details class="fold sub" open=move || self.captures_open.get() on:toggle=move |ev| {
                 let open = event_target::<web_sys::Element>(&ev).has_attribute("open");
                 if self.captures_open.get_untracked() != open {
@@ -1398,7 +1444,7 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
             <h3 class="mini-title">{tr("pca.f.alerts")}</h3>
             <div class="form-row">
                 {number_field("pca.f.alert", Some("pca.f.alert_help"), alert.into(), Callback::new(move |v| alert.set(v)), 0, 8760)}
-                {number_field("pca.f.critical", None, critical.into(), Callback::new(move |v| critical.set(v)), 0, 8760)}
+                {number_field("pca.f.critical", Some("pca.f.critical_help"), critical.into(), Callback::new(move |v| critical.set(v)), 0, 8760)}
             </div>
         }
     };
