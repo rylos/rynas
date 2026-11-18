@@ -119,11 +119,10 @@ pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> R
             let estimate_ms = median(durations.clone());
             // what the agent really follows: set times and "at every start" from 0.8.21, the
             // interval the NAS sends instead to an older one
-            let (shared, every) = crate::pc_agent::plan_trigger(plan, &rynas_power::system_tz(), now);
+            let (shared, every) = crate::pc_agent::plan_trigger(plan, &rynas_power::system_tz(), now, rynas_api_types::pcagent::agent_follows_calendar(&d.agent_version));
             let (trigger, every_h) = match shared {
                 TaskTrigger::Interval { .. } => (None, Some(every)),
-                t if rynas_api_types::pcagent::agent_follows_calendar(&d.agent_version) => (Some(t), None),
-                _ => (None, Some(every)),
+                t => (Some(t), None),
             };
             jobs.push(JobInput {
                 job: OverviewJob {

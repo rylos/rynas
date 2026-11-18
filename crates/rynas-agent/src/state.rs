@@ -56,6 +56,10 @@ pub struct State {
     /// the allowed window), and why: one report per wait. Cleared when a backup starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_noted: Option<(u64, rynas_api_types::scheduler::SkipReason)>,
+    /// The boot of the PC (its key, `scheduler::boot_key`) in which the last good run ended:
+    /// "also at every start of the PC" runs once per boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ok_boot: Option<String>,
 }
 
 pub fn dir() -> PathBuf {
@@ -94,11 +98,33 @@ impl State {
     /// an older copy (the backup child, the service) writes only what it changed, never back
     /// what another wrote meanwhile (an address or trust refreshed by the service).
     pub fn update(f: impl FnOnce(&mut State)) -> Result<State, String> {
+        // the service and its backup child both write the state (the child its outcome, the
+        // service the plan the run's report changed): one read-modify-write at a time, or one
+        // of them loses the other's fields (a good run lost, backed up again at once)
+        let _lock = lock()?;
         let mut st = State::load()?;
         f(&mut st);
         st.save()?;
         Ok(st)
     }
+}
+
+/// An exclusive lock on the state folder's `state.lock` (released when dropped).
+fn lock() -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    let p = dir().join("state.lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&p)
+        .map_err(|e| format!("{}: {e}", p.display()))?;
+    // SAFETY: flock on a descriptor this function owns
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(format!("{}: {}", p.display(), std::io::Error::last_os_error()));
+    }
+    Ok(f)
 }
 
 /// `data` to `p` through `p.tmp` + fsync + rename.

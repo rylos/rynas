@@ -557,6 +557,44 @@ async fn agent_settings_round_trip() {
     assert_eq!(serde_json::from_slice::<Value>(&b).unwrap()["settings"]["maintenance_memory_pct"], 40);
 }
 
+/// Cancel takes back a "Back up now" the PC has not taken yet (off, asleep): nothing stays
+/// waiting; once the PC took it, Cancel is queued for the run.
+#[tokio::test]
+async fn cancel_takes_back_an_untaken_backup_now() {
+    let (e, _agent) = env_agent();
+    let t = task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "laptop", "path": "/volume1/backup/laptop", "agent": true}))).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    let (_, b) = call(&e, "POST", "/v1/pcbackup/pairings", Some(json!({"btrfs_target": "laptop"}))).await;
+    let code = serde_json::from_slice::<rynas_api_types::pcagent::PairingCreated>(&b).unwrap().code;
+    let (s, b) = agent_call(&e, None, "POST", "/v1/pcbackup/agent/pair", json!({"code": code, "hostname": "laptop"}).to_string().into_bytes()).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let token = serde_json::from_slice::<rynas_api_types::pcagent::PairResponse>(&b).unwrap().token;
+    let command = |e: &Env| {
+        let app = e.app.clone();
+        async move {
+            let req = Request::builder().uri("/v1/pcbackup/devices/laptop").header("x-rynas-user", "admin").body(Body::empty()).unwrap();
+            let r = app.oneshot(req).await.unwrap();
+            let v: Value = serde_json::from_slice(&to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
+            v["device"]["command"].clone()
+        }
+    };
+    // (a later millisecond than the pairing's contact: the PC has not seen the command)
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, _) = call(&e, "POST", "/v1/pcbackup/devices/laptop/backup-now", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(!command(&e).await.is_null());
+    let (s, _) = call(&e, "POST", "/v1/pcbackup/devices/laptop/cancel", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(command(&e).await.is_null(), "{}", command(&e).await);
+    // taken by the PC (its plan read after the command): Cancel is queued
+    call(&e, "POST", "/v1/pcbackup/devices/laptop/backup-now", None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, _) = agent_call(&e, Some(&token), "GET", "/v1/pcbackup/agent/plan", Vec::new()).await;
+    assert_eq!(s, StatusCode::OK);
+    call(&e, "POST", "/v1/pcbackup/devices/laptop/cancel", None).await;
+    assert!(!command(&e).await.is_null());
+}
+
 // ------------------------------------------------------------------ rynas-agent's btrfs method
 
 /// The memory host plus the agent side (`/v1/pcbackup/…`) linked to it, as rynasd wires them.

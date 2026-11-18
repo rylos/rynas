@@ -172,14 +172,15 @@ impl ScheduleEditor {
     }
 
     /// The calendar part alone (presets, fields, errors, the next times), for owners whose
-    /// catch-up and random delay are fixed (a PC's backups: catch-up once at its next start).
-    pub fn view_calendar(self) -> AnyView {
+    /// catch-up and random delay are fixed (a PC's backups: catch-up once at its next start);
+    /// `presets`: which ones are offered ([`Preset::OPTIONS`], [`Preset::DAILY_OPTIONS`]).
+    pub fn view_calendar(self, presets: &'static [(&'static str, &'static str)]) -> AnyView {
         let e = self;
         view! {
             {select_field(
                 "sch.f.repeat",
                 None,
-                Preset::OPTIONS,
+                presets,
                 Signal::derive(move || e.draft.with(|d| d.preset.code().to_string())),
                 Callback::new(move |v: String| e.draft.update(|d| d.switch_to(Preset::parse(&v)))),
             )}

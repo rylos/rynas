@@ -147,11 +147,12 @@ pub fn calendar_due(spec: &CalendarSpec, tz: &TimeZone, last_ok_ms: Option<u64>,
     }
 }
 
-/// When a backup "at every start of the PC" is due: `delay_ms` after the agent started, unless
-/// a good run ended since the PC booted (`boot_ms`: its boot, not the agent's start, so a
-/// restart of the agent alone runs nothing again); then not before the next boot (`u64::MAX`).
-pub fn boot_due(boot_ms: u64, last_ok_ms: Option<u64>, started_ms: u64, delay_ms: u64) -> u64 {
-    if last_ok_ms.is_some_and(|ok| ok >= boot_ms) {
+/// When a backup "also at every start of the PC" is due: `delay_ms` after the agent started,
+/// unless a good run already ended in this boot of the PC (`done_this_boot`: the agent keys it
+/// by the kernel's boot id, so a restart of the agent alone runs nothing again); then not
+/// before the next boot (`u64::MAX`).
+pub fn boot_due(done_this_boot: bool, started_ms: u64, delay_ms: u64) -> u64 {
+    if done_this_boot {
         return u64::MAX;
     }
     started_ms.saturating_add(delay_ms)
@@ -213,12 +214,11 @@ fn next_starts(
     (out, false)
 }
 
-/// The hours between a calendar's next times (the median of the next eight gaps from `now_ms`),
-/// 1 to 168: what an agent that knows only intervals is told instead (older agents).
-pub fn calendar_every_h(spec: &CalendarSpec, tz: &TimeZone, now_ms: u64) -> u32 {
+/// The gaps between a calendar's next `n` + 1 times from `now_ms`.
+fn gaps(spec: &CalendarSpec, tz: &TimeZone, now_ms: u64, n: usize) -> Vec<u64> {
     let mut times = Vec::new();
     let mut at = now_ms;
-    while times.len() < 9 {
+    while times.len() <= n {
         match next_time(spec, tz, at) {
             Some(t) => {
                 times.push(t);
@@ -227,13 +227,26 @@ pub fn calendar_every_h(spec: &CalendarSpec, tz: &TimeZone, now_ms: u64) -> u32 
             None => break,
         }
     }
-    let mut gaps: Vec<u64> = times.windows(2).map(|w| w[1] - w[0]).collect();
-    if gaps.is_empty() {
+    times.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+/// The hours between a calendar's next times (the median of the next eight gaps from `now_ms`),
+/// 1 to 8760: what an agent that knows only intervals is told instead (older agents follow
+/// any interval; a monthly calendar is about 730 h).
+pub fn calendar_every_h(spec: &CalendarSpec, tz: &TimeZone, now_ms: u64) -> u32 {
+    let mut g = gaps(spec, tz, now_ms, 8);
+    if g.is_empty() {
         return 24;
     }
-    gaps.sort_unstable();
-    let h = (gaps[gaps.len() / 2] + 1_800_000) / 3_600_000;
-    h.clamp(1, 168) as u32
+    g.sort_unstable();
+    let h = (g[g.len() / 2] + 1_800_000) / 3_600_000;
+    h.clamp(1, 8760) as u32
+}
+
+/// The shortest gap between a calendar's next 50 times from `now_ms` (`None`: fewer than two
+/// times left): a PC's plan refuses times closer than an hour.
+pub fn calendar_min_gap_ms(spec: &CalendarSpec, tz: &TimeZone, now_ms: u64) -> Option<u64> {
+    gaps(spec, tz, now_ms, 50).into_iter().min()
 }
 
 #[cfg(test)]
@@ -343,13 +356,18 @@ mod tests {
         assert_eq!(calendar_every_h(&daily, &tz(), last), 24);
         assert_eq!(calendar_every_h(&CalendarSpec::parse("Mon *-*-* 03:00:00").unwrap(), &tz(), last), 168);
         assert_eq!(calendar_every_h(&CalendarSpec::parse("*-*-* 00/6:00:00").unwrap(), &tz(), last), 6);
+        let monthly = calendar_every_h(&CalendarSpec::parse("*-*-01 03:00:00").unwrap(), &tz(), last);
+        assert!((672..=744).contains(&monthly), "{monthly}");
+        // the shortest gap (a PC refuses less than an hour)
+        assert_eq!(calendar_min_gap_ms(&CalendarSpec::parse("*:0/5").unwrap(), &tz(), last), Some(300_000));
+        assert_eq!(calendar_min_gap_ms(&CalendarSpec::parse("*-*-* 08,20:00").unwrap(), &tz(), last), Some(12 * h));
+        assert_eq!(calendar_min_gap_ms(&gone, &tz(), last), None);
         assert_eq!(plan_due(None, 24 * h, &tz(), Some(last), 0, 0), last + 24 * h);
         // at every start: after the delay, however recent the last run of an earlier boot;
         // not again in the same boot (an agent restart is not a boot)
         let boot = ms("2026-11-17T08:00");
-        assert_eq!(boot_due(boot, Some(boot - 60_000), boot + 20_000, 600_000), boot + 620_000);
-        assert_eq!(boot_due(boot, None, boot + 20_000, 600_000), boot + 620_000);
-        assert_eq!(boot_due(boot, Some(boot + 900_000), boot + 3 * h, 600_000), u64::MAX);
+        assert_eq!(boot_due(false, boot + 20_000, 600_000), boot + 620_000);
+        assert_eq!(boot_due(true, boot + 3 * h, 600_000), u64::MAX);
         assert_eq!(plan_due(Some(&daily), 24 * h, &tz(), Some(last), 0, 0), ms("2026-11-17T02:00"));
     }
 }

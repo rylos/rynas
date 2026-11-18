@@ -1120,10 +1120,15 @@ fn backup_pending(reg: &Registry, group: &str, now: u64, paused_all: bool) -> bo
         // (the agent's own rules; "also at every start" is not foreseeable here)
         let p = &d.settings.plan;
         let tz = rynas_power::system_tz();
-        let spec = p.calendar.as_deref().and_then(|c| rynas_schedule::CalendarSpec::parse(c).ok());
+        // what this PC's agent follows (an older one: the calendar's spacing as its interval)
+        let (trigger, every_h) = super::plan_trigger(p, &tz, now, agent_follows_calendar(&d.agent_version));
+        let spec = match &trigger {
+            rynas_api_types::scheduler::TaskTrigger::Calendar { on_calendar, .. } => rynas_schedule::CalendarSpec::parse(on_calendar).ok(),
+            _ => None,
+        };
         let due = !p.paused
             && !paused_all
-            && rynas_schedule::window::plan_due(spec.as_ref(), u64::from(p.interval_hours) * 3_600_000, &tz, d.last_ok_ms, 0, 0) <= now
+            && rynas_schedule::window::plan_due(spec.as_ref(), u64::from(every_h) * 3_600_000, &tz, d.last_ok_ms, 0, 0) <= now
             && p.window.as_deref().is_none_or(|w| rynas_schedule::window::is_open(w, &tz, now));
         d.group == group && !d.revoked && online && (d.command.is_some() || due)
     })

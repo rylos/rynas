@@ -138,7 +138,7 @@ impl IntervalEditor {
         let delay_field = move |help: &'static str| number_field("pca.f.delay", Some(help), e.delay.into(), Callback::new(move |v| e.delay.set(v)), 0, 1440);
         let body = move || match e.mode.get().as_str() {
             "calendar" => view! {
-                {e.cal.view_calendar()}
+                {e.cal.view_calendar(super::Preset::DAILY_OPTIONS)}
                 {delay_field("pca.f.delay_calendar_help")}
             }
             .into_any(),

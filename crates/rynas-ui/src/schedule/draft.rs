@@ -37,6 +37,19 @@ impl Preset {
         ("cron", "sch.rep.cron"),
     ];
 
+    /// The presets of a schedule whose runs are hours apart at least (a PC's backups): no
+    /// "every few minutes / hours" (an expression or crontab line can still say it, the NAS
+    /// refuses times less than an hour apart).
+    pub const DAILY_OPTIONS: &'static [(&'static str, &'static str)] = &[
+        ("daily", "sch.rep.daily"),
+        ("weekly", "sch.rep.weekdays"),
+        ("monthly", "sch.rep.monthly"),
+        ("monthly_nth", "sch.rep.monthly_nth"),
+        ("yearly", "sch.rep.yearly"),
+        ("advanced", "sch.rep.custom"),
+        ("cron", "sch.rep.cron"),
+    ];
+
     pub fn code(self) -> &'static str {
         match self {
             Preset::Minutes => "minutes",

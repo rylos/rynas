@@ -1311,10 +1311,21 @@ pub fn check_settings(s: &PcDeviceSettings) -> Res<()> {
             return Err(Error::invalid("plan.calendar", "a calendar expression"));
         }
         rynas_scheduler::calendar::plausible_calendar(c).map_err(|e| Error::invalid("plan.calendar", e))?;
-        let spec = rynas_schedule::CalendarSpec::parse_with(c, |z| jiff::tz::TimeZone::get(z).is_ok())
-            .map_err(|e| Error::invalid("plan.calendar", e.to_string()))?;
-        if spec.next_after(&rynas_power::system_tz(), jiff::Timestamp::now()).is_none() {
+        // the agent's own parser (what it can read is what is stored)
+        let spec = rynas_schedule::CalendarSpec::parse(c).map_err(|e| Error::invalid("plan.calendar", e.to_string()))?;
+        // the times are the NAS's (sent with its zone): a zone of its own would need the
+        // zone database on every PC
+        if spec.timezone.is_some() {
+            return Err(Error::invalid("plan.calendar", "no time zone in the expression: the times are the NAS's"));
+        }
+        let tz = rynas_power::system_tz();
+        let now = now_ms();
+        if spec.next_after(&tz, jiff::Timestamp::now()).is_none() {
             return Err(Error::invalid("plan.calendar", "the expression never runs again"));
+        }
+        // backups, not a busy loop (and room for the repository's maintenance)
+        if rynas_schedule::window::calendar_min_gap_ms(&spec, &tz, now).is_some_and(|g| g < 3_600_000) {
+            return Err(Error::invalid("plan.calendar", "set times at least an hour apart"));
         }
     }
     if s.plan.excludes.len() > 200
@@ -1479,6 +1490,16 @@ fn queue(svc: &PcAgent, device: &str, cancel: bool) -> Res<()> {
         let d = r.devices.get_mut(device).ok_or_else(|| not_found(device))?;
         if d.revoked {
             return Err(Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, "the PC is revoked".into()));
+        }
+        // a "Back up now" the PC has not taken yet (no contact since: off, asleep): Cancel
+        // takes it back instead of queueing a cancel behind it
+        let untaken = matches!(d.command, Some(AgentCommand::BackupNow { .. }))
+            && d.command_at_ms.is_some_and(|c| d.last_seen_ms.is_none_or(|t| t < c));
+        if cancel && untaken {
+            d.command = None;
+            d.command_at_ms = None;
+            d.rev += 1;
+            return Ok(());
         }
         d.command = Some(if cancel {
             AgentCommand::Cancel { id: seq }
@@ -1864,7 +1885,7 @@ fn plan_of(d: &Dev, paused_all: bool) -> AgentPlan {
     let mut plan = d.settings.plan.clone();
     plan.paused |= paused_all;
     let tz = rynas_power::system_tz();
-    let (trigger, every_h) = plan_trigger(&plan, &tz, now_ms());
+    let (trigger, every_h) = plan_trigger(&plan, &tz, now_ms(), agent_follows_calendar(&d.agent_version));
     plan.interval_hours = every_h;
     AgentPlan {
         rev: if paused_all { d.rev | PAUSED_ALL_REV } else { d.rev },
@@ -1877,18 +1898,31 @@ fn plan_of(d: &Dev, paused_all: bool) -> AgentPlan {
     }
 }
 
-/// A PC plan as the shared trigger (every N hours, or set times) and the interval an agent
-/// that knows only intervals follows instead (older than 0.8.21).
-pub fn plan_trigger(plan: &PcPlan, tz: &jiff::tz::TimeZone, now: u64) -> (rynas_api_types::scheduler::TaskTrigger, u32) {
+/// A PC plan as the trigger its agent follows, and the interval of the plan's
+/// `interval_hours` field (the calendar's spacing with set times):
+///
+/// - set times, for an agent that knows them (`follows_calendar`, 0.8.21 and later):
+///   `Calendar`;
+/// - set times for an older agent: `Interval` of the calendar's spacing, which a 0.8.20 agent
+///   follows with the window and its skipped-start reports (it knows only `Interval`);
+/// - set times without any future time (an expression with a date that has passed): the
+///   plan's interval, so backups go on;
+/// - else: the plan's interval.
+pub fn plan_trigger(plan: &PcPlan, tz: &jiff::tz::TimeZone, now: u64, follows_calendar: bool) -> (rynas_api_types::scheduler::TaskTrigger, u32) {
     use rynas_api_types::scheduler::TaskTrigger;
     // ("also at every start of the PC" is the plan's `at_boot`, on top of either)
+    let interval = |hours: u32| (TaskTrigger::Interval { hours, after_boot_min: plan.start_delay_min }, hours);
     if let Some(c) = plan.calendar.as_deref().map(str::trim).filter(|c| !c.is_empty())
         && let Ok(spec) = rynas_schedule::CalendarSpec::parse(c)
+        && i64::try_from(now).ok().and_then(|m| jiff::Timestamp::from_millisecond(m).ok()).and_then(|t| spec.next_after(tz, t)).is_some()
     {
         let every = rynas_schedule::window::calendar_every_h(&spec, tz, now);
+        if !follows_calendar {
+            return interval(every);
+        }
         return (TaskTrigger::Calendar { on_calendar: c.to_string(), cron: None, persistent: true, randomized_delay_s: 0 }, every);
     }
-    (TaskTrigger::Interval { hours: plan.interval_hours, after_boot_min: plan.start_delay_min }, plan.interval_hours)
+    interval(plan.interval_hours)
 }
 
 async fn plan_get(
@@ -2300,6 +2334,30 @@ mod tests {
         assert_eq!(code_hash(&c.to_lowercase()), code_hash(&c));
         assert_eq!(normalize_code("o1l-i"), "0111");
         assert_eq!(new_token().unwrap().len(), 64);
+    }
+
+    /// What an agent older than 0.8.21 receives for a plan at set times: an interval of the
+    /// calendar's spacing (the only trigger 0.8.20 knows, so it keeps the window and its skip
+    /// reports), never the calendar; a current agent gets the calendar.
+    #[test]
+    fn set_times_for_older_agents() {
+        let tz = jiff::tz::TimeZone::get("Europe/Rome").unwrap();
+        let now = 1_795_000_000_000;
+        let window = format!("{}{}", "0".repeat(22), "1".repeat(146));
+        let plan = PcPlan { calendar: Some("Mon *-*-* 03:00:00".into()), start_delay_min: 7, window: Some(window.clone()), ..PcPlan::default() };
+        let (old, every) = plan_trigger(&plan, &tz, now, false);
+        assert_eq!(every, 168);
+        let v = serde_json::to_value(&old).unwrap();
+        assert_eq!(v, serde_json::json!({"kind": "interval", "hours": 168, "after_boot_min": 7}));
+        // as 0.8.20 reads the plan: the shared interval, the window kept
+        let sent = AgentPlan { plan: PcPlan { interval_hours: every, ..plan.clone() }, trigger: Some(old), ..AgentPlan::default() };
+        let s = sent.schedule();
+        assert!(s.shared && s.calendar.is_none() && s.window == Some(window) && s.every_h == 168);
+        let (new, _) = plan_trigger(&plan, &tz, now, true);
+        assert!(matches!(new, rynas_api_types::scheduler::TaskTrigger::Calendar { .. }));
+        // no time left: the plan's own interval for everyone
+        let gone = PcPlan { calendar: Some("2020-01-01 00:00:00".into()), interval_hours: 12, ..PcPlan::default() };
+        assert_eq!(plan_trigger(&gone, &tz, now, true).1, 12);
     }
 
     #[test]

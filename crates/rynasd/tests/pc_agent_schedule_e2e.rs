@@ -254,6 +254,7 @@ async fn an_agent_with_a_window_starts_only_inside_it() {
         v["last_ok_ms"] = ms.map_or(Value::Null, Value::from);
         v["failures"] = Value::from(0);
         v.as_object_mut().unwrap().remove("skip_noted");
+        v.as_object_mut().unwrap().remove("last_ok_boot");
         std::fs::write(&p, v.to_string()).unwrap();
     };
     // a run of `secs` seconds: the runs it added, and when the agent started
@@ -334,7 +335,15 @@ async fn an_agent_with_a_window_starts_only_inside_it() {
         p.calendar = Some("Mon *-*-* 03:00:00".into());
     }))
     .await;
+    // (the agent that ran says its version: before the release's bump to 0.8.21 it counts
+    // as older, gets the interval, and 4c ran its interval path; after it, the calendar)
     let weekly = plan_of().await;
     assert_eq!(weekly.plan.interval_hours, 168);
-    assert!(matches!(weekly.trigger, Some(rynas_api_types::scheduler::TaskTrigger::Calendar { .. })));
+    let version = agent.device("laptop").unwrap().agent_version;
+    if rynas_api_types::pcagent::agent_follows_calendar(&version) {
+        assert!(matches!(weekly.trigger, Some(rynas_api_types::scheduler::TaskTrigger::Calendar { .. })), "{version}");
+    } else {
+        assert_eq!(weekly.trigger, Some(rynas_api_types::scheduler::TaskTrigger::Interval { hours: 168, after_boot_min: 0 }), "{version}");
+    }
+    println!("agent {version}: {:?}", weekly.trigger);
 }
