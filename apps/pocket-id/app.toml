@@ -1,8 +1,8 @@
 schema = 1
 id = "pocket-id"
 name = "Pocket ID"
-version = "1.0.0"
-app_version = "v2.19.2"
+version = "1.0.1"
+app_version = "v2.19.3"
 update_policy = "minor"
 description = "Simple OpenID Connect provider that signs users in with passkeys instead of passwords."
 homepage = "https://pocket-id.org"
