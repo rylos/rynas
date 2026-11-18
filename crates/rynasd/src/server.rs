@@ -465,7 +465,16 @@ async fn storage_filesystems(
 async fn storage_tree(
     State(st): State<DaemonState>,
 ) -> Res<Json<rynas_api_types::storage::StorageTree>> {
-    let inv = inventory(&st).await?;
+    let mut inv = inventory(&st).await?;
+    // a filesystem whole again after a degraded mount, not scrubbed yet, reads as a warning
+    if let Some(path) = st.storage_ops.as_ref().and_then(|o| o.btrfs_guard.get())
+        && let Ok(g) = rynas_storage::btrfs_repair::Guard::load(path)
+        && !g.mounts.is_empty()
+    {
+        let mut annotated = (*inv).clone();
+        g.annotate(&mut annotated.filesystems);
+        inv = std::sync::Arc::new(annotated);
+    }
     // cryptsetup status of the open LUKS mappings: quick, but still a command
     blocking_storage(&st, move |s| Ok(s.tree_of(&inv)))
         .await

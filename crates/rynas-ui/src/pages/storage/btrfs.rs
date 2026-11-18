@@ -12,7 +12,7 @@ use rynas_api_types::storage::{BtrfsBlocker, BtrfsFilesystem, BtrfsRepair, Btrfs
 use serde_json::{Value, json};
 
 use super::volume::{Flow, Stage, start_task};
-use super::{Vol, disk_title, free_disks, serial_of};
+use super::{Vol, disk_title, free_disks};
 use crate::api;
 use crate::form::{SaveBar, form_error, save_bar_with, spinner};
 use crate::i18n::{self, t, tf, tr};
@@ -291,7 +291,8 @@ pub fn RepairDialog(vol: Vol, what: Repair, on_close: Callback<()>) -> impl Into
                             </select>
                         </label>
                         {move || chosen().map(|d| {
-                            let facts = [d.model.trim().to_string(), serial_of(&d), i18n::bytes_si(d.size)]
+                            // a drive without a serial number (a virtual disk) shows none
+                            let facts = [d.model.trim().to_string(), d.serial.trim().to_string(), i18n::bytes_si(d.size)]
                                 .into_iter()
                                 .filter(|x| !x.is_empty())
                                 .collect::<Vec<_>>()

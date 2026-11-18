@@ -448,7 +448,7 @@ pub fn tree(inv: &Inventory) -> StorageTree {
         // devices missing: degraded while mounted, failed while it cannot be mounted
         match &f.repair {
             Some(r) if !r.mounted => v.health = HealthVerdict::Failing,
-            Some(r) if r.degraded() => v.health = HealthVerdict::Warning,
+            Some(r) if r.degraded() || r.scrub_needed => v.health = HealthVerdict::Warning,
             _ => {}
         }
         for dev in &f.devices {
