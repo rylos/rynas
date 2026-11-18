@@ -436,6 +436,10 @@ pub enum CaptureNote {
     MountPointMissing,
     /// The filesystem refused to freeze: read in use.
     FreezeRefused { error: String },
+    /// A code this NAS does not know (a newer agent): the interface shows [`Capture::note`],
+    /// and the report is still accepted.
+    #[serde(other)]
+    Other,
 }
 
 impl CaptureNote {
@@ -446,6 +450,7 @@ impl CaptureNote {
             CaptureNote::LvmFailed { error } | CaptureNote::BtrfsFailed { error } => error.clone(),
             CaptureNote::MountPointMissing => "its mount point is missing in the parent filesystem".into(),
             CaptureNote::FreezeRefused { error } => format!("freeze refused: {error}"),
+            CaptureNote::Other => String::new(),
         }
     }
 }
@@ -1828,6 +1833,8 @@ impl Manifest {
             m.disks.iter().any(|d| d.table.as_ref().is_some_and(|t| t.partitions.iter().any(|p| format!("/dev/{}", partition_name(&d.name, p.number)) == dev)))
                 || m.luks_of_pv(dev).is_some()
         };
+        // a partition already named as a PV (or picked for another alias) is never a candidate
+        let mut taken: std::collections::HashSet<String> = layout.vgs.iter().flat_map(|v| v.pvs.iter().map(|p| p.device.clone())).collect();
         let mut renames: Vec<(String, String)> = Vec::new();
         for vg in &layout.vgs {
             for pv in &vg.pvs {
@@ -1843,12 +1850,13 @@ impl Manifest {
                     for p in &t.partitions {
                         let bytes = p.size_lba * sector;
                         let dev = format!("/dev/{}", partition_name(&d.name, p.number));
-                        if bytes >= need && bytes < need + slack && !self.partition_used(&dev) {
+                        if bytes >= need && bytes < need + slack && !taken.contains(&dev) && !self.partition_used(&dev) {
                             fits.push(dev);
                         }
                     }
                 }
                 if let [only] = fits.as_slice() {
+                    taken.insert(only.clone());
                     renames.push((pv.device.clone(), only.clone()));
                 }
             }
@@ -2027,6 +2035,14 @@ pub fn device_from_hostname(h: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_note_from_a_newer_agent_is_kept_as_other() {
+        let n: CaptureNote = serde_json::from_str(r#"{"code":"something_new","detail":"x"}"#).unwrap();
+        assert_eq!(n, CaptureNote::Other);
+        let n: CaptureNote = serde_json::from_str(r#"{"code":"lvm_no_space","vg":"v","lv":"l"}"#).unwrap();
+        assert_eq!(n, CaptureNote::LvmNoSpace { vg: "v".into(), lv: "l".into() });
+    }
 
     #[test]
     fn device_names() {

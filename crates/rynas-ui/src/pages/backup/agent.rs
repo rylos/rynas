@@ -729,7 +729,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
         let captures = run.as_ref().map(|r| {
             r.captures
                 .iter()
-                .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{c.fstype.clone()}" · "{tr(method_text(c.method))}{c.note_code.as_ref().map(capture_note_text).or_else(|| agent_note(c.btrfs.as_ref(), |s| s.snapshot.as_str(), c.note.as_deref())).map(|n| format!(" ({n})"))}</li> })
+                .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{c.fstype.clone()}" · "{tr(method_text(c.method))}{c.note_code.as_ref().and_then(capture_note_text).or_else(|| agent_note(c.btrfs.as_ref(), |s| s.snapshot.as_str(), c.note.as_deref())).map(|n| format!(" ({n})"))}</li> })
                 .collect_view()
         });
         let history = d
@@ -1082,7 +1082,7 @@ impl AgentCtl {
             let captures = run.as_ref().filter(|r| !r.captures.is_empty()).map(|r| {
                 r.captures
                     .iter()
-                    .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{tr(method_text(c.method))}{c.note_code.as_ref().map(capture_note_text).or_else(|| agent_note(c.btrfs.as_ref(), |s| s.snapshot.as_str(), c.note.as_deref())).map(|n| format!(" ({n})"))}</li> })
+                    .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{tr(method_text(c.method))}{c.note_code.as_ref().and_then(capture_note_text).or_else(|| agent_note(c.btrfs.as_ref(), |s| s.snapshot.as_str(), c.note.as_deref())).map(|n| format!(" ({n})"))}</li> })
                     .collect_view()
             });
             // the error of the last run while it is the news: failed, nothing running
@@ -1249,14 +1249,16 @@ fn phase_text(p: AgentPhase) -> &'static str {
 
 /// Why a filesystem was read the way it was, in the interface's language (agents from 0.8.21;
 /// older ones: their English text through [`agent_note`]).
-pub(super) fn capture_note_text(n: &CaptureNote) -> String {
-    match n {
+pub(super) fn capture_note_text(n: &CaptureNote) -> Option<String> {
+    Some(match n {
         CaptureNote::LvmNoSpace { vg, lv } => tf("pca.note.lvm_no_space", &[("vg", vg), ("lv", lv)]),
         CaptureNote::LvmFailed { error } => tf("pca.note.lvm_failed", &[("error", error)]),
         CaptureNote::BtrfsFailed { error } => tf("pca.note.btrfs_failed", &[("error", error)]),
         CaptureNote::MountPointMissing => t("pca.note.mount_missing").to_string(),
         CaptureNote::FreezeRefused { error } => tf("pca.note.freeze_refused", &[("error", error)]),
-    }
+        // a code from a newer agent: its English text
+        CaptureNote::Other => return None,
+    })
 }
 
 /// The agent's note on a subvolume (btrfs method) in the interface's language, from the
