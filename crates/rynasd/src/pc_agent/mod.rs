@@ -169,6 +169,11 @@ pub struct Dev {
     pub created_ms: u64,
     #[serde(default)]
     pub last_seen_ms: Option<u64>,
+    /// When the PC came online this time: its first contact after more than
+    /// [`OFFLINE_AFTER_MS`] without any ([`Dev::contact`]). A due backup is late only when the
+    /// agent would have started it within this stretch online ([`missed_online`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online_since_ms: Option<u64>,
     pub group: String,
     /// SHA-256 of the device token; empty once revoked.
     #[serde(default)]
@@ -534,6 +539,13 @@ impl PcAgent {
                 a.folder_removed(device, folder);
             }
         }));
+        // the folder's lateness follows its live agent's contacts ([`missed_online`])
+        let me = Arc::downgrade(self);
+        let _ = side.agent_missed.set(Box::new(move |device| {
+            let a = me.upgrade()?;
+            let d = a.device(device).ok().filter(|d| !d.revoked && d.settings.method == PcMethod::Btrfs)?;
+            Some(missed_online(&d, a.paused_all(), &rynas_power::system_tz(), now_ms()))
+        }));
         let _ = self.btrfs.set(side);
     }
 
@@ -747,6 +759,7 @@ impl PcAgent {
             .map(|(p, _)| p.clone())
             .filter(|p| now_ms().saturating_sub(p.updated_ms) < 120_000);
         let kit = reg.groups.get(&d.group).and_then(|g| g.recovery_kit_ms);
+        let (now, tz, paused_all) = (now_ms(), rynas_power::system_tz(), self.paused_all());
         PcDevice {
             device: name.to_string(),
             description: d.settings.description.clone(),
@@ -757,7 +770,8 @@ impl PcAgent {
             root_btrfs: d.root_btrfs,
             created_ms: d.created_ms,
             last_seen_ms: d.last_seen_ms,
-            state: state_of(d, progress.is_some(), now_ms()),
+            state: state_of(d, progress.is_some(), missed_online(d, paused_all, &tz, now), now),
+            next_due_ms: next_due(d, paused_all, &tz, now),
             last_ok_ms: d.last_ok_ms,
             last_run: d.history.iter().rev().find(|r| !r.restore).cloned(),
             progress,
@@ -917,34 +931,116 @@ fn group_not_found(group: &str) -> Error {
     Error::new(StatusCode::NOT_FOUND, error_codes::NOT_FOUND, format!("no group {group}"))
 }
 
-/// The console state of a device.
-pub fn state_of(d: &Dev, running: bool, now: u64) -> PcState {
+/// The console state of a device. `missed`: a scheduled backup was due while the PC was
+/// online and none ran ([`missed_online`]): only then is it late, critical once its last good
+/// version (or the pairing) is older than `critical_hours`. A PC that is off keeps the state
+/// its last backup left (the console says how long it has been off).
+pub fn state_of(d: &Dev, running: bool, missed: bool, now: u64) -> PcState {
     if running {
         return PcState::Running;
     }
     let hours_since = |ms: u64| now.saturating_sub(ms) / 3_600_000;
-    let alerts = d.settings.alert_hours > 0;
+    let critical = |since: u64| d.settings.alert_hours > 0 && d.settings.critical_hours > 0 && hours_since(since) >= u64::from(d.settings.critical_hours);
+    let late = |since: u64| if critical(since) { PcState::Critical } else { PcState::Late };
     let Some(ok) = d.last_ok_ms else {
         // never a good version: late only counted from the pairing
         if d.history.iter().any(|r| !r.restore && !r.ok) {
             return PcState::Failed;
         }
-        if alerts && d.settings.critical_hours > 0 && hours_since(d.created_ms) >= u64::from(d.settings.critical_hours) {
-            return PcState::Critical;
-        }
-        return PcState::Waiting;
+        return if missed { late(d.created_ms) } else { PcState::Waiting };
     };
-    let h = hours_since(ok);
-    if alerts && d.settings.critical_hours > 0 && h >= u64::from(d.settings.critical_hours) {
-        return PcState::Critical;
-    }
-    if alerts && h >= u64::from(d.settings.alert_hours) {
-        return PcState::Late;
-    }
     match d.history.iter().rev().find(|r| !r.restore) {
         Some(r) if !r.ok => PcState::Failed,
+        _ if missed => late(ok),
         _ => PcState::Ok,
     }
+}
+
+/// No contact for this long and the PC counts as off (asleep, away): the agent asks for its
+/// plan at least every 50 s and the NAS writes the contact once a minute, so about three
+/// missed contacts. The console uses the same span.
+pub const OFFLINE_AFTER_MS: u64 = 5 * 60_000;
+
+/// How long after the moment the agent would have started a due backup (its due time, the
+/// delay after the PC came online, the allowed window) the PC must still have been online for
+/// the backup to count as missed: the start itself is at once, so this covers the clocks of
+/// the PC and the NAS disagreeing, a slow first contact and the minute between contacts.
+pub const LATE_MARGIN_MS: u64 = 30 * 60_000;
+
+impl Dev {
+    /// A contact of the PC at `seen`: a new stretch online after more than
+    /// [`OFFLINE_AFTER_MS`] without one (or when none is known yet).
+    pub fn contact(&mut self, seen: u64) {
+        if self.online_since_ms.is_none() || self.last_seen_ms.is_none_or(|t| seen.saturating_sub(t) > OFFLINE_AFTER_MS) {
+            self.online_since_ms = Some(seen);
+        }
+        self.last_seen_ms = Some(seen);
+    }
+}
+
+/// The schedule this device's agent follows, as its version reads the plan the NAS sends
+/// ([`plan_at`]): before 0.8.20 only the two old fields (every so many hours, the delay
+/// after the start: no window, no set times, nothing at every start); 0.8.20 the interval and
+/// the window. `None` while paused (also by Pause all) or revoked.
+fn followed(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u64) -> Option<(AgentSchedule, Option<rynas_schedule::CalendarSpec>)> {
+    if d.revoked || d.settings.plan.paused || paused_all {
+        return None;
+    }
+    let mut s = plan_at(d, false, tz, now).schedule();
+    if !agent_follows_window(&d.agent_version) {
+        s.window = None;
+        s.calendar = None;
+    }
+    if !agent_follows_calendar(&d.agent_version) {
+        s.at_boot = false;
+    }
+    let spec = s.calendar.as_deref().and_then(|c| rynas_schedule::CalendarSpec::parse(c).ok());
+    Some((s, spec))
+}
+
+/// A scheduled backup of the device was due while the PC was online and none ran: the
+/// agent would have started it ([`rynas_schedule::window::agent_due`] from the last good run,
+/// at least the plan's delay after the PC came online, then [`start_at`] for the allowed
+/// window, which may push it past a closed window) and the PC was still seen
+/// [`LATE_MARGIN_MS`] after that, in the same stretch online. Nothing is missed while paused
+/// or while the PC is off.
+///
+/// "Also at every start of the PC" is not judged here: the NAS cannot tell a boot from a
+/// resume after sleep or a network that came back (the agent runs it only after a boot), so
+/// only the interval or the set times count.
+///
+/// [`start_at`]: rynas_schedule::window::start_at
+pub fn missed_online(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u64) -> bool {
+    let Some((s, spec)) = followed(d, paused_all, tz, now) else { return false };
+    let (Some(seen), Some(since)) = (d.last_seen_ms, d.online_since_ms) else { return false };
+    let due = rynas_schedule::window::agent_due(
+        spec.as_ref(),
+        u64::from(s.every_h.max(1)) * 3_600_000,
+        tz,
+        d.last_ok_ms,
+        since,
+        u64::from(s.delay_min) * 60_000,
+        None,
+    );
+    if due == u64::MAX {
+        return false;
+    }
+    rynas_schedule::window::start_at(s.window.as_deref(), tz, due).is_some_and(|start| seen >= start.saturating_add(LATE_MARGIN_MS))
+}
+
+/// When the device's next scheduled backup is due, for the console ([`PcDevice::next_due_ms`]):
+/// the due time from the last good run when it has passed (missed while the PC was off: it
+/// catches up once, soon after the PC starts), else the next start inside the allowed window.
+pub fn next_due(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u64) -> Option<u64> {
+    let (s, spec) = followed(d, paused_all, tz, now)?;
+    let due = rynas_schedule::window::agent_due(spec.as_ref(), u64::from(s.every_h.max(1)) * 3_600_000, tz, d.last_ok_ms, 0, 0, None);
+    if due == u64::MAX {
+        return None;
+    }
+    if due <= now {
+        return Some(due);
+    }
+    rynas_schedule::window::start_at(s.window.as_deref(), tz, due)
 }
 
 /// "Bare-metal ready": a version, a recent manifest without problems, a recovery kit of the
@@ -1887,10 +1983,15 @@ struct PlanQuery {
 /// NAS's zone (the window's and the calendar's), and `paused`
 /// while every task of the NAS is paused (with its own revision, so every agent takes it).
 fn plan_of(d: &Dev, paused_all: bool) -> AgentPlan {
+    plan_at(d, paused_all, &rynas_power::system_tz(), now_ms())
+}
+
+/// [`plan_of`] in the zone `tz` at `now`.
+fn plan_at(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u64) -> AgentPlan {
     let mut plan = d.settings.plan.clone();
     plan.paused |= paused_all;
-    let tz = rynas_power::system_tz();
-    let (trigger, every_h) = plan_trigger(&plan, &tz, now_ms(), agent_follows_calendar(&d.agent_version));
+    let tz = tz.clone();
+    let (trigger, every_h) = plan_trigger(&plan, &tz, now, agent_follows_calendar(&d.agent_version));
     plan.interval_hours = every_h;
     AgentPlan {
         rev: if paused_all { d.rev | PAUSED_ALL_REV } else { d.rev },
@@ -1952,7 +2053,7 @@ async fn plan_get(
         if taking || d.last_seen_ms.is_none_or(|t| seen.saturating_sub(t) > 60_000) {
             svc.touch(|r| {
                 if let Some(x) = r.devices.get_mut(&device) {
-                    x.last_seen_ms = Some(seen);
+                    x.contact(seen);
                 }
             });
         }
@@ -2079,7 +2180,7 @@ async fn btrfs_receive_post(
     let seen = now_ms();
     svc.touch(|r| {
         if let Some(x) = r.devices.get_mut(&device) {
-            x.last_seen_ms = Some(seen);
+            x.contact(seen);
         }
     });
     Ok(Json(side.agent_receive(&device, folder, q.snapshot, parent, body).await?))
@@ -2404,19 +2505,163 @@ mod tests {
             ..Default::default()
         };
         let h = 3_600_000;
-        assert_eq!(state_of(&d, false, 10 * h), PcState::Waiting);
-        assert_eq!(state_of(&d, false, 100 * h), PcState::Critical);
+        // never backed up: waiting while nothing was missed, late (then critical) once one was
+        assert_eq!(state_of(&d, false, false, 100 * h), PcState::Waiting);
+        assert_eq!(state_of(&d, false, true, 10 * h), PcState::Late);
+        assert_eq!(state_of(&d, false, true, 100 * h), PcState::Critical);
         d.last_ok_ms = Some(100 * h);
-        assert_eq!(state_of(&d, false, 101 * h), PcState::Ok);
-        assert_eq!(state_of(&d, false, 127 * h), PcState::Late);
-        assert_eq!(state_of(&d, false, 173 * h), PcState::Critical);
-        assert_eq!(state_of(&d, true, 173 * h), PcState::Running);
+        assert_eq!(state_of(&d, false, false, 101 * h), PcState::Ok);
+        // a PC that is off for days: still as its last backup left it
+        assert_eq!(state_of(&d, false, false, 500 * h), PcState::Ok);
+        assert_eq!(state_of(&d, false, true, 127 * h), PcState::Late);
+        assert_eq!(state_of(&d, false, true, 173 * h), PcState::Critical);
+        // no alerts: late, never critical
+        d.settings.alert_hours = 0;
+        assert_eq!(state_of(&d, false, true, 173 * h), PcState::Late);
+        d.settings.alert_hours = 26;
+        assert_eq!(state_of(&d, true, true, 173 * h), PcState::Running);
         d.history.push_back(PcRun {
             ok: false,
             ..Default::default()
         });
-        assert_eq!(state_of(&d, false, 101 * h), PcState::Failed);
+        // failed is said before late
+        assert_eq!(state_of(&d, false, false, 101 * h), PcState::Failed);
+        assert_eq!(state_of(&d, false, true, 173 * h), PcState::Failed);
         assert!(!ready_of(&d, None).ready);
+    }
+
+    const H: u64 = 3_600_000;
+    const M: u64 = 60_000;
+
+    /// Monday 2026-11-16 00:00 UTC.
+    fn t0() -> u64 {
+        jiff::civil::date(2026, 11, 16).at(0, 0, 0, 0).to_zoned(jiff::tz::TimeZone::UTC).unwrap().timestamp().as_millisecond() as u64
+    }
+
+    /// A PC of `version` backed up at `last_ok`, online from `since` to `seen`.
+    fn pc(version: &str, last_ok: u64, since: u64, seen: u64) -> Dev {
+        Dev {
+            agent_version: version.into(),
+            created_ms: 0,
+            last_ok_ms: Some(last_ok),
+            online_since_ms: Some(since),
+            last_seen_ms: Some(seen),
+            settings: PcDeviceSettings::default(),
+            ..Default::default()
+        }
+    }
+
+    fn late(d: &Dev, now: u64) -> bool {
+        missed_online(d, false, &jiff::tz::TimeZone::UTC, now)
+    }
+
+    #[test]
+    fn off_is_not_late() {
+        // every 24 h, 10 min after the start: seen two hours after the backup, then off for days
+        let t = t0();
+        let d = pc("0.8.22", t, t, t + 2 * H);
+        let now = t + 72 * H;
+        assert!(!late(&d, now));
+        assert_eq!(state_of(&d, false, false, now), PcState::Ok);
+        // the backup due after a day was missed while off: it catches up at the start
+        assert_eq!(next_due(&d, false, &jiff::tz::TimeZone::UTC, now), Some(t + 24 * H));
+        assert_eq!(maint::want_alert(&d, false, &jiff::tz::TimeZone::UTC, now), Alert::None);
+    }
+
+    #[test]
+    fn online_while_due_is_late() {
+        let t = t0();
+        // online across the due time (24 h): late once the margin has passed
+        assert!(!late(&pc("0.8.22", t, t + 20 * H, t + 24 * H + 29 * M), t + 25 * H));
+        assert!(late(&pc("0.8.22", t, t + 20 * H, t + 24 * H + 30 * M), t + 25 * H));
+        // the notification only once the last good version is older than alert_hours (26)
+        let d = pc("0.8.22", t, t + 20 * H, t + 25 * H);
+        assert_eq!(maint::want_alert(&d, false, &jiff::tz::TimeZone::UTC, t + 25 * H), Alert::None);
+        let d = pc("0.8.22", t, t + 20 * H, t + 27 * H);
+        assert_eq!(maint::want_alert(&d, false, &jiff::tz::TimeZone::UTC, t + 27 * H), Alert::Late);
+        let d = pc("0.8.22", t, t + 20 * H, t + 73 * H);
+        assert_eq!(maint::want_alert(&d, false, &jiff::tz::TimeZone::UTC, t + 73 * H), Alert::Critical);
+        // late while online, then off: still late (it was on and nothing ran)
+        assert!(late(&d, t + 200 * H));
+    }
+
+    #[test]
+    fn came_online_after_due_waits_for_the_delay() {
+        // off when due (24 h), on at 30 h: the agent catches up 10 min after its start
+        let t = t0();
+        assert!(!late(&pc("0.8.22", t, t + 30 * H, t + 30 * H + 39 * M), t + 31 * H));
+        assert!(late(&pc("0.8.22", t, t + 30 * H, t + 30 * H + 40 * M), t + 31 * H));
+    }
+
+    #[test]
+    fn closed_window_is_not_late() {
+        // allowed 02:00-03:00 only; backed up Monday 01:00, due Tuesday 01:00, starts at 02:00
+        let t = t0();
+        let mut w = vec![b'0'; 168];
+        for day in 0..7 {
+            w[day * 24 + 2] = b'1';
+        }
+        let mut d = pc("0.8.22", t + H, t + H, t + 24 * H + 2 * H + 29 * M);
+        d.settings.plan.window = Some(String::from_utf8(w).unwrap());
+        assert!(!late(&d, t + 27 * H));
+        d.last_seen_ms = Some(t + 24 * H + 2 * H + 30 * M);
+        assert!(late(&d, t + 27 * H));
+        // not due yet: the next start is when the window opens
+        assert_eq!(next_due(&d, false, &jiff::tz::TimeZone::UTC, t + 2 * H), Some(t + 26 * H));
+        // an agent older than 0.8.20 does not know the window: due at 01:00
+        d.agent_version = "0.8.19".into();
+        d.last_seen_ms = Some(t + 25 * H + 30 * M);
+        assert!(late(&d, t + 27 * H));
+    }
+
+    #[test]
+    fn calendar_follows_the_agent_version() {
+        // every day at 04:00; backed up Monday 04:05: due Tuesday 04:00
+        let t = t0();
+        let mut d = pc("0.8.21", t + 4 * H + 5 * M, t + 4 * H, t + 28 * H + 29 * M);
+        d.settings.plan.calendar = Some("*-*-* 04:00:00".into());
+        assert!(!late(&d, t + 29 * H));
+        d.last_seen_ms = Some(t + 28 * H + 30 * M);
+        assert!(late(&d, t + 29 * H));
+        // an agent older than 0.8.21 runs every 24 h from the last good run (04:05)
+        d.agent_version = "0.8.20".into();
+        assert!(!late(&d, t + 29 * H));
+        d.last_seen_ms = Some(t + 28 * H + 35 * M);
+        assert!(late(&d, t + 29 * H));
+    }
+
+    #[test]
+    fn paused_and_at_boot_are_never_late() {
+        let t = t0();
+        let mut d = pc("0.8.22", t, t + 20 * H, t + 30 * H);
+        assert!(late(&d, t + 30 * H));
+        assert!(!missed_online(&d, true, &jiff::tz::TimeZone::UTC, t + 30 * H));
+        assert_eq!(next_due(&d, true, &jiff::tz::TimeZone::UTC, t + 30 * H), None);
+        d.settings.plan.paused = true;
+        assert!(!late(&d, t + 30 * H));
+        // "also at every start": a new stretch online is not told from a resume, never late
+        let mut d = pc("0.8.22", t, t + 2 * H, t + 5 * H);
+        d.settings.plan.at_boot = true;
+        assert!(!late(&d, t + 5 * H));
+        // revoked
+        let mut d = pc("0.8.22", t, t + 20 * H, t + 30 * H);
+        d.revoked = true;
+        assert!(!late(&d, t + 30 * H));
+    }
+
+    #[test]
+    fn contacts_make_stretches_online() {
+        let mut d = Dev::default();
+        d.contact(1000);
+        assert_eq!(d.online_since_ms, Some(1000));
+        d.contact(1000 + 4 * M);
+        assert_eq!(d.online_since_ms, Some(1000));
+        d.contact(1000 + 10 * M);
+        assert_eq!(d.online_since_ms, Some(1000 + 10 * M));
+        // a record from before the field: the first contact starts one
+        let mut d = Dev { last_seen_ms: Some(5000), ..Default::default() };
+        d.contact(6000);
+        assert_eq!(d.online_since_ms, Some(6000));
     }
 
     #[test]

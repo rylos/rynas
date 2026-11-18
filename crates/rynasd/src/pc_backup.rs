@@ -1838,6 +1838,22 @@ fn bare_metal(
     b
 }
 
+/// The folder's "nothing arrives" notification once nothing arrived for its alert time (or,
+/// never anything, since it was made): `late` (a warning) when its agent missed a backup while
+/// the PC was on (state `Late`); `quiet` (a notice) when nothing tells whether the PC is on
+/// (`signal` false: btrbk, or no live agent). A PC with a live agent that is merely off:
+/// neither (the console shows how long it has not been seen).
+fn freshness_alert(v: &PcTarget, signal: bool, now: u64) -> (bool, bool) {
+    let hours = v.alert_after_hours();
+    let since = v.last_received_ms.unwrap_or(v.created_at_ms);
+    let old = hours > 0 && now > since.saturating_add(u64::from(hours) * HOUR_MS);
+    match v.state {
+        ReceiveState::Late => (old, false),
+        ReceiveState::Ok if !signal => (false, old),
+        _ => (false, false),
+    }
+}
+
 /// Facts the alerts of one device are worked out from.
 struct HealthFacts<'a> {
     list: &'a [ReceivedSnapshot],
@@ -1973,6 +1989,8 @@ struct Registry {
 
 /// Called with (device, folder id) when an agent folder is removed.
 pub type AgentRemoved = Box<dyn Fn(&str, u64) + Send + Sync>;
+/// See [`PcBackup::agent_missed`].
+pub type AgentMissed = Box<dyn Fn(&str) -> Option<bool> + Send + Sync>;
 
 pub struct PcBackup {
     pub ops: Arc<Ops>,
@@ -1996,6 +2014,10 @@ pub struct PcBackup {
     /// Told when an agent folder goes (device, folder id): the PC records bound to it are
     /// revoked or fall back to the files method (set once at start, [`crate::pc_agent`]).
     pub on_agent_removed: std::sync::OnceLock<AgentRemoved>,
+    /// Whether the live agent paired under a device name missed a backup while the PC was on
+    /// (`None`: no live agent, nothing tells whether the PC is on), set once at start
+    /// ([`crate::pc_agent::PcAgent::bind_btrfs`]).
+    pub agent_missed: std::sync::OnceLock<AgentMissed>,
 }
 
 /// Most manifests remembered (a few per device).
@@ -2037,6 +2059,7 @@ impl PcBackup {
             receives: std::sync::atomic::AtomicUsize::new(0),
             sending: Mutex::new(BTreeSet::new()),
             on_agent_removed: std::sync::OnceLock::new(),
+            agent_missed: std::sync::OnceLock::new(),
         })
     }
 
@@ -2202,12 +2225,19 @@ impl PcBackup {
         for (share, _) in overlapping_shares(&folder, &self.shares().into_iter().chain(others).collect::<Vec<_>>()) {
             issues.push(PcIssue { code: PcIssueCode::SharedFolder, subject: Some(share), since_ms: None, free_bytes: None, needed_bytes: None });
         }
+        // late only when the PC was on while a backup was due (its agent asked for the plan);
+        // without a live agent nothing tells, and a PC that is merely off is never late
+        let missed = present && t.agent && self.missed(device) == Some(true);
         let state = match (present, s.last_received_ms) {
             (false, _) => ReceiveState::Missing,
+            _ if missed => ReceiveState::Late,
             (true, None) => ReceiveState::Waiting,
-            (true, Some(ms)) if alert_hours > 0 && now_ms > ms + u64::from(alert_hours) * HOUR_MS => ReceiveState::Late,
             (true, Some(_)) => ReceiveState::Ok,
         };
+        // "nothing for so long" is the state's to say (late, or how long nothing arrived)
+        if !missed {
+            issues.retain(|i| i.code != PcIssueCode::Late);
+        }
         // the newest run that brought something complete (not a receive still going)
         let newest_run = runs.iter().find(|r| {
             r.snapshots.iter().any(|n| s.list.iter().any(|x| &x.name == n && !x.incomplete))
@@ -2260,6 +2290,11 @@ impl PcBackup {
         all.iter().map(|(d, t)| self.view(d, t, now).target).collect()
     }
 
+    /// See [`PcBackup::agent_missed`] (`None` before it is bound).
+    fn missed(&self, device: &str) -> Option<bool> {
+        self.agent_missed.get().and_then(|f| f(device))
+    }
+
     fn setup(&self) -> ReceiveSetup {
         let f = self.host.facts();
         let mut problems = Vec::new();
@@ -2304,10 +2339,17 @@ impl PcBackup {
         for (d, t) in all {
             let v = self.view(&d, &t, now).target;
             let hours = v.alert_after_hours();
-            let late = hours > 0 && v.state == ReceiveState::Late;
-            if late != t.alerted {
+            let (late, quiet) = freshness_alert(&v, self.missed(&d).is_some(), now);
+            if (late || quiet) != t.alerted {
                 let key = format!("pcbackup:late:{d}");
-                let ev = if late {
+                let ev = if quiet {
+                    // btrbk (or an agent no longer paired): the NAS cannot tell a PC that is
+                    // off from one whose backups stopped, so a notice, not a warning
+                    let since_h = v.last_received_ms.map(|ms| now.saturating_sub(ms) / HOUR_MS).unwrap_or(0);
+                    let mut ev = firing(NotifyCategory::Backup, NotifySeverity::Info, "pcbackup", key, format!("Nothing received from {d} for {since_h} hours"));
+                    ev.body = format!("The NAS cannot tell whether {d} is off or its backups stopped (notice after {hours} hours).");
+                    field(field(field(code(ev, "pcbackup.quiet"), "device", &d), "hours", since_h), "alert_hours", hours)
+                } else if late {
                     let since_h = v.last_received_ms.map(|ms| (now - ms) / HOUR_MS).unwrap_or(0);
                     let days = since_h / 24;
                     let mut ev = firing(
@@ -2321,7 +2363,7 @@ impl PcBackup {
                             format!("No backup from {d} for {since_h} hours")
                         },
                     );
-                    ev.body = format!("Nothing received in {} for {since_h} hours (alert after {hours}).", t.path);
+                    ev.body = format!("A backup was due while {d} was on, and nothing received in {} for {since_h} hours (alert after {hours}).", t.path);
                     // days only from two days on: the texts use hours below that
                     let ev = field(code(ev, "pcbackup.late"), "device", &d);
                     let ev = field(ev, "days", if since_h >= 48 { days.to_string() } else { String::new() });
@@ -2334,7 +2376,7 @@ impl PcBackup {
                 if self
                     .edit(|r| {
                         if let Some(x) = r.targets.get_mut(&d) {
-                            x.alerted = late;
+                            x.alerted = late || quiet;
                         }
                     })
                     .is_ok()
@@ -4453,6 +4495,22 @@ mod tests {
         let i = codes(issues(&f(true, 1, None)));
         assert_eq!(i, [(PcIssueCode::Late, None)]);
         assert!(issues(&f(true, 0, None)).is_empty());
+    }
+
+    #[test]
+    fn freshness_follows_the_pc_being_on() {
+        let t = |state, last: Option<u64>| PcTarget { state, last_received_ms: last, alert_hours: 72, ..Default::default() };
+        let now = 100 * HOUR_MS;
+        // rynas-agent: late (it was on when due) notifies after the alert time, off never does
+        assert_eq!(freshness_alert(&t(ReceiveState::Late, Some(now - 80 * HOUR_MS)), true, now), (true, false));
+        assert_eq!(freshness_alert(&t(ReceiveState::Late, Some(now - 10 * HOUR_MS)), true, now), (false, false));
+        assert_eq!(freshness_alert(&t(ReceiveState::Ok, Some(now - 80 * HOUR_MS)), true, now), (false, false));
+        // btrbk: nothing tells, a notice after the alert time
+        assert_eq!(freshness_alert(&t(ReceiveState::Ok, Some(now - 80 * HOUR_MS)), false, now), (false, true));
+        assert_eq!(freshness_alert(&t(ReceiveState::Ok, Some(now - 10 * HOUR_MS)), false, now), (false, false));
+        // alerts off
+        let off = PcTarget { alert_hours: 0, ..t(ReceiveState::Late, Some(0)) };
+        assert_eq!(freshness_alert(&off, true, now), (false, false));
     }
 
     #[test]

@@ -115,10 +115,13 @@ pub fn ssh_target_url(host: &str, port: Option<u16>, path: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReceiveState {
-    /// Something was received within the alert window (or no alert is set).
+    /// The last backup arrived, and none was missed while the PC was on. A PC that is off
+    /// stays here: the console says how long nothing arrived.
     #[default]
     Ok,
-    /// Nothing received for longer than `alert_days`.
+    /// Fed by rynas-agent: a backup was due while the PC was on (the agent asked the NAS for
+    /// its plan) and nothing arrived. btrbk folders are never late: the NAS cannot tell a PC
+    /// that is off from one whose backups stopped.
     Late,
     /// Nothing received yet.
     Waiting,

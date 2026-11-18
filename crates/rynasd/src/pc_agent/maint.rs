@@ -393,6 +393,7 @@ fn pair_btrfs(svc: &Arc<PcAgent>, p: &Pairing, target: &str, req: &PairRequest) 
         root_btrfs: req.root_btrfs,
         created_ms: now_ms(),
         last_seen_ms: Some(now_ms()),
+        online_since_ms: Some(now_ms()),
         group: String::new(),
         token_sha: super::sha_hex(token.as_bytes()),
         settings: ds,
@@ -412,6 +413,7 @@ fn pair_btrfs(svc: &Arc<PcAgent>, p: &Pairing, target: &str, req: &PairRequest) 
                 old.machine_id = dev.machine_id;
                 old.root_btrfs = dev.root_btrfs;
                 old.last_seen_ms = dev.last_seen_ms;
+                old.online_since_ms = dev.online_since_ms;
                 old.token_sha = dev.token_sha;
                 // bound to the folder the pairing was made for (it may be a new one)
                 old.btrfs_folder = dev.btrfs_folder;
@@ -524,6 +526,7 @@ pub async fn pair(svc: &Arc<PcAgent>, p: &Pairing, settings: &PcAgentSettings, r
         root_btrfs: req.root_btrfs,
         created_ms: now_ms(),
         last_seen_ms: Some(now_ms()),
+        online_since_ms: Some(now_ms()),
         group: group.clone(),
         token_sha: super::sha_hex(token.as_bytes()),
         pc_key,
@@ -1138,17 +1141,28 @@ fn backup_pending(reg: &Registry, group: &str, now: u64, paused_all: bool) -> bo
     })
 }
 
+/// The notification a device should have open: late or critical only when a backup was
+/// missed while the PC was online ([`super::missed_online`]), and only once its last good
+/// version (or the pairing) is older than `alert_hours` (critical: `critical_hours`, see
+/// [`super::state_of`]). A PC that is merely off never notifies.
+pub(super) fn want_alert(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u64) -> Alert {
+    let missed = super::missed_online(d, paused_all, tz, now);
+    let since = d.last_ok_ms.unwrap_or(d.created_ms);
+    let old = |h: u32| h > 0 && now.saturating_sub(since) >= u64::from(h) * 3_600_000;
+    match super::state_of(d, false, missed, now) {
+        PcState::Critical => Alert::Critical,
+        PcState::Late if old(d.settings.alert_hours) => Alert::Late,
+        _ => Alert::None,
+    }
+}
+
 /// Late and critical notifications of one device (state changes only).
 fn alerts(svc: &PcAgent, name: &str, d: &Dev) {
     // the btrfs method's alerts are the folder's (`pcbackup.late` and the rest)
     if d.revoked || (d.settings.method == PcMethod::Btrfs && d.alert == Alert::None) {
         return;
     }
-    let want = match super::state_of(d, false, now_ms()) {
-        PcState::Late => Alert::Late,
-        PcState::Critical => Alert::Critical,
-        _ => Alert::None,
-    };
+    let want = want_alert(d, svc.paused_all(), &rynas_power::system_tz(), now_ms());
     if want == d.alert {
         return;
     }
@@ -1167,8 +1181,8 @@ fn alerts(svc: &PcAgent, name: &str, d: &Dev) {
             };
             let mut ev = firing(NotifyCategory::Backup, sev, "pcbackup", key, format!("No backup from {name} for {h} hours"));
             ev.body = match d.last_ok_ms {
-                Some(_) => format!("The last good version of {name} is older than {h} hours."),
-                None => format!("{name} has no version yet."),
+                Some(_) => format!("A backup was due while {name} was on and none ran; the last good version is older than {h} hours."),
+                None => format!("A backup was due while {name} was on and none ran; {name} has no version yet."),
             };
             field(field(code(ev, c), "device", name), "hours", h)
         }

@@ -257,20 +257,23 @@ async fn settings_rules_and_removal() {
 }
 
 #[tokio::test]
-async fn late_notification_opens_once_and_closes() {
+async fn quiet_notice_opens_once_and_closes() {
     let e = env();
     e.host.folders.lock().unwrap().insert("/volume1/backup/pc".into(), (true, vec![snap("home", 5)]));
     task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": "/volume1/backup/pc", "adopt": true, "alert_days": 2}))).await;
-    assert_eq!(list(&e).await[0].state, ReceiveState::Late);
+    // btrbk: nothing tells whether the PC is on, so never late, only a notice after the
+    // alert time
+    assert_eq!(list(&e).await[0].state, ReceiveState::Ok);
     e.svc.check_freshness();
     e.svc.check_freshness();
     {
         let evs = e.notifier.0.lock().unwrap();
         assert_eq!(evs.len(), 1);
-        assert_eq!(evs[0].code, "pcbackup.late");
+        assert_eq!(evs[0].code, "pcbackup.quiet");
         assert_eq!(evs[0].state, EventState::Firing);
+        assert_eq!(evs[0].severity, rynas_api_types::notify::NotifySeverity::Info);
         assert_eq!(evs[0].fields["device"], "pc");
-        assert_eq!(evs[0].fields["days"], "5");
+        assert_eq!(evs[0].fields["hours"], "120");
     }
     e.host.folders.lock().unwrap().get_mut(&PathBuf::from("/volume1/backup/pc")).unwrap().1.insert(0, snap("home", 0));
     e.svc.check_freshness();

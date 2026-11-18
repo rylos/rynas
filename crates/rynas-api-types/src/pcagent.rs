@@ -578,7 +578,15 @@ pub struct PcDevice {
     pub created_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_ms: Option<u64>,
+    /// `Late` and `Critical` only when the PC was online when a backup was due (the agent
+    /// would have started it) and none ran; a PC that is off stays as its last backup left it.
     pub state: PcState,
+    /// When the next scheduled backup is due, as the agent counts it from the last good one
+    /// (without the delay after the PC starts): in the past when one was missed while the PC
+    /// was off (it catches up soon after the PC starts), else the next start inside the
+    /// allowed window. `None` while paused (also by Pause all) or revoked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_due_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ok_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
