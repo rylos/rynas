@@ -999,6 +999,8 @@ schema 2 added the `code` and `body_format` columns.
 | `storage.btrfs_weak_chunks` / `storage.btrfs_weak_chunks_ok` | `volume`, `chunks` | Volume {volume}: chunks with less redundancy / redundancy restored |
 | `storage.btrfs_mounted_degraded` / `storage.btrfs_mount_failed` | `volume`, `present`, `total`, `error` (failed) | Volume {volume} mounted degraded / could not be mounted degraded (oneshot, after boot) |
 | `storage.btrfs_split_brain` | `volume` | Volume {volume} not mounted: its devices may hold older data (oneshot) |
+| `storage.btrfs_scrub_needed` / `storage.btrfs_scrub_needed_ok` | `volume` | Volume {volume}: run a data scrub / copies up to date |
+| `storage.btrfs_guard_unreadable` | `error` | Degraded btrfs mounts stopped: their record is unreadable (oneshot) |
 | `storage.volume_full` / `storage.volume_ok` | `volume`, `used_pct`, `used_gib`, `free_gib` / `limit_pct` | Volume {volume} {used_pct}% full / back under {limit_pct}% |
 | `task.failed` / `task.succeeded` | `type`, `task_id`, `user` | Task failed / succeeded: {type} (body: the task error, not translated) |
 | `config.apply_failed` / `config.apply_ok` | `type`, `task_id`, `user` | Configuration apply failed / succeeded |

@@ -116,7 +116,10 @@ each time.
   use), whether the missing devices can be removed (no loss, the devices left at least the
   strongest profile's minimum, their unallocated space, less 256 MiB of working room each, at
   least what the missing ones held: a removal on loop devices without that room failed with
-  ENOSPC), `degraded_mount` and `system` (mounted at `/`).
+  ENOSPC; a new mirrored copy never goes where a copy is already, so with one device missing
+  and as many left as copies each device left must take the chunks it has no copy of, total of
+  those chunks minus what it holds, and with several missing only the `n - copies + 1`
+  devices with the least room count), `degraded_mount` and `system` (mounted at `/`).
 - **Configured volumes that did not mount**: `/etc/fstab` btrfs lines at `/<label>` (by `UUID=`,
   `LABEL=` or device), not mounted, whose members present (lsblk) are fewer than the
   superblock's `num_devices` (`btrfs inspect-internal dump-super`, read only while their disks
@@ -131,7 +134,9 @@ each time.
   what is missing or weak, the repair buttons, and the root filesystem's boot note).
 - **Notifications**: `storage.btrfs_unmounted` (critical, until it is mounted),
   `storage.btrfs_missing` per devid (critical, existing), `storage.btrfs_weak_chunks` (warning,
-  once no device is missing, until converted), and the events of the degraded mount below.
+  once no device is missing, until converted), `storage.btrfs_scrub_needed` (warning, every
+  device back after a degraded mount and no clean scrub yet, see §2.2), and the events of the
+  degraded mount below.
 
 ### 2.2 The degraded mount after boot
 
@@ -145,11 +150,28 @@ and the fstab unit would wait for the device units). The kernel refuses when a c
 complete copy; the notification says it (`storage.btrfs_mount_failed`), or says the volume runs
 degraded on N of M devices (`storage.btrfs_mounted_degraded`).
 
-**Split brain.** Every degraded mount (after boot or from the UI) is recorded first in
-`<state>/storage/btrfs-degraded.json`: the devids it ran on. A later degraded mount whose devices
+**Split brain.** Every degraded mount (after boot or from the UI) is recorded in
+`<state>/storage/btrfs-degraded.json` before it runs (the devids it ran on, their newest
+superblock generation), and the record is put back as it was when the mount fails and nothing is
+mounted, so a refused mount never blocks the other half. A later degraded mount whose devices
 present include none of those is refused, after boot (`storage.btrfs_split_brain`) and from the
-UI: those devices were the missing ones and hold older data. A record is forgotten once the
-filesystem is mounted with no device missing (after a replace or remove, or every device back).
+UI: those devices were the missing ones and hold older data. The file is written to a temporary
+file of its own, flushed, renamed and its folder flushed, one writer at a time; a file that
+exists but cannot be read stops every degraded mount (`storage.btrfs_guard_unreadable`) instead
+of counting as "no record".
+
+**A device that comes back.** When every device is present again, the ones that were missing
+still lack the copies of what was written meanwhile (data written into existing mirrored chunks
+while degraded has one copy only; new chunks are `single`). The btrfs documentation's answer is
+a scrub (it rewrites the stale copies from the good ones, as corrected errors) and a soft convert
+for the `single` chunks. So the record stays: the moment every device is back, the start of the
+last scrub is noted; the record ends only when a scrub started after that finishes with no
+uncorrectable error (corrected ones are the expected repair). Meanwhile the volume shows "run a
+data scrub" with the Scrub button and `storage.btrfs_scrub_needed` warns, and if the devices
+that stayed die before it, the returned ones are refused alone (split brain). A replace or a
+removal that leaves nothing missing ends the record at once: the missing device was rebuilt
+from the copies or is gone.
+
 To give up the newer half on purpose (it is lost for good), mount by hand:
 `mount -o degraded /dev/<member> /<label>`, then replace, as root.
 
@@ -168,11 +190,13 @@ such setting.
 | Route | Plan | Confirmation |
 |---|---|---|
 | `POST /storage/btrfs/{uuid}/mount-degraded` | `mount … -o degraded` (an unmounted configured volume; refused for a split brain) | the plan (not destructive) |
-| `POST /storage/btrfs/{uuid}/replace` {devid, new_disk} | `wipefs -a` the new disk, `btrfs replace start <devid> /dev/<disk> <mnt>`, wait (`replace status`, progress), `resize <devid>:max`, convert what is weak then | typed volume name and the new disk's serial (it is erased) |
+| `POST /storage/btrfs/{uuid}/replace` {devid, new_disk} | `wipefs -a` the new disk, `btrfs replace start <devid> /dev/<disk> <mnt>`, wait (`replace status`, progress), `resize <devid>:max`, convert what is weak then | typed volume name and the new disk's serial, typed on the plan; no drive is chosen in advance, the form shows the drive's model, serial and what is on it, and the plan warns about another btrfs on it (maybe the other half of a volume) |
 | `POST /storage/btrfs/{uuid}/remove-missing` | `btrfs device remove missing… <mnt>`, convert what is weak then | the plan |
 | `POST /storage/btrfs/{uuid}/convert` | the soft balance of the weaker kinds (only once no device is missing: chunks would be written weak again) | the plan |
 
-`dry_run` answers with the plan. Checks before: a fresh inventory, the new disk not in use and
+`dry_run` answers with the plan. `btrfs replace start` returns before the kernel shows the replace:
+"Never started" is accepted for the first minute of polls. A removal whose device usage is not
+known (a drive asleep) is refused rather than planned blind. Checks before: a fresh inventory, the new disk not in use and
 not the system disk, at least the size of the missing device (the kernel checks too), free for
 the kernel (`O_EXCL`), no other operation on the disk or the volume. A replace needs a mounted
 filesystem (mount it degraded first) and no lost chunks. The whole disk is used (a member that

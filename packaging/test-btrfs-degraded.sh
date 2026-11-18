@@ -19,8 +19,8 @@
 #      the data intact;
 #   B. a 2-device raid1 loses a device and is mounted degraded on the other (recorded); with
 #      only the missing one back, the degraded mount is refused (split brain); with both back
-#      it mounts normally, the single data chunks written meanwhile are converted back, and
-#      the record is forgotten;
+#      it mounts normally, the single data chunks written meanwhile are converted back, the
+#      record stays (scrub needed) until a scrub finishes without errors;
 #   C. a 3-device raid1 loses a device: mounted degraded, the missing device removed (the
 #      other two take its chunks), two devices left, the data intact.
 # At the end the host must have no loop device and no btrfs filesystem of this test left.
@@ -300,7 +300,7 @@ fs "$UB" '.repair.mounted == false and .repair.present[0].devid == 2' "B: device
 api POST "/storage/btrfs/$UB/mount-degraded" "{\"confirm\":\"$B\"}"; expect 409 "the split brain is refused"
 echo "  $(echo "$BODY" | jq -r .message)"
 
-step "B. both back: a normal mount, the single data chunks converted back, the record forgotten"
+step "B. both back: a normal mount, the single data chunks converted back, a scrub, the record forgotten"
 attach b1 512M
 btrfs device scan "/dev/$(dev_of b1)" "/dev/$(dev_of b2)" >/dev/null
 mount -o noatime "/dev/$(dev_of b1)" "/$B"
@@ -308,15 +308,21 @@ fs "$UB" '.repair.mounted and .repair.missing_count == 0 and (.repair.convert | 
 show
 dump weak
 run "/storage/btrfs/$UB/convert" '{"dry_run":false}'
-fs "$UB" '.repair == null' "B: still weak after the conversion"
 btrfs filesystem usage -b "/$B" | grep -qiE '^Data,single' && fail "B: single data chunks left"
 verify_data "$B"
-for _ in $(seq 30); do
+# device 2 lacks the copies written while it was away: the record stays, a scrub is asked for
+fs "$UB" '.repair.scrub_needed and (.repair.convert | length) == 0' "B: no scrub asked for after the reunion"
+sleep 6
+jq -e --arg u "$UB" '.mounts[$u].whole_scrub != null' /var/lib/rynas/storage/btrfs-degraded.json >/dev/null || fail "B: the record went before a scrub"
+echo "  record of $B kept until a scrub: $(jq -c --arg u "$UB" '.mounts[$u]' /var/lib/rynas/storage/btrfs-degraded.json)"
+run "/storage/volumes/$B/scrub" '{"action":"start","md_check":false,"dry_run":false}'
+for _ in $(seq 60); do
     jq -e --arg u "$UB" '.mounts[$u] == null' /var/lib/rynas/storage/btrfs-degraded.json >/dev/null && break
     sleep 1
 done
-jq -e --arg u "$UB" '.mounts[$u] == null' /var/lib/rynas/storage/btrfs-degraded.json >/dev/null || fail "B: the record stays"
-echo "  degraded-mount record of $B forgotten"
+jq -e --arg u "$UB" '.mounts[$u] == null' /var/lib/rynas/storage/btrfs-degraded.json >/dev/null || fail "B: the record stays after a clean scrub"
+fs "$UB" '.repair == null' "B: still something to repair after the scrub"
+echo "  degraded-mount record of $B forgotten after the scrub"
 umount "/$B"
 
 # ===================================================================== C
