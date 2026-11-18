@@ -51,17 +51,12 @@ pub fn due_ms_at(st: &State, started_ms: u64, boot: Option<&str>) -> u64 {
     let delay = u64::from(s.delay_min) * 60_000;
     // an expression this agent cannot read (it never should: the NAS checks it with the same
     // parser) or without any time left: the interval, so backups go on
+    // (the same rule as the NAS's view of this PC: `window::agent_due`)
     let spec = s.calendar.as_deref().and_then(|c| rynas_schedule::CalendarSpec::parse(c).ok());
-    let mut due = window::plan_due(spec.as_ref(), interval, &zone(&st.plan), st.last_ok_ms, started_ms, delay);
-    if s.calendar.is_some() && due == u64::MAX {
-        due = window::interval_due(st.last_ok_ms, interval, started_ms, delay);
-    }
     // also at every start of the PC: whichever comes first (after the boot's backup the
     // interval counts from it; a calendar's next time still comes)
-    if s.at_boot {
-        let done = boot.is_none_or(|b| st.last_ok_boot.as_deref() == Some(b));
-        due = due.min(window::boot_due(done, started_ms, delay));
-    }
+    let boot_done = s.at_boot.then(|| boot.is_none_or(|b| st.last_ok_boot.as_deref() == Some(b)));
+    let due = window::agent_due(spec.as_ref(), interval, &zone(&st.plan), st.last_ok_ms, started_ms, delay, boot_done);
     // a failed run: again after 5, 10, 20… minutes, never later than the interval
     let retry = match (st.failures, st.last_attempt_ms) {
         (n, Some(at)) if n > 0 => at + ((5 * 60_000u64) << n.min(6)).min(interval),

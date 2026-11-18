@@ -187,6 +187,32 @@ pub fn plan_due(calendar: Option<&CalendarSpec>, every_ms: u64, tz: &TimeZone, l
     }
 }
 
+/// When a PC's next scheduled backup is due (ignoring the pause, the window and the retries
+/// of a failed run), as `rynas-agent` counts it: [`plan_due`] (the interval when the calendar
+/// has no time left, so backups go on), and with "also at every start of the PC"
+/// ([`boot_due`]) whichever comes first. `boot_done`: `None` without "also at every start",
+/// else whether a good run already ended in this boot of the PC. The agent's loop and the
+/// NAS's view of a PC (is it late, when is the next backup) both use it.
+#[allow(clippy::too_many_arguments)]
+pub fn agent_due(
+    calendar: Option<&CalendarSpec>,
+    every_ms: u64,
+    tz: &TimeZone,
+    last_ok_ms: Option<u64>,
+    started_ms: u64,
+    delay_ms: u64,
+    boot_done: Option<bool>,
+) -> u64 {
+    let mut due = plan_due(calendar, every_ms, tz, last_ok_ms, started_ms, delay_ms);
+    if calendar.is_some() && due == u64::MAX {
+        due = interval_due(last_ok_ms, every_ms, started_ms, delay_ms);
+    }
+    match boot_done {
+        Some(done) => due.min(boot_due(done, started_ms, delay_ms)),
+        None => due,
+    }
+}
+
 fn next_starts(
     first_due_ms: u64,
     next_due: impl Fn(u64) -> Option<u64>,
@@ -369,5 +395,23 @@ mod tests {
         assert_eq!(boot_due(false, boot + 20_000, 600_000), boot + 620_000);
         assert_eq!(boot_due(true, boot + 3 * h, 600_000), u64::MAX);
         assert_eq!(plan_due(Some(&daily), 24 * h, &tz(), Some(last), 0, 0), ms("2026-11-17T02:00"));
+    }
+
+    #[test]
+    fn agent_due_rules() {
+        let h = 3_600_000;
+        let ok = ms("2026-11-16T04:05");
+        let spec = CalendarSpec::parse("*-*-* 04:00:00").unwrap();
+        // set times: the next one after the last good run; a missed one at least the delay
+        // after the start
+        assert_eq!(agent_due(Some(&spec), 24 * h, &tz(), Some(ok), 0, 0, None), ms("2026-11-17T04:00"));
+        assert_eq!(agent_due(Some(&spec), 24 * h, &tz(), Some(ok), ms("2026-11-18T09:00"), 600_000, None), ms("2026-11-18T09:10"));
+        // an expression without any time left: the interval, so backups go on
+        let past = CalendarSpec::parse("2020-01-01 00:00:00").unwrap();
+        assert_eq!(agent_due(Some(&past), 24 * h, &tz(), Some(ok), 0, 0, None), ok + 24 * h);
+        // also at every start: whichever comes first, nothing more once done in this boot
+        let start = ms("2026-11-16T08:00");
+        assert_eq!(agent_due(None, 24 * h, &tz(), Some(ok), start, 600_000, Some(false)), start + 600_000);
+        assert_eq!(agent_due(None, 24 * h, &tz(), Some(ok), start, 600_000, Some(true)), ok + 24 * h);
     }
 }
