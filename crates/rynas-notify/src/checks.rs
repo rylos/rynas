@@ -595,6 +595,22 @@ impl StorageWatch {
                     field(code(ev, "storage.btrfs_unmounted_ok"), "volume", &name)
                 },
             );
+            // every device back after a degraded mount, no clean scrub since
+            let key = format!("storage:btrfs:{}:scrub", fs.uuid);
+            self.t.emit(
+                &mut out,
+                &key,
+                repair.filter(|r| r.scrub_needed).map(|_| Sev::Warning),
+                |s| {
+                    let mut ev = firing(Cat::Storage, s, ST, &key, format!("Volume {name}: run a data scrub"));
+                    ev.body = format!("Every device of volume {name} is back after it ran degraded, but the devices that were missing lack the copies of what was written meanwhile: losing the others now costs data. Run a data scrub from Storage; until it finishes without errors, the returned devices are not mounted degraded on their own.");
+                    field(code(ev, "storage.btrfs_scrub_needed"), "volume", &name)
+                },
+                || {
+                    let ev = resolved(Cat::Storage, ST, &key, format!("Volume {name}: copies up to date"));
+                    field(code(ev, "storage.btrfs_scrub_needed_ok"), "volume", &name)
+                },
+            );
             // chunks a degraded mount wrote with a weaker profile, once no device is missing
             let key = format!("storage:btrfs:{}:weak", fs.uuid);
             let weak = repair.filter(|r| r.mounted && !r.degraded() && !r.convert.is_empty());
@@ -1083,7 +1099,7 @@ mod tests {
         let waiting = BtrfsRepair { mounted: false, total_devices: 2, missing_count: 1, ..Default::default() };
         let ev = w.check(&[], &[], &[fs(Some(waiting.clone()), false)], &[]);
         // the first pass also closes what may have been open before a restart
-        assert_eq!(ev.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), ["storage.btrfs_unmounted", "storage.btrfs_weak_chunks_ok"]);
+        assert_eq!(ev.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), ["storage.btrfs_unmounted", "storage.btrfs_scrub_needed_ok", "storage.btrfs_weak_chunks_ok"]);
         assert_eq!(ev[0].severity, Sev::Critical);
         assert_eq!(ev[0].fields["missing"], "1");
         assert_eq!(ev[0].fields["total"], "2");
@@ -1102,11 +1118,16 @@ mod tests {
         let ev = w.check(&[], &[], &[fs(Some(weak), true)], &[]);
         assert_eq!(ev[0].code, "storage.btrfs_weak_chunks");
         assert_eq!(ev[0].fields["chunks"], "metadata single");
+        // a device back after the degraded mount, not scrubbed yet: warn until it is
+        let scrub = BtrfsRepair { mounted: true, scrub_needed: true, ..Default::default() };
+        let ev = w.check(&[], &[], &[fs(Some(scrub), true)], &[]);
+        assert!(ev.iter().any(|e| e.code == "storage.btrfs_scrub_needed" && e.severity == Sev::Warning), "{ev:?}");
+        assert!(ev.iter().any(|e| e.code == "storage.btrfs_weak_chunks_ok"), "converted meanwhile: {ev:?}");
         // converted: a filesystem of two devices, nothing to repair
         let mut whole = fs(None, true);
         whole.devices = vec![BtrfsDevice { devid: 1, ..Default::default() }, BtrfsDevice { devid: 2, ..Default::default() }];
         let ev = w.check(&[], &[], &[whole], &[]);
-        assert!(ev.iter().any(|e| e.code == "storage.btrfs_weak_chunks_ok"), "{ev:?}");
+        assert!(ev.iter().any(|e| e.code == "storage.btrfs_scrub_needed_ok"), "scrubbed: {ev:?}");
     }
 
     /// A disk lost from a flexible RAID degrades every tier it was in: one event for the

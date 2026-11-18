@@ -145,6 +145,40 @@ fn weaker_chunks_left_by_the_degraded_mount_are_converted_back() {
         convert_argv("/v", &c),
         ["btrfs", "balance", "start", "-dconvert=raid1,soft", "-mconvert=raid1c3,soft", "-sconvert=raid1,soft", "-f", "/v"]
     );
+    // only system chunks weak: their own filter, the metadata is not touched
+    let sys = vec![BtrfsConvert { kind: "system".into(), from: vec!["single".into()], to: "raid1c3".into() }];
+    assert_eq!(convert_argv("/v", &sys), ["btrfs", "balance", "start", "-sconvert=raid1c3,soft", "-f", "/v"]);
+}
+
+#[test]
+fn removal_room_per_device_for_mirrors() {
+    const G: u64 = 1 << 30;
+    let room = REMOVE_ROOM;
+    // a 3-device raid1 left with 2: chunks of (sda, missing) need sdb, those of (sdb, missing)
+    // need sda. Per device: sda 1.5 GiB, sdb 1 GiB, missing 1.5 GiB → T = 2 GiB of chunks:
+    // sda takes 0.5 GiB, sdb takes 1 GiB
+    let u = |a: u64, b: u64| {
+        vec![
+            dev(1, "/dev/sda", &[("data", "raid1", 3 * G / 2)], a + room),
+            dev(2, "/dev/sdb", &[("data", "raid1", G)], b + room),
+            dev(3, "", &[("data", "raid1", 3 * G / 2)], 0),
+        ]
+    };
+    assert_eq!(remove_blocker(&u(5 * G, G / 2)), Some(BtrfsBlocker::NoSpace), "the sum alone would allow it");
+    assert_eq!(remove_blocker(&u(G / 2, G)), None);
+    assert_eq!(remove_blocker(&u(G / 4, 5 * G)), Some(BtrfsBlocker::NoSpace));
+    // two missing from a 5-device raid1c3: only the 2 devices with the least room count
+    let v = |c: u64| {
+        vec![
+            dev(1, "/dev/sda", &[("data", "raid1c3", G)], 9 * G),
+            dev(2, "/dev/sdb", &[("data", "raid1c3", G)], 9 * G),
+            dev(3, "/dev/sdc", &[("data", "raid1c3", G)], c),
+            dev(4, "", &[("data", "raid1c3", G)], 0),
+            dev(5, "", &[("data", "raid1c3", G)], 0),
+        ]
+    };
+    assert_eq!(remove_blocker(&v(room)), Some(BtrfsBlocker::NoSpace));
+    assert_eq!(remove_blocker(&v(2 * G + room)), None);
 }
 
 #[test]
@@ -264,6 +298,22 @@ fn configured_volumes_that_did_not_mount() {
     assert_eq!(unmounted_filesystem(&none, None).unwrap().repair.unwrap().mount, Some(BtrfsBlocker::NoDevices));
 }
 
+/// A replacement disk that carries another btrfs (the other half of a volume?) is named in the
+/// plan's warning; the filesystem's own UUID is not.
+#[test]
+fn what_a_replacement_disk_holds() {
+    let inv = crate::Inventory { graph: graph(), ..Default::default() };
+    let h = disk_holds(&inv, "sdd1", UUID);
+    assert_eq!(h, ["btrfs “data2” other on sdd1 (part of another volume?)"]);
+    assert!(disk_holds(&inv, "sdb1", UUID).is_empty());
+    let mut f = degraded_fs();
+    f.repair.as_mut().unwrap().remove = None;
+    let p = plan_replace(&f, 3, "sdd1", 2 << 30, &h);
+    assert!(p.valid);
+    assert_eq!(p.warning_items[0].code, PlanWarningCode::DataErased);
+    assert_eq!(p.warning_items[0].args.items, h);
+}
+
 fn member(devid: u64) -> BtrfsMember {
     BtrfsMember { devid, path: format!("/dev/sd{}1", (b'a' + devid as u8) as char), generation: 9 }
 }
@@ -272,13 +322,13 @@ fn member(devid: u64) -> BtrfsMember {
 fn split_brain_guard() {
     let dir = tempfile::tempdir().unwrap();
     let path = Guard::path(dir.path());
-    let mut g = Guard::load(&path);
+    let g = Guard::load(&path).unwrap();
     assert!(!g.split_brain(UUID, &[member(1)]), "nothing recorded");
     // degraded on device 1 (device 2 missing)
-    g.record(UUID, &[member(1)], 1000);
-    g.save(&path).unwrap();
-    let g = Guard::load(&path);
+    Guard::update(&path, |g| g.record(UUID, &[member(1)], 1000)).unwrap();
+    let g = Guard::load(&path).unwrap();
     assert_eq!(g.mounts[UUID].present, [1]);
+    assert_eq!(g.mounts[UUID].generation, 9);
     // next boot: device 2 alone (it was the missing one): refused
     assert!(g.split_brain(UUID, &[member(2)]));
     // device 1 there again (with or without 2): fine
@@ -289,10 +339,74 @@ fn split_brain_guard() {
     g.record(UUID, &[member(1), member(2)], 1);
     assert!(!g.split_brain(UUID, &[member(2), member(3)]));
     assert!(g.split_brain(UUID, &[member(3)]));
-    // whole again: forgotten
-    assert!(g.forget_healthy(&[UUID.to_uppercase()]));
+    // the missing device replaced or removed: forgotten
+    assert!(g.forget(&UUID.to_uppercase()));
     assert!(!g.split_brain(UUID, &[member(3)]));
-    assert!(!g.forget_healthy(&[UUID.into()]));
+    assert!(!g.forget(UUID));
+    // no temporary file left behind
+    assert_eq!(std::fs::read_dir(dir.path().join("storage")).unwrap().count(), 1);
+}
+
+/// An unreadable record blocks (it could hide a split brain) instead of reading as empty.
+#[test]
+fn an_unreadable_guard_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Guard::path(dir.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{ not json").unwrap();
+    let e = Guard::load(&path).unwrap_err();
+    assert!(e.contains("unreadable") && e.contains("refused"), "{e}");
+    assert!(Guard::update(&path, |g| g.record(UUID, &[member(1)], 1)).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json", "left as it was");
+}
+
+/// Every device back after a degraded mount: the record (and the warning) stays until a
+/// scrub started after the reunion finishes without errors.
+#[test]
+fn the_record_waits_for_a_clean_scrub() {
+    use rynas_api_types::storage::{ScrubState, ScrubStatus};
+    let mut g = Guard::default();
+    g.record(UUID, &[member(1)], 1);
+    let fs = |missing: bool, scrub: Option<(&str, ScrubState, u64)>| BtrfsFilesystem {
+        uuid: UUID.into(),
+        mountpoint: Some("/fxvol".into()),
+        devices: vec![
+            BtrfsDevice { devid: 1, path: "/dev/sdb1".into(), ..Default::default() },
+            BtrfsDevice { devid: 2, path: String::new(), missing, ..Default::default() },
+        ],
+        scrub: scrub.map(|(started, status, errors)| ScrubStatus {
+            started: Some(started.into()),
+            status,
+            // the third value: errors left uncorrectable; 5 more were corrected (stale copies)
+            errors: errors + 5,
+            uncorrectable: Some(errors),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    // still degraded: nothing changes, no warning
+    let mut v = vec![fs(true, None)];
+    g.settle(&v);
+    assert_eq!(g.mounts[UUID].whole_scrub, None);
+    g.annotate(&mut v);
+    assert!(v[0].repair.is_none());
+    // device 2 back (an older scrub on record): the scrub status of now is noted, warning
+    let old = Some(("Mon Nov 16 03:00:00 2026", ScrubState::Finished, 0));
+    let mut v = vec![fs(false, old)];
+    g.settle(&v);
+    assert_eq!(g.mounts[UUID].whole_scrub.as_deref(), Some("Mon Nov 16 03:00:00 2026"));
+    g.annotate(&mut v);
+    assert!(v[0].repair.as_ref().unwrap().scrub_needed);
+    // the old scrub again: not enough; a newer one running or with errors: not enough
+    g.settle(&[fs(false, old)]);
+    g.settle(&[fs(false, Some(("Wed Nov 18 12:00:00 2026", ScrubState::Running, 0)))]);
+    g.settle(&[fs(false, Some(("Wed Nov 18 12:00:00 2026", ScrubState::Finished, 3)))]);
+    assert!(g.mounts.contains_key(UUID));
+    // the device that came back is still refused alone meanwhile
+    assert!(g.split_brain(UUID, &[member(2)]));
+    // a clean scrub after the reunion ends it
+    g.settle(&[fs(false, Some(("Wed Nov 18 13:00:00 2026", ScrubState::Finished, 0)))]);
+    assert!(g.mounts.is_empty());
 }
 
 fn candidate() -> MountCandidate {
@@ -399,7 +513,7 @@ fn waits_for_uptime_and_stable_devices() {
 #[test]
 fn replace_plan() {
     let f = degraded_fs();
-    let p = plan_replace(&f, 3, "sdd", 2 << 30);
+    let p = plan_replace(&f, 3, "sdd", 2 << 30, &[]);
     assert!(p.valid, "{:?}", p.errors);
     let kinds: Vec<_> = p.steps.iter().map(|s| s.kind.unwrap()).collect();
     assert_eq!(
@@ -418,14 +532,14 @@ fn replace_plan() {
         PlanAction::Command { argv: ["btrfs", "replace", "start", "3", "/dev/sdd", "/fxvol"].map(String::from).into(), stdin: None }
     );
     // a disk too small, a device that is not missing
-    let small = plan_replace(&f, 3, "sdd", 1 << 29);
+    let small = plan_replace(&f, 3, "sdd", 1 << 29, &[]);
     assert!(!small.valid && small.steps.is_empty());
     assert!(small.errors[0].contains("smaller"), "{:?}", small.errors);
-    assert!(!plan_replace(&f, 1, "sdd", 2 << 30).valid);
+    assert!(!plan_replace(&f, 1, "sdd", 2 << 30, &[]).valid);
     // not mounted: mount it first
     let mut un = f.clone();
     un.mountpoint = None;
-    assert!(plan_replace(&un, 3, "sdd", 2 << 30).errors[0].contains("not mounted"));
+    assert!(plan_replace(&un, 3, "sdd", 2 << 30, &[]).errors[0].contains("not mounted"));
     // removing is blocked (raid1c3 on two devices); converting waits for the repair
     let r = plan_remove_missing(&f);
     assert!(!r.valid && r.errors[0].contains("fewer"), "{:?}", r.errors);
@@ -471,7 +585,7 @@ fn replace_status() {
         ReplaceState::Finished
     );
     assert!(matches!(parse_replace_status("Started on 18.Nov 12:05:56, canceled on 18.Nov 12:06:10 at 0.0%\n"), ReplaceState::Failed(_)));
-    assert!(matches!(parse_replace_status("Never started\n"), ReplaceState::Failed(_)));
+    assert_eq!(parse_replace_status("Never started\n"), ReplaceState::NotStarted);
 }
 
 fn run_now<F: std::future::Future>(f: F) -> F::Output {
@@ -481,7 +595,7 @@ fn run_now<F: std::future::Future>(f: F) -> F::Output {
 #[test]
 fn the_replace_task_runs_waits_and_converts_what_is_weak_then() {
     let f = degraded_fs();
-    let p = plan_replace(&f, 3, "sdd", 2 << 30);
+    let p = plan_replace(&f, 3, "sdd", 2 << 30, &[]);
     let mut m = FakeMachine::default();
     m.output("btrfs replace status -1 /fxvol", "Started on 18.Nov 12:05:56, finished on 18.Nov 12:05:56, 0 write errs, 0 uncorr. read errs\n")
         .output("btrfs device usage -b /fxvol", include_str!("../tests/fixtures/btrfs-device-usage-after-replace.txt"));
@@ -502,6 +616,11 @@ fn the_replace_task_runs_waits_and_converts_what_is_weak_then() {
     m.output("btrfs replace status -1 /fxvol", "");
     assert!(run_now(run_plan(&m, &p)).unwrap_err().contains("in use"));
     assert!(m.ran().is_empty());
+    // the kernel does not show the replace yet: accepted for a while, then a failure
+    let mut m = FakeMachine::default();
+    m.output("btrfs replace status -1 /fxvol", "Never started\n");
+    assert!(run_now(run_plan(&m, &p)).unwrap_err().contains("did not start"));
+    assert_eq!(m.ran().iter().filter(|l| l.contains("replace status")).count(), NOT_STARTED_POLLS as usize + 1);
     // the rebuild stops: the task fails
     let mut m = FakeMachine::default();
     m.output("btrfs replace status -1 /fxvol", "Started on 18.Nov 12:05:56, canceled on 18.Nov 12:06:10 at 0.0%\n");

@@ -90,17 +90,14 @@ fn checked(p: StoragePlan, dry_run: bool) -> Res<Option<Response>> {
     Ok(dry_run.then(|| Json(p).into_response()))
 }
 
-/// Forgets the degraded mount of `uuid` once nothing is missing any more.
+/// Forgets the degraded mount of `uuid` after a replace or a removal left nothing missing: the
+/// missing device was rebuilt from the copies or is gone, so no device with older copies is
+/// left (a device that merely came back keeps the record until a clean scrub instead).
 fn forget_if_whole(guard: Option<PathBuf>, uuid: &str, inv: &rynas_storage::Inventory) {
     let Some(path) = guard else { return };
     let whole = inv.filesystems.iter().any(|f| f.uuid.eq_ignore_ascii_case(uuid) && f.mountpoint.is_some() && f.repair.as_ref().is_none_or(|r| !r.degraded()));
-    if whole {
-        let mut g = Guard::load(&path);
-        if g.forget_healthy(&[uuid.to_string()])
-            && let Err(e) = g.save(&path)
-        {
-            tracing::warn!("btrfs degraded-mount record: {e}");
-        }
+    if whole && let Err(e) = Guard::update(&path, |g| g.forget(uuid)) {
+        tracing::warn!("btrfs degraded-mount record: {e}");
     }
 }
 
@@ -116,7 +113,8 @@ async fn replace(State(st): State<StoState>, h: HeaderMap, UrlPath(uuid): UrlPat
     if disk.in_use || disk.system {
         return Err(conflict(format!("disk {} is in use: {}", disk.name, disk.used_by.join(", "))));
     }
-    let p = br::plan_replace(&fs, req.devid, &disk.name, disk.size);
+    let holds = br::disk_holds(&inv, &disk.name, &fs.uuid);
+    let p = br::plan_replace(&fs, req.devid, &disk.name, disk.size, &holds);
     if let Some(r) = checked(p.clone(), req.dry_run)? {
         return Ok(r);
     }
@@ -214,7 +212,11 @@ async fn mount_degraded(State(st): State<StoState>, h: HeaderMap, UrlPath(uuid):
     let inv = s.inventory(true).await?;
     let fs = find(&inv, &uuid)?;
     let guard_file = guard_path(&s);
-    let guard = guard_file.as_deref().map(Guard::load).unwrap_or_default();
+    // an unreadable record refuses: it may be the one that tells a split brain
+    let guard = match guard_file.as_deref() {
+        Some(p) => Guard::load(p).map_err(|e| Error::new(axum::http::StatusCode::CONFLICT, error_codes::CONFLICT, e))?,
+        None => Guard::default(),
+    };
     let c = candidate_of(&fs, &inv, &guard)?;
     let systemd = std::path::Path::new("/run/systemd/system").exists();
     let suffix = format!("{}-{}", &uuid[..8], rynas_tasks::now_ms());
@@ -230,15 +232,22 @@ async fn mount_degraded(State(st): State<StoState>, h: HeaderMap, UrlPath(uuid):
     Ok(started(id))
 }
 
-/// Runs the degraded mount of `c` and records it in the guard (before the mount: a mount
-/// that ran but reported an error must count too).
+/// Runs the degraded mount of `c`, recorded in the guard first ([`br::begin_record`]) and the
+/// record put back when the mount failed and nothing is mounted ([`br::undo_record`]).
 pub async fn mount_and_record<M: Machine>(m: &M, p: &StoragePlan, c: &MountCandidate, guard: Option<PathBuf>) -> Result<(), String> {
-    if let Some(path) = &guard {
-        let mut g = Guard::load(path);
-        g.record(&c.uuid, &c.present, rynas_tasks::now_ms());
-        g.save(path)?;
+    let prev = match &guard {
+        Some(path) => Some(br::begin_record(path, c, rynas_tasks::now_ms())?),
+        None => None,
+    };
+    if let Err(e) = br::run_plan(m, p).await {
+        if let (Some(path), Some(prev)) = (&guard, prev) {
+            let mounted = br::mounted_at(&rynas_storage::mounts::host_mountinfo(), &c.mountpoint);
+            if let Err(u) = br::undo_record(path, c, prev, mounted) {
+                m.log(&format!("the record of the degraded mount could not be put back: {u}"));
+            }
+        }
+        return Err(e);
     }
-    br::run_plan(m, p).await?;
     m.log(&format!(
         "{} is mounted degraded on {} of {} devices: replace the missing device, or remove it",
         c.mountpoint,

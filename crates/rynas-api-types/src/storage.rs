@@ -709,6 +709,11 @@ pub struct BtrfsRepair {
     pub mount: Option<BtrfsBlocker>,
     /// Not mounted: the devices present, from their superblocks.
     pub present: Vec<BtrfsMember>,
+    /// Every device is back after a degraded mount, but no scrub has finished without errors
+    /// since: the devices that were missing lack the copies of what was written meanwhile,
+    /// so losing the others now costs data. A data scrub brings them up to date.
+    #[serde(default)]
+    pub scrub_needed: bool,
 }
 
 impl BtrfsRepair {

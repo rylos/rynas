@@ -452,7 +452,14 @@ async fn storage_arrays(
 async fn storage_filesystems(
     State(st): State<DaemonState>,
 ) -> Res<Json<Vec<rynas_api_types::storage::BtrfsFilesystem>>> {
-    Ok(Json(inventory(&st).await?.filesystems.clone()))
+    let mut fss = inventory(&st).await?.filesystems.clone();
+    // a filesystem whole again after a degraded mount, not scrubbed yet (scrub needed)
+    if let Some(path) = st.storage_ops.as_ref().and_then(|o| o.btrfs_guard.get())
+        && let Ok(g) = rynas_storage::btrfs_repair::Guard::load(path)
+    {
+        g.annotate(&mut fss);
+    }
+    Ok(Json(fss))
 }
 
 async fn storage_tree(

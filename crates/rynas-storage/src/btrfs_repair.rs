@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use rynas_api_types::storage::{
     BtrfsBlocker, BtrfsConvert, BtrfsFilesystem, BtrfsMember, BtrfsRepair, PlanAction, PlanArgs,
-    PlanStep, PlanStepKind, StoragePlan,
+    PlanStep, PlanStepKind, PlanWarningCode, ScrubState, StoragePlan,
 };
 use serde::{Deserialize, Serialize};
 
@@ -284,9 +284,39 @@ pub fn remove_blocker(usage: &[DevUsage]) -> Option<BtrfsBlocker> {
         return Some(BtrfsBlocker::TooFewDevices);
     }
     let moved: u64 = usage.iter().filter(|d| d.missing).map(DevUsage::allocated).sum();
-    let free: u64 = present.iter().map(|d| d.unallocated.saturating_sub(REMOVE_ROOM)).sum();
-    if moved > free {
+    let mut frees: Vec<u64> = present.iter().map(|d| d.unallocated.saturating_sub(REMOVE_ROOM)).collect();
+    if moved > frees.iter().sum::<u64>() {
         return Some(BtrfsBlocker::NoSpace);
+    }
+    // a mirrored chunk gets its new copy on a device that has none of it
+    let of = |d: &DevUsage, profile: &str| -> u64 { d.chunks.iter().filter(|(_, p, _)| p == profile).map(|c| c.2).sum() };
+    let missing_n = usage.iter().filter(|d| d.missing).count();
+    let mut sorted = frees.clone();
+    sorted.sort_unstable();
+    for (profile, copies) in [("raid1", 2u32), ("raid1c3", 3), ("raid1c4", 4)] {
+        let lost_bytes: u64 = usage.iter().filter(|d| d.missing).map(|d| of(d, profile)).sum();
+        if lost_bytes == 0 {
+            continue;
+        }
+        if missing_n == 1 && n == copies {
+            // exactly as many devices left as copies: each chunk of the missing device has its
+            // other copies on all but one device left, which must take the new one. With T the
+            // bytes of all such chunks (the sum over every device / copies), device X must take
+            // T minus what it holds already.
+            let t: u64 = usage.iter().map(|d| of(d, profile)).sum::<u64>() / u64::from(copies);
+            for (d, free) in present.iter().zip(frees.iter()) {
+                if t.saturating_sub(of(d, profile)) > *free {
+                    return Some(BtrfsBlocker::NoSpace);
+                }
+            }
+        } else if missing_n > 1 {
+            // several missing: the worst case, only the `n - copies + 1` devices with the
+            // least room can take them
+            let takers = (n + 1).saturating_sub(copies).max(1) as usize;
+            if lost_bytes > sorted.iter().take(takers).sum::<u64>() {
+                return Some(BtrfsBlocker::NoSpace);
+            }
+        }
     }
     None
 }
@@ -311,7 +341,13 @@ pub fn convert_argv(mountpoint: &str, c: &[BtrfsConvert]) -> Vec<String> {
             argv.push(format!("-sconvert={s},soft"));
             argv.push("-f".into());
         }
-        (Some(m), _) | (None, Some(m)) => argv.push(format!("-mconvert={m},soft")),
+        (Some(m), _) => argv.push(format!("-mconvert={m},soft")),
+        // only system chunks are weak: their own filter (which needs -f), so that the
+        // metadata is never converted to the system profile
+        (None, Some(s)) => {
+            argv.push(format!("-sconvert={s},soft"));
+            argv.push("-f".into());
+        }
         (None, None) => {}
     }
     argv.push(mountpoint.to_string());
@@ -354,6 +390,7 @@ pub fn repair_of(fs: &BtrfsFilesystem, usage: &[DevUsage]) -> Option<BtrfsRepair
         remove,
         mount: None,
         present: Vec::new(),
+        scrub_needed: false,
     })
 }
 
@@ -444,6 +481,9 @@ pub fn unmounted_filesystem(u: &Unmounted, supers: Option<&[(String, Super)]>) -
         None if u.present.is_empty() => repair.mount = Some(BtrfsBlocker::NoDevices),
         None => repair.mount = Some(BtrfsBlocker::Asleep),
         Some(s) => {
+            // distinct devices: one device may be seen under two names
+            let mut seen: Vec<u64> = Vec::new();
+            let s: Vec<&(String, Super)> = s.iter().filter(|(_, x)| !seen.contains(&x.devid) && { seen.push(x.devid); true }).collect();
             let total = s.iter().map(|(_, x)| x.num_devices).max().unwrap_or(0);
             if total > 0 && s.len() as u32 >= total {
                 return None;
@@ -477,12 +517,19 @@ pub fn unmounted_filesystem(u: &Unmounted, supers: Option<&[(String, Super)]>) -
 
 // ------------------------------------------------------------------------------- guard
 
-/// The record of one degraded mount: the devices it ran on.
+/// The record of one degraded mount: the devices it ran on, the newest superblock generation
+/// among them, and, once every device is back, the start of the last scrub seen then.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DegradedRecord {
     pub present: Vec<u64>,
     pub generation: u64,
     pub ms: u64,
+    /// Every device is present again: the `Scrub started` of the scrub status seen at that
+    /// moment ("" for none). The record is kept until a scrub started after that one finishes
+    /// without errors: until then the devices that were missing lack the copies of what was
+    /// written meanwhile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whole_scrub: Option<String>,
 }
 
 /// The degraded mounts done and not yet repaired, by filesystem UUID, kept in a file
@@ -498,19 +545,62 @@ impl Guard {
         state_dir.join("storage").join("btrfs-degraded.json")
     }
 
-    /// The guard of `path`; empty when the file is missing or unreadable.
-    pub fn load(path: &Path) -> Self {
-        std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    /// The guard of `path`: empty when the file does not exist; an error when it exists but
+    /// cannot be read or parsed (a record lost that way could let a split brain through, so
+    /// the degraded mounts stop until it is fixed).
+    pub fn load(path: &Path) -> Result<Self, String> {
+        match std::fs::read(path) {
+            Ok(b) => serde_json::from_slice(&b).map_err(|e| {
+                format!("the record of degraded btrfs mounts {} is unreadable ({e}): degraded mounts are refused until it is fixed or removed by hand", path.display())
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(format!(
+                "the record of degraded btrfs mounts {} cannot be read ({e}): degraded mounts are refused until it is fixed",
+                path.display()
+            )),
+        }
     }
 
+    /// Writes the guard: a temporary file of its own, flushed to the disk, renamed over
+    /// `path`, and the folder flushed too (the rename survives a power cut).
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(d) = path.parent() {
-            std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
-        }
-        let tmp = path.with_extension("tmp");
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = path.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let tmp = dir.join(format!(
+            ".{}.{}-{}.tmp",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("guard"),
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         let body = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, body).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+        let written = (|| -> std::io::Result<()> {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&body)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, path)?;
+            std::fs::File::open(dir)?.sync_all()
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written.map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Loads, changes with `f` and saves (when `f` changed it) the guard of `path`, one
+    /// caller at a time in this process.
+    pub fn update<T>(path: &Path, f: impl FnOnce(&mut Guard) -> T) -> Result<T, String> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = Self::load(path)?;
+        let before = g.clone();
+        let out = f(&mut g);
+        if g != before {
+            g.save(path)?;
+        }
+        Ok(out)
     }
 
     /// Would mounting `uuid` degraded on `present` risk a split brain? Yes when the last
@@ -520,23 +610,96 @@ impl Guard {
         self.mounts.get(uuid).is_some_and(|r| !r.present.is_empty() && !present.iter().any(|m| r.present.contains(&m.devid)))
     }
 
-    /// Records a degraded mount of `uuid` on `present`. Devices kept from an earlier record
-    /// stay: a second degraded mount on a subset of the first one's devices is fine.
+    /// Records a degraded mount of `uuid` on `present` (it replaces an earlier record: a mount
+    /// allowed by [`Guard::split_brain`] shares a device with it).
     pub fn record(&mut self, uuid: &str, present: &[BtrfsMember], ms: u64) {
         let mut ids: Vec<u64> = present.iter().map(|m| m.devid).collect();
         ids.sort_unstable();
         ids.dedup();
         let generation = present.iter().map(|m| m.generation).max().unwrap_or(0);
-        self.mounts.insert(uuid.to_string(), DegradedRecord { present: ids, generation, ms });
+        self.mounts.insert(uuid.to_string(), DegradedRecord { present: ids, generation, ms, whole_scrub: None });
     }
 
-    /// Forgets the filesystems seen whole again (`healthy`: mounted, no device missing).
-    /// `true` when something was forgotten.
-    pub fn forget_healthy(&mut self, healthy: &[String]) -> bool {
+    /// Forgets the record of `uuid` (its missing device was replaced or removed: no device
+    /// with older copies is left). `true` when there was one.
+    pub fn forget(&mut self, uuid: &str) -> bool {
         let before = self.mounts.len();
-        self.mounts.retain(|u, _| !healthy.iter().any(|h| h.eq_ignore_ascii_case(u)));
+        self.mounts.retain(|u, _| !u.eq_ignore_ascii_case(uuid));
         self.mounts.len() != before
     }
+
+    /// Follows the recorded filesystems in `fss`: one mounted with every device present notes
+    /// the scrub status of that moment; a scrub started after it that finished without errors
+    /// ends the record (the devices that came back got the copies they lacked).
+    pub fn settle(&mut self, fss: &[BtrfsFilesystem]) {
+        let mut done: Vec<String> = Vec::new();
+        for (uuid, r) in self.mounts.iter_mut() {
+            let Some(fs) = fss.iter().find(|f| f.uuid.eq_ignore_ascii_case(uuid) && whole(f)) else { continue };
+            let started = fs.scrub.as_ref().and_then(|s| s.started.clone()).unwrap_or_default();
+            match &r.whole_scrub {
+                None => r.whole_scrub = Some(started),
+                Some(seen) => {
+                    // errors it corrected are expected (the stale copies it rewrote); none may
+                    // be left uncorrectable
+                    let clean = fs.scrub.as_ref().is_some_and(|s| s.status == ScrubState::Finished && s.uncorrectable.unwrap_or(s.errors) == 0);
+                    if clean && !started.is_empty() && &started != seen {
+                        done.push(uuid.clone());
+                    }
+                }
+            }
+        }
+        self.mounts.retain(|u, _| !done.contains(u));
+    }
+
+    /// Marks the recorded filesystems of `fss` that have every device back but no clean scrub
+    /// yet ([`BtrfsRepair::scrub_needed`]).
+    pub fn annotate(&self, fss: &mut [BtrfsFilesystem]) {
+        for f in fss.iter_mut() {
+            if !self.mounts.keys().any(|u| u.eq_ignore_ascii_case(&f.uuid)) || !whole(f) {
+                continue;
+            }
+            let total = f.devices.len() as u32;
+            f.repair.get_or_insert_with(|| BtrfsRepair { mounted: true, total_devices: total, ..Default::default() }).scrub_needed = true;
+        }
+    }
+}
+
+/// Mounted with every device present.
+fn whole(f: &BtrfsFilesystem) -> bool {
+    f.mountpoint.is_some() && !f.devices.iter().any(|d| d.missing) && f.repair.as_ref().is_none_or(|r| r.mounted && !r.degraded())
+}
+
+/// Records the degraded mount of `c` in the guard of `path` before it runs (a mount that ran
+/// but reported an error, or a crash right after it, must count) and returns the record it
+/// replaced, for [`undo_record`] when the mount failed.
+pub fn begin_record(path: &Path, c: &MountCandidate, ms: u64) -> Result<Option<DegradedRecord>, String> {
+    Guard::update(path, |g| {
+        let prev = g.mounts.get(&c.uuid).cloned();
+        g.record(&c.uuid, &c.present, ms);
+        prev
+    })
+}
+
+/// A degraded mount recorded by [`begin_record`] failed: the record goes back to what it was
+/// (it must not block the other half of a volume that was never mounted degraded). Kept when
+/// the filesystem turned out mounted after all.
+pub fn undo_record(path: &Path, c: &MountCandidate, prev: Option<DegradedRecord>, mounted: bool) -> Result<(), String> {
+    if mounted {
+        return Ok(());
+    }
+    Guard::update(path, |g| match prev {
+        Some(r) => {
+            g.mounts.insert(c.uuid.clone(), r);
+        }
+        None => {
+            g.mounts.remove(&c.uuid);
+        }
+    })
+}
+
+/// Is a btrfs filesystem mounted at `mountpoint` (per `mountinfo`)?
+pub fn mounted_at(mountinfo: &str, mountpoint: &str) -> bool {
+    crate::mounts::parse_mountinfo(mountinfo).iter().any(|m| m.mountpoint == mountpoint && m.fstype == "btrfs")
 }
 
 // ------------------------------------------------------------------- degraded mount after boot
@@ -738,8 +901,9 @@ fn mounted_repair(fs: &BtrfsFilesystem) -> Result<(String, &BtrfsRepair), String
 
 /// Replace missing device `devid` of `fs` with the whole disk `new_disk` (`size` bytes):
 /// clear its signatures, `btrfs replace start`, wait, grow the device to the disk, convert
-/// what a degraded mount wrote back.
-pub fn plan_replace(fs: &BtrfsFilesystem, devid: u64, new_disk: &str, size: u64) -> StoragePlan {
+/// what a degraded mount wrote back. `holds`: what is on the new disk now (it is erased: a
+/// warning names it, e.g. the half of another btrfs volume).
+pub fn plan_replace(fs: &BtrfsFilesystem, devid: u64, new_disk: &str, size: u64, holds: &[String]) -> StoragePlan {
     let op = "btrfs_replace";
     let (mnt, r) = match mounted_repair(fs) {
         Ok(x) => x,
@@ -788,8 +952,39 @@ pub fn plan_replace(fs: &BtrfsFilesystem, devid: u64, new_disk: &str, size: u64)
         steps.push(convert_step(&mnt, &r.convert));
     }
     let mut p = plan(op, errors, steps);
+    if !holds.is_empty() {
+        crate::plan::warn(
+            &mut p,
+            PlanWarningCode::DataErased,
+            PlanArgs { subject: Some(new_disk.into()), items: holds.to_vec(), ..Default::default() },
+        );
+    }
     p.summary = vec![("mountpoint".into(), mnt), ("devid".into(), devid.to_string()), ("disk".into(), new_disk.into())];
     p
+}
+
+/// What is on disk `name` that a replace would erase: its uses (as the inventory names them)
+/// and every btrfs filesystem on it or its partitions other than `own` (the half of another
+/// volume, maybe the one a split brain left).
+pub fn disk_holds(inv: &crate::Inventory, name: &str, own: &str) -> Vec<String> {
+    let mut v: Vec<String> = inv.disks.iter().find(|d| d.name == name).map(|d| d.used_by.clone()).unwrap_or_default();
+    let mut devs: Vec<&crate::lsblk::BlockDev> = inv.graph.devs.values().filter(|d| d.kname == name || inv.graph.disks_under(&d.kname) == [name.to_string()]).collect();
+    devs.sort_by(|a, b| a.kname.cmp(&b.kname));
+    for d in devs {
+        if d.fstype.as_deref() == Some("btrfs") && d.uuid.as_deref().is_some_and(|u| !u.eq_ignore_ascii_case(own)) {
+            let s = format!(
+                "btrfs {} {} on {} (part of another volume?)",
+                d.label.as_deref().map(|l| format!("“{l}”")).unwrap_or_default(),
+                d.uuid.as_deref().unwrap_or(""),
+                d.kname
+            )
+            .replace("  ", " ");
+            if !v.contains(&s) {
+                v.push(s);
+            }
+        }
+    }
+    v
 }
 
 /// Remove the missing devices of `fs` (the others take their chunks), then convert.
@@ -807,7 +1002,8 @@ pub fn plan_remove_missing(fs: &BtrfsFilesystem) -> StoragePlan {
         Some(BtrfsBlocker::Incomplete) => errors.push(format!("chunks without a complete copy ({})", r.lost.join(", "))),
         Some(BtrfsBlocker::TooFewDevices) => errors.push("the devices left are fewer than the profiles need: replace the missing device instead".into()),
         Some(BtrfsBlocker::NoSpace) => errors.push("the devices left have not enough free space for the missing device's chunks".into()),
-        Some(_) | None => {}
+        Some(_) => errors.push("what the missing device held is not known now (a drive may sleep): try again".into()),
+        None => {}
     }
     let mut argv: Vec<String> = ["btrfs", "device", "remove"].map(String::from).into();
     for _ in 0..r.missing_count.max(1) {
@@ -880,13 +1076,18 @@ pub fn mount_now(host: &dyn crate::host::Host, c: &MountCandidate, systemd: bool
 
 // ------------------------------------------------------------------------------- execution
 
-/// Progress of `btrfs replace status -1`: `Some(pct)` while running, `Ok` when finished.
+/// State of a replace as `btrfs replace status -1` prints it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplaceState {
     Running(f32),
     Finished,
+    /// `Never started`: right after `replace start` the kernel may not show it yet.
+    NotStarted,
     Failed(String),
 }
+
+/// Polls of 5 s a replace may answer "Never started" before the wait gives up.
+pub const NOT_STARTED_POLLS: u32 = 12;
 
 /// `btrfs replace status -1 <mnt>`: `12.3% done, 0 write errs, 0 uncorr. read errs`,
 /// `Started on …, finished on …, 0 write errs, …`, `Started on …, canceled on …`,
@@ -898,6 +1099,9 @@ pub fn parse_replace_status(s: &str) -> ReplaceState {
     }
     if t.contains("finished on") {
         return ReplaceState::Finished;
+    }
+    if t.starts_with("Never started") || t.is_empty() {
+        return ReplaceState::NotStarted;
     }
     ReplaceState::Failed(if t.is_empty() { "no status".into() } else { t.lines().last().unwrap_or(t).to_string() })
 }
@@ -944,13 +1148,19 @@ pub async fn run_plan<M: Machine>(m: &M, p: &StoragePlan) -> Result<(), String> 
         match &st.action {
             PlanAction::Wait { condition } if condition.starts_with("btrfs replace ") => {
                 let base = i * 100 / total;
+                // `replace start` returns before the kernel shows the replace: "Never started"
+                // is accepted for the first polls (NOT_STARTED_POLLS x 5 s)
+                let mut polls = 0u32;
                 loop {
+                    polls += 1;
                     let s = run(m, ["btrfs", "replace", "status", "-1", &mnt].map(String::from).into(), false).await?;
                     match parse_replace_status(&s) {
                         ReplaceState::Finished => break,
                         ReplaceState::Running(pct) => {
                             m.progress((base as f32 + pct / total as f32).min(99.0) as u8);
                         }
+                        ReplaceState::NotStarted if polls <= NOT_STARTED_POLLS => {}
+                        ReplaceState::NotStarted => return Err("the rebuild did not start".into()),
                         ReplaceState::Failed(e) => return Err(format!("the rebuild stopped: {e}")),
                     }
                     if m.is_cancelled() {
