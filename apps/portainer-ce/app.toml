@@ -1,8 +1,8 @@
 schema = 1
 id = "portainer-ce"
 name = "Portainer CE"
-version = "1.0.0"
-app_version = "2.45.3"
+version = "1.0.1"
+app_version = "2.45.4"
 update_policy = "minor"
 description = "Container management UI for Docker, Swarm and Kubernetes (Community Edition)."
 homepage = "https://www.portainer.io"
