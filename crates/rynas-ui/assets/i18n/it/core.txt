@@ -5487,6 +5487,7 @@ pca.last_error	Ultimo errore
 pca.changed	File cambiati durante la lettura
 pca.changed_n	{n} file
 pca.changed_note	Questi file sono stati scritti mentre il backup li leggeva: la loro copia può mescolare contenuto vecchio e nuovo. Il congelamento del filesystem, uno snapshot (btrfs, LVM) o un dump prima del backup lo evitano.
+pca.changed_more	Sono elencati i primi {n} su {total}.
 pca.how_read	Come è stato letto ogni filesystem
 pca.m.btrfs	snapshot btrfs
 pca.m.lvm	snapshot LVM

@@ -776,7 +776,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
             {run.as_ref().filter(|r| !r.changed_during.is_empty()).map(|r| view! {
                 {ui::fold(None, "pca.changed", false, None, view! { 
                     <p class="small muted">{tr("pca.changed_note")}</p>
-                    <ul class="small mono bk-wrap">{r.changed_during.iter().map(|c| view! { <li>{c.clone()}</li> }).collect_view()}</ul>
+                    {changed_view(&r.changed_during, r.changed_count)}
                  }.into_any())}
             })}
             {form_error(error)}
@@ -1247,6 +1247,45 @@ fn phase_text(p: AgentPhase) -> &'static str {
     }
 }
 
+/// The files changed while read, by folder (sorted), each with its file names in the order
+/// the agent listed them.
+fn changed_by_folder(paths: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut by: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for p in paths {
+        let (dir, name) = match p.rsplit_once('/') {
+            Some(("", name)) => ("/".to_string(), name),
+            Some((dir, name)) => (dir.to_string(), name),
+            None => (String::new(), p.as_str()),
+        };
+        by.entry(dir).or_default().push(name.to_string());
+    }
+    by.into_iter().collect()
+}
+
+/// The list of files changed while read: one foldable row per folder with its count (open when
+/// there is only one), and how many of the total the agent listed.
+fn changed_view(paths: &[String], total: u64) -> AnyView {
+    let groups = changed_by_folder(paths);
+    let open = groups.len() == 1;
+    let listed = paths.len() as u64;
+    view! {
+        <ul class="small pca-changed">
+            {groups.into_iter().map(|(dir, names)| {
+                let n = i18n::count(names.len() as u64);
+                view! {
+                    <li><details class="fold" open=open>
+                        <summary><Icon icon=icons::CHEVRON_RIGHT size=14 /><span class="mono bk-wrap">{dir}</span><span class="muted pca-changed-n">{n}</span></summary>
+                        <ul class="mono bk-wrap">{names.into_iter().map(|f| view! { <li>{f}</li> }).collect_view()}</ul>
+                    </details></li>
+                }
+            }).collect_view()}
+        </ul>
+        {(total > listed).then(|| view! { <p class="small muted">{tf("pca.changed_more", &[("n", &i18n::count(listed)), ("total", &i18n::count(total))])}</p> })}
+    }
+    .into_any()
+}
+
+
 /// Why a filesystem was read the way it was, in the interface's language (agents from 0.8.21;
 /// older ones: their English text through [`agent_note`]).
 pub(super) fn capture_note_text(n: &CaptureNote) -> Option<String> {
@@ -1474,4 +1513,24 @@ fn browse_drawer(device: String, version: String, close: Callback<()>) -> AnyVie
     let foot = ui::close_foot(close);
     let title = Signal::stored(tf("pca.browse_title", &[("device", &device), ("id", &version[..version.len().min(8)])]));
     view! { {ui::drawer_wide(title, close, body, foot)} }.into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::changed_by_folder;
+
+    #[test]
+    fn files_changed_while_read_group_by_folder() {
+        let p = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let g = changed_by_folder(&p(&["/var/log/b.log", "/etc/x", "/var/log/a.log", "/top", "rel"]));
+        assert_eq!(
+            g,
+            vec![
+                (String::new(), p(&["rel"])),
+                ("/".to_string(), p(&["top"])),
+                ("/etc".to_string(), p(&["x"])),
+                ("/var/log".to_string(), p(&["b.log", "a.log"])),
+            ]
+        );
+    }
 }

@@ -6169,6 +6169,7 @@ dict! { BLOB, LENS;
     "pca.changed" => "Files changed while read";
     "pca.changed_n" => "{n} files";
     "pca.changed_note" => "These files were written while the backup read them: their copy may mix old and new content. Freezing the filesystem, a snapshot (btrfs, LVM) or a pre-backup dump avoids it.";
+    "pca.changed_more" => "The first {n} of {total} are listed.";
     "pca.how_read" => "How each filesystem was read";
     "pca.m.btrfs" => "btrfs snapshot";
     "pca.m.lvm" => "LVM snapshot";
