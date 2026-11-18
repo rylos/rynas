@@ -573,6 +573,11 @@ like every configuration key (A19). Types in `rynas_api_types::storage`.
 | GET / POST | `/api/v1/storage/volumes/{name}/subvolumes` | `SubvolumeCreateRequest` {name, compression, readonly} | `Vec<SubvolumeInfo>` / 202 (`storage.subvolume-create`) |
 | PUT / DELETE | `/api/v1/storage/volumes/{name}/subvolumes/{sub}?confirm={sub}` | `SubvolumeSettings` {compression, readonly} | 202 (`storage.subvolume-settings`, `storage.subvolume-delete`) |
 | GET / PUT | `/api/v1/storage/disks/{name}/settings` | `DiskSettings` {scheduler?, read_ahead_kb?, apm?, standby_s?} | `DiskSettingsState` {defaults, applied?, pending?, effective, current_*} (PUT stages `storage.disks`) |
+| POST | `/api/v1/storage/btrfs/{uuid}/mount-degraded` | `BtrfsRepairRequest` {confirm, dry_run} | 202 (`storage.btrfs-mount-degraded`) / 200; 409 for a split brain (`../phase2/btrfs-degraded.md`) |
+| POST | `/api/v1/storage/btrfs/{uuid}/replace` | `BtrfsReplaceRequest` {devid, new_disk, confirm, serials, dry_run} | 202 (`storage.btrfs-replace`) / 200 |
+| POST | `/api/v1/storage/btrfs/{uuid}/remove-missing` | `BtrfsRepairRequest` {confirm, dry_run} | 202 (`storage.btrfs-remove-missing`) / 200 |
+| POST | `/api/v1/storage/btrfs/{uuid}/convert` | `BtrfsRepairRequest` {dry_run} | 202 (`storage.btrfs-convert`) / 200 |
+| GET / PUT | `/api/v1/storage/btrfs/{uuid}/settings` | `BtrfsSettings` {auto_degraded} | `BtrfsSettingsState` {applied, pending?} (PUT stages `storage.disks`: `btrfs_manual`) |
 | POST | `/api/v1/shares` | `Share` with `subvolume` {volume, compression} and an empty `path` | as before: the share is staged with path `/<volume>/<name>`, its subvolume is created by the apply |
 
 Grow and replace: `serials` lists every disk the plan erases (step `destroys` naming a whole
@@ -990,6 +995,10 @@ schema 2 added the `code` and `body_format` columns.
 | `storage.raid_degraded` / `storage.raid_failed` / `storage.raid_inactive` / `storage.raid_ok` | `array`, `level`, `state`, `degraded`, `raid_disks`, `members` (optional) | RAID {array} degraded / failed / inactive / healthy again |
 | `storage.btrfs_errors` / `storage.btrfs_errors_cleared` | `volume`, `device`, `write_io`, `read_io`, `flush_io`, `corruption`, `generation` | Volume {volume}: device errors on {device} / counters cleared |
 | `storage.btrfs_missing` / `storage.btrfs_back` | `volume`, `devid` | Volume {volume}: device {devid} missing / back |
+| `storage.btrfs_unmounted` / `storage.btrfs_unmounted_ok` | `volume`, `missing`, `total` | Volume {volume} cannot be mounted: devices missing / is mounted |
+| `storage.btrfs_weak_chunks` / `storage.btrfs_weak_chunks_ok` | `volume`, `chunks` | Volume {volume}: chunks with less redundancy / redundancy restored |
+| `storage.btrfs_mounted_degraded` / `storage.btrfs_mount_failed` | `volume`, `present`, `total`, `error` (failed) | Volume {volume} mounted degraded / could not be mounted degraded (oneshot, after boot) |
+| `storage.btrfs_split_brain` | `volume` | Volume {volume} not mounted: its devices may hold older data (oneshot) |
 | `storage.volume_full` / `storage.volume_ok` | `volume`, `used_pct`, `used_gib`, `free_gib` / `limit_pct` | Volume {volume} {used_pct}% full / back under {limit_pct}% |
 | `task.failed` / `task.succeeded` | `type`, `task_id`, `user` | Task failed / succeeded: {type} (body: the task error, not translated) |
 | `config.apply_failed` / `config.apply_ok` | `type`, `task_id`, `user` | Configuration apply failed / succeeded |

@@ -162,3 +162,9 @@ symbolic link to `/`.
 - A notification when the root filesystem crosses the low-space threshold (today: the Docker
   data-root alert and the flag on every choice).
 - A Storage page card for the system volume (device, free space, the exceptions above).
+
+## Root filesystem on several btrfs devices
+
+A root filesystem with its own btrfs RAID profile that loses a device starts only with
+`rootflags=degraded` at the boot loader; the volume page says so and offers the repairs. See
+`btrfs-degraded.md` §1.2 and §2.4.

@@ -29,9 +29,9 @@ synodeb hardware screens, the app catalogue, Docker stacks next to other manager
 | E | Encrypted folder | done 2026-11-08 (D-CRYPT E1, `encrypted-folders.md`): gocryptfs folder per share, recovery key, lock/unlock, password change, optional automatic unlock; volume LUKS exists | done |
 | E | Synology Photos album import into Immich | one-time import from the `synofoto` database dump | not started |
 | — | Firewall (nftables) | lower priority when the router filters | not started (fail2ban for the login and systemd IP filters for upsd only) |
-| — | Degraded btrfs boot | document booting with a dead mirror member (`-o degraded`) | partial: since 0.8.11 md arrays left inactive by a missing drive are started degraded after boot and the volume mounted; a btrfs multi-device volume or root with a dead member (`-o degraded`, `rootflags=degraded`) is neither handled nor documented |
+| — | Degraded btrfs boot | document booting with a dead mirror member (`-o degraded`) | done after 0.8.21 (`btrfs-degraded.md`): md arrays since 0.8.11; a btrfs volume of several devices left unmounted by a missing device is listed and mounted degraded after boot when every chunk has a copy (per-volume setting, on by default; split-brain guard), replace / remove missing / restore redundancy as tasks; a root filesystem gets the `rootflags=degraded` guidance |
 
 Phase A comes first because a certificate renewal date drives the migration.
 
 Status on 2026-11-18 (release 0.8.21): phases A to D and the encrypted folder are done; still
-open are the photo album import, the firewall and the degraded btrfs boot.
+open are the photo album import and the firewall; the degraded btrfs boot is done after 0.8.21.
