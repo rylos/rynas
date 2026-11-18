@@ -8,8 +8,7 @@ module.exports = {
   onboarding: false,
   requireConfig: "optional",
   gitAuthor: "Marco Ziliani <508111+rylos@users.noreply.github.com>",
-  dependencyDashboard: true,
-  dependencyDashboardTitle: "App catalogue updates",
+  dependencyDashboard: { enabled: true, title: "App catalogue updates" },
   enabledManagers: ["docker-compose"],
   "docker-compose": {
     managerFilePatterns: ["/^apps/[^/]+/compose\\.yaml$/"],
@@ -39,6 +38,10 @@ module.exports = {
       automerge: true,
       automergeType: "pr",
       minimumReleaseAge: "3 days",
+      // take the newest release that is old enough: with "strict" an image that releases more
+      // often than every three days (Home Assistant, Immich, Redis) never gets its branch
+      // updated, and the PR stays on its first, still pending status for good
+      internalChecksFilter: "flexible",
     },
     {
       matchUpdateTypes: ["major"],
