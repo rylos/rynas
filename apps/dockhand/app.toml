@@ -1,8 +1,8 @@
 schema = 1
 id = "dockhand"
 name = "Dockhand"
-version = "1.0.1"
-app_version = "v1.0.57"
+version = "1.0.2"
+app_version = "v1.0.58"
 update_policy = "minor"
 description = "Docker manager with compose stacks, Git deploys, update checks and restic backups."
 homepage = "https://dockhand.pro"
