@@ -1500,9 +1500,18 @@ pub struct FakeMachine {
     /// Cancel when a command line starting with this runs.
     pub cancel_at: Option<String>,
     pub no_systemd: bool,
+    /// Answers given once each, in order, before `outputs` (a status that changes between
+    /// two runs of the same command).
+    pub queued: std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<String>>>,
 }
 
 impl FakeMachine {
+    /// Queues `stdout` as the next answer of `line` (used once, before `outputs`).
+    pub fn then(&mut self, line: &str, stdout: &str) -> &mut Self {
+        self.queued.get_mut().unwrap().entry(line.into()).or_default().push_back(stdout.into());
+        self
+    }
+
     pub fn output(&mut self, line: &str, stdout: &str) -> &mut Self {
         self.outputs.insert(
             line.into(),
@@ -1566,7 +1575,13 @@ impl Machine for FakeMachine {
         let r = match self.fail.iter().find(|(k, _)| line.starts_with(k.as_str())) {
             Some((_, e)) => Err(e.clone()),
             None if opts.cancellable && self.is_cancelled() => Err("cancelled".to_string()),
-            None => Ok(self.outputs.get(&line).cloned().unwrap_or_default()),
+            None => {
+                let queued = self.queued.lock().unwrap().get_mut(&line).and_then(|q| q.pop_front());
+                Ok(match queued {
+                    Some(stdout) => Output { stdout, stderr: String::new() },
+                    None => self.outputs.get(&line).cloned().unwrap_or_default(),
+                })
+            }
         };
         std::future::ready(r)
     }

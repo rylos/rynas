@@ -390,8 +390,12 @@ fn the_record_waits_for_a_clean_scrub() {
     assert_eq!(g.mounts[UUID].whole_scrub, None);
     g.annotate(&mut v);
     assert!(v[0].repair.is_none());
-    // device 2 back (an older scrub on record): the scrub status of now is noted, warning
+    // device 2 back but the scrub status unreadable: nothing noted yet (an old clean scrub
+    // read on the next pass must not count as one after the reunion)
     let old = Some(("Mon Nov 16 03:00:00 2026", ScrubState::Finished, 0));
+    g.settle(&[fs(false, None)]);
+    assert_eq!(g.mounts[UUID].whole_scrub, None);
+    // device 2 back (an older scrub on record): the scrub status of now is noted, warning
     let mut v = vec![fs(false, old)];
     g.settle(&v);
     assert_eq!(g.mounts[UUID].whole_scrub.as_deref(), Some("Mon Nov 16 03:00:00 2026"));
@@ -597,13 +601,15 @@ fn the_replace_task_runs_waits_and_converts_what_is_weak_then() {
     let f = degraded_fs();
     let p = plan_replace(&f, 3, "sdd", 2 << 30, &[]);
     let mut m = FakeMachine::default();
-    m.output("btrfs replace status -1 /fxvol", "Started on 18.Nov 12:05:56, finished on 18.Nov 12:05:56, 0 write errs, 0 uncorr. read errs\n")
+    m.then("btrfs replace status -1 /fxvol", "Never started\n")
+        .output("btrfs replace status -1 /fxvol", "Started on 18.Nov 12:05:56, finished on 18.Nov 12:05:56, 0 write errs, 0 uncorr. read errs\n")
         .output("btrfs device usage -b /fxvol", include_str!("../tests/fixtures/btrfs-device-usage-after-replace.txt"));
     run_now(run_plan(&m, &p)).unwrap();
     assert_eq!(
         m.ran(),
         [
             "wipefs -a /dev/sdd",
+            "btrfs replace status -1 /fxvol",
             "btrfs replace start 3 /dev/sdd /fxvol",
             "btrfs replace status -1 /fxvol",
             "btrfs filesystem resize 3:max /fxvol",
@@ -620,14 +626,30 @@ fn the_replace_task_runs_waits_and_converts_what_is_weak_then() {
     let mut m = FakeMachine::default();
     m.output("btrfs replace status -1 /fxvol", "Never started\n");
     assert!(run_now(run_plan(&m, &p)).unwrap_err().contains("did not start"));
-    assert_eq!(m.ran().iter().filter(|l| l.contains("replace status")).count(), NOT_STARTED_POLLS as usize + 1);
+    assert_eq!(m.ran().iter().filter(|l| l.contains("replace status")).count(), NOT_STARTED_POLLS as usize + 2, "the status before the start, then the polls");
+    // an earlier replace of this filesystem, finished long ago: its "finished" is not this one's
+    let old = "Started on 2.Nov 09:00:00, finished on 2.Nov 09:30:00, 0 write errs, 0 uncorr. read errs\n";
+    let new = "Started on 18.Nov 12:05:56, finished on 18.Nov 12:20:01, 0 write errs, 0 uncorr. read errs\n";
+    let mut m = FakeMachine::default();
+    m.then("btrfs replace status -1 /fxvol", old)
+        .then("btrfs replace status -1 /fxvol", old)
+        .then("btrfs replace status -1 /fxvol", "42.0% done, 0 write errs, 0 uncorr. read errs\n")
+        .output("btrfs replace status -1 /fxvol", new)
+        .output("btrfs device usage -b /fxvol", include_str!("../tests/fixtures/btrfs-device-usage-healthy.txt"));
+    run_now(run_plan(&m, &p)).unwrap();
+    assert_eq!(m.ran().iter().filter(|l| l.contains("replace status")).count(), 4, "old finished, running, new finished");
+    // only the old "finished" ever: the replace never showed up
+    let mut m = FakeMachine::default();
+    m.output("btrfs replace status -1 /fxvol", old);
+    assert!(run_now(run_plan(&m, &p)).unwrap_err().contains("did not start"));
     // the rebuild stops: the task fails
     let mut m = FakeMachine::default();
     m.output("btrfs replace status -1 /fxvol", "Started on 18.Nov 12:05:56, canceled on 18.Nov 12:06:10 at 0.0%\n");
     assert!(run_now(run_plan(&m, &p)).unwrap_err().contains("rebuild stopped"));
     // nothing weak after the rebuild: the conversion is skipped
     let mut m = FakeMachine::default();
-    m.output("btrfs replace status -1 /fxvol", "Started on x, finished on y, 0 write errs\n")
+    m.then("btrfs replace status -1 /fxvol", "Never started\n")
+        .output("btrfs replace status -1 /fxvol", "Started on x, finished on y, 0 write errs\n")
         .output("btrfs device usage -b /fxvol", include_str!("../tests/fixtures/btrfs-device-usage-healthy.txt"));
     run_now(run_plan(&m, &p)).unwrap();
     assert!(!m.ran().iter().any(|l| l.starts_with("btrfs balance")));

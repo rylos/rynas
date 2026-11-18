@@ -635,7 +635,10 @@ impl Guard {
         let mut done: Vec<String> = Vec::new();
         for (uuid, r) in self.mounts.iter_mut() {
             let Some(fs) = fss.iter().find(|f| f.uuid.eq_ignore_ascii_case(uuid) && whole(f)) else { continue };
-            let started = fs.scrub.as_ref().and_then(|s| s.started.clone()).unwrap_or_default();
+            // the scrub status could not be read: nothing is noted (a status read later would
+            // otherwise make an old, clean scrub look newer than the reunion)
+            let Some(scrub) = fs.scrub.as_ref() else { continue };
+            let started = scrub.started.clone().unwrap_or_default();
             match &r.whole_scrub {
                 None => r.whole_scrub = Some(started),
                 Some(seen) => {
@@ -1139,6 +1142,9 @@ async fn stop_kernel_work(m: &impl Machine, argv: &[String], mnt: &str) {
 pub async fn run_plan<M: Machine>(m: &M, p: &StoragePlan) -> Result<(), String> {
     let total = p.steps.len().max(1);
     let mnt = p.summary.iter().find(|(k, _)| k == "mountpoint").map(|(_, v)| v.clone()).unwrap_or_default();
+    // the replace status before this task's replace started: a "finished" equal to it is an
+    // earlier replace of the same filesystem, not this one
+    let mut before_replace: Option<String> = None;
     for (i, st) in p.steps.iter().enumerate() {
         if m.is_cancelled() {
             return Err("cancelled".into());
@@ -1154,7 +1160,11 @@ pub async fn run_plan<M: Machine>(m: &M, p: &StoragePlan) -> Result<(), String> 
                 loop {
                     polls += 1;
                     let s = run(m, ["btrfs", "replace", "status", "-1", &mnt].map(String::from).into(), false).await?;
-                    match parse_replace_status(&s) {
+                    let state = match parse_replace_status(&s) {
+                        ReplaceState::Finished if before_replace.as_deref() == Some(s.trim()) => ReplaceState::NotStarted,
+                        other => other,
+                    };
+                    match state {
                         ReplaceState::Finished => break,
                         ReplaceState::Running(pct) => {
                             m.progress((base as f32 + pct / total as f32).min(99.0) as u8);
@@ -1184,6 +1194,13 @@ pub async fn run_plan<M: Machine>(m: &M, p: &StoragePlan) -> Result<(), String> 
                 }
                 if let Some(d) = st.destroys.first() {
                     m.claim_free(&format!("/dev/{d}"))?;
+                }
+                if st.kind == Some(PlanStepKind::BtrfsReplace) {
+                    before_replace = run(m, ["btrfs", "replace", "status", "-1", &mnt].map(String::from).into(), false)
+                        .await
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| parse_replace_status(s) == ReplaceState::Finished);
                 }
                 if let Err(e) = run(m, argv.clone(), true).await {
                     if m.is_cancelled() {
