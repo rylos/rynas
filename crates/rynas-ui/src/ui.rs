@@ -310,15 +310,17 @@ impl<T: serde::de::DeserializeOwned + Send + Sync + 'static> Remote<T> {
     pub fn reload(self) {
         let data = self.data;
         let err = self.err;
+        // a plain closure, not a `Callback`: a reload started from a click (a browser going
+        // into a folder) has no lasting reactive owner, and a callback stored there is gone
+        // when the answer comes (the skeleton then stayed for good)
         fetch_text(
             self.src,
             err,
-            Callback::new(move |text: String| match crate::api::decode::<T>(&text) {
-                Ok(v) => {
-                    let _ = data.try_set(Some(v));
-                }
+            Box::new(move |text: &str| match crate::api::decode::<T>(text) {
+                Ok(v) => data.try_set(Some(v)).is_none(),
                 Err(_) => {
                     let _ = err.try_set(Some("decode".into()));
+                    true
                 }
             }),
         );
@@ -358,8 +360,8 @@ impl<T: serde::de::DeserializeOwned + Send + Sync + 'static> Remote<T> {
 }
 
 /// The request of [`Remote::reload`], not generic. `apply` gets the body when it differs from
-/// the last one.
-fn fetch_text(src: StoredValue<(String, String)>, err: RwSignal<Option<String>>, apply: Callback<String>) {
+/// the last one, and says whether it reached the value (`false`: the value is gone).
+fn fetch_text(src: StoredValue<(String, String)>, err: RwSignal<Option<String>>, apply: Box<dyn Fn(&str) -> bool>) {
     let Some(url) = src.try_with_value(|s| s.0.clone()) else { return };
     leptos::task::spawn_local(async move {
         let answer = crate::api::get_text(&url).await;
@@ -378,7 +380,7 @@ fn fetch_text(src: StoredValue<(String, String)>, err: RwSignal<Option<String>>,
                 // generation bump right after a dialog's own reload) dispose the first one's
                 // `apply` with its effect run, and the second answer, equal to the first, must
                 // still reach the data
-                if src.try_with_value(|s| s.1 != text) == Some(true) && apply.try_run(text.clone()).is_some() {
+                if src.try_with_value(|s| s.1 != text) == Some(true) && apply(&text) {
                     let _ = src.try_update_value(|s| s.1 = text);
                 }
             }
