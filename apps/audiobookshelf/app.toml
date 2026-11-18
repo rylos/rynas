@@ -1,8 +1,8 @@
 schema = 1
 id = "audiobookshelf"
 name = "Audiobookshelf"
-version = "1.0.0"
-app_version = "2.37.2"
+version = "1.0.1"
+app_version = "2.38.0"
 update_policy = "minor"
 description = "Audiobook and podcast server with progress sync across the web and mobile apps."
 homepage = "https://www.audiobookshelf.org"
