@@ -96,6 +96,8 @@ fn step_text(s: &PlanStep) -> Text {
             Some(i18n::tn("plan.s.create_partitions", *n, &[("subject", d)]))
         }
         (Some(PlanStepKind::CreatePartition), PlanArgs { other: Some(_), .. }) => coded("plan.s.", "create_tier_partition".into(), &s.args),
+        // the profiles are known only once the repair before it has run
+        (Some(PlanStepKind::BtrfsConvert), PlanArgs { items, .. }) if items.is_empty() => coded("plan.s.", "btrfs_convert_any".into(), &s.args),
         (Some(k), args) => coded("plan.s.", code_name(&k), args),
         (None, _) => None,
     };

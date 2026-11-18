@@ -264,7 +264,10 @@ pub fn converts(usage: &[DevUsage]) -> Vec<BtrfsConvert> {
 }
 
 /// Why the missing devices cannot be removed now; `None` when the devices present can take
-/// their chunks with every profile kept.
+/// their chunks with every profile kept. Chunks are relocated one at a time (a new chunk, then
+/// the old one freed), so in the end the devices present must hold what the missing ones held:
+/// it must fit in their unallocated space, less [`REMOVE_ROOM`] per device of working room
+/// (a whole new chunk is allocated before the old one is freed; the kernel keeps a reserve).
 pub fn remove_blocker(usage: &[DevUsage]) -> Option<BtrfsBlocker> {
     if !lost(usage).is_empty() {
         return Some(BtrfsBlocker::Incomplete);
@@ -281,12 +284,15 @@ pub fn remove_blocker(usage: &[DevUsage]) -> Option<BtrfsBlocker> {
         return Some(BtrfsBlocker::TooFewDevices);
     }
     let moved: u64 = usage.iter().filter(|d| d.missing).map(DevUsage::allocated).sum();
-    let free: u64 = present.iter().map(|d| d.unallocated).sum();
+    let free: u64 = present.iter().map(|d| d.unallocated.saturating_sub(REMOVE_ROOM)).sum();
     if moved > free {
         return Some(BtrfsBlocker::NoSpace);
     }
     None
 }
+
+/// Working room per device kept free by [`remove_blocker`].
+pub const REMOVE_ROOM: u64 = 256 << 20;
 
 /// The soft balance that converts `c` back: `-dconvert=raid1,soft -mconvert=raid1c3,soft`;
 /// system chunks follow the metadata, or get their own filter (which needs `-f`) when their
@@ -395,7 +401,11 @@ pub struct Unmounted {
 pub fn unmounted(fstab: &[FstabEntry], g: &BlockGraph, mounts: &[Mount], mounted: &[BtrfsFilesystem]) -> Vec<Unmounted> {
     let mut out: Vec<Unmounted> = Vec::new();
     for e in fstab.iter().filter(|e| e.fstype == "btrfs") {
-        if volume_mountpoint(&e.mountpoint).is_none() || mounts.iter().any(|m| m.mountpoint == e.mountpoint) {
+        // `noauto`: not mounted at boot on purpose, so not ours to report or mount
+        if volume_mountpoint(&e.mountpoint).is_none()
+            || e.options.iter().any(|o| o == "noauto")
+            || mounts.iter().any(|m| m.mountpoint == e.mountpoint)
+        {
             continue;
         }
         let Some(uuid) = spec_uuid(&e.spec, g) else { continue };

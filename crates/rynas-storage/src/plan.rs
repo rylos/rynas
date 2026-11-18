@@ -193,6 +193,9 @@ pub(crate) fn step_english(kind: PlanStepKind, a: &PlanArgs) -> String {
         K::BtrfsRemoveMissing => {
             return format!("Remove the missing devices of {s} (the others take their data)");
         }
+        K::BtrfsConvert if a.items.is_empty() => {
+            return format!("Convert the chunks of {s} written with a weaker profile meanwhile back, if any");
+        }
         K::BtrfsConvert => {
             return format!("Convert the chunks of {s} written with a weaker profile back to {}", a.items.join(", "));
         }

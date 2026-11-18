@@ -151,15 +151,17 @@ fn weaker_chunks_left_by_the_degraded_mount_are_converted_back() {
 fn removing_the_missing_device_needs_enough_devices_and_space() {
     // raid1c3 metadata on the two devices left: too few
     assert_eq!(remove_blocker(&usage("degraded")), Some(BtrfsBlocker::TooFewDevices));
+    const M: u64 = 1 << 20;
     let raid1 = |free: u64| {
         vec![
-            dev(1, "/dev/sda", &[("data", "raid1", 10), ("metadata", "raid1", 2)], free),
-            dev(2, "/dev/sdb", &[("data", "raid1", 10), ("metadata", "raid1", 2)], free),
-            dev(3, "", &[("data", "raid1", 10), ("metadata", "raid1", 2)], 50),
+            dev(1, "/dev/sda", &[("data", "raid1", 100 * M), ("metadata", "raid1", 20 * M)], free),
+            dev(2, "/dev/sdb", &[("data", "raid1", 100 * M), ("metadata", "raid1", 20 * M)], free),
+            dev(3, "", &[("data", "raid1", 100 * M), ("metadata", "raid1", 20 * M)], 50 * M),
         ]
     };
-    assert_eq!(remove_blocker(&raid1(100)), None);
-    assert_eq!(remove_blocker(&raid1(5)), Some(BtrfsBlocker::NoSpace));
+    // 120 MiB to place: (1 GiB - 256 MiB) x 2 is room enough; (300 - 256) MiB x 2 is not
+    assert_eq!(remove_blocker(&raid1(1 << 30)), None);
+    assert_eq!(remove_blocker(&raid1(300 * M)), Some(BtrfsBlocker::NoSpace));
     let u = vec![dev(1, "/dev/sda", &[("data", "single", 10)], 100), dev(2, "", &[("data", "single", 10)], 100)];
     assert_eq!(remove_blocker(&u), Some(BtrfsBlocker::Incomplete));
 }
@@ -225,9 +227,9 @@ fn configured_volumes_that_did_not_mount() {
     let fstab = parse_fstab(
         "# comment\nUUID=24a82255-ac7d-4198-b5d4-8dba11c8f5ed / btrfs defaults 0 0\n\
          UUID=DE89BE44-41d2-4fad-ae56-9a2c5b027c0e /fxvol btrfs noatime,compress=zstd:1,nofail,x-systemd.device-timeout=10s 0 0\n\
-         LABEL=data2 /data2 btrfs nofail 0 0\n/dev/sde1 /media/usb btrfs noauto 0 0\nbroken\n",
+         LABEL=data2 /data2 btrfs nofail 0 0\n/dev/sde1 /media/usb btrfs noauto 0 0\nUUID=0b000000-0000-0000-0000-000000000000 /spare btrfs noauto 0 0\nbroken\n",
     );
-    assert_eq!(fstab.len(), 4);
+    assert_eq!(fstab.len(), 5);
     assert_eq!(fstab[1].options, ["noatime", "compress=zstd:1", "nofail", "x-systemd.device-timeout=10s"]);
     let g = graph();
     // data2 is mounted
@@ -332,7 +334,7 @@ fn mount_after_boot() {
     let mut h = crate::host::FakeHost::default();
     h.cmd(&line, 0, "");
     assert_eq!(mount_now(&h, &c, false, "x"), Ok(()));
-    assert_eq!(h.ran(), [line.clone()]);
+    assert_eq!(h.ran().as_slice(), std::slice::from_ref(&line));
     let mut h = crate::host::FakeHost::default();
     h.commands.get_mut().unwrap().insert(
         line,
@@ -434,8 +436,8 @@ fn replace_plan() {
 fn remove_and_convert_plans() {
     let mut f = degraded_fs();
     let u = vec![
-        dev(1, "/dev/sda", &[("data", "raid1", 10), ("metadata", "raid1", 2)], 100),
-        dev(2, "/dev/sdb", &[("data", "raid1", 10), ("metadata", "raid1", 2), ("data", "single", 3)], 100),
+        dev(1, "/dev/sda", &[("data", "raid1", 10), ("metadata", "raid1", 2)], 1 << 30),
+        dev(2, "/dev/sdb", &[("data", "raid1", 10), ("metadata", "raid1", 2), ("data", "single", 3)], 1 << 30),
         dev(3, "", &[("data", "raid1", 10), ("metadata", "raid1", 2)], 50),
     ];
     f.repair = repair_of(&f, &u);

@@ -1729,6 +1729,7 @@ dict! { BLOB, LENS;
     "plan.s.btrfs_resize" => "Grow device {other} of {subject} to the whole drive";
     "plan.s.btrfs_remove_missing" => "Remove the missing devices of {subject} (the other drives take their data)";
     "plan.s.btrfs_convert" => "Convert the chunks of {subject} written with a weaker profile back to {items}";
+    "plan.s.btrfs_convert_any" => "Convert the chunks of {subject} written with a weaker profile meanwhile back, if any";
     "plan.w.flex_leftover_disk" => "{subject} still has old parts of this volume that no tier uses and is not erased: add it to a volume or erase it, since an old copy of a tier can disturb starting the volume";
     "plan.w.flex_unused_space" => "{items}: {size} unused until another drive reaches the same size";
     "plan.w.flex_long_reshape" => "The tiers are reshaped one at a time: {size} to move, about {n} h in all; the volume stays online";

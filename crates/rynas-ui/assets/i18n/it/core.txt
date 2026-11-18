@@ -5753,6 +5753,7 @@ plan.s.btrfs_wait_replace	Attendi la fine della ricostruzione su {subject}
 plan.s.btrfs_resize	Estendi il dispositivo {other} di {subject} a tutto il disco
 plan.s.btrfs_remove_missing	Rimuovi i dispositivi mancanti di {subject} (gli altri dischi prendono i loro dati)
 plan.s.btrfs_convert	Riconverti a {items} i chunk di {subject} scritti con un profilo più debole
+plan.s.btrfs_convert_any	Riconverti gli eventuali chunk di {subject} scritti nel frattempo con un profilo più debole
 plan.w.flex_leftover_disk	{subject} ha ancora vecchie parti di questo volume che nessuna fascia usa e non viene cancellato: aggiungilo a un volume o cancellalo, perché una vecchia copia di una fascia può disturbare l'avvio del volume
 plan.w.flex_unused_space	{items}: {size} inutilizzati finché un altro disco non raggiunge la stessa dimensione
 plan.w.flex_long_reshape	Le fasce vengono rimodellate una alla volta: {size} da spostare, circa {n} h in tutto; il volume resta disponibile

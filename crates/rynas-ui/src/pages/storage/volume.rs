@@ -466,7 +466,8 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
             })}
         </header>
         {stale_notice(s)}
-        {(!vol.managed).then(|| view! { {ui::note(Tone::Info, icons::INFO, view! { {tr("sto.unmanaged")} }.into_any())} })}
+        // a btrfs volume of several devices made elsewhere still gets its repairs (devices card)
+        {(!vol.managed && !vol.fs.as_ref().is_some_and(super::btrfs::multi_device)).then(|| view! { {ui::note(Tone::Info, icons::INFO, view! { {tr("sto.unmanaged")} }.into_any())} })}
         {pending.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
             <span>{tr("sto.flex_pending")}</span>
             <button class="btn primary sm row-end" type="button" on:click=move |_| modal.set(Open::Complete)>{tr("sto.complete")}</button>
