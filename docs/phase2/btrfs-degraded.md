@@ -172,6 +172,13 @@ that stayed die before it, the returned ones are refused alone (split brain). A 
 removal that leaves nothing missing ends the record at once: the missing device was rebuilt
 from the copies or is gone.
 
+Limit: a scrub repairs what it can verify by checksum. Files without checksums (`nodatacow`
+mounts, folders with `chattr +C`, the NOCOW shared folders and app folders of rynas) are not
+rewritten: on the device that came back their blocks written while it was away stay old, and
+a read may return the stale copy. After a reunion, check or restore such files (or copy them
+once, which writes both copies anew); a replace or removal instead rebuilds the device from
+the good copies and is not affected.
+
 To give up the newer half on purpose (it is lost for good), mount by hand:
 `mount -o degraded /dev/<member> /<label>`, then replace, as root.
 
