@@ -113,6 +113,11 @@ nev.storage.btrfs_unmounted_ok.title	Il volume {volume} è montato
 nev.storage.btrfs_weak_chunks.title	Volume {volume}: chunk con meno ridondanza
 nev.storage.btrfs_weak_chunks.body	Il volume {volume} ha chunk scritti con un profilo più debole mentre era degradato ({chunks}). Riconvertili da Archiviazione, così la perdita di un dispositivo non costa dati.
 nev.storage.btrfs_weak_chunks_ok.title	Volume {volume}: ridondanza ripristinata
+nev.storage.btrfs_scrub_needed.title	Volume {volume}: esegui una pulizia dati
+nev.storage.btrfs_scrub_needed.body	Tutti i dispositivi del volume {volume} sono tornati dopo che ha funzionato in modalità degradata, ma quelli che mancavano non hanno le copie di ciò che è stato scritto nel frattempo: perdere gli altri ora costa dati. Esegui una pulizia dati da Archiviazione; finché non termina senza errori, i dispositivi tornati non vengono montati da soli in modalità degradata.
+nev.storage.btrfs_scrub_needed_ok.title	Volume {volume}: copie aggiornate
+nev.storage.btrfs_guard_unreadable.title	Montaggi btrfs degradati fermati: il loro registro è illeggibile
+nev.storage.btrfs_guard_unreadable.body	Nessun volume btrfs viene montato in modalità degradata dopo l'avvio finché il registro dei montaggi degradati passati non si può leggere: {error}. Controlla quali dispositivi hanno i dati più recenti prima di correggere o rimuovere il file.
 nev.storage.btrfs_mounted_degraded.title	Volume {volume} montato in modalità degradata
 nev.storage.btrfs_mounted_degraded.body	Il volume {volume} era rimasto smontato dopo l'avvio perché mancano dei dispositivi, quindi è stato montato in modalità degradata sui {present} dei suoi {total} dispositivi presenti: lì ogni chunk ha ancora una copia. Finché il dispositivo mancante non viene sostituito o rimosso (Archiviazione, pagina del volume), la perdita di un altro dispositivo può costare dati e i nuovi dati possono essere scritti con meno ridondanza; la riparazione li riconverte.
 nev.storage.btrfs_mount_failed.title	Il volume {volume} non è stato montato in modalità degradata
@@ -1407,6 +1412,9 @@ sto.bt.replace_text	Il dispositivo mancante viene ricostruito sul nuovo disco da
 sto.bt.remove_text	Il dispositivo mancante lascia il volume per sempre: i suoi dati vengono copiati dalle copie rimaste sugli altri dischi. Richiede ore e spazio libero su di essi.
 sto.bt.convert_text	Un bilanciamento riscrive con il profilo del volume i chunk scritti con un profilo più debole; il resto non viene toccato.
 sto.bt.missing_device	Dispositivo mancante
+sto.bt.choose_disk	Scegli un disco
+sto.bt.disk_holds	Ora su questo disco: {items}. Verrà cancellato tutto.
+sto.bt.scrub_needed	Tutti i dispositivi sono tornati dopo che il volume ha funzionato in modalità degradata, ma quelli che mancavano non hanno le copie di ciò che è stato scritto nel frattempo: perdere gli altri ora costa dati. Esegui una pulizia dati; finché non termina senza errori, i dispositivi tornati non vengono mai montati da soli in modalità degradata.
 sto.bt.min_size	Il nuovo disco deve avere almeno {size}.
 sto.bt.go_mount	Monta
 sto.bt.go_replace	Sostituisci

@@ -26,6 +26,8 @@ pub enum Repair {
     Replace,
     Remove,
     Convert,
+    /// The data scrub a device that came back needs (the volume page's scrub dialog).
+    Scrub,
 }
 
 fn url(uuid: &str, what: &str) -> String {
@@ -85,6 +87,7 @@ fn state(r: Option<&BtrfsRepair>) -> (Tone, &'static str) {
         Some(r) if !r.mounted => (Tone::Err, "rm.not_mounted"),
         Some(r) if !r.lost.is_empty() => (Tone::Err, "health.failed"),
         Some(r) if r.degraded() => (Tone::Warn, "health.degraded"),
+        Some(r) if r.scrub_needed => (Tone::Warn, "sto.h.warning"),
         Some(r) if !r.convert.is_empty() => (Tone::Warn, "sto.h.warning"),
         _ => (Tone::Ok, "health.healthy"),
     }
@@ -127,7 +130,10 @@ pub fn devices_card(v: &Vol, open: Callback<Repair>, selected: RwSignal<Option<S
             if let Some(b) = r.remove {
                 out.push(view! { <p class="muted small">{tr("sto.bt.remove_blocked")}" "{tr(blocker_key(b))}</p> }.into_any());
             }
-        } else if !r.convert.is_empty() {
+        } else if r.scrub_needed {
+            out.push(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("sto.bt.scrub_needed")} }.into_any()));
+        }
+        if r.mounted && !r.degraded() && !r.convert.is_empty() {
             let items: Vec<String> = r.convert.iter().map(|c| format!("{} {}", c.kind, c.from.join("/"))).collect();
             out.push(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tf("sto.bt.weak", &[("items", &items.join(", "))])} }.into_any()));
         }
@@ -138,12 +144,14 @@ pub fn devices_card(v: &Vol, open: Callback<Repair>, selected: RwSignal<Option<S
         let degraded = r.mounted && r.degraded() && r.lost.is_empty();
         let remove = degraded && r.remove.is_none();
         let convert = r.mounted && !r.degraded() && !r.convert.is_empty();
-        (mount || degraded || convert).then(|| view! {
+        let scrub = r.mounted && !r.degraded() && r.scrub_needed;
+        (mount || degraded || convert || scrub).then(|| view! {
             <div class="card-actions">
                 {mount.then(|| btn(Repair::Mount, icons::PLAY, "sto.bt.mount", true))}
                 {degraded.then(|| btn(Repair::Replace, icons::REFRESH_CW, "sto.bt.replace", true))}
                 {remove.then(|| btn(Repair::Remove, icons::UNPLUG, "sto.bt.remove", false))}
-                {convert.then(|| btn(Repair::Convert, icons::SHIELD_CHECK, "sto.bt.convert", true))}
+                {convert.then(|| btn(Repair::Convert, icons::LAYERS, "sto.bt.convert", true))}
+                {scrub.then(|| btn(Repair::Scrub, icons::SHIELD_CHECK, "sto.scrub", true))}
             </div>
         })
     });
@@ -210,23 +218,21 @@ pub fn RepairDialog(vol: Vol, what: Repair, on_close: Callback<()>) -> impl Into
         Repair::Mount => ("mount-degraded", "sto.bt.mount_title", "sto.bt.mount_text", "sto.bt.go_mount"),
         Repair::Replace => ("replace", "sto.bt.replace_title", "sto.bt.replace_text", "sto.bt.go_replace"),
         Repair::Remove => ("remove-missing", "sto.bt.remove_title", "sto.bt.remove_text", "sto.bt.go_remove"),
-        Repair::Convert => ("convert", "sto.bt.convert_title", "sto.bt.convert_text", "sto.bt.go_convert"),
+        // the scrub has its own dialog on the volume page; never opened here
+        Repair::Convert | Repair::Scrub => ("convert", "sto.bt.convert_title", "sto.bt.convert_text", "sto.bt.go_convert"),
     };
     let target = StoredValue::new(url(&fs.uuid, path));
     // the replace: which missing device, onto which drive
     let missing: Vec<u64> = r.missing.clone();
     let devid = RwSignal::new(missing.first().copied().unwrap_or(0));
+    // no drive chosen in advance: the administrator picks it, sees what is on it, and types
+    // its serial number on the plan (it is erased)
     let new_disk = RwSignal::new(String::new());
     let free = free_disks(s);
-    if let Some(d) = free.iter().find(|d| d.size >= r.missing_bytes).or(free.first()) {
-        new_disk.set(d.name.clone());
-    }
-    let body = move |dry: bool| -> Value {
+    let body = move |dry: bool, serials: Vec<String>| -> Value {
         match what {
             Repair::Replace => {
-                let nd = new_disk.get_untracked();
-                let serials: Vec<String> = s.disk(&nd).map(|d| vec![serial_of(&d)]).unwrap_or_else(|| vec![nd.clone()]);
-                json!({"devid": devid.get_untracked(), "new_disk": nd, "confirm": id.get_value(), "serials": serials, "dry_run": dry})
+                json!({"devid": devid.get_untracked(), "new_disk": new_disk.get_untracked(), "confirm": id.get_value(), "serials": serials, "dry_run": dry})
             }
             _ => json!({"confirm": id.get_value(), "dry_run": dry}),
         }
@@ -234,7 +240,7 @@ pub fn RepairDialog(vol: Vol, what: Repair, on_close: Callback<()>) -> impl Into
     let review = move |_| {
         busy.set(true);
         error.set(None);
-        let b = body(true);
+        let b = body(true, Vec::new());
         spawn_local(async move {
             let r = api::post::<_, StoragePlan>(&target.get_value(), Some(&b)).await;
             let _ = busy.try_set(false);
@@ -248,11 +254,13 @@ pub fn RepairDialog(vol: Vol, what: Repair, on_close: Callback<()>) -> impl Into
             }
         });
     };
-    let exec = move |_: (String, Vec<String>)| start_task(target.get_value(), Some(body(false)), false, stage, busy, error);
+    // the serial numbers typed on the plan for the drive it erases
+    let exec = move |(_, typed): (String, Vec<String>)| start_task(target.get_value(), Some(body(false, typed)), false, stage, busy, error);
     let replace = what == Repair::Replace;
-    // only the replace erases a drive: the typed name and its serial
-    let flow = Flow::new(stage, replace.then(|| id.get_value()), false, go, busy, error, Callback::new(exec), on_close)
-        .with_own(Signal::derive(move || vec![new_disk.get()]));
+    // only the replace erases a drive: the typed name, and the drive's serial typed too (it
+    // is not one of the form's own drives, so the plan asks for it)
+    let flow = Flow::new(stage, replace.then(|| id.get_value()), false, go, busy, error, Callback::new(exec), on_close);
+    let chosen = move || new_disk.with(|n| s.disk(n));
     let free = StoredValue::new(free);
     let missing = StoredValue::new(missing);
     let foot = move || match stage.get() {
@@ -278,9 +286,23 @@ pub fn RepairDialog(vol: Vol, what: Repair, on_close: Callback<()>) -> impl Into
                         <label class="field">
                             <span class="field-label">{tr("sto.replace_new")}</span>
                             <select class="input" prop:value=move || new_disk.get() on:change=move |ev| new_disk.set(event_target_value(&ev))>
+                                <option value="">{tr("sto.bt.choose_disk")}</option>
                                 {free.get_value().into_iter().map(|d| view! { <option value=d.name.clone()>{disk_title(&d)}</option> }).collect_view()}
                             </select>
                         </label>
+                        {move || chosen().map(|d| {
+                            let facts = [d.model.trim().to_string(), serial_of(&d), i18n::bytes_si(d.size)]
+                                .into_iter()
+                                .filter(|x| !x.is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" · ");
+                            view! {
+                                <p class="muted small"><span class="mono strong">{d.name.clone()}</span>" "{facts}</p>
+                                {(!d.used_by.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
+                                    {tf("sto.bt.disk_holds", &[("items", &d.used_by.join(", "))])}
+                                }.into_any()))}
+                            }
+                        })}
                         {(size > 0).then(|| view! { <p class="muted small">{tf("sto.bt.min_size", &[("size", &i18n::bytes_si(size))])}</p> })}
                         {free.with_value(Vec::is_empty).then(|| view! { <p class="muted small">{tr("sto.no_free")}</p> })}
                     })}

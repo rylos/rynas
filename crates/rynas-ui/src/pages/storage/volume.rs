@@ -488,7 +488,7 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
                 None => vol.md.clone().map(|a| raid_card(a, selected)).into_any(),
             }}
             {vol.fs.as_ref().filter(|f| super::btrfs::multi_device(f)).map(|_| {
-                super::btrfs::devices_card(&vol, Callback::new(move |r| modal.set(Open::Btrfs(r))), selected)
+                super::btrfs::devices_card(&vol, Callback::new(move |r| modal.set(if r == super::btrfs::Repair::Scrub { Open::Scrub } else { Open::Btrfs(r) })), selected)
             })}
             {(!vol.locked && !waiting && vol.fs.is_some()).then(|| scrub_card(&vol, modal))}
             {(!vol.locked && vol.mountpoint.is_some()).then(|| view! { <super::dedup::DedupCard key=vol.id.clone() /> })}
