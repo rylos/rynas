@@ -13,22 +13,25 @@ synodeb hardware screens, the app catalogue, Docker stacks next to other manager
 
 ## Missing, in order
 
-| Phase | Item | Notes |
-|---|---|---|
-| A | Own-domain certificates in the UI (DNS-01) | backend done (W2, §5.4); the domains page is missing |
-| A | Import an external certificate | upload, plus a watched folder an external tool (acme.sh on a router, a corporate CA) pushes to; reload without downtime |
-| B | Tailscale | install and guided login; VPN ranges already feed the access rules (design: `remote-access.md`) |
-| B | NUT server on the LAN | upsd reachable by other hosts (e.g. Home Assistant), with its own users |
-| B | Proxy on host:port | routes like `nas.example.com:8443 → app`, besides one name per app on 443 |
-| C | Adopt existing compose stacks | take over a project made by hand or by another manager without rewriting it |
-| C | No-CoW subvolume | done 2026-11-07 (D-NOCOW): per-folder switch at creation, state and on/off for empty folders, `nocow` app folders (Frigate) |
-| C | Existing users and UID changes | adopt Linux users with their UIDs; change a UID with a file ownership remap |
-| D | Backup to another NAS and to the cloud | restic/rustic repositories; rest-server, SFTP, rclone remotes |
-| D | Receive btrbk from PCs | keep existing incremental chains (btrfs receive) |
-| D | Local snapshot replication | send/receive between volumes (NVMe → HDD) with retention |
-| E | Encrypted folder | done 2026-11-08 (D-CRYPT E1, `encrypted-folders.md`): gocryptfs folder per share, recovery key, lock/unlock, password change, optional automatic unlock; volume LUKS exists |
-| E | Synology Photos album import into Immich | one-time import from the `synofoto` database dump |
-| — | Firewall (nftables) | lower priority when the router filters |
-| — | Degraded btrfs boot | document booting with a dead mirror member (`-o degraded`) |
+| Phase | Item | Notes | Status (2026-11-18, 0.8.21) |
+|---|---|---|---|
+| A | Own-domain certificates in the UI (DNS-01) | backend done (W2, §5.4); the domains page is missing | done: Web access › Domains (guided add with DNS preview, records, certificate inventory) |
+| A | Import an external certificate | upload, plus a watched folder an external tool (acme.sh on a router, a corporate CA) pushes to; reload without downtime | done: Web access › Imported certificates (upload or watched folder, `/web-access/imports`), the proxy reloads in place |
+| B | Tailscale | install and guided login; VPN ranges already feed the access rules (design: `remote-access.md`) | done: `rynas-tailscale`, Network › Remote access (install, login with URL/QR or key, options, logout, uninstall) |
+| B | NUT server on the LAN | upsd reachable by other hosts (e.g. Home Assistant), with its own users | done: `ups.netserver` (LISTEN addresses, client accounts, allowed hosts), Hardware › UPS |
+| B | Proxy on host:port | routes like `nas.example.com:8443 → app`, besides one name per app on 443 | done: extra HTTPS ports per route (`ports`, `main_port`), path prefixes for shared ports |
+| C | Adopt existing compose stacks | take over a project made by hand or by another manager without rewriting it | done: Docker › adopt in place, import a folder, release, move (`docker_adopt`) |
+| C | No-CoW subvolume | done 2026-11-07 (D-NOCOW): per-folder switch at creation, state and on/off for empty folders, `nocow` app folders (Frigate) | done |
+| C | Existing users and UID changes | adopt Linux users with their UIDs; change a UID with a file ownership remap | done: adopt accounts, UID/GID change with ownership remap (`/v1/ids/plan`, `/v1/ids/remap`), UID dialog on Users & Groups |
+| D | Backup to another NAS and to the cloud | restic/rustic repositories; rest-server, SFTP, rclone remotes | done: `rynas-backup` + worker (local, rest-server, SFTP, object storage, rclone), Backup page |
+| D | Receive btrbk from PCs | keep existing incremental chains (btrfs receive) | done: Backup › PCs (`pc_backup`, `rynas-btrbk-filter`), adopt an existing folder of received snapshots |
+| D | Local snapshot replication | send/receive between volumes (NVMe → HDD) with retention | done: Snapshots › Replication, targets on another volume or over SSH, retention, browse/restore/promote |
+| E | Encrypted folder | done 2026-11-08 (D-CRYPT E1, `encrypted-folders.md`): gocryptfs folder per share, recovery key, lock/unlock, password change, optional automatic unlock; volume LUKS exists | done |
+| E | Synology Photos album import into Immich | one-time import from the `synofoto` database dump | not started |
+| — | Firewall (nftables) | lower priority when the router filters | not started (fail2ban for the login and systemd IP filters for upsd only) |
+| — | Degraded btrfs boot | document booting with a dead mirror member (`-o degraded`) | partial: since 0.8.11 md arrays left inactive by a missing drive are started degraded after boot and the volume mounted; a btrfs multi-device volume or root with a dead member (`-o degraded`, `rootflags=degraded`) is neither handled nor documented |
 
 Phase A comes first because a certificate renewal date drives the migration.
+
+Status on 2026-11-18 (release 0.8.21): phases A to D and the encrypted folder are done; still
+open are the photo album import, the firewall and the degraded btrfs boot.
