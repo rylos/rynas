@@ -1775,6 +1775,84 @@ impl Manifest {
         out
     }
 
+    /// Physical volumes the LVM report names by an alias (a udev symlink such as
+    /// `/dev/gpt-auto-root` or `/dev/disk/by-…`, which older agents recorded as LVM printed
+    /// it) are renamed to their partition (`/dev/nvme0n1p2`), in the PV rows and in the
+    /// volumes' `devices`, when that is certain: exactly one partition of the manifest's disks
+    /// has the PV's size (its data start plus its extents, within one extent and the 1 MiB
+    /// alignment) and holds nothing else of the manifest (no filesystem, LUKS container or
+    /// swap). Names already known (a partition, a LUKS container) stay; an alias that does
+    /// not fit exactly one partition stays too (the restore then refuses the group, as before).
+    /// Returns whether something was renamed.
+    pub fn normalize_lvm_aliases(&mut self) -> bool {
+        let Some(report) = self.lvm_report.clone() else { return false };
+        let Ok(layout) = LvmLayout::parse(&report) else { return false };
+        let known = |m: &Manifest, dev: &str| {
+            m.disks.iter().any(|d| d.table.as_ref().is_some_and(|t| t.partitions.iter().any(|p| format!("/dev/{}", partition_name(&d.name, p.number)) == dev)))
+                || m.luks_of_pv(dev).is_some()
+        };
+        let mut renames: Vec<(String, String)> = Vec::new();
+        for vg in &layout.vgs {
+            for pv in &vg.pvs {
+                if pv.device.is_empty() || known(self, &pv.device) || pv.size_bytes == 0 {
+                    continue;
+                }
+                let need = pv.size_bytes + pv.pe_start_bytes;
+                let slack = vg.extent_bytes.max(1 << 20) + (1 << 20);
+                let mut fits: Vec<String> = Vec::new();
+                for d in &self.disks {
+                    let Some(t) = &d.table else { continue };
+                    let sector = u64::from(if d.logical_sector == 0 { 512 } else { d.logical_sector });
+                    for p in &t.partitions {
+                        let bytes = p.size_lba * sector;
+                        let dev = format!("/dev/{}", partition_name(&d.name, p.number));
+                        if bytes >= need && bytes < need + slack && !self.partition_used(&dev) {
+                            fits.push(dev);
+                        }
+                    }
+                }
+                if let [only] = fits.as_slice() {
+                    renames.push((pv.device.clone(), only.clone()));
+                }
+            }
+        }
+        if renames.is_empty() {
+            return false;
+        }
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&report) else { return false };
+        let rename = |s: &str| -> String {
+            // `path` or `path(extent)`, comma separated
+            s.split(',')
+                .map(|part| {
+                    let (path, rest) = part.split_once('(').map_or((part, String::new()), |(p, r)| (p, format!("({r}")));
+                    let path = renames.iter().find(|(from, _)| from == path.trim()).map_or(path.to_string(), |(_, to)| to.clone());
+                    format!("{path}{rest}")
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        for r in v.get_mut("report").and_then(|r| r.as_array_mut()).into_iter().flatten() {
+            for (key, field) in [("pv", "pv_name"), ("lv", "devices")] {
+                for row in r.get_mut(key).and_then(|x| x.as_array_mut()).into_iter().flatten() {
+                    if let Some(s) = row.get(field).and_then(|x| x.as_str()).map(rename) {
+                        row[field] = serde_json::Value::String(s);
+                    }
+                }
+            }
+        }
+        self.lvm_report = Some(v.to_string());
+        true
+    }
+
+    /// A partition (`/dev/…`) holds a filesystem, a LUKS container or swap of the manifest.
+    fn partition_used(&self, dev: &str) -> bool {
+        let on = |src: &FsSource| match src {
+            FsSource::Partition { disk, number } => self.disks.get(*disk).is_some_and(|d| format!("/dev/{}", partition_name(&d.name, *number)) == dev),
+            _ => false,
+        };
+        self.filesystems.iter().any(|f| on(&f.source)) || self.swap.iter().any(|s| on(&s.source)) || self.luks.iter().any(|l| on(&l.source) || l.device == dev)
+    }
+
     /// The disk index of an LVM physical volume of the manifest: a partition of a disk with
     /// a partition table, or a LUKS container on one.
     pub fn lvm_pv_disk(&self, device: &str) -> Option<usize> {
@@ -2313,5 +2391,55 @@ mod tests {
         assert!(m.lvm_unsupported().iter().any(|x| x.contains("whole disk")), "{:?}", m.lvm_unsupported());
         assert_eq!(partition_name("nvme0n1", 2), "nvme0n1p2");
         assert_eq!(partition_name("sda", 2), "sda2");
+    }
+
+    /// A real report (Arch with systemd-gpt-auto: LVM names its PV by the udev symlink
+    /// `/dev/gpt-auto-root`): renamed to the one partition of the PV's size, so the group is
+    /// made again and the PC is ready; an alias that fits no partition, or two, stays (refused).
+    #[test]
+    fn a_pv_named_by_a_udev_alias() {
+        const REAL: &str = r#"{"report":[{"lv":[{"devices":"/dev/gpt-auto-root(11776)","lv_attr":"-wi-ao----","lv_name":"home","lv_size":"449369341952B","segtype":"linear","stripes":"1","vg_name":"ArchinstallVg"},{"devices":"/dev/gpt-auto-root(0)","lv_attr":"-wi-ao----","lv_name":"root","lv_size":"49392123904B","segtype":"linear","stripes":"1","vg_name":"ArchinstallVg"}],"pv":[{"pe_start":"1048576B","pv_name":"/dev/gpt-auto-root","pv_size":"499029901312B","vg_name":"ArchinstallVg"}],"vg":[{"vg_extent_size":"4194304B","vg_free":"268435456B","vg_name":"ArchinstallVg","vg_size":"499029901312B"}]}]}"#;
+        // nvme0n1: p1 the ESP (1 GiB, vfat), p2 the PV (the rest of a 500 GB disk)
+        let pv_part = (499029901312u64 + 1048576 + 2 * 1048576) / 512;
+        let manifest = |pv_lba: u64, extra: Option<u64>| {
+            let mut parts = vec![
+                Partition { number: 1, size_lba: (1 << 30) / 512, ..Default::default() },
+                Partition { number: 2, size_lba: pv_lba, ..Default::default() },
+            ];
+            if let Some(lba) = extra {
+                parts.push(Partition { number: 3, size_lba: lba, ..Default::default() });
+            }
+            Manifest {
+                disks: vec![Disk { name: "nvme0n1".into(), logical_sector: 512, table: Some(PartTable { kind: "gpt".into(), partitions: parts, ..Default::default() }), ..Default::default() }],
+                boot: BootInfo { loader: Loader::SystemdBoot, ..Default::default() },
+                filesystems: vec![
+                    Filesystem { source: FsSource::Partition { disk: 0, number: 1 }, fstype: "vfat".into(), mounts: vec![MountEntry { path: "/boot".into(), ..Default::default() }], ..Default::default() },
+                    Filesystem { source: FsSource::Lvm { vg: "ArchinstallVg".into(), lv: "root".into() }, fstype: "ext4".into(), mounts: vec![MountEntry { path: "/".into(), ..Default::default() }], ..Default::default() },
+                    Filesystem { source: FsSource::Lvm { vg: "ArchinstallVg".into(), lv: "home".into() }, fstype: "ext4".into(), mounts: vec![MountEntry { path: "/home".into(), ..Default::default() }], ..Default::default() },
+                ],
+                lvm_report: Some(REAL.into()),
+                ..Default::default()
+            }
+        };
+        // as the agent sent it: the alias is no partition, the group is refused
+        let m = manifest(pv_part, None);
+        assert!(m.ready_reasons().contains(&ReadyReason::ManualLayout));
+        let mut m = m;
+        assert!(m.normalize_lvm_aliases());
+        let r = m.lvm_report.clone().unwrap();
+        assert!(r.contains(r#""pv_name":"/dev/nvme0n1p2""#) && r.contains(r#""devices":"/dev/nvme0n1p2(11776)""#) && r.contains(r#""devices":"/dev/nvme0n1p2(0)""#), "{r}");
+        assert!(!r.contains("gpt-auto"), "{r}");
+        assert_eq!(m.restore_disk(), Some(0));
+        assert!(m.lvm_unsupported().is_empty(), "{:?}", m.lvm_unsupported());
+        assert!(!m.ready_reasons().contains(&ReadyReason::ManualLayout));
+        // again: nothing more to rename
+        assert!(!m.normalize_lvm_aliases());
+        // two partitions of that size: not certain, left as it was
+        let mut two = manifest(pv_part, Some(pv_part));
+        assert!(!two.normalize_lvm_aliases());
+        assert!(two.ready_reasons().contains(&ReadyReason::ManualLayout));
+        // no partition of that size
+        let mut none = manifest(pv_part / 2, None);
+        assert!(!none.normalize_lvm_aliases());
     }
 }

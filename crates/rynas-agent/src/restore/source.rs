@@ -81,11 +81,14 @@ pub fn parse_manifest(b: &[u8], what: &str) -> Result<Manifest, String> {
     if b.len() > MAX_MANIFEST {
         return Err(format!("{what} is too large"));
     }
-    let m: Manifest = serde_json::from_slice(b).map_err(|e| format!("{what} does not parse: {e}"))?;
+    let mut m: Manifest = serde_json::from_slice(b).map_err(|e| format!("{what} does not parse: {e}"))?;
     if m.format != MANIFEST_FORMAT {
         return Err(format!("{what} has format {}, this agent reads {MANIFEST_FORMAT}", m.format));
     }
     check_paths(&m)?;
+    // a PV an older agent named by a udev alias (`/dev/gpt-auto-root`): its partition when
+    // certain, so the volume group is made again on the restored disk's partition
+    m.normalize_lvm_aliases();
     Ok(m)
 }
 

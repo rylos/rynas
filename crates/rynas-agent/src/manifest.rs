@@ -187,7 +187,50 @@ fn lvm_layout_report() -> Option<String> {
         }
     }
     without_own_snapshots(&mut merged);
+    canonical_lvm_devices(&mut merged, &canonical_dev);
     Some(serde_json::json!({ "report": [merged] }).to_string())
+}
+
+/// The kernel name of a device path LVM printed (`/dev/gpt-auto-root`, `/dev/disk/by-…`:
+/// udev symlinks → `/dev/nvme0n1p2`), the way the manifest's partitions are named. A
+/// device-mapper node stays `/dev/mapper/<name>` (a LUKS container is known by that name);
+/// a path that does not resolve stays as it is.
+fn canonical_dev(p: &str) -> String {
+    if p.starts_with("/dev/mapper/") {
+        return p.to_string();
+    }
+    let Ok(real) = std::fs::canonicalize(p) else { return p.to_string() };
+    let real = real.to_string_lossy().into_owned();
+    if let Some(dm) = real.strip_prefix("/dev/dm-") {
+        return std::fs::read_to_string(format!("/sys/block/dm-{dm}/dm/name"))
+            .ok()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty() && !n.contains('/'))
+            .map_or(p.to_string(), |n| format!("/dev/mapper/{n}"));
+    }
+    if real.starts_with("/dev/") { real } else { p.to_string() }
+}
+
+/// The PV names (`pv_name`) and the volumes' `devices` (`path(extent)`, comma separated) of
+/// an LVM report through `resolve` ([`canonical_dev`]).
+fn canonical_lvm_devices(report: &mut serde_json::Map<String, serde_json::Value>, resolve: &dyn Fn(&str) -> String) {
+    let devices = |s: &str| -> String {
+        s.split(',')
+            .map(|part| match part.split_once('(') {
+                Some((path, rest)) => format!("{}({rest}", resolve(path.trim())),
+                None if part.trim().is_empty() => part.to_string(),
+                None => resolve(part.trim()),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    for (key, field) in [("pv", "pv_name"), ("lv", "devices")] {
+        for row in report.get_mut(key).and_then(|x| x.as_array_mut()).into_iter().flatten() {
+            if let Some(s) = row.get(field).and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| if field == "pv_name" { resolve(s) } else { devices(s) }) {
+                row[field] = serde_json::Value::String(s);
+            }
+        }
+    }
 }
 
 /// The agent's own snapshots of a running backup (`*-rynas-snap`) are not part of the PC's
@@ -597,6 +640,23 @@ mod tests {
         assert_eq!(r["vg"][0]["vg_free"], "268435456B");
         let l = rynas_api_types::pcagent::LvmLayout::parse(&serde_json::json!({"report": [r]}).to_string()).unwrap();
         assert!(l.unsupported().is_empty(), "the origin alone is a plain volume");
+    }
+
+    /// LVM printing a PV by its udev symlink (systemd-gpt-auto's `/dev/gpt-auto-root`, a real
+    /// report): the PV row and the volumes' devices get the kernel name; a mapper name stays.
+    #[test]
+    fn lvm_devices_by_their_kernel_name() {
+        let real = r#"{"lv":[{"devices":"/dev/gpt-auto-root(11776)","lv_name":"home","vg_name":"ArchinstallVg"},{"devices":"/dev/gpt-auto-root(0),/dev/mapper/crypt(5)","lv_name":"root","vg_name":"ArchinstallVg"}],"pv":[{"pe_start":"1048576B","pv_name":"/dev/gpt-auto-root","pv_size":"499029901312B","vg_name":"ArchinstallVg"},{"pv_name":"/dev/mapper/crypt","vg_name":"ArchinstallVg"}]}"#;
+        let mut m: serde_json::Map<String, serde_json::Value> = serde_json::from_str(real).unwrap();
+        let resolve = |p: &str| if p == "/dev/gpt-auto-root" { "/dev/nvme0n1p2".to_string() } else { p.to_string() };
+        canonical_lvm_devices(&mut m, &resolve);
+        let t = serde_json::Value::Object(m).to_string();
+        assert!(t.contains(r#""pv_name":"/dev/nvme0n1p2""#) && t.contains(r#""devices":"/dev/nvme0n1p2(11776)""#), "{t}");
+        assert!(t.contains(r#""devices":"/dev/nvme0n1p2(0),/dev/mapper/crypt(5)""#) && t.contains(r#""pv_name":"/dev/mapper/crypt""#), "{t}");
+        assert!(!t.contains("gpt-auto"), "{t}");
+        // the real resolver: a mapper name and a path that does not exist stay
+        assert_eq!(canonical_dev("/dev/mapper/anything"), "/dev/mapper/anything");
+        assert_eq!(canonical_dev("/dev/does-not-exist-rynas"), "/dev/does-not-exist-rynas");
     }
 
     #[test]

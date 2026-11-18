@@ -721,7 +721,10 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
         record_skip(svc, device, &run, reason);
         return Ok(());
     }
-    let manifest = r.manifest.and_then(|m| {
+    let manifest = r.manifest.and_then(|mut m| {
+        // a PV an older agent named by a udev alias (`/dev/gpt-auto-root`): its partition,
+        // when certain (the readiness and the restore read the same names)
+        m.normalize_lvm_aliases();
         let b = serde_json::to_vec(&m).ok()?;
         (b.len() <= MAX_MANIFEST).then_some((m, b))
     });
