@@ -385,6 +385,23 @@ pub fn spawn_storage_watch(
                     for ev in watch.check(&inv.disks, &inv.arrays, &inv.filesystems, &inv.flex) {
                         notifier.emit(ev);
                     }
+                    // degraded btrfs mounts whose filesystem is whole again: forgotten
+                    if let Some(path) = st.storage_ops.as_ref().and_then(|o| o.btrfs_guard.get())
+                        && path.exists()
+                    {
+                        let healthy: Vec<String> = inv
+                            .filesystems
+                            .iter()
+                            .filter(|f| f.mountpoint.is_some() && f.repair.as_ref().is_none_or(|r| !r.degraded()) && !f.devices.iter().any(|d| d.missing))
+                            .map(|f| f.uuid.clone())
+                            .collect();
+                        let mut g = rynas_storage::btrfs_repair::Guard::load(path);
+                        if g.forget_healthy(&healthy)
+                            && let Err(e) = g.save(path)
+                        {
+                            tracing::warn!("btrfs degraded-mount record: {e}");
+                        }
+                    }
                 }
                 Err(e) => tracing::warn!("storage check: {}", e.2),
             }
@@ -518,6 +535,153 @@ fn degraded_start_event(volume: &str, arrays: &str, r: Result<bool, String>) -> 
     field(field(ev, "volume", volume), "arrays", arrays)
 }
 
+/// Configured btrfs volumes (`/etc/fstab`, `/<label>`) that are not mounted now, from the
+/// files alone: the boot watcher reads the inventory only when there is one.
+fn btrfs_volume_unmounted(fstab: &str, mountinfo: &str) -> bool {
+    let mounted: Vec<String> = rynas_storage::mounts::parse_mountinfo(mountinfo).into_iter().map(|m| m.mountpoint).collect();
+    rynas_storage::btrfs_repair::parse_fstab(fstab).iter().any(|e| {
+        e.fstype == "btrfs"
+            && e.mountpoint.strip_prefix('/').is_some_and(rynas_storage::plan::valid_label)
+            && !mounted.contains(&e.mountpoint)
+    })
+}
+
+/// Mounts degraded, once the boot has settled, the configured btrfs volumes that stayed
+/// unmounted because a device is missing, when every chunk still has a copy (the kernel's
+/// check of a degraded read-write mount) and the setting of the filesystem allows it; tells
+/// the administrators either way. Same timing and reservation as the md arrays
+/// ([`spawn_degraded_start`]), a record of each degraded mount against a split brain
+/// ([`rynas_storage::btrfs_repair::Guard`]). Never under `--dry-system`.
+pub fn spawn_btrfs_degraded_mount(st: crate::server::DaemonState, notifier: Arc<dyn Notifier>) {
+    use rynas_storage::btrfs_repair::{self as br, Guard, Waiting};
+    use rynas_storage::host::SystemHost;
+    use rynas_storage::recover;
+    tokio::spawn(async move {
+        let mut waiting = Waiting::default();
+        let mut told: std::collections::HashSet<String> = Default::default();
+        let mut tick = tokio::time::interval(DEGRADED_START_INTERVAL);
+        loop {
+            tick.tick().await;
+            let now = rynas_tasks::now_ms();
+            let uptime = recover::uptime_s(&SystemHost);
+            if waiting.finished(uptime) {
+                tracing::debug!("btrfs degraded mount: past the boot window, no longer watching");
+                return;
+            }
+            let fstab = tokio::fs::read_to_string("/etc/fstab").await.unwrap_or_default();
+            if !btrfs_volume_unmounted(&fstab, &rynas_storage::mounts::host_mountinfo()) {
+                waiting.due(Vec::new(), now, uptime);
+                continue;
+            }
+            if st.storage_ops.as_ref().is_some_and(|o| o.storage_busy()) {
+                continue;
+            }
+            let inv = match crate::server::inventory(&st).await {
+                Ok(i) => i,
+                Err(e) => {
+                    tracing::warn!("btrfs degraded mount: {}", e.2);
+                    continue;
+                }
+            };
+            let manual = st
+                .ops
+                .as_ref()
+                .and_then(|o| o.config.current(rynas_storage::domain::TUNING_KEY).ok())
+                .and_then(|v| rynas_storage::domain::parse_tuning(v.as_ref()).ok())
+                .map(|t| t.btrfs_manual)
+                .unwrap_or_default();
+            let guard_file = st.storage_ops.as_ref().and_then(|o| o.btrfs_guard.get().cloned());
+            let guard = guard_file.as_deref().map(Guard::load).unwrap_or_default();
+            let volumes = crate::storage_ops::btrfs::fstab_volumes(&inv, &fstab);
+            let (ok, blocked) = br::candidates(&inv.filesystems, &manual, &guard, &volumes);
+            for (c, why) in blocked {
+                if why == rynas_api_types::storage::BtrfsBlocker::SplitBrain && told.insert(c.uuid.clone()) {
+                    notifier.emit(btrfs_split_brain_event(&c.label));
+                }
+            }
+            for c in waiting.due(ok, now, uptime) {
+                let held = match &st.storage_ops {
+                    Some(o) => match o.reserve_for_recovery(&c.label) {
+                        Some(h) => Some(h),
+                        None => continue,
+                    },
+                    None => None,
+                };
+                // read again under the reservation: still unmounted, same devices
+                st.storage.invalidate();
+                let still = match crate::server::inventory(&st).await {
+                    Ok(i) => br::candidates(&i.filesystems, &manual, &guard, &volumes).0.contains(&c),
+                    Err(_) => false,
+                };
+                if !still {
+                    continue;
+                }
+                waiting.forget(&c.uuid);
+                tracing::warn!("volume {}: mounting it degraded on {} of {} devices", c.label, c.present.len(), c.total);
+                if let Some(path) = &guard_file {
+                    let mut g = Guard::load(path);
+                    g.record(&c.uuid, &c.present, now);
+                    if let Err(e) = g.save(path) {
+                        tracing::error!("volume {}: degraded mount not done, the record failed: {e}", c.label);
+                        drop(held);
+                        continue;
+                    }
+                }
+                let systemd = std::path::Path::new("/run/systemd/system").exists();
+                let job = c.clone();
+                let suffix = format!("{}-{now}", &c.uuid[..8.min(c.uuid.len())]);
+                let r = tokio::task::spawn_blocking(move || br::mount_now(&SystemHost, &job, systemd, &suffix))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                drop(held);
+                st.storage.invalidate();
+                notifier.emit(btrfs_degraded_mount_event(&c, r));
+            }
+        }
+    });
+}
+
+fn btrfs_degraded_mount_event(c: &rynas_storage::btrfs_repair::MountCandidate, r: Result<(), String>) -> NewEvent {
+    use rynas_notify::event::{code, field, oneshot};
+    let volume = c.label.as_str();
+    let (present, total) = (c.present.len().to_string(), c.total.to_string());
+    let key = format!("storage:btrfs-degraded-mount:{volume}");
+    let ev = match r {
+        Ok(()) => {
+            tracing::warn!("volume {volume} mounted degraded");
+            let mut ev = oneshot(NotifyCategory::Storage, NotifySeverity::Warning, "storage", key, format!("Volume {volume} mounted degraded"));
+            ev.body = format!(
+                "Volume {volume} stayed unmounted after boot because devices are missing, so it was mounted degraded on the {present} of its {total} devices present: every chunk still has a copy there. Until the missing device is replaced or removed (Storage, the volume's page), a further lost device may cost data, and new data may be written with less redundancy; the repair converts it back."
+            );
+            code(ev, "storage.btrfs_mounted_degraded")
+        }
+        Err(e) => {
+            tracing::error!("volume {volume}: degraded mount failed: {e}");
+            let mut ev = oneshot(NotifyCategory::Storage, NotifySeverity::Error, "storage", key, format!("Volume {volume} could not be mounted degraded"));
+            ev.body = format!(
+                "Volume {volume} stayed unmounted after boot because devices are missing, and mounting it degraded on the {present} devices present failed: {e}. The kernel refuses a degraded mount when a chunk has no complete copy left: reconnect the missing devices."
+            );
+            field(code(ev, "storage.btrfs_mount_failed"), "error", e)
+        }
+    };
+    field(field(field(ev, "volume", volume), "present", present), "total", total)
+}
+
+fn btrfs_split_brain_event(volume: &str) -> NewEvent {
+    use rynas_notify::event::{code, field, oneshot};
+    let mut ev = oneshot(
+        NotifyCategory::Storage,
+        NotifySeverity::Error,
+        "storage",
+        format!("storage:btrfs-split-brain:{volume}"),
+        format!("Volume {volume} not mounted: its devices may hold older data"),
+    );
+    ev.body = format!(
+        "The devices of volume {volume} present now were the missing ones when it was last mounted degraded: they may hold older data than the others, and mounting them degraded would let the two halves drift apart for good. Reconnect the devices of the last degraded mount. Only if they are lost for good, mount these by hand (see the documentation on degraded btrfs volumes)."
+    );
+    field(code(ev, "storage.btrfs_split_brain"), "volume", volume)
+}
+
 /// How often rynasd looks for the alert a storage change leaves when the initramfs refresh
 /// went wrong ([`rynas_storage::domain::INITRAMFS_ALERT`], a missing file).
 const INITRAMFS_ALERT_INTERVAL: Duration = Duration::from_secs(20);
@@ -615,6 +779,37 @@ mod tests {
         assert!(ev.body.starts_with("Started degraded: md126 (raid1) on 1 of 2 drives"), "{}", ev.body);
         assert!(ev.body.contains("older data"), "{}", ev.body);
         assert!(fields(&ev).contains("storage.volume_started_degraded"));
+    }
+
+    /// The boot watcher looks at the inventory only while a configured btrfs volume is not
+    /// mounted; its notifications say on how many devices and why.
+    #[test]
+    fn btrfs_degraded_mount_after_boot() {
+        let fstab = "UUID=1 / btrfs defaults 0 0\nUUID=2 /photos btrfs noatime,nofail 0 0\nUUID=3 /mnt/x btrfs nofail 0 0\n";
+        let mi = |mp: &str| format!("30 1 0:30 / {mp} rw,noatime - btrfs /dev/sdb1 rw\n");
+        assert!(btrfs_volume_unmounted(fstab, &mi("/")));
+        assert!(!btrfs_volume_unmounted(fstab, &mi("/photos")));
+        assert!(!btrfs_volume_unmounted("UUID=3 /mnt/x btrfs nofail 0 0\n", ""));
+        let c = rynas_storage::btrfs_repair::MountCandidate {
+            uuid: "u".into(),
+            label: "photos".into(),
+            mountpoint: "/photos".into(),
+            options: Vec::new(),
+            present: vec![rynas_api_types::storage::BtrfsMember { devid: 1, path: "/dev/sdb1".into(), generation: 9 }],
+            total: 2,
+        };
+        let ev = btrfs_degraded_mount_event(&c, Ok(()));
+        assert_eq!(ev.severity, NotifySeverity::Warning);
+        assert_eq!(ev.title, "Volume photos mounted degraded");
+        assert!(ev.body.contains("on the 1 of its 2 devices"), "{}", ev.body);
+        let j = fields(&ev);
+        assert!(j.contains("storage.btrfs_mounted_degraded") && j.contains("\"present\":\"1\""), "{j}");
+        let ev = btrfs_degraded_mount_event(&c, Err("wrong fs type".into()));
+        assert_eq!(ev.severity, NotifySeverity::Error);
+        assert!(fields(&ev).contains("storage.btrfs_mount_failed"));
+        assert!(ev.body.contains("wrong fs type"));
+        let ev = btrfs_split_brain_event("photos");
+        assert!(fields(&ev).contains("storage.btrfs_split_brain"));
     }
 
     /// Each outcome of an initramfs refresh has its code; only an initramfs left unusable

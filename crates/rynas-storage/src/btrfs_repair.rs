@@ -855,6 +855,19 @@ pub fn plan_mount(c: &MountCandidate, systemd: bool, unit_suffix: &str) -> Stora
     p
 }
 
+/// Mounts `c` degraded now, outside a task (the mount after boot): the command of
+/// [`mount_argv`] through `host`, its last error line on failure.
+pub fn mount_now(host: &dyn crate::host::Host, c: &MountCandidate, systemd: bool, unit_suffix: &str) -> Result<(), String> {
+    let argv = mount_argv(c, systemd, unit_suffix);
+    let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+    let o = host.run(&argv[0], &args, Duration::from_secs(330)).map_err(|e| format!("{}: {e}", argv[0]))?;
+    if o.success() {
+        return Ok(());
+    }
+    let why = o.stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+    Err(format!("mount failed (exit code {:?}): {why}", o.status))
+}
+
 // ------------------------------------------------------------------------------- execution
 
 /// Progress of `btrfs replace status -1`: `Some(pct)` while running, `Ok` when finished.

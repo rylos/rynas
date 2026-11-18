@@ -44,6 +44,8 @@ use serde::Deserialize;
 
 use crate::ops::{Error, Ops, Res, user};
 
+pub mod btrfs;
+
 /// How long the recovery key of a new volume waits to be revealed.
 const RECOVERY_KEY_TTL_MS: u64 = 3600 * 1000;
 /// Recovery keys kept at once (one per volume created in the last hour).
@@ -69,6 +71,9 @@ pub struct StorageOps {
     reserved: Mutex<HashSet<String>>,
     /// label → id of its running scrub task.
     scrubs: Mutex<HashMap<String, String>>,
+    /// The file of the btrfs degraded mounts done
+    /// ([`rynas_storage::btrfs_repair::Guard`]); unset in tests and dry runs.
+    pub btrfs_guard: std::sync::OnceLock<std::path::PathBuf>,
 }
 
 impl StorageOps {
@@ -86,6 +91,7 @@ impl StorageOps {
             recovery: Mutex::default(),
             reserved: Mutex::default(),
             scrubs: Mutex::default(),
+            btrfs_guard: std::sync::OnceLock::new(),
         }
     }
 
@@ -653,6 +659,7 @@ pub fn router(st: StoState) -> Router {
             "/v1/storage/disks/{name}/health-ack",
             post(health_ack_post).delete(health_ack_delete),
         )
+        .merge(btrfs::router())
         .with_state(st)
 }
 

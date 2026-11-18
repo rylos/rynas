@@ -89,6 +89,12 @@ pub fn routes() -> Router<AppState> {
             put(forward).delete(forward),
         )
         .route("/storage/disks/{name}/settings", get(forward).put(forward))
+        // a btrfs filesystem missing a device: repairs, degraded mount, its setting
+        .route("/storage/btrfs/{uuid}/replace", post(forward))
+        .route("/storage/btrfs/{uuid}/remove-missing", post(forward))
+        .route("/storage/btrfs/{uuid}/convert", post(forward))
+        .route("/storage/btrfs/{uuid}/mount-degraded", post(forward))
+        .route("/storage/btrfs/{uuid}/settings", get(forward).put(forward))
         // SMART warnings marked as seen (counts read by rynasd, never sent by the client)
         .route(
             "/storage/disks/{name}/health-ack",

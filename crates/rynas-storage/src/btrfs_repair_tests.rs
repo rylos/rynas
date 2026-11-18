@@ -76,6 +76,18 @@ fn show_names_the_missing_device_of_a_mounted_filesystem() {
     assert!(u[0].missing);
 }
 
+/// `filesystem usage` counts the missing device's size; `device stats` names it by devid.
+#[test]
+fn usage_and_stats_of_a_degraded_filesystem() {
+    let u = crate::btrfs::parse_usage(include_str!("../tests/fixtures/btrfs-usage-degraded.txt"));
+    assert_eq!(u.missing, 1_073_741_824);
+    assert_eq!(u.data_ratio, 2.0);
+    assert_eq!(u.metadata_ratio, 3.0);
+    let s = crate::btrfs::parse_device_stats(include_str!("../tests/fixtures/btrfs-device-stats-degraded.txt"));
+    assert_eq!(s.len(), 3);
+    assert!(s.contains_key("devid:3") && s.contains_key("/dev/loop0"));
+}
+
 #[test]
 fn profiles_lost_only_beyond_their_tolerance() {
     // one device of three gone: raid1 and raid1c3 keep a copy of everything
@@ -311,6 +323,23 @@ fn degraded_mount_command() {
     assert!(p.valid);
     assert_eq!(p.steps[0].kind, Some(PlanStepKind::BtrfsMountDegraded));
     assert!(!plan_mount(&MountCandidate { present: Vec::new(), ..c }, false, "x").valid);
+}
+
+#[test]
+fn mount_after_boot() {
+    let c = candidate();
+    let line = mount_argv(&c, false, "x").join(" ");
+    let mut h = crate::host::FakeHost::default();
+    h.cmd(&line, 0, "");
+    assert_eq!(mount_now(&h, &c, false, "x"), Ok(()));
+    assert_eq!(h.ran(), [line.clone()]);
+    let mut h = crate::host::FakeHost::default();
+    h.commands.get_mut().unwrap().insert(
+        line,
+        crate::host::CmdOutput { status: Some(32), stdout: String::new(), stderr: "mount: /fxvol: wrong fs type, bad option, bad superblock on /dev/sdb1\n".into() },
+    );
+    let e = mount_now(&h, &c, false, "x").unwrap_err();
+    assert!(e.contains("bad superblock") && e.contains("32"), "{e}");
 }
 
 #[test]

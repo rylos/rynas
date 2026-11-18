@@ -568,6 +568,54 @@ impl StorageWatch {
                     },
                 );
             }
+            // a configured volume that cannot be mounted because devices are missing (only
+            // filesystems of several devices are watched for it)
+            let repair = fs.repair.as_ref();
+            let watched = repair.is_some() || fs.devices.len() > 1;
+            let key = format!("storage:btrfs:{}:unmounted", fs.uuid);
+            let unmounted = repair.filter(|r| !r.mounted);
+            let (missing, total) = unmounted.map(|r| (r.missing_count, r.total_devices)).unwrap_or_default();
+            if watched {
+            self.t.emit(
+                &mut out,
+                &key,
+                unmounted.map(|_| Sev::Critical),
+                |s| {
+                    let mut ev = firing(Cat::Storage, s, ST, &key, format!("Volume {name} cannot be mounted: devices missing"));
+                    ev.body = if total > 0 {
+                        format!("{missing} of the {total} devices of volume {name} are missing, so it was not mounted. Reconnect them, or mount the volume degraded from Storage when every chunk still has a copy, then replace the missing device.")
+                    } else {
+                        format!("Devices of volume {name} are missing, so it was not mounted. Reconnect them, or mount the volume degraded from Storage when every chunk still has a copy, then replace the missing device.")
+                    };
+                    let ev = field(field(code(ev, "storage.btrfs_unmounted"), "volume", &name), "missing", missing);
+                    field(ev, "total", total)
+                },
+                || {
+                    let ev = resolved(Cat::Storage, ST, &key, format!("Volume {name} is mounted"));
+                    field(code(ev, "storage.btrfs_unmounted_ok"), "volume", &name)
+                },
+            );
+            // chunks a degraded mount wrote with a weaker profile, once no device is missing
+            let key = format!("storage:btrfs:{}:weak", fs.uuid);
+            let weak = repair.filter(|r| r.mounted && !r.degraded() && !r.convert.is_empty());
+            let kinds = weak
+                .map(|r| r.convert.iter().map(|c| format!("{} {}", c.kind, c.from.join("/"))).collect::<Vec<_>>().join(", "))
+                .unwrap_or_default();
+            self.t.emit(
+                &mut out,
+                &key,
+                weak.map(|_| Sev::Warning),
+                |s| {
+                    let mut ev = firing(Cat::Storage, s, ST, &key, format!("Volume {name}: chunks with less redundancy"));
+                    ev.body = format!("Volume {name} has chunks written with a weaker profile while it was degraded ({kinds}). Convert them back from Storage so that a lost device costs no data.");
+                    field(field(code(ev, "storage.btrfs_weak_chunks"), "volume", &name), "chunks", &kinds)
+                },
+                || {
+                    let ev = resolved(Cat::Storage, ST, &key, format!("Volume {name}: redundancy restored"));
+                    field(code(ev, "storage.btrfs_weak_chunks_ok"), "volume", &name)
+                },
+            );
+            }
             // usage: only for mounted volumes with sizes
             // counted once (a RAID1 holds every byte twice: `used` is raw)
             let (logical, total) = (fs.logical_used(), fs.usable_size());
@@ -1017,6 +1065,48 @@ mod tests {
         );
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].key.as_deref(), Some("storage:btrfs:u1:1:errors"));
+    }
+
+    /// A btrfs volume left unmounted by a missing device fires until it is mounted; chunks a
+    /// degraded mount wrote weak warn once no device is missing, until converted.
+    #[test]
+    fn btrfs_volume_unmounted_and_weak_chunks() {
+        use rynas_api_types::storage::{BtrfsConvert, BtrfsRepair};
+        let mut w = StorageWatch::default();
+        let fs = |repair: Option<BtrfsRepair>, mounted: bool| BtrfsFilesystem {
+            uuid: "u9".into(),
+            label: Some("photos".into()),
+            mountpoint: mounted.then(|| "/photos".into()),
+            repair,
+            ..Default::default()
+        };
+        let waiting = BtrfsRepair { mounted: false, total_devices: 2, missing_count: 1, ..Default::default() };
+        let ev = w.check(&[], &[], &[fs(Some(waiting.clone()), false)], &[]);
+        // the first pass also closes what may have been open before a restart
+        assert_eq!(ev.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), ["storage.btrfs_unmounted", "storage.btrfs_weak_chunks_ok"]);
+        assert_eq!(ev[0].severity, Sev::Critical);
+        assert_eq!(ev[0].fields["missing"], "1");
+        assert_eq!(ev[0].fields["total"], "2");
+        assert!(ev[0].body.contains("1 of the 2 devices"), "{}", ev[0].body);
+        assert!(w.check(&[], &[], &[fs(Some(waiting), false)], &[]).is_empty(), "once");
+        // mounted degraded: resolved (the per-device events tell what is missing)
+        let degraded = BtrfsRepair { mounted: true, degraded_mount: true, missing: vec![2], missing_count: 1, ..Default::default() };
+        let ev = w.check(&[], &[], &[fs(Some(degraded), true)], &[]);
+        assert_eq!(ev.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), ["storage.btrfs_unmounted_ok"]);
+        // repaired, single chunks left
+        let weak = BtrfsRepair {
+            mounted: true,
+            convert: vec![BtrfsConvert { kind: "metadata".into(), from: vec!["single".into()], to: "raid1".into() }],
+            ..Default::default()
+        };
+        let ev = w.check(&[], &[], &[fs(Some(weak), true)], &[]);
+        assert_eq!(ev[0].code, "storage.btrfs_weak_chunks");
+        assert_eq!(ev[0].fields["chunks"], "metadata single");
+        // converted: a filesystem of two devices, nothing to repair
+        let mut whole = fs(None, true);
+        whole.devices = vec![BtrfsDevice { devid: 1, ..Default::default() }, BtrfsDevice { devid: 2, ..Default::default() }];
+        let ev = w.check(&[], &[], &[whole], &[]);
+        assert!(ev.iter().any(|e| e.code == "storage.btrfs_weak_chunks_ok"), "{ev:?}");
     }
 
     /// A disk lost from a flexible RAID degrades every tier it was in: one event for the

@@ -879,12 +879,16 @@ fn main() -> std::io::Result<()> {
             homes: opened.homes,
             moves: Arc::new(rynas_services::homes::MoveStore::in_dir(&args.state_dir)),
         }));
-        state.storage_ops = Some(Arc::new(rynasd::storage_ops::StorageOps::new(
+        let storage_ops = Arc::new(rynasd::storage_ops::StorageOps::new(
             ops.clone(),
             state.storage.clone(),
             state.storage_lock.clone(),
             args.dry_system,
-        )));
+        ));
+        if !args.dry_system {
+            let _ = storage_ops.btrfs_guard.set(rynas_storage::btrfs_repair::Guard::path(&args.state_dir));
+        }
+        state.storage_ops = Some(storage_ops);
         // notifications: engine, its loops, rynasd's own sources, a module's forward socket
         let mut nopts = EngineOptions::new(args.state_dir.join("notify"), &running_hostname());
         nopts.imports = opened.modules.notify_imports();
@@ -1421,6 +1425,8 @@ fn main() -> std::io::Result<()> {
         // arrays of rynas volumes left inactive after boot by a missing drive
         if !args.dry_system {
             rynasd::notifications::spawn_degraded_start(state.clone(), notifier.clone());
+            // configured btrfs volumes left unmounted after boot by a missing device
+            rynasd::notifications::spawn_btrfs_degraded_mount(state.clone(), notifier.clone());
             // an initramfs refresh after a change of the arrays that failed or was rejected
             rynasd::notifications::spawn_initramfs_alerts(notifier.clone());
         }
