@@ -57,7 +57,7 @@ use crate::http::{Client, Endpoint};
 use crate::state::{State, now_ms};
 
 const USAGE: &str = "usage:
-  rynas-agent pair <nas address> <code> [--fingerprint AA:BB:..] [--yes] [--allow-http]
+  rynas-agent pair <nas address> <code> [--fingerprint AA:BB:..] [--yes] [--btrfs] [--allow-http]
                    (--yes over https needs --fingerprint)
   rynas-agent run
   rynas-agent backup
@@ -150,12 +150,15 @@ fn pair(args: &[String]) -> Result<(), String> {
     if !ep.tls && !flag(args, "--allow-http") {
         return Err("plain http sends the token unprotected: use https, or --allow-http on a trusted link".into());
     }
-    if btrfs_root() && !flag(args, "--yes") {
+    // the NAS decides the method by the code; `--btrfs` (in the command of a btrfs pairing)
+    // says the code already is one, so the question offering it is moot
+    if btrfs_root() && !flag(args, "--yes") && !flag(args, "--btrfs") {
         eprintln!("This PC's root filesystem is btrfs. rynas offers two methods for PCs:");
         eprintln!("  - btrfs snapshots: the NAS receives the PC's snapshots (recommended for btrfs);");
-        eprintln!("  - file backup: files into a repository on the NAS (this command).");
-        if !ask("Continue with the file backup? [y/N] ").eq_ignore_ascii_case("y") {
-            return Err("stopped: add the PC with the btrfs snapshots method on the NAS".into());
+        eprintln!("  - file backup: files into a repository on the NAS.");
+        eprintln!("The code decides the method: a code from the btrfs tab's \"Add a PC\" pairs for snapshots.");
+        if !ask("Pair with this code? [y/N] ").eq_ignore_ascii_case("y") {
+            return Err("stopped: for btrfs snapshots, pair with a code from the NAS' \"PC (Linux with btrfs)\" tab (its command ends with --btrfs)".into());
         }
     }
     // the certificate first: shown, compared, pinned
@@ -234,7 +237,13 @@ fn pair(args: &[String]) -> Result<(), String> {
         }
     }
     st.save()?;
-    println!("paired with {} as {} (group {})", if r.nas_name.is_empty() { ep.url() } else { r.nas_name }, r.device, r.group);
+    let nas = if r.nas_name.is_empty() { ep.url() } else { r.nas_name };
+    // a PC of the btrfs method has no repository, hence no group
+    if r.group.is_empty() {
+        println!("paired with {nas} as {} (btrfs snapshots)", r.device);
+    } else {
+        println!("paired with {nas} as {} (group {})", r.device, r.group);
+    }
     println!("start the service: systemctl enable --now rynas-agent.service");
     Ok(())
 }
@@ -334,7 +343,11 @@ fn test_run(args: &[String]) -> Result<(), String> {
 fn status() -> Result<(), String> {
     let st = State::load()?;
     println!("NAS          {} ({})", st.url, st.nas_name);
-    println!("PC           {} (group {})", st.device, st.group);
+    if st.group.is_empty() {
+        println!("PC           {} (btrfs snapshots)", st.device);
+    } else {
+        println!("PC           {} (group {})", st.device, st.group);
+    }
     if st.nas_id.is_empty() && st.fingerprint.is_empty() {
         println!("trust        none (paired over plain http; pair again over https to trust the NAS' certificate authority)");
     } else if st.nas_id.is_empty() {

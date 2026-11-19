@@ -1399,7 +1399,7 @@ async fn pairing_post(
     let fingerprint = svc.fingerprint();
     let body = PairingCreated {
         id: id.clone(),
-        command: pair_command(&code, fingerprint.as_deref()),
+        command: pair_command(&code, fingerprint.as_deref(), req.btrfs_target.is_some()),
         code,
         expires_ms,
         fingerprint,
@@ -1409,12 +1409,18 @@ async fn pairing_post(
 
 /// The command the console shows for a pairing (`{url}` is filled in by the browser): with
 /// the certificate's fingerprint, so the agent pins the NAS' certificate without asking and
-/// nobody in the path can pose as the NAS.
-pub fn pair_command(code: &str, fingerprint: Option<&str>) -> String {
-    match fingerprint.filter(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_hexdigit() || b == b':')) {
+/// nobody in the path can pose as the NAS. A pairing of the btrfs method adds `--btrfs`: the
+/// agent then skips its question for a btrfs root, which offers the btrfs method instead of
+/// the file backup (an older agent ignores the flag and still asks).
+pub fn pair_command(code: &str, fingerprint: Option<&str>, btrfs: bool) -> String {
+    let mut cmd = match fingerprint.filter(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_hexdigit() || b == b':')) {
         Some(f) => format!("sudo rynas-agent pair {{url}} {code} --fingerprint {f}"),
         None => format!("sudo rynas-agent pair {{url}} {code}"),
+    };
+    if btrfs {
+        cmd.push_str(" --btrfs");
     }
+    cmd
 }
 
 async fn pairing_delete(
@@ -2830,10 +2836,11 @@ mod tests {
     #[test]
     fn pairing_command_pins_the_certificate() {
         assert_eq!(
-            pair_command("ABCD-EFGH-JKMN", Some("AA:BB:01")),
+            pair_command("ABCD-EFGH-JKMN", Some("AA:BB:01"), false),
             "sudo rynas-agent pair {url} ABCD-EFGH-JKMN --fingerprint AA:BB:01"
         );
-        assert_eq!(pair_command("C", None), "sudo rynas-agent pair {url} C");
-        assert_eq!(pair_command("C", Some("x; rm")), "sudo rynas-agent pair {url} C");
+        assert_eq!(pair_command("C", None, false), "sudo rynas-agent pair {url} C");
+        assert_eq!(pair_command("C", Some("x; rm"), false), "sudo rynas-agent pair {url} C");
+        assert_eq!(pair_command("C", Some("AA:BB"), true), "sudo rynas-agent pair {url} C --fingerprint AA:BB --btrfs");
     }
 }
