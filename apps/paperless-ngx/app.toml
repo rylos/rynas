@@ -1,8 +1,8 @@
 schema = 1
 id = "paperless-ngx"
 name = "Paperless-ngx"
-version = "1.0.3"
-app_version = "3.4.2"
+version = "1.0.4"
+app_version = "3.5.1"
 update_policy = "minor"
 description = "Document archive: scans, OCRs, tags and indexes your paperwork for full-text search."
 homepage = "https://docs.paperless-ngx.com"
