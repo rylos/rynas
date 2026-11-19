@@ -471,6 +471,10 @@ pub struct PcTargetDetail {
     /// Sizes come live from the volume's quota groups (otherwise from Measure).
     #[serde(default)]
     pub sizes_from_quota: bool,
+    /// When the NAS owns retention: why each snapshot stays, or that it goes, at the next
+    /// pass (the plan of the saved settings).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan: Vec<RetentionItem>,
 }
 
 /// `POST /api/v1/pc-backups/plan/retention`: what the NAS would delete now with these
@@ -512,6 +516,10 @@ pub struct RetentionItem {
     pub group: String,
     pub keep: bool,
     pub reason: RetentionReason,
+    /// Kept by the counts (or the minimum): about when they let it go (the start of the
+    /// period past its count). The parent and the NAS floor may keep it longer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

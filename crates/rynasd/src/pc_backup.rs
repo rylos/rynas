@@ -1562,42 +1562,67 @@ fn snap_ms(e: &Entry) -> Option<u64> {
 
 /// What the NAS keeps of a device folder now, newest first (`entries` as scanned).
 ///
-/// Per subvolume (btrbk name), the GFS counts keep the first snapshot of each hour, day,
-/// week, month and year within that many of them, everything within `min`; on top, and
-/// whatever the counts say:
-/// - the newest complete snapshot (the parent of the PC's next incremental send);
+/// By whole runs (the snapshots taken together, [`run_keys`]): the GFS counts keep, for each
+/// hour, day, week, month and year within that many of them, the first run of that period
+/// that holds every `expected` subvolume (the first run at all when none does), with all of
+/// its snapshots, so a restore of a kept point in time never mixes runs; everything within
+/// `min`. On top, and whatever the counts say, single snapshots stay as:
+/// - the newest complete snapshot of each subvolume (the parent of the PC's next incremental
+///   send);
 /// - the NAS floor (`floor.keep_last` newest by NAS-side time, at least one, and nothing
 ///   younger than `floor.min_age_days`), as for deletes the PC asks for;
 /// - names more than a day in the future (never deleted on the NAS's own);
 /// - interrupted receives while a receive runs or for an hour after they stopped.
 ///
-/// Folders with a snapshot name that are not subvolumes never appear.
+/// A snapshot kept by the counts says until when (`until_ms`, the start of the period that
+/// lets it go). Folders with a snapshot name that are not subvolumes never appear.
 pub fn retention_plan(
     entries: &[Entry],
     gfs: &Retention,
     floor: &DeletePolicy,
+    expected: &BTreeSet<String>,
     receiving: bool,
     now_ms: u64,
 ) -> Vec<RetentionItem> {
     let parents = receive::parents(entries, now_ms);
     let floor = DeletePolicy { allowed: true, keep_last: floor.keep_last.max(1), min_age_days: floor.min_age_days };
-    let group_of = |e: &Entry| rynas_btrfs::name::split_snapshot_name(&e.name).map(|(g, _)| g.to_string());
+    let group_of = |e: &Entry| rynas_btrfs::name::split_snapshot_name(&e.name).map(|(g, _)| g.to_string()).unwrap_or_default();
     let counted = |e: &Entry| e.info.is_some() && !e.incomplete() && !receive::future_dated(&e.name, now_ms);
-    // the first (oldest) snapshot of every bucket, per subvolume and level
-    let mut oldest_first: Vec<(&Entry, u64, [i64; 5])> = entries
+    let listed: Vec<(&Entry, String)> = entries.iter().filter(|e| e.info.is_some()).map(|e| (e, group_of(e))).collect();
+    let keys = run_keys(&listed.iter().map(|(e, g)| (e.name.as_str(), g.as_str())).collect::<Vec<_>>());
+    // a snapshot without a btrbk time is a run of its own
+    let run_of: BTreeMap<&str, String> = listed
         .iter()
-        .filter(|e| counted(e))
-        .filter_map(|e| snap_ms(e).and_then(|ms| buckets(ms).map(|b| (e, ms, b))))
+        .zip(keys)
+        .map(|((e, _), k)| (e.name.as_str(), k.unwrap_or_else(|| format!("/{}", e.name))))
         .collect();
-    oldest_first.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| rynas_btrfs::name::compare_names(&a.0.name, &b.0.name)));
-    let mut firsts: BTreeMap<(String, usize, i64), &str> = BTreeMap::new();
-    let mut bucket_of: BTreeMap<&str, [i64; 5]> = BTreeMap::new();
-    for (e, _, b) in &oldest_first {
-        let g = group_of(e).unwrap_or_default();
-        for (level, key) in b.iter().enumerate() {
-            firsts.entry((g.clone(), level, *key)).or_insert(e.name.as_str());
+    // the counted snapshots of each run: its time (the name's), its periods, its subvolumes
+    let mut runs: BTreeMap<&str, (u64, [i64; 5], BTreeSet<&str>)> = BTreeMap::new();
+    for (e, g) in listed.iter().filter(|(e, _)| counted(e)) {
+        let Some((ms, b)) = snap_ms(e).and_then(|ms| buckets(ms).map(|b| (ms, b))) else { continue };
+        let r = runs.entry(run_of[e.name.as_str()].as_str()).or_insert((ms, b, BTreeSet::new()));
+        if ms < r.0 {
+            (r.0, r.1) = (ms, b);
         }
-        bucket_of.insert(e.name.as_str(), *b);
+        r.2.insert(g.as_str());
+    }
+    let mut oldest_first: Vec<(&str, u64, [i64; 5], bool)> = runs
+        .iter()
+        .map(|(k, (ms, b, groups))| (*k, *ms, *b, expected.iter().all(|g| groups.contains(g.as_str()))))
+        .collect();
+    oldest_first.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+    // per level and period, the run that stays: the first complete one, else the first one
+    let mut chosen: BTreeMap<(usize, i64), (&str, bool)> = BTreeMap::new();
+    for (k, _, b, full) in &oldest_first {
+        for (level, key) in b.iter().enumerate() {
+            let take = match chosen.get(&(level, *key)) {
+                None => true,
+                Some((_, was_full)) => !was_full && *full,
+            };
+            if take {
+                chosen.insert((level, *key), (k, *full));
+            }
+        }
     }
     let now_b = buckets(now_ms);
     let counts = [gfs.hourly, gfs.daily, gfs.weekly, gfs.monthly, gfs.yearly];
@@ -1609,9 +1634,23 @@ pub fn retention_plan(
         RetentionReason::Yearly,
     ];
     let min = min_keep(&gfs.min);
+    let kept_by = |l: usize, b: &[i64; 5], key: &str| counts[l] > 0 && chosen.get(&(l, b[l])).map(|c| c.0) == Some(key);
+    // when the counts let a kept run go: the latest start of the period past its count (and
+    // past `min`); `None` when `min` keeps everything
+    let until = |b: &[i64; 5], key: &str| -> Option<u64> {
+        let mut end = None;
+        for l in (0..5).filter(|&l| kept_by(l, b, key)) {
+            end = end.max(bucket_start(l, b[l] + i64::from(counts[l])));
+        }
+        match min {
+            MinKeep::All => None,
+            MinKeep::Within(l, n) => end.max(bucket_start(l, b[l] + n)),
+            MinKeep::Nothing => end,
+        }
+    };
     let mut out = Vec::new();
-    for e in entries.iter().filter(|e| e.info.is_some()) {
-        let group = group_of(e).unwrap_or_default();
+    for (e, group) in &listed {
+        let mut until_ms = None;
         let (keep, reason) = if e.incomplete() {
             let stale = receive::otime_ms(e).is_none_or(|t| now_ms >= t.saturating_add(CLEAN_INTERRUPTED_AFTER_MS));
             (receiving || !stale, RetentionReason::Interrupted)
@@ -1619,18 +1658,20 @@ pub fn retention_plan(
             (true, RetentionReason::Parent)
         } else if receive::delete_refusal(&e.name, entries, &floor, now_ms).is_some() {
             (true, RetentionReason::Floor)
-        } else if let (Some(b), Some(nb)) = (bucket_of.get(e.name.as_str()), now_b) {
+        } else if let (Some((key, (_, b, _))), Some(nb)) = (run_of.get(e.name.as_str()).and_then(|k| runs.get_key_value(k.as_str())), now_b) {
             let delta = |l: usize| nb[l] - b[l];
             let recent = match min {
                 MinKeep::All => true,
                 MinKeep::Nothing => false,
                 MinKeep::Within(l, n) => delta(l) < n,
             };
-            if recent || (0..5).any(|l| delta(l) < 0) {
+            if (0..5).any(|l| delta(l) < 0) {
                 (true, RetentionReason::Recent)
-            } else if let Some(l) = (0..5).find(|&l| {
-                counts[l] > 0 && delta(l) < i64::from(counts[l]) && firsts.get(&(group.clone(), l, b[l])) == Some(&e.name.as_str())
-            }) {
+            } else if recent {
+                until_ms = until(b, key);
+                (true, RetentionReason::Recent)
+            } else if let Some(l) = (0..5).find(|&l| delta(l) < i64::from(counts[l]) && kept_by(l, b, key)) {
+                until_ms = until(b, key);
                 (true, reasons[l])
             } else {
                 (false, RetentionReason::Expired)
@@ -1639,9 +1680,36 @@ pub fn retention_plan(
             // named in the future (or no time at all): never deleted on the NAS's own
             (true, RetentionReason::Future)
         };
-        out.push(RetentionItem { name: e.name.clone(), group, keep, reason });
+        out.push(RetentionItem { name: e.name.clone(), group: group.clone(), keep, reason, until_ms });
     }
     out
+}
+
+/// When a period of [`buckets`] starts (`level`: hour, day, week from Sunday, month, year;
+/// `key` its number there), in the NAS's local time.
+fn bucket_start(level: usize, key: i64) -> Option<u64> {
+    use rynas_btrfs::name::days_from_civil;
+    let (day, hour) = match level {
+        0 => (key.div_euclid(24), key.rem_euclid(24)),
+        1 => (key, 0),
+        // 1970-01-04 (day 3) was a Sunday
+        2 => (key * 7 + 3, 0),
+        3 => (days_from_civil(i32::try_from(key.div_euclid(12)).ok()?, key.rem_euclid(12) as u32 + 1, 1), 0),
+        _ => (days_from_civil(i32::try_from(key).ok()?, 1, 1), 0),
+    };
+    let date = jiff::civil::date(1970, 1, 1).checked_add(jiff::Span::new().try_days(day).ok()?).ok()?;
+    let at = date.at(i8::try_from(hour).ok()?, 0, 0, 0).to_zoned(rynas_power::system_tz()).ok()?;
+    u64::try_from(at.timestamp().as_millisecond()).ok()
+}
+
+/// The subvolumes a full run holds: the manifest's, else every one received complete, minus
+/// the ones the PC no longer sends (`ignored`).
+fn expected_of(manifest: Option<&ManifestRead>, complete: &BTreeSet<String>, ignored: &[String]) -> BTreeSet<String> {
+    let sent = |g: &&String| !ignored.contains(g);
+    match manifest {
+        Some(Ok(m)) => m.subvolumes.iter().filter(sent).cloned().collect(),
+        _ => complete.iter().filter(sent).cloned().collect(),
+    }
 }
 
 /// A fingerprint of the complete snapshots in a folder (their subvolume UUIDs, else names;
@@ -1661,18 +1729,41 @@ fn snapshot_set(entries: &[Entry]) -> u64 {
     h
 }
 
-/// The time part of a snapshot name without btrbk's `_N` suffix: the run it belongs to.
-fn run_key(name: &str) -> Option<&str> {
-    let (_, ts) = rynas_btrfs::name::split_snapshot_name(name)?;
-    Some(ts.split_once('_').filter(|(a, _)| a.len() != 8).map_or(ts, |(a, _)| a))
+/// The run of each snapshot (`(name, subvolume)`): the time in its name without btrbk's `_N`
+/// suffix (kept on btrbk's `short` names, where it is part of the day's count). When a
+/// subvolume has several snapshots with that time (two runs in the same minute: the later ones
+/// carry `_1`, `_2`…), the n-th of each subvolume by suffix belongs to the n-th run of that
+/// minute, keyed `<time>_<n>`: two runs never merge into one with a subvolume twice. `None`
+/// for a name without a btrbk time.
+fn run_keys(snaps: &[(&str, &str)]) -> Vec<Option<String>> {
+    fn stamp(name: &str) -> Option<&str> {
+        let (_, ts) = rynas_btrfs::name::split_snapshot_name(name)?;
+        Some(ts.split_once('_').filter(|(a, _)| a.len() != 8).map_or(ts, |(a, _)| a))
+    }
+    let mut by: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
+    for (i, (name, group)) in snaps.iter().enumerate() {
+        if let Some(s) = stamp(name) {
+            by.entry((s, group)).or_default().push(i);
+        }
+    }
+    let mut out = vec![None; snaps.len()];
+    for ((s, _), mut idx) in by {
+        idx.sort_by(|a, b| rynas_btrfs::name::compare_names(snaps[*a].0, snaps[*b].0));
+        for (n, i) in idx.into_iter().enumerate() {
+            out[i] = Some(if n == 0 { s.to_string() } else { format!("{s}_{n}") });
+        }
+    }
+    out
 }
 
 /// The snapshots grouped by run (same timestamp), newest first. `expected`: the subvolumes
 /// a full set has.
 fn runs(list: &[ReceivedSnapshot], expected: &BTreeSet<String>) -> Vec<PcRun> {
-    let mut by: BTreeMap<&str, Vec<&ReceivedSnapshot>> = BTreeMap::new();
-    for s in list.iter().filter(|s| !s.not_subvolume) {
-        if let Some(k) = run_key(&s.name) {
+    let subs: Vec<&ReceivedSnapshot> = list.iter().filter(|s| !s.not_subvolume).collect();
+    let keys = run_keys(&subs.iter().map(|s| (s.name.as_str(), s.group.as_str())).collect::<Vec<_>>());
+    let mut by: BTreeMap<String, Vec<&ReceivedSnapshot>> = BTreeMap::new();
+    for (s, k) in subs.into_iter().zip(keys) {
+        if let Some(k) = k {
             by.entry(k).or_default().push(s);
         }
     }
@@ -1684,7 +1775,7 @@ fn runs(list: &[ReceivedSnapshot], expected: &BTreeSet<String>) -> Vec<PcRun> {
                 snaps.iter().filter(|s| !s.incomplete).map(|s| s.size.as_ref().map(f)).sum::<Option<u64>>()
             };
             PcRun {
-                timestamp: k.to_string(),
+                timestamp: k,
                 created_ms: snaps.iter().filter_map(|s| s.created_ms).min(),
                 snapshots: snaps.iter().map(|s| s.name.clone()).collect(),
                 lacks: expected.iter().filter(|g| !complete.contains(g.as_str())).cloned().collect(),
@@ -2208,11 +2299,7 @@ impl PcBackup {
             .collect();
         let parents = receive::parents(&entries, now_ms);
         let manifest = if present { self.find_manifest(root, &entries, &parents) } else { None };
-        let ignored = |g: &String| !t.ignored_groups.contains(g);
-        let expected: BTreeSet<String> = match &manifest {
-            Some((_, _, Ok(m))) => m.subvolumes.iter().filter(|g| ignored(g)).cloned().collect(),
-            _ => complete.iter().filter(|g| ignored(g)).cloned().collect(),
-        };
+        let expected = expected_of(manifest.as_ref().map(|m| &m.2), &complete, &t.ignored_groups);
         let runs = runs(&s.list, &expected);
         let space = if present { self.host.space(root) } else { None };
         let receiving = present && self.host.receiving(root);
@@ -2618,6 +2705,19 @@ impl PcBackup {
         self.reg.lock().unwrap().targets.values().filter(|t| !t.agent).map(|t| t.path.clone()).collect()
     }
 
+    /// The subvolumes a full run of `t` holds ([`expected_of`], the manifest read once per
+    /// snapshot): what retention calls a complete run.
+    fn expected_groups(&self, t: &Stored, root: &Path, entries: &[Entry], now: u64) -> BTreeSet<String> {
+        let parents = receive::parents(entries, now);
+        let manifest = self.find_manifest(root, entries, &parents);
+        let complete: BTreeSet<String> = entries
+            .iter()
+            .filter(|e| e.info.is_some() && !e.incomplete())
+            .filter_map(|e| rynas_btrfs::name::split_snapshot_name(&e.name).map(|(g, _)| g.to_string()))
+            .collect();
+        expected_of(manifest.as_ref().map(|m| &m.2), &complete, &t.ignored_groups)
+    }
+
     /// What the NAS would delete of `t`'s folder now with these settings (read only).
     fn preview(&self, t: &Stored, retention: &PcRetention, floor: &DeletePolicy) -> Result<PcRetentionPreview, String> {
         let root = Path::new(&t.path);
@@ -2625,7 +2725,8 @@ impl PcBackup {
             return Err(format!("{}: no such folder", t.path));
         };
         let now = rynas_tasks::now_ms();
-        let items = retention_plan(&entries, &retention.gfs, floor, self.host.receiving(root), now);
+        let expected = self.expected_groups(t, root, &entries, now);
+        let items = retention_plan(&entries, &retention.gfs, floor, &expected, self.host.receiving(root), now);
         let quota = self.host.quota_sizes(root, &entries);
         let excl = |name: &str| match &quota {
             Some(q) => q.get(name).map(|x| x.1),
@@ -2661,7 +2762,9 @@ impl PcBackup {
             let Some((_, entries, _)) = self.host.scan(root)? else {
                 return Err(format!("{}: no such folder", t.path));
             };
-            let plan = retention_plan(&entries, &t.retention.gfs, &t.rules(), false, rynas_tasks::now_ms());
+            let now = rynas_tasks::now_ms();
+            let expected = self.expected_groups(&t, root, &entries, now);
+            let plan = retention_plan(&entries, &t.retention.gfs, &t.rules(), &expected, false, now);
             let mut gone = Vec::new();
             for i in plan.iter().filter(|i| !i.keep).take(PRUNE_MAX) {
                 self.host.delete_snapshot(&lock, &i.name)?;
@@ -3595,7 +3698,9 @@ async fn detail_get(
                 .ok()
                 .map(|(k, b)| receive::key_line(&device, &t.path, &t.key_policy(), &k, &b));
             let nas = t.retention.owner == RetentionOwner::Nas;
+            let plan = if nas { s.preview(&t, &t.retention, &t.rules()).map(|p| p.items).unwrap_or_default() } else { Vec::new() };
             PcTargetDetail {
+                plan,
                 key_line,
                 key_commands: receive::client_key_commands(&device),
                 client_config: receive::client_config(&device, &host, port, &t.path, nas),
@@ -4362,7 +4467,7 @@ mod tests {
         e.insert(0, entry("root", now - 50 * day, true));
         let gfs = Retention { preset: None, hourly: 0, daily: 7, weekly: 0, monthly: 0, yearly: 0, min: "latest".into() };
         let floor = DeletePolicy { allowed: false, keep_last: 0, min_age_days: 0 };
-        let plan = retention_plan(&e, &gfs, &floor, false, now as u64 * 1000);
+        let plan = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000);
         // the newest of each subvolume is the parent, however old (root only has one)
         assert_eq!(keep_of(&plan, &e[1].name), (true, RetentionReason::Parent));
         assert_eq!(keep_of(&plan, &e[0].name), (true, RetentionReason::Parent));
@@ -4372,12 +4477,12 @@ mod tests {
         assert!((7..=9).contains(&kept), "{kept} kept");
         // a floor of 100 days keeps everything
         let floor = DeletePolicy { allowed: true, keep_last: 1, min_age_days: 100 };
-        assert!(retention_plan(&e, &gfs, &floor, false, now as u64 * 1000).iter().all(|i| i.keep));
+        assert!(retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000).iter().all(|i| i.keep));
         // min "all" keeps everything too; monthly counts keep the first of each month
         let all = Retention { min: "all".into(), ..gfs.clone() };
-        assert!(retention_plan(&e, &all, &DeletePolicy::default(), false, now as u64 * 1000).iter().all(|i| i.keep));
+        assert!(retention_plan(&e, &all, &DeletePolicy::default(), &BTreeSet::new(), false, now as u64 * 1000).iter().all(|i| i.keep));
         let monthly = Retention { daily: 0, monthly: 12, ..gfs };
-        let plan = retention_plan(&e, &monthly, &DeletePolicy::default(), false, now as u64 * 1000);
+        let plan = retention_plan(&e, &monthly, &DeletePolicy::default(), &BTreeSet::new(), false, now as u64 * 1000);
         let months = plan.iter().filter(|i| i.reason == RetentionReason::Monthly).count();
         assert!((1..=3).contains(&months), "{months}");
     }
@@ -4394,7 +4499,7 @@ mod tests {
         ];
         let gfs = Retention { preset: None, hourly: 0, daily: 1, weekly: 0, monthly: 0, yearly: 0, min: "latest".into() };
         let floor = DeletePolicy::default();
-        let plan = retention_plan(&e, &gfs, &floor, false, now as u64 * 1000);
+        let plan = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000);
         // a name in the future stays and is not the parent: the real newest is
         assert_eq!(keep_of(&plan, &e[0].name), (true, RetentionReason::Future));
         assert_eq!(keep_of(&plan, &e[3].name), (true, RetentionReason::Parent));
@@ -4402,7 +4507,7 @@ mod tests {
         assert_eq!(keep_of(&plan, &e[1].name), (true, RetentionReason::Interrupted));
         assert_eq!(keep_of(&plan, &e[2].name), (false, RetentionReason::Interrupted));
         assert_eq!(keep_of(&plan, &e[4].name), (false, RetentionReason::Expired));
-        let busy = retention_plan(&e, &gfs, &floor, true, now as u64 * 1000);
+        let busy = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), true, now as u64 * 1000);
         assert_eq!(keep_of(&busy, &e[2].name), (true, RetentionReason::Interrupted));
     }
 
@@ -4425,8 +4530,64 @@ mod tests {
         assert_eq!((r[0].referenced_bytes, r[0].exclusive_bytes), (Some(20), Some(2)));
         assert_eq!(r[1].lacks, ["root"]);
         assert!(r[1].incomplete);
-        assert_eq!(run_key("home.20261110T0300_2"), Some("20261110T0300"));
-        assert_eq!(run_key("home.20261110_101500"), Some("20261110_101500"));
+        let k = |n: &[(&str, &str)]| run_keys(n).into_iter().map(|k| k.unwrap_or_default()).collect::<Vec<_>>();
+        // btrbk's `_N` of a name taken belongs to the same run; `short` names keep it
+        assert_eq!(k(&[("home.20261110T0300_2", "home"), ("root.20261110T0300", "root")]), ["20261110T0300", "20261110T0300"]);
+        assert_eq!(k(&[("home.20261110_101500", "home")]), ["20261110_101500"]);
+        // two runs in the same minute stay two runs, each with one snapshot per subvolume
+        let two = k(&[("@.20261110T0300", "@"), ("@home.20261110T0300", "@home"), ("@.20261110T0300_1", "@"), ("@home.20261110T0300_1", "@home")]);
+        assert_eq!(two, ["20261110T0300", "20261110T0300", "20261110T0300_1", "20261110T0300_1"]);
+        // the n-th of each subvolume by suffix, whatever the suffixes are
+        assert_eq!(k(&[("@.20261110T0300_2", "@"), ("@.20261110T0300", "@"), ("@home.20261110T0300", "@home"), ("x", "")]), ["20261110T0300_1", "20261110T0300", "20261110T0300", ""]);
+        let e = vec![entry("@", t, true), entry("@home", t, true)];
+        let mut l = listed(&e);
+        let mut again = l.clone();
+        for s in again.iter_mut() {
+            s.name = format!("{}_1", s.name);
+        }
+        l.extend(again);
+        let expected = BTreeSet::from(["@".to_string(), "@home".to_string()]);
+        let r = runs(&l, &expected);
+        assert_eq!(r.len(), 2);
+        assert!(r.iter().all(|r| r.snapshots.len() == 2 && r.lacks.is_empty()), "{r:?}");
+    }
+
+    /// Retention keeps whole runs: on a day with a partial run (`@` sent, `@home` failed) and a
+    /// full one later, the full one stays with both snapshots and the partial one goes, so no
+    /// kept point in time mixes runs; a day with only a partial run keeps it.
+    #[test]
+    fn retention_keeps_complete_runs_whole() {
+        let now = now_s();
+        let day_start = |back: i64| (bucket_start(1, buckets(now as u64 * 1000).unwrap()[1] - back).unwrap() / 1000) as i64;
+        let (d1, d2, d3) = (day_start(1), day_start(2), day_start(3));
+        let e = vec![
+            // yesterday: a full run (the parents)
+            entry("@", d1 + 3 * 3600, true),
+            entry("@home", d1 + 3 * 3600, true),
+            // two days ago: a partial run at 03:00, a full one at 05:00
+            entry("@", d2 + 5 * 3600, true),
+            entry("@home", d2 + 5 * 3600, true),
+            entry("@", d2 + 3 * 3600, true),
+            // three days ago: only a partial run
+            entry("@", d3 + 3 * 3600, true),
+        ];
+        let gfs = Retention { preset: None, hourly: 0, daily: 7, weekly: 0, monthly: 0, yearly: 0, min: "latest".into() };
+        let floor = DeletePolicy { allowed: false, keep_last: 0, min_age_days: 0 };
+        let expected = BTreeSet::from(["@".to_string(), "@home".to_string()]);
+        let plan = retention_plan(&e, &gfs, &floor, &expected, false, now as u64 * 1000);
+        assert_eq!(keep_of(&plan, &e[0].name), (true, RetentionReason::Parent));
+        assert_eq!(keep_of(&plan, &e[2].name), (true, RetentionReason::Daily));
+        assert_eq!(keep_of(&plan, &e[3].name), (true, RetentionReason::Daily));
+        assert_eq!(keep_of(&plan, &e[4].name), (false, RetentionReason::Expired));
+        assert_eq!(keep_of(&plan, &e[5].name), (true, RetentionReason::Daily));
+        // kept by the counts: until the day past its count (seven days on)
+        let until = plan.iter().find(|i| i.name == e[2].name).and_then(|i| i.until_ms).unwrap();
+        assert_eq!(until, bucket_start(1, buckets(d2 as u64 * 1000).unwrap()[1] + 7).unwrap());
+        assert!(plan.iter().find(|i| i.name == e[0].name).unwrap().until_ms.is_none());
+        // nothing expected: every run counts as complete, so the first of the day stays
+        let loose = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000);
+        assert_eq!(keep_of(&loose, &e[4].name), (true, RetentionReason::Daily));
+        assert_eq!(keep_of(&loose, &e[2].name), (false, RetentionReason::Expired));
     }
 
     #[test]

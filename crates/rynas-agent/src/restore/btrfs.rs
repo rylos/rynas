@@ -158,13 +158,13 @@ pub fn complete(s: &ReceivedSnapshot) -> bool {
 }
 
 /// The snapshot of `group` for run `run`: the run's own when complete, else the newest
-/// complete one not newer than the run, else the newest complete one.
+/// complete one not newer than the run (the caller says that it mixes points in time).
+/// Never a newer one: a restore of the run never brings back what came after it.
 pub fn snapshot_for<'a>(snaps: &'a [ReceivedSnapshot], run: &PcRun, group: &str) -> Option<&'a ReceivedSnapshot> {
     let mine = || snaps.iter().filter(|s| s.group == group && complete(s));
     mine()
         .find(|s| run.snapshots.contains(&s.name))
         .or_else(|| mine().filter(|s| s.created_ms.is_some() && s.created_ms <= run.created_ms).max_by_key(|s| s.created_ms))
-        .or_else(|| mine().max_by_key(|s| s.created_ms))
 }
 
 /// The subvolumes to restore, by the rules of the mode (pure: tested). `names`: the custom
@@ -263,9 +263,17 @@ pub fn select(
         let snap = match overrides.iter().find(|(n, _)| n == &c.name) {
             Some((_, s)) => snaps.iter().find(|x| &x.name == s && x.group == c.name && complete(x)).ok_or_else(|| format!("{s}: not a complete snapshot of {}", c.name))?,
             None => {
-                let s = snapshot_for(snaps, run, &c.name).ok_or_else(|| format!("{}: the NAS has no complete snapshot of it", c.name))?;
+                let s = snapshot_for(snaps, run, &c.name).ok_or_else(|| {
+                    format!(
+                        "{}: the backup {} has no complete snapshot of it, nor does any older one: choose a later backup, or name a snapshot with --subvol {}=<snapshot>",
+                        c.name, run.timestamp, c.name
+                    )
+                })?;
                 if !run.snapshots.contains(&s.name) {
-                    notes.push(format!("{}: not in the run {}, {} is used", c.name, run.timestamp, s.name));
+                    notes.push(format!(
+                        "{}: the backup {} lacks it, so the older snapshot {} is restored: the restored PC mixes two points in time",
+                        c.name, run.timestamp, s.name
+                    ));
                 }
                 s
             }
@@ -951,10 +959,12 @@ mod tests {
         // the run's own, then the newest not newer than the run …
         assert_eq!(snapshot_for(&snaps, &run, "@").unwrap().name, "@.20261110T0300");
         assert_eq!(snapshot_for(&snaps, &run, "@games").unwrap().name, "@games.20261109T0300");
-        // … then the newest complete one at all (only newer ones are left)
+        // … never a newer one: a run is never mixed with what came after it
         snaps.retain(|s| s.group != "@games");
         snaps.push(snap("@games", "20261111T0300", 3000, None));
-        assert_eq!(snapshot_for(&snaps, &run, "@games").unwrap().name, "@games.20261111T0300");
+        assert!(snapshot_for(&snaps, &run, "@games").is_none());
+        snaps.push(snap("@games", "20261108T0300", 500, None));
+        assert_eq!(snapshot_for(&snaps, &run, "@games").unwrap().name, "@games.20261108T0300");
         // an incomplete one never
         snaps.iter_mut().for_each(|s| if s.group == "@games" { s.readonly = false });
         assert!(snapshot_for(&snaps, &run, "@games").is_none());
