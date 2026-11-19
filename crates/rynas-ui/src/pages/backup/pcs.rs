@@ -97,7 +97,7 @@ fn quiet_chip(p: &PcTarget) -> Option<AnyView> {
     let last = p.last_received_ms?;
     let off = (js_sys::Date::now() as u64).saturating_sub(last);
     let hours = match p.alert_after_hours() {
-        0 => super::agent::not_seen_after_h(0),
+        0 => super::agent::not_seen_after_h(0, 0),
         h => u64::from(h),
     };
     (!p.receiving && p.state == ReceiveState::Ok && off >= hours * 3_600_000).then(|| super::agent::not_seen_view(off))
@@ -240,15 +240,19 @@ fn gap_text(g: &BareMetalGap, agent: bool) -> String {
         BareMetalCode::LoaderUnknown => "bkpc.bm.loader_unknown",
         BareMetalCode::ManifestStale => "bkpc.bm.manifest_stale",
         BareMetalCode::LatestRunIncomplete => "bkpc.bm.latest_run_incomplete",
+        BareMetalCode::BootCopyStale => "bkpc.bm.boot_copy_stale",
+        BareMetalCode::BootCopyMissing => "bkpc.bm.boot_copy_missing",
     };
     tf(k, &[("subject", g.subject.as_deref().unwrap_or(""))])
 }
 
+/// Ready, ready with notes (a stale manifest or boot copy, a newest run that lacks a
+/// subvolume: said in the panel), or not ready.
 fn bm_status(b: &BareMetal) -> AnyView {
-    if b.ready {
-        ui::status(Tone::Ok, t("bkpc.bm.ready").to_string())
-    } else {
-        ui::status(Tone::Info, t("bkpc.bm.not_ready").to_string())
+    match (b.ready, b.warnings.is_empty()) {
+        (true, true) => ui::status(Tone::Ok, t("bkpc.bm.ready").to_string()),
+        (true, false) => ui::status(Tone::Warn, t("bkpc.bm.ready_notes").to_string()),
+        (false, _) => ui::status(Tone::Info, t("bkpc.bm.not_ready").to_string()),
     }
 }
 
@@ -1607,7 +1611,8 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         let shown_gaps: Vec<&BareMetalGap> = b.missing.iter().chain(&b.warnings).filter(|g| g.code != BareMetalCode::NoSnapshots).collect();
         // btrbk without a manifest: the drop-in of the manual steps writes it
         let no_manifest = shown_gaps.iter().any(|g| g.code == BareMetalCode::NoManifest);
-        let reason = (!b.ready).then(|| b.missing.first().map(|g| gap_text(g, agent))).flatten();
+        // what stops a restore, else what a ready one should look at first
+        let reason = if b.ready { b.warnings.first() } else { b.missing.first() }.map(|g| gap_text(g, agent));
         let gaps = shown_gaps.iter().map(|g| view! { <li>{gap_text(g, agent)}</li> }).collect_view();
         let layout = (!b.layout.is_empty()).then(|| {
             let whole = rynas_api_types::pcagent::BtrbkLayout { subvolumes: b.layout.clone(), ..Default::default() };

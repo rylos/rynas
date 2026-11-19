@@ -763,6 +763,10 @@ impl PcAgent {
             .filter(|p| now_ms().saturating_sub(p.updated_ms) < 120_000);
         let kit = reg.groups.get(&d.group).and_then(|g| g.recovery_kit_ms);
         let (now, tz, paused_all) = (now_ms(), rynas_power::system_tz(), self.paused_all());
+        // a PC of the btrfs method has one set of settings, its folder's: the alert time,
+        // retention, the backups held and the restore readiness come from there
+        let folder = (d.settings.method == PcMethod::Btrfs).then(|| self.btrfs.get().and_then(|b| b.agent_facts(name))).flatten();
+        let d = &with_folder(d, folder.as_ref());
         PcDevice {
             device: name.to_string(),
             description: d.settings.description.clone(),
@@ -780,9 +784,12 @@ impl PcAgent {
             progress,
             group: d.group.clone(),
             uploaded_bytes: d.uploaded_bytes,
-            versions: d.versions,
+            versions: folder.as_ref().map_or(d.versions, |f| f.runs),
             settings: d.settings.clone(),
-            bare_metal: ready_of(d, kit),
+            bare_metal: match &folder {
+                Some(f) => folder_ready(&f.bare_metal),
+                None => ready_of(d, kit),
+            },
             command: d.command.clone(),
             command_at_ms: d.command_at_ms,
             revoked: d.revoked,
@@ -999,6 +1006,48 @@ fn followed(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u64) -> Opt
     }
     let spec = s.calendar.as_deref().and_then(|c| rynas_schedule::CalendarSpec::parse(c).ok());
     Some((s, spec))
+}
+
+/// A btrfs PC as its folder rules it ([`crate::pc_backup::PcBackup::agent_facts`]), the one set
+/// of settings of such a PC: the folder's alert time (late when a backup was missed while the
+/// PC was on, as for every PC; the folder notifies once nothing arrived for that long; no
+/// critical tier), its retention and minimum age. The record's own values stay stored,
+/// unused. Without a folder: the record as it is.
+fn with_folder<'a>(d: &'a Dev, folder: Option<&crate::pc_backup::AgentFolder>) -> std::borrow::Cow<'a, Dev> {
+    let Some(f) = folder else { return std::borrow::Cow::Borrowed(d) };
+    let mut x = d.clone();
+    x.settings.alert_hours = f.alert_hours;
+    x.settings.critical_hours = 0;
+    x.settings.retention = rynas_api_types::backup::Retention {
+        last: f.keep_last,
+        hourly: f.retention.hourly,
+        daily: f.retention.daily,
+        weekly: f.retention.weekly,
+        monthly: f.retention.monthly,
+        yearly: f.retention.yearly,
+    };
+    x.settings.min_age_days = f.min_age_days;
+    std::borrow::Cow::Owned(x)
+}
+
+/// A btrfs folder's restore readiness in the agent record's terms (the same answer in both
+/// views of the PC).
+fn folder_ready(b: &rynas_api_types::pcbackup::BareMetal) -> BareMetalReady {
+    use rynas_api_types::pcbackup::BareMetalCode as C;
+    let mut reasons = Vec::new();
+    for g in &b.missing {
+        let r = match g.code {
+            C::NoSnapshots => ReadyReason::NoVersion,
+            C::SubvolumeMissing => ReadyReason::VolumeSkipped,
+            C::LoaderUnknown => ReadyReason::LoaderUnknown,
+            C::ManifestStale => ReadyReason::ManifestStale,
+            _ => ReadyReason::NoManifest,
+        };
+        if !reasons.contains(&r) {
+            reasons.push(r);
+        }
+    }
+    BareMetalReady { ready: b.ready, reasons, details: Vec::new() }
 }
 
 /// The device's last good run as its agent counts the next one from it: the interval from the
@@ -1500,6 +1549,14 @@ async fn device_put(
         }
         if d.settings.plan != s.plan || d.settings.method != s.method {
             d.rev += 1;
+        }
+        // the btrfs method's retention and alerts are the folder's: what the console sent
+        // back for them (the folder's, shown in the record) never replaces the record's own
+        if s.method == PcMethod::Btrfs {
+            s.retention = d.settings.retention;
+            s.min_age_days = d.settings.min_age_days;
+            s.alert_hours = d.settings.alert_hours;
+            s.critical_hours = d.settings.critical_hours;
         }
         d.settings = s;
         Ok(d.clone())

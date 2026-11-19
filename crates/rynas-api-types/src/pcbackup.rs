@@ -350,6 +350,12 @@ pub enum BareMetalCode {
     ManifestStale,
     /// The newest run lacks a subvolume: a restore mixes runs (`subject`).
     LatestRunIncomplete,
+    /// The last copy of a boot filesystem into the root subvolume failed: the snapshots
+    /// carry the previous one (`subject`: its mount point).
+    BootCopyStale,
+    /// A UEFI PC whose snapshots carry no copy of its ESP (`subject`: its mount point): a
+    /// restore rebuilds the boot files with the PC's tools.
+    BootCopyMissing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

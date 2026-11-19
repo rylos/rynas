@@ -122,16 +122,16 @@ pub(super) fn off_note(p: &PcDevice) -> Option<String> {
 }
 
 /// Hours off after which a PC also gets a neutral "Not seen for…" chip: its critical hours,
-/// else three days.
-pub(super) fn not_seen_after_h(critical_hours: u32) -> u64 {
-    u64::from(if critical_hours > 0 { critical_hours } else { 72 })
+/// else its alert hours (a btrfs PC has only its folder's), else three days.
+pub(super) fn not_seen_after_h(critical_hours: u32, alert_hours: u32) -> u64 {
+    u64::from([critical_hours, alert_hours].into_iter().find(|h| *h > 0).unwrap_or(72))
 }
 
 /// A neutral chip next to the state once a PC has been off for longer than its critical
 /// hours ([`not_seen_after_h`]): a fact, not an error (no notification either).
 pub(super) fn not_seen_chip(p: &PcDevice) -> Option<AnyView> {
     let off = off_for_ms(p)?;
-    (off >= not_seen_after_h(p.settings.critical_hours) * 3_600_000).then(|| not_seen_view(off))
+    (off >= not_seen_after_h(p.settings.critical_hours, p.settings.alert_hours) * 3_600_000).then(|| not_seen_view(off))
 }
 
 /// The neutral "Not seen for…" chip, `off_ms` since the last contact.

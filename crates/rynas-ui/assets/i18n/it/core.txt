@@ -5213,6 +5213,7 @@ bk.snap.not_subvolume	Non è un sottovolume
 bk.browse	Sfoglia
 bkpc.col.restore	Ripristino su disco vuoto
 bkpc.bm.ready	Pronto
+bkpc.bm.ready_notes	Pronto, con note
 bkpc.bm.disks	Dischi
 bkpc.bm.serial	N. di serie {serial}
 bkpc.bm.part	Partizione {n}
@@ -5235,7 +5236,9 @@ bkpc.bm.no_root	Il manifest non indica nessun sottovolume montato su /.
 bkpc.bm.subvolume_missing	{subject} serve per un ripristino ma qui non ha nessuno snapshot completo.
 bkpc.bm.loader_unknown	Il manifest non indica il caricatore di avvio.
 bkpc.bm.manifest_stale	Il manifest è più vecchio di {subject} giorni rispetto allo snapshot che lo contiene.
-bkpc.bm.latest_run_incomplete	L'esecuzione più recente non ha {subject}: un ripristino lo prende da un'esecuzione precedente.
+bkpc.bm.latest_run_incomplete	L'esecuzione più recente non ha {subject}: ripristinandola, {subject} viene da un'esecuzione precedente e si mescolano due momenti.
+bkpc.bm.boot_copy_stale	L'ultima copia di {subject} negli snapshot non è riuscita: contengono una copia precedente dei file di avvio.
+bkpc.bm.boot_copy_missing	Gli snapshot non contengono una copia di {subject}: un ripristino ricrea i file di avvio con gli strumenti del PC.
 bkpc.bm.layout	Sottovolumi
 bkpc.owner.agent_help	Il NAS elimina gli snapshot vecchi con questi numeri; rynas-agent può solo aggiungere. Lo snapshot più recente di ogni sottovolume resta sempre: il prossimo invio parte da lì.
 pcb.how	Inviati da

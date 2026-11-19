@@ -1803,6 +1803,8 @@ struct Manifest {
     disks: Vec<rynas_api_types::pcagent::Disk>,
     layout: Vec<rynas_api_types::pcagent::BtrbkSubvolume>,
     boot_copies: Vec<rynas_api_types::pcagent::BootCopy>,
+    /// The ESP's mount point of a UEFI PC (`boot.esp` with `boot.uefi`).
+    esp: Option<String>,
 }
 
 /// A manifest found in a snapshot, or why it cannot be used.
@@ -1887,6 +1889,12 @@ fn parse_manifest(b: &[u8]) -> ManifestRead {
     Ok(Manifest {
         written_at_ms: v.get("written_at_ms").and_then(serde_json::Value::as_u64),
         loader: v.pointer("/boot/loader").and_then(serde_json::Value::as_str).and_then(short),
+        esp: v
+            .pointer("/boot/esp")
+            .and_then(serde_json::Value::as_str)
+            .filter(|_| v.pointer("/boot/uefi").and_then(serde_json::Value::as_bool) == Some(true))
+            .filter(|s| s.starts_with('/') && s.len() <= SHOWN_MAX && !s.chars().any(char::is_control))
+            .map(str::to_string),
         subvolumes,
         root,
         disks,
@@ -1935,6 +1943,16 @@ fn bare_metal(
                 for g in r.lacks.iter().filter(|g| m.subvolumes.contains(g)) {
                     b.warnings.push(gap(BareMetalCode::LatestRunIncomplete, Some(g.clone())));
                 }
+            }
+            // the boot files the snapshots carry: a failed last copy leaves the previous one;
+            // a UEFI PC without a copy of its ESP has its boot files rebuilt by the restore
+            for c in m.boot_copies.iter().filter(|c| c.stale) {
+                b.warnings.push(gap(BareMetalCode::BootCopyStale, Some(c.mount.clone())));
+            }
+            if let Some(esp) = &m.esp
+                && !m.boot_copies.iter().any(|c| c.mount.trim_end_matches('/') == esp.trim_end_matches('/'))
+            {
+                b.warnings.push(gap(BareMetalCode::BootCopyMissing, Some(esp.clone())));
             }
             b.subvolumes = m.subvolumes;
             b.loader = m.loader;
@@ -2104,6 +2122,17 @@ pub type AgentRemoved = Box<dyn Fn(&str, u64) + Send + Sync>;
 /// See [`PcBackup::agent_missed`].
 pub type AgentMissed = Box<dyn Fn(&str) -> Option<bool> + Send + Sync>;
 
+/// A btrfs PC's folder as its agent record shows it ([`PcBackup::agent_facts`]).
+#[derive(Debug, Clone)]
+pub struct AgentFolder {
+    pub alert_hours: u32,
+    pub retention: Retention,
+    pub keep_last: u32,
+    pub min_age_days: u32,
+    pub runs: u32,
+    pub bare_metal: BareMetal,
+}
+
 pub struct PcBackup {
     pub ops: Arc<Ops>,
     pub host: Arc<dyn ReceiveHost>,
@@ -2270,6 +2299,12 @@ impl PcBackup {
     }
 
     fn view(&self, device: &str, t: &Stored, now_ms: u64) -> View {
+        self.view_with(device, t, now_ms, true)
+    }
+
+    /// [`Self::view`]; `ask_agent` false leaves the agent's word on lateness out (the agent's
+    /// side asks while it builds its own view: no call back into it).
+    fn view_with(&self, device: &str, t: &Stored, now_ms: u64, ask_agent: bool) -> View {
         let root = Path::new(&t.path);
         let scan = self.host.scan(root);
         let present = matches!(scan, Ok(Some(_)));
@@ -2335,7 +2370,7 @@ impl PcBackup {
         }
         // late only when the PC was on while a backup was due (its agent asked for the plan);
         // without a live agent nothing tells, and a PC that is merely off is never late
-        let missed = present && t.agent && self.missed(device) == Some(true);
+        let missed = present && t.agent && ask_agent && self.missed(device) == Some(true);
         let state = match (present, s.last_received_ms) {
             (false, _) => ReceiveState::Missing,
             _ if missed => ReceiveState::Late,
@@ -3196,6 +3231,23 @@ impl PcBackup {
     /// `rynas-agent`'s folder exists for `device` (the btrfs method may be chosen).
     pub fn has_agent_target(&self, device: &str) -> bool {
         self.reg.lock().unwrap().targets.get(device).is_some_and(|t| t.agent)
+    }
+
+    /// What a btrfs PC's agent record shows from its folder, the one set of settings of such a
+    /// PC: the alert time, the retention and the floor's minimum age (the agent record's own
+    /// are not used), the backups held (runs) and whether they rebuild the PC. `None` without
+    /// a folder for `rynas-agent` of that name.
+    pub fn agent_facts(&self, device: &str) -> Option<AgentFolder> {
+        let t = self.reg.lock().unwrap().targets.get(device).filter(|t| t.agent).cloned()?;
+        let v = self.view_with(device, &t, rynas_tasks::now_ms(), false);
+        Some(AgentFolder {
+            alert_hours: v.target.alert_after_hours(),
+            retention: t.retention.gfs.clone(),
+            keep_last: t.delete.keep_last.max(1),
+            min_age_days: t.delete.min_age_days,
+            runs: v.target.runs,
+            bare_metal: v.target.bare_metal,
+        })
     }
 
     /// What the agent's folder holds (the agent picks its parents from it).
@@ -4614,6 +4666,33 @@ mod tests {
         // no manifest at all (the PC side comes later), no snapshots at all
         assert_eq!(bare_metal(&groups, None, None).missing[0].code, BareMetalCode::NoManifest);
         assert_eq!(bare_metal(&BTreeSet::new(), None, None).missing[0].code, BareMetalCode::NoSnapshots);
+    }
+
+    /// The boot files the snapshots carry: a failed last copy and a UEFI PC without a copy of
+    /// its ESP are notes on a ready restore, not reasons it is not ready.
+    #[test]
+    fn bare_metal_notes_boot_copies() {
+        let groups = BTreeSet::from(["@".to_string()]);
+        let text = |copies: &str| {
+            format!(
+                r#"{{"format":1,"written_at_ms":1000,"boot":{{"loader":"grub","uefi":true,"esp":"/boot/efi"}},
+                "btrbk":{{"subvolumes":[{{"name":"@","mount":"/"}}],"boot_copies":[{copies}]}}}}"#
+            )
+        };
+        let read = |copies: &str| parse_manifest(text(copies).as_bytes()).unwrap();
+        let codes = |m: Manifest| {
+            let b = bare_metal(&groups, Some(("@.x".into(), Some(2000), Ok(m))), None);
+            assert!(b.ready);
+            b.warnings.iter().map(|w| (w.code, w.subject.clone().unwrap_or_default())).collect::<Vec<_>>()
+        };
+        let good = r#"{"mount":"/boot/efi","dir":"/.rynas/boot/boot-efi","bytes":1,"files":1}"#;
+        assert!(codes(read(good)).is_empty());
+        let stale = r#"{"mount":"/boot/efi","dir":"/.rynas/boot/boot-efi","bytes":1,"files":1,"stale":true,"error":"EIO"}"#;
+        assert_eq!(codes(read(stale)), [(BareMetalCode::BootCopyStale, "/boot/efi".to_string())]);
+        assert_eq!(codes(read("")), [(BareMetalCode::BootCopyMissing, "/boot/efi".to_string())]);
+        // a BIOS PC has no ESP to copy
+        let bios = parse_manifest(text("").replace(r#""uefi":true"#, r#""uefi":false"#).as_bytes()).unwrap();
+        assert!(bios.esp.is_none() && codes(bios).is_empty());
     }
 
     /// A subvolume nested in another without a mount (`@home/games`) is a group of its own:

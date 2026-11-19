@@ -5247,6 +5247,7 @@ bk.snap.not_subvolume	Не подтом
 bk.browse	Просмотреть
 bkpc.col.restore	Восстановление на пустой диск
 bkpc.bm.ready	Готово
+bkpc.bm.ready_notes	Готово, есть замечания
 bkpc.bm.disks	Диски
 bkpc.bm.serial	S/N {serial}
 bkpc.bm.part	Раздел {n}
@@ -5269,7 +5270,9 @@ bkpc.bm.no_root	В манифесте нет подтома, смонтиров�
 bkpc.bm.subvolume_missing	{subject} нужен для восстановления, но здесь нет его полного снимка.
 bkpc.bm.loader_unknown	В манифесте не указан загрузчик.
 bkpc.bm.manifest_stale	Манифест старше содержащего его снимка (дн.): {subject}.
-bkpc.bm.latest_run_incomplete	В последнем запуске нет {subject}: при восстановлении он берётся из более раннего запуска.
+bkpc.bm.latest_run_incomplete	В последнем запуске нет {subject}: при его восстановлении {subject} берётся из более раннего запуска, и смешиваются два момента времени.
+bkpc.bm.boot_copy_stale	Последнее копирование {subject} в снимки не удалось: в них более старая копия загрузочных файлов.
+bkpc.bm.boot_copy_missing	В снимках нет копии {subject}: при восстановлении загрузочные файлы создаются заново средствами самого ПК.
 bkpc.bm.layout	Подтома
 bkpc.owner.agent_help	NAS удаляет старые снимки по этим счётчикам; rynas-agent может только добавлять. Последний снимок каждого подтома всегда сохраняется: следующая отправка начинается с него.
 pcb.how	Способ отправки
