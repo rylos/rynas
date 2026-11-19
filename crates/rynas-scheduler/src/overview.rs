@@ -646,7 +646,8 @@ mod tests {
         assert_eq!(bands[0], (ms("2026-11-17T22:00", &tz), ms("2026-11-18T00:00", &tz)));
         let o = build(vec![pc(None)], None, &tz, from, ms("2026-11-18T00:00", &tz), from, &|_| vec![]);
         let starts: Vec<u64> = o.runs.iter().map(|r| r.start_ms).collect();
-        assert_eq!(starts, vec![ms("2026-11-17T15:00", &tz), ms("2026-11-17T21:30", &tz)]);
+        // every 6 h from the previous start (the agent counts from the run's start)
+        assert_eq!(starts, vec![ms("2026-11-17T15:00", &tz), ms("2026-11-17T21:00", &tz)]);
         assert!(o.windows.is_empty());
     }
 
