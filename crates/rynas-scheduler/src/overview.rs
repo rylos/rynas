@@ -51,6 +51,12 @@ pub struct JobInput {
     pub resources: Vec<Resource>,
     /// End of its last run (an interval task), or a PC's last good backup.
     pub last_ms: Option<u64>,
+    /// A PC's plan: when its interval counts from (the last good run's start for agents from
+    /// 0.8.24, else `last_ms`).
+    pub interval_from_ms: Option<u64>,
+    /// A PC's plan: each next start an interval after the previous start (agents from
+    /// 0.8.24), else after the previous run's end.
+    pub from_start: bool,
     /// When its timer elapses next, when known (an interval task's own timer).
     pub next_ms: Option<u64>,
 }
@@ -257,13 +263,14 @@ pub fn build(
                     TaskTrigger::After { .. } | TaskTrigger::Boot { .. } | TaskTrigger::Manual => {}
                 },
                 // a PC's backup plan: the agent's own rules (S6, `rynas_schedule::window`):
-                // due every so many hours after the end of the last good run, started only
-                // inside its allowed window (drawn as its start band)
+                // due every so many hours after the last good run (its start for agents from
+                // 0.8.24, its end before), started only inside its allowed window (drawn as
+                // its start band)
                 (None, Some(h)) if h > 0 => {
                     let every = u64::from(h) * 3_600_000;
-                    let first = j.last_ms.map(|l| l + every).unwrap_or(now).max(now.min(to));
+                    let first = j.interval_from_ms.or(j.last_ms).map(|l| l + every).unwrap_or(now).max(now.min(to));
                     let window = job.window.as_deref().filter(|w| week_window_valid(w));
-                    let (s, cut) = rynas_schedule::window::interval_starts(first, every, dur.unwrap_or(0), window, tz, to, MAX_RUNS_PER_JOB);
+                    let (s, cut) = rynas_schedule::window::interval_starts(first, every, dur.unwrap_or(0), j.from_start, window, tz, to, MAX_RUNS_PER_JOB);
                     job.truncated = cut;
                     starts.extend(s.into_iter().filter(|st| *st >= from).map(|st| (st, st + dur.unwrap_or(DEFAULT_MS), dur.is_some())));
                     if let Some(w) = window {
@@ -573,6 +580,8 @@ mod tests {
             claims,
             resources: res,
             last_ms: None,
+            interval_from_ms: None,
+            from_start: true,
             next_ms: None,
         }
     }
@@ -601,8 +610,8 @@ mod tests {
     }
 
     /// S6: a PC's backup plan with an allowed window starts only inside it (the agent's rules)
-    /// and draws the window as its start band; without one, every interval from the last
-    /// good run's end plus the run's length.
+    /// and draws the window as its start band; without one, every interval from the previous
+    /// start (agents from 0.8.24; older ones from the previous run's end).
     #[test]
     fn a_pc_plan_with_an_allowed_window() {
         let tz = TimeZone::get("Europe/Rome").unwrap();
@@ -636,6 +645,8 @@ mod tests {
             claims: vec![],
             resources: vec![],
             last_ms: Some(ms("2026-11-17T09:00", &tz)),
+            interval_from_ms: None,
+            from_start: true,
             next_ms: None,
         };
         let o = build(vec![pc(Some(String::from_utf8(w).unwrap()))], None, &tz, from, to, from, &|_| vec![]);
@@ -649,6 +660,16 @@ mod tests {
         // every 6 h from the previous start (the agent counts from the run's start)
         assert_eq!(starts, vec![ms("2026-11-17T15:00", &tz), ms("2026-11-17T21:00", &tz)]);
         assert!(o.windows.is_empty());
+        let until = ms("2026-11-18T00:00", &tz);
+        let starts = |j: JobInput| build(vec![j], None, &tz, from, until, from, &|_| vec![]).runs.iter().map(|r| r.start_ms).collect::<Vec<u64>>();
+        // the last good run started at 08:30 (an agent that counts from the start): 14:30 first
+        let mut j = pc(None);
+        j.interval_from_ms = Some(ms("2026-11-17T08:30", &tz));
+        assert_eq!(starts(j), vec![ms("2026-11-17T14:30", &tz), ms("2026-11-17T20:30", &tz)]);
+        // an agent before 0.8.24: each next one an interval after the previous run's end
+        let mut j = pc(None);
+        j.from_start = false;
+        assert_eq!(starts(j), vec![ms("2026-11-17T15:00", &tz), ms("2026-11-17T21:30", &tz)]);
     }
 
     /// A PC's plan at set times: a missed time at once, then the calendar's times.
@@ -678,6 +699,8 @@ mod tests {
             claims: vec![],
             resources: vec![],
             last_ms: Some(ms("2026-11-16T02:10", &tz)),
+            interval_from_ms: None,
+            from_start: true,
             next_ms: None,
         };
         let daily = TaskTrigger::Calendar { on_calendar: "*-*-* 02:00:00".into(), cron: None, persistent: true, randomized_delay_s: 0 };

@@ -162,9 +162,17 @@ pub fn complete(s: &ReceivedSnapshot) -> bool {
 /// Never a newer one: a restore of the run never brings back what came after it.
 pub fn snapshot_for<'a>(snaps: &'a [ReceivedSnapshot], run: &PcRun, group: &str) -> Option<&'a ReceivedSnapshot> {
     let mine = || snaps.iter().filter(|s| s.group == group && complete(s));
+    // names carry the minute: within the run's own minute, only what the NAS received before
+    // the run's last snapshot is older (a later run of that minute is not)
+    let run_received = snaps.iter().filter(|s| run.snapshots.contains(&s.name)).filter_map(|s| s.received_at_ms).max();
+    let older = |s: &ReceivedSnapshot| match (s.created_ms, run.created_ms) {
+        (Some(c), Some(r)) if c < r => true,
+        (Some(c), Some(r)) if c == r => s.received_at_ms.zip(run_received).is_none_or(|(a, b)| a <= b),
+        _ => false,
+    };
     mine()
         .find(|s| run.snapshots.contains(&s.name))
-        .or_else(|| mine().filter(|s| s.created_ms.is_some() && s.created_ms <= run.created_ms).max_by_key(|s| s.created_ms))
+        .or_else(|| mine().filter(|s| older(s)).max_by_key(|s| (s.created_ms, s.received_at_ms)))
 }
 
 /// The subvolumes to restore, by the rules of the mode (pure: tested). `names`: the custom
@@ -968,6 +976,24 @@ mod tests {
         // an incomplete one never
         snaps.iter_mut().for_each(|s| if s.group == "@games" { s.readonly = false });
         assert!(snapshot_for(&snaps, &run, "@games").is_none());
+    }
+
+    /// Within the run's own minute a snapshot of a later run (received after the run's last
+    /// snapshot) is not older: the one before is taken.
+    #[test]
+    fn snapshot_fallback_skips_a_later_run_of_the_same_minute() {
+        let (mut snaps, run) = data();
+        for s in snaps.iter_mut() {
+            s.received_at_ms = s.created_ms.map(|c| c + 10);
+        }
+        let mut later = snap("@games", "20261110T0300_1", 2000, None);
+        later.received_at_ms = Some(2500);
+        snaps.push(later);
+        assert_eq!(snapshot_for(&snaps, &run, "@games").unwrap().name, "@games.20261109T0300");
+        let mut same = snap("@games", "20261110T0300_2", 2000, None);
+        same.received_at_ms = Some(2005);
+        snaps.push(same);
+        assert_eq!(snapshot_for(&snaps, &run, "@games").unwrap().name, "@games.20261110T0300_2");
     }
 
     #[test]

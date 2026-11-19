@@ -6066,6 +6066,7 @@ dict! { BLOB, LENS;
     "bkpc.pruned" => "Old snapshots deleted";
     "bkpc.prune_title" => "Delete old snapshots of {device}?";
     "bkpc.prune_nothing" => "Nothing to delete now: the rules keep every snapshot.";
+    "bkpc.prune_batch" => "Up to {n} go now, the hourly cleanups delete the rest.";
     "bkpc.last_prune" => "Last cleanup";
     "bkpc.last_prune_text" => "{when}: {n} deleted";
     "bkpc.prune_postponed" => "{when}: postponed, a backup was being received; the next pass runs within the hour";

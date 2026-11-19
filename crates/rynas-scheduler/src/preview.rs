@@ -104,8 +104,8 @@ pub fn preview(req: &SchedulePreviewRequest, nas: &TimeZone, now: Timestamp) -> 
             }
             let now_ms = now.as_millisecond().max(0) as u64;
             let every = u64::from(*hours) * 3_600_000;
-            let first = req.last_ms.map_or(now_ms, |l| l.saturating_add(every)).max(now_ms);
-            let (runs, _) = rynas_schedule::window::interval_starts(first, every, 0, window, &tz, u64::MAX, count);
+            let first = req.interval_from_ms.or(req.last_ms).map_or(now_ms, |l| l.saturating_add(every)).max(now_ms);
+            let (runs, _) = rynas_schedule::window::interval_starts(first, every, 0, true, window, &tz, u64::MAX, count);
             return SchedulePreview {
                 runs: runs
                     .iter()
@@ -516,6 +516,16 @@ mod tests {
         );
         let locals: Vec<&str> = p.runs.iter().map(|r| r.local.as_str()).collect();
         assert_eq!(locals, ["2026-11-13 22:00:00", "2026-11-14 22:00:00", "2026-11-15 22:00:00"]);
+        // a run that started at 08:00 and ended at 09:00 (an agent counting from the start):
+        // the first start an interval after 08:00
+        let start = at("2026-11-13 08:00", "Europe/Rome").as_millisecond() as u64;
+        let p = preview(
+            &SchedulePreviewRequest { trigger: Some(every6.clone()), last_ms: Some(last), interval_from_ms: Some(start), count: Some(2), ..Default::default() },
+            &rome(),
+            from,
+        );
+        let locals: Vec<&str> = p.runs.iter().map(|r| r.local.as_str()).collect();
+        assert_eq!(locals, ["2026-11-13 14:00:00", "2026-11-13 20:00:00"]);
         let p = preview(&SchedulePreviewRequest { trigger: Some(every6), window: Some("1".into()), ..Default::default() }, &rome(), from);
         assert!(!p.valid);
         assert!(!trig(TaskTrigger::Interval { hours: 0, after_boot_min: 0 }).valid);

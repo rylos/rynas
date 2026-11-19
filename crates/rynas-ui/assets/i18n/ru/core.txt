@@ -5387,6 +5387,7 @@ bkpc.prune	Удалить старые сейчас
 bkpc.pruned	Старые снимки удалены
 bkpc.prune_title	Удалить старые снимки «{device}»?
 bkpc.prune_nothing	Сейчас удалять нечего: правила сохраняют все снимки.
+bkpc.prune_batch	Сейчас удаляется до {n}, остальное удалят ежечасные очистки.
 bkpc.last_prune	Последняя очистка
 bkpc.last_prune_text	{when}: удалено {n}
 bkpc.prune_postponed	{when}: отложено, шёл приём копии; следующий проход в течение часа

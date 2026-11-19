@@ -141,11 +141,14 @@ pub fn start_at(window: Option<&str>, tz: &TimeZone, due_ms: u64) -> Option<u64>
 /// The next starts of an interval schedule from `first_due_ms`, up to `to_ms` and at most
 /// `max` (`true` when cut): each start where [`start_at`] puts it, the next one due
 /// `every_ms` after it, as the agent counts from the start of the last good run, and not
-/// before the run's expected length (`length_ms`) is over.
+/// before the run's expected length (`length_ms`) is over; `from_start` false: `every_ms`
+/// after the run's expected end, as agents before 0.8.24 count.
+#[allow(clippy::too_many_arguments)]
 pub fn interval_starts(
     first_due_ms: u64,
     every_ms: u64,
     length_ms: u64,
+    from_start: bool,
     window: Option<&str>,
     tz: &TimeZone,
     to_ms: u64,
@@ -154,7 +157,11 @@ pub fn interval_starts(
     if every_ms == 0 {
         return (Vec::new(), false);
     }
-    next_starts(first_due_ms, |end| Some(end.saturating_sub(length_ms).saturating_add(every_ms).max(end)), length_ms, window, tz, to_ms, max)
+    let next = |end: u64| {
+        let base = if from_start { end.saturating_sub(length_ms) } else { end };
+        Some(base.saturating_add(every_ms).max(end))
+    };
+    next_starts(first_due_ms, next, length_ms, window, tz, to_ms, max)
 }
 
 /// When a calendar backup is due (ignoring any window), the way `Persistent=true` catches up:
@@ -365,16 +372,19 @@ mod tests {
         assert_eq!(start_at(Some(&w), &tz(), ms("2026-11-17T23:10")), Some(ms("2026-11-17T23:10")));
         // every 6 h with a two-hour night window: one start a night (the next due falls in
         // the day), another one when the run is short and the window still open
-        let (s, cut) = interval_starts(ms("2026-11-17T14:00"), 6 * h, 0, Some(&w), &tz(), ms("2026-11-20T00:00"), 10);
+        let (s, cut) = interval_starts(ms("2026-11-17T14:00"), 6 * h, 0, true, Some(&w), &tz(), ms("2026-11-20T00:00"), 10);
         assert!(!cut);
         assert_eq!(s, vec![ms("2026-11-17T22:00"), ms("2026-11-18T22:00"), ms("2026-11-19T22:00")]);
-        let (s, _) = interval_starts(ms("2026-11-17T14:00"), h, 0, Some(&w), &tz(), ms("2026-11-18T00:00"), 10);
+        let (s, _) = interval_starts(ms("2026-11-17T14:00"), h, 0, true, Some(&w), &tz(), ms("2026-11-18T00:00"), 10);
         assert_eq!(s, vec![ms("2026-11-17T22:00"), ms("2026-11-17T23:00")]);
         // the next start counts from the previous start, never before that run is over
-        let (s, cut) = interval_starts(0, 2 * h, h, None, &tz(), 5 * h, 2);
+        let (s, cut) = interval_starts(0, 2 * h, h, true, None, &tz(), 5 * h, 2);
         assert_eq!((s, cut), (vec![0, 2 * h], true));
-        let (s, cut) = interval_starts(0, h, 2 * h, None, &tz(), 5 * h, 2);
+        let (s, cut) = interval_starts(0, h, 2 * h, true, None, &tz(), 5 * h, 2);
         assert_eq!((s, cut), (vec![0, 2 * h], true));
+        // an agent before 0.8.24: the interval after the run's end
+        let (s, _) = interval_starts(0, 2 * h, h, false, None, &tz(), 5 * h, 2);
+        assert_eq!(s, vec![0, 3 * h]);
     }
 
     /// A calendar plan catches a missed time up once (the way `Persistent=true` does), after

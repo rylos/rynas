@@ -5379,6 +5379,7 @@ bkpc.prune	Elimina i vecchi ora
 bkpc.pruned	Vecchi snapshot eliminati
 bkpc.prune_title	Eliminare gli snapshot vecchi di {device}?
 bkpc.prune_nothing	Niente da eliminare ora: le regole tengono ogni snapshot.
+bkpc.prune_batch	Ne vanno via fino a {n} ora, le pulizie orarie eliminano il resto.
 bkpc.last_prune	Ultima pulizia
 bkpc.last_prune_text	{when}: {n} eliminati
 bkpc.prune_postponed	{when}: rimandata, si stava ricevendo un backup; la prossima passata è entro un'ora

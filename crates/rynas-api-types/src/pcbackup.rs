@@ -260,8 +260,9 @@ pub struct PruneRun {
     /// Why it stopped (a delete failed).
     #[serde(default)]
     pub error: Option<String>,
-    /// A receive was running: the pass waits for the next one (within the hour), nothing
-    /// failed.
+    /// The pass did not run, a receive was running: the next one (within the hour) goes on,
+    /// nothing failed. Said by the pass itself; the stored last pass is always a real one
+    /// ([`PcTarget::prune_postponed_ms`]).
     #[serde(default)]
     pub postponed: bool,
 }
@@ -441,6 +442,10 @@ pub struct PcTarget {
     pub receiving: bool,
     #[serde(default)]
     pub last_prune: Option<PruneRun>,
+    /// A pass postponed after `last_prune` because a receive was running (the next one goes on
+    /// within the hour).
+    #[serde(default)]
+    pub prune_postponed_ms: Option<u64>,
     /// Fed by `rynas-agent` over HTTPS (the paired PC of the same name, btrfs method): no
     /// SSH key, retention always on the NAS.
     #[serde(default)]
@@ -544,6 +549,9 @@ pub struct PcRetentionPreview {
     /// Sum of the exclusive sizes of what goes, when every one is known (deleting several
     /// snapshots frees at least this: what only they share goes too).
     pub frees_at_least_bytes: Option<u64>,
+    /// One pass deletes at most this many (the next passes, hourly, go on); 0: no limit said.
+    #[serde(default)]
+    pub per_pass: u32,
 }
 
 /// What the PCs connect to and whether this NAS can receive.

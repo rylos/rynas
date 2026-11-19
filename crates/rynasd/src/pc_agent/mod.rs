@@ -780,6 +780,7 @@ impl PcAgent {
             state: state_of(d, progress.is_some(), missed_online(d, paused_all, &tz, now), now),
             next_due_ms: next_due(d, paused_all, &tz, now),
             last_ok_ms: d.last_ok_ms,
+            interval_from_ms: last_ok(d).map(|l| l.started_ms),
             last_run: d.history.iter().rev().find(|r| !r.restore).cloned(),
             progress,
             group: d.group.clone(),
@@ -1563,7 +1564,9 @@ async fn device_put(
     })?;
     svc.changed.notify_waiters();
     audit(&who, "settings", &device);
-    Ok(Json(svc.view(&device, &d, &svc.snapshot())))
+    // the view reads the btrfs folder of such a PC: off the async threads
+    let s2 = svc.clone();
+    blocking(move || s2.view(&device, &d, &s2.snapshot())).await.map(Json)
 }
 
 async fn group_put(

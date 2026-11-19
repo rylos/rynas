@@ -1373,7 +1373,7 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
     let s = p.settings.clone();
     let method = s.method;
     let description = RwSignal::new(s.description.clone());
-    let schedule = crate::schedule::interval::IntervalEditor::new(&s.plan, p.last_ok_ms, &p.agent_version);
+    let schedule = crate::schedule::interval::IntervalEditor::new(&s.plan, p.last_ok_ms, p.interval_from_ms, &p.agent_version);
     let freeze = RwSignal::new(if s.plan.freeze == FreezeMode::Freeze { "freeze" } else { "hot" }.to_string());
     let freeze_max = RwSignal::new(s.plan.freeze_max_secs.to_string());
     let excludes = RwSignal::new(s.plan.excludes.join("\n"));

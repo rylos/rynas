@@ -99,6 +99,8 @@ pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> R
             claims,
             resources,
             last_ms: last,
+            interval_from_ms: None,
+            from_start: true,
             next_ms,
         });
     }
@@ -150,6 +152,9 @@ pub(crate) fn overview_of(p: &Protection, rt: &Runtime, from: u64, to: u64) -> R
                 claims: Vec::new(),
                 resources: Vec::new(),
                 last_ms: d.last_ok_ms,
+                // the interval as this PC's agent counts it (from the run's start from 0.8.24)
+                interval_from_ms: crate::pc_agent::last_ok(d).map(|l| l.started_ms),
+                from_start: rynas_api_types::pcagent::agent_counts_from_start(&d.agent_version),
                 next_ms: None,
             });
         }

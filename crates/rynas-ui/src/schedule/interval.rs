@@ -66,10 +66,11 @@ pub struct IntervalEditor {
 }
 
 impl IntervalEditor {
-    /// From the saved plan; `last_ok_ms`: the PC's last good backup (the next starts count from
-    /// it); `agent_version`: the PC's agent (an older one is told to update for the window, the
-    /// set times and "at every start").
-    pub fn new(plan: &PcPlan, last_ok_ms: Option<u64>, agent_version: &str) -> Self {
+    /// From the saved plan; `last_ok_ms`: the PC's last good backup (set times count from its
+    /// end); `interval_from_ms`: when its interval counts from (the run's start for agents from
+    /// 0.8.24); `agent_version`: the PC's agent (an older one is told to update for the window,
+    /// the set times and "at every start").
+    pub fn new(plan: &PcPlan, last_ok_ms: Option<u64>, interval_from_ms: Option<u64>, agent_version: &str) -> Self {
         let paused = RwSignal::new(if plan.paused { "paused" } else { "on" }.to_string());
         let mode = RwSignal::new(if plan.calendar.is_some() { "calendar" } else { "every" }.to_string());
         let at_boot = RwSignal::new(plan.at_boot);
@@ -101,7 +102,7 @@ impl IntervalEditor {
                 "every" => TaskTrigger::Interval { hours: every.with(|e| e.trim().parse().ok()).filter(|h| (1..=168).contains(h))?, after_boot_min: 0 },
                 _ => return None,
             };
-            Some(SchedulePreviewRequest { trigger: Some(trigger), window, last_ms: last_ok_ms, ..Default::default() })
+            Some(SchedulePreviewRequest { trigger: Some(trigger), window, last_ms: last_ok_ms, interval_from_ms, ..Default::default() })
         });
         IntervalEditor { paused, mode, at_boot, every, cal, delay, limit, grid, next, agent: StoredValue::new(agent_version.to_string()) }
     }

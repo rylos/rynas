@@ -1163,7 +1163,9 @@ fn alerts(svc: &PcAgent, name: &str, d: &Dev) {
     if d.revoked || (d.settings.method == PcMethod::Btrfs && d.alert == Alert::None) {
         return;
     }
-    let want = want_alert(d, svc.paused_all(), &rynas_power::system_tz(), now_ms());
+    // a btrfs PC's alert left open from before (when the record's own hours counted): closed
+    // at once, never judged again by those hours
+    let want = if d.settings.method == PcMethod::Btrfs { Alert::None } else { want_alert(d, svc.paused_all(), &rynas_power::system_tz(), now_ms()) };
     if want == d.alert {
         return;
     }

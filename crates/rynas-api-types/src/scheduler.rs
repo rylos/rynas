@@ -1386,6 +1386,10 @@ pub struct SchedulePreviewRequest {
     /// later; absent: due now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ms: Option<u64>,
+    /// A PC's interval counts from here instead of `last_ms`: its last good run's start
+    /// (agents from 0.8.24; `PcDevice::interval_from_ms`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_from_ms: Option<u64>,
 }
 
 /// Answer of `POST /api/v1/scheduler/preview` (always 200; `valid: false` with `error`).

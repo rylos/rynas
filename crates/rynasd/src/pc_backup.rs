@@ -1518,8 +1518,13 @@ const PRUNE_MAX: usize = 50;
 const MANIFEST_STALE_DAYS: u64 = 7;
 /// Low space without known sizes: less than this share of the volume free.
 const LOW_SPACE_PCT: u64 = 5;
-/// How a pass skipped for a running receive was stored before [`PruneRun::postponed`].
+/// How a pass skipped for a running receive was stored before it was kept apart.
 const PRUNE_POSTPONED: &str = "a receive is running";
+
+/// A stored pass that was a skip for a running receive (records from before 2026-11-19).
+fn old_postponed(r: &PruneRun) -> bool {
+    r.error.as_deref().is_some_and(|e| e.starts_with(PRUNE_POSTPONED))
+}
 
 /// Calendar buckets of a time in the NAS's local time: hour, day, week (from Sunday), month,
 /// year (the counts of a [`Retention`], in that order).
@@ -1566,9 +1571,10 @@ fn snap_ms(e: &Entry) -> Option<u64> {
 ///
 /// By whole runs (the snapshots taken together, [`run_keys`]): the GFS counts keep, for each
 /// hour, day, week, month and year within that many of them, the first run of that period
-/// that holds every `expected` subvolume (the first run at all when none does), with all of
-/// its snapshots, so a restore of a kept point in time never mixes runs; everything within
-/// `min`. On top, and whatever the counts say, single snapshots stay as:
+/// that holds every `expected` subvolume, with all of its snapshots, so a restore of a kept
+/// point in time never mixes runs; a period without a complete run (a btrbk PC that snapshots
+/// its subvolumes at different times, a partial run alone) keeps the first snapshot of each
+/// subvolume; everything within `min`. On top, and whatever the counts say, single snapshots stay as:
 /// - the newest complete snapshot of each subvolume (the parent of the PC's next incremental
 ///   send);
 /// - the NAS floor (`floor.keep_last` newest by NAS-side time, at least one, and nothing
@@ -1591,15 +1597,17 @@ pub fn retention_plan(
     let group_of = |e: &Entry| rynas_btrfs::name::split_snapshot_name(&e.name).map(|(g, _)| g.to_string()).unwrap_or_default();
     let counted = |e: &Entry| e.info.is_some() && !e.incomplete() && !receive::future_dated(&e.name, now_ms);
     let listed: Vec<(&Entry, String)> = entries.iter().filter(|e| e.info.is_some()).map(|e| (e, group_of(e))).collect();
-    let keys = run_keys(&listed.iter().map(|(e, g)| (e.name.as_str(), g.as_str())).collect::<Vec<_>>());
+    let keys = run_keys(&listed.iter().map(|(e, g)| (e.name.as_str(), g.as_str(), receive::otime_ms(e))).collect::<Vec<_>>());
     // a snapshot without a btrbk time is a run of its own
     let run_of: BTreeMap<&str, String> = listed
         .iter()
         .zip(keys)
         .map(|((e, _), k)| (e.name.as_str(), k.unwrap_or_else(|| format!("/{}", e.name))))
         .collect();
-    // the counted snapshots of each run: its time (the name's), its periods, its subvolumes
+    // the counted snapshots of each run: its time (the name's), its periods, its subvolumes;
+    // and per subvolume and period the first snapshot (the rule where no run is complete)
     let mut runs: BTreeMap<&str, (u64, [i64; 5], BTreeSet<&str>)> = BTreeMap::new();
+    let mut by_time: Vec<(&str, &str, u64, [i64; 5])> = Vec::new();
     for (e, g) in listed.iter().filter(|(e, _)| counted(e)) {
         let Some((ms, b)) = snap_ms(e).and_then(|ms| buckets(ms).map(|b| (ms, b))) else { continue };
         let r = runs.entry(run_of[e.name.as_str()].as_str()).or_insert((ms, b, BTreeSet::new()));
@@ -1607,23 +1615,28 @@ pub fn retention_plan(
             (r.0, r.1) = (ms, b);
         }
         r.2.insert(g.as_str());
+        by_time.push((e.name.as_str(), g.as_str(), ms, b));
     }
-    let mut oldest_first: Vec<(&str, u64, [i64; 5], bool)> = runs
+    by_time.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| rynas_btrfs::name::compare_names(a.0, b.0)));
+    let mut group_first: BTreeMap<(&str, usize, i64), &str> = BTreeMap::new();
+    for (name, g, _, b) in &by_time {
+        for (level, key) in b.iter().enumerate() {
+            group_first.entry((g, level, *key)).or_insert(name);
+        }
+    }
+    let mut oldest_first: Vec<(&str, u64, [i64; 5])> = runs
         .iter()
-        .map(|(k, (ms, b, groups))| (*k, *ms, *b, expected.iter().all(|g| groups.contains(g.as_str()))))
+        .filter(|(_, (_, _, groups))| expected.iter().all(|g| groups.contains(g.as_str())))
+        .map(|(k, (ms, b, _))| (*k, *ms, *b))
         .collect();
     oldest_first.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
-    // per level and period, the run that stays: the first complete one, else the first one
-    let mut chosen: BTreeMap<(usize, i64), (&str, bool)> = BTreeMap::new();
-    for (k, _, b, full) in &oldest_first {
+    // per level and period, the run that stays: the first complete one; a period without a
+    // complete run (a PC that snapshots its subvolumes at different times, a partial run
+    // alone) keeps the first snapshot of each subvolume instead
+    let mut complete_first: BTreeMap<(usize, i64), &str> = BTreeMap::new();
+    for (k, _, b) in &oldest_first {
         for (level, key) in b.iter().enumerate() {
-            let take = match chosen.get(&(level, *key)) {
-                None => true,
-                Some((_, was_full)) => !was_full && *full,
-            };
-            if take {
-                chosen.insert((level, *key), (k, *full));
-            }
+            complete_first.entry((level, *key)).or_insert(k);
         }
     }
     let now_b = buckets(now_ms);
@@ -1636,12 +1649,18 @@ pub fn retention_plan(
         RetentionReason::Yearly,
     ];
     let min = min_keep(&gfs.min);
-    let kept_by = |l: usize, b: &[i64; 5], key: &str| counts[l] > 0 && chosen.get(&(l, b[l])).map(|c| c.0) == Some(key);
-    // when the counts let a kept run go: the latest start of the period past its count (and
-    // past `min`); `None` when `min` keeps everything
-    let until = |b: &[i64; 5], key: &str| -> Option<u64> {
+    let kept_by = |l: usize, b: &[i64; 5], key: &str, name: &str, group: &str| {
+        counts[l] > 0
+            && match complete_first.get(&(l, b[l])) {
+                Some(k) => *k == key,
+                None => group_first.get(&(group, l, b[l])) == Some(&name),
+            }
+    };
+    // when the counts let a kept snapshot go: the latest start of the period past its count
+    // (and past `min`); `None` when `min` keeps everything
+    let until = |b: &[i64; 5], key: &str, name: &str, group: &str| -> Option<u64> {
         let mut end = None;
-        for l in (0..5).filter(|&l| kept_by(l, b, key)) {
+        for l in (0..5).filter(|&l| kept_by(l, b, key, name, group)) {
             end = end.max(bucket_start(l, b[l] + i64::from(counts[l])));
         }
         match min {
@@ -1670,10 +1689,10 @@ pub fn retention_plan(
             if (0..5).any(|l| delta(l) < 0) {
                 (true, RetentionReason::Recent)
             } else if recent {
-                until_ms = until(b, key);
+                until_ms = until(b, key, &e.name, group);
                 (true, RetentionReason::Recent)
-            } else if let Some(l) = (0..5).find(|&l| delta(l) < i64::from(counts[l]) && kept_by(l, b, key)) {
-                until_ms = until(b, key);
+            } else if let Some(l) = (0..5).find(|&l| delta(l) < i64::from(counts[l]) && kept_by(l, b, key, &e.name, group)) {
+                until_ms = until(b, key, &e.name, group);
                 (true, reasons[l])
             } else {
                 (false, RetentionReason::Expired)
@@ -1731,28 +1750,54 @@ fn snapshot_set(entries: &[Entry]) -> u64 {
     h
 }
 
-/// The run of each snapshot (`(name, subvolume)`): the time in its name without btrbk's `_N`
-/// suffix (kept on btrbk's `short` names, where it is part of the day's count). When a
-/// subvolume has several snapshots with that time (two runs in the same minute: the later ones
-/// carry `_1`, `_2`…), the n-th of each subvolume by suffix belongs to the n-th run of that
-/// minute, keyed `<time>_<n>`: two runs never merge into one with a subvolume twice. `None`
+/// The run of each snapshot (`(name, subvolume, NAS receive time)`): the time in its name
+/// without btrbk's `_N` suffix (kept on btrbk's `short` names, where it is part of the day's
+/// count). When a subvolume has several snapshots with that time (two runs in the same
+/// minute), the minute splits into runs keyed `<time>_<n>`, so two runs never merge into one
+/// with a subvolume twice: by receive time when every one is known (a new run starts where a
+/// subvolume comes again: a run whose `@home` failed and the next one that names its
+/// `@home` without a suffix stay apart), else the n-th of each subvolume by suffix. `None`
 /// for a name without a btrbk time.
-fn run_keys(snaps: &[(&str, &str)]) -> Vec<Option<String>> {
+fn run_keys(snaps: &[(&str, &str, Option<u64>)]) -> Vec<Option<String>> {
     fn stamp(name: &str) -> Option<&str> {
         let (_, ts) = rynas_btrfs::name::split_snapshot_name(name)?;
         Some(ts.split_once('_').filter(|(a, _)| a.len() != 8).map_or(ts, |(a, _)| a))
     }
-    let mut by: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
-    for (i, (name, group)) in snaps.iter().enumerate() {
+    let key = |s: &str, n: usize| if n == 0 { s.to_string() } else { format!("{s}_{n}") };
+    let mut by: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, (name, _, _)) in snaps.iter().enumerate() {
         if let Some(s) = stamp(name) {
-            by.entry((s, group)).or_default().push(i);
+            by.entry(s).or_default().push(i);
         }
     }
     let mut out = vec![None; snaps.len()];
-    for ((s, _), mut idx) in by {
-        idx.sort_by(|a, b| rynas_btrfs::name::compare_names(snaps[*a].0, snaps[*b].0));
-        for (n, i) in idx.into_iter().enumerate() {
-            out[i] = Some(if n == 0 { s.to_string() } else { format!("{s}_{n}") });
+    for (s, mut idx) in by {
+        let mut per_group: BTreeMap<&str, usize> = BTreeMap::new();
+        for &i in &idx {
+            *per_group.entry(snaps[i].1).or_default() += 1;
+        }
+        let repeats = per_group.values().any(|&n| n > 1);
+        if repeats && idx.iter().all(|&i| snaps[i].2.is_some()) {
+            idx.sort_by(|a, b| snaps[*a].2.cmp(&snaps[*b].2).then_with(|| rynas_btrfs::name::compare_names(snaps[*a].0, snaps[*b].0)));
+            let (mut n, mut seen) = (0, BTreeSet::new());
+            for i in idx {
+                if !seen.insert(snaps[i].1) {
+                    n += 1;
+                    seen = BTreeSet::from([snaps[i].1]);
+                }
+                out[i] = Some(key(s, n));
+            }
+        } else {
+            let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+            for i in idx {
+                groups.entry(snaps[i].1).or_default().push(i);
+            }
+            for (_, mut g) in groups {
+                g.sort_by(|a, b| rynas_btrfs::name::compare_names(snaps[*a].0, snaps[*b].0));
+                for (n, i) in g.into_iter().enumerate() {
+                    out[i] = Some(key(s, n));
+                }
+            }
         }
     }
     out
@@ -1762,7 +1807,7 @@ fn run_keys(snaps: &[(&str, &str)]) -> Vec<Option<String>> {
 /// a full set has.
 fn runs(list: &[ReceivedSnapshot], expected: &BTreeSet<String>) -> Vec<PcRun> {
     let subs: Vec<&ReceivedSnapshot> = list.iter().filter(|s| !s.not_subvolume).collect();
-    let keys = run_keys(&subs.iter().map(|s| (s.name.as_str(), s.group.as_str())).collect::<Vec<_>>());
+    let keys = run_keys(&subs.iter().map(|s| (s.name.as_str(), s.group.as_str(), s.received_at_ms)).collect::<Vec<_>>());
     let mut by: BTreeMap<String, Vec<&ReceivedSnapshot>> = BTreeMap::new();
     for (s, k) in subs.into_iter().zip(keys) {
         if let Some(k) = k {
@@ -1994,6 +2039,8 @@ struct HealthFacts<'a> {
     full_set_bytes: Option<u64>,
     /// The largest of the recent incremental runs (their own data), when known.
     recent_bytes: Option<u64>,
+    /// The low-space error is open now (it steps back to the warning with a margin).
+    was_low: bool,
     now_ms: u64,
 }
 
@@ -2050,8 +2097,15 @@ fn issues(f: &HealthFacts) -> Vec<PcIssue> {
     if let Some((free, total)) = f.space {
         let next = f.recent_bytes.unwrap_or(0).saturating_add(receive_reserve(total));
         let full = f.full_set_bytes.unwrap_or(total / 100 * LOW_SPACE_PCT);
-        let (code, needed) = if free < next { (PcIssueCode::LowSpace, next) } else { (PcIssueCode::SpaceTight, full) };
-        if free < needed {
+        // the error steps back only with a margin over its threshold (it moves at every
+        // receive): no notification going back and forth
+        let low_at = if f.was_low { next.saturating_add((next / 10).max(RECEIVE_RESERVE)) } else { next };
+        let found = if free < low_at {
+            Some((PcIssueCode::LowSpace, next))
+        } else {
+            (free < full).then_some((PcIssueCode::SpaceTight, full))
+        };
+        if let Some((code, needed)) = found {
             out.push(PcIssue {
                 free_bytes: Some(free),
                 needed_bytes: Some(needed),
@@ -2095,6 +2149,9 @@ struct Stored {
     open_alerts: BTreeMap<String, String>,
     #[serde(default)]
     last_prune: Option<PruneRun>,
+    /// A pass postponed for a running receive after `last_prune` (cleared by the next real one).
+    #[serde(default)]
+    prune_postponed_ms: Option<u64>,
     /// Fed by `rynas-agent` over HTTPS (no key line, retention on the NAS).
     #[serde(default)]
     agent: bool,
@@ -2129,6 +2186,12 @@ struct Registry {
 pub type AgentRemoved = Box<dyn Fn(&str, u64) + Send + Sync>;
 /// See [`PcBackup::agent_missed`].
 pub type AgentMissed = Box<dyn Fn(&str) -> Option<bool> + Send + Sync>;
+
+/// A cached scan of [`PcBackup::agent_facts`]: folder mtime, when, runs, readiness.
+type FolderFacts = (Option<std::time::SystemTime>, std::time::Instant, u32, BareMetal);
+/// How long [`PcBackup::agent_facts`] trusts a scan of an unchanged folder (free space and
+/// manifests still come in within this).
+const FACTS_FOR: Duration = Duration::from_secs(60);
 
 /// A btrfs PC's folder as its agent record shows it ([`PcBackup::agent_facts`]).
 #[derive(Debug, Clone)]
@@ -2167,6 +2230,8 @@ pub struct PcBackup {
     /// (`None`: no live agent, nothing tells whether the PC is on), set once at start
     /// ([`crate::pc_agent::PcAgent::bind_btrfs`]).
     pub agent_missed: std::sync::OnceLock<AgentMissed>,
+    /// [`Self::agent_facts`]' last scan per device: (folder mtime, when, runs, readiness).
+    facts: Mutex<BTreeMap<String, FolderFacts>>,
 }
 
 /// Most manifests remembered (a few per device).
@@ -2209,6 +2274,7 @@ impl PcBackup {
             sending: Mutex::new(BTreeSet::new()),
             on_agent_removed: std::sync::OnceLock::new(),
             agent_missed: std::sync::OnceLock::new(),
+            facts: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -2367,6 +2433,7 @@ impl PcBackup {
                 space,
                 full_set_bytes,
                 recent_bytes,
+                was_low: t.open_alerts.get("space").map(String::as_str) == Some("pcbackup.low_space"),
                 now_ms,
             })
         } else {
@@ -2438,13 +2505,9 @@ impl PcBackup {
             free_bytes: space.map(|x| x.0),
             volume_bytes: space.map(|x| x.1),
             receiving,
-            // a pass skipped for a receive was stored as an error before: postponed
-            last_prune: t.last_prune.clone().map(|mut r| {
-                if r.error.as_deref().is_some_and(|e| e.starts_with(PRUNE_POSTPONED)) {
-                    (r.error, r.postponed) = (None, true);
-                }
-                r
-            }),
+            // a pass skipped for a receive was stored as a failed pass before: postponed
+            last_prune: t.last_prune.clone().filter(|r| !old_postponed(r)),
+            prune_postponed_ms: t.prune_postponed_ms.or_else(|| t.last_prune.as_ref().filter(|r| old_postponed(r)).map(|r| r.at_ms)),
             agent: t.agent,
             runs: runs.len() as u32,
         };
@@ -2807,6 +2870,7 @@ impl PcBackup {
         Ok(PcRetentionPreview {
             delete: gone.len() as u32,
             frees_at_least_bytes: gone.iter().map(|i| excl(&i.name)).sum(),
+            per_pass: PRUNE_MAX as u32,
             items,
         })
     }
@@ -2857,9 +2921,15 @@ impl PcBackup {
         })();
         run.error = result.err();
         run.postponed = postponed;
+        // a postponed pass keeps the last real one and is noted apart
         self.edit(|r| {
             if let Some(x) = r.targets.get_mut(device) {
-                x.last_prune = Some(run.clone());
+                if postponed {
+                    x.prune_postponed_ms = Some(run.at_ms);
+                } else {
+                    x.last_prune = Some(run.clone());
+                    x.prune_postponed_ms = None;
+                }
             }
         })?;
         Ok(run)
@@ -3279,14 +3349,27 @@ impl PcBackup {
     /// a folder for `rynas-agent` of that name.
     pub fn agent_facts(&self, device: &str) -> Option<AgentFolder> {
         let t = self.reg.lock().unwrap().targets.get(device).filter(|t| t.agent).cloned()?;
-        let v = self.view_with(device, &t, rynas_tasks::now_ms(), false);
+        // the folder's scan, read again only once its entries changed (its mtime: a snapshot
+        // came or went) or after FACTS_FOR: the console polls every few seconds during a run
+        let mtime = std::fs::metadata(&t.path).and_then(|m| m.modified()).ok();
+        let cached = self.facts.lock().unwrap().get(device).filter(|c| mtime.is_some() && c.0 == mtime && c.1.elapsed() < FACTS_FOR).map(|c| (c.2, c.3.clone()));
+        let (runs, bare_metal) = match cached {
+            Some(c) => c,
+            None => {
+                let v = self.view_with(device, &t, rynas_tasks::now_ms(), false);
+                let mut f = self.facts.lock().unwrap();
+                f.retain(|_, c| c.1.elapsed() < FACTS_FOR);
+                f.insert(device.to_string(), (mtime, std::time::Instant::now(), v.target.runs, v.target.bare_metal.clone()));
+                (v.target.runs, v.target.bare_metal)
+            }
+        };
         Some(AgentFolder {
-            alert_hours: v.target.alert_after_hours(),
+            alert_hours: alert_hours(t.alert_hours, t.alert_days),
             retention: t.retention.gfs.clone(),
             keep_last: t.delete.keep_last.max(1),
             min_age_days: t.delete.min_age_days,
-            runs: v.target.runs,
-            bare_metal: v.target.bare_metal,
+            runs,
+            bare_metal,
         })
     }
 
@@ -4626,7 +4709,11 @@ mod tests {
         assert_eq!((r[0].referenced_bytes, r[0].exclusive_bytes), (Some(20), Some(2)));
         assert_eq!(r[1].lacks, ["root"]);
         assert!(r[1].incomplete);
-        let k = |n: &[(&str, &str)]| run_keys(n).into_iter().map(|k| k.unwrap_or_default()).collect::<Vec<_>>();
+        let k = |n: &[(&str, &str)]| run_keys(&n.iter().map(|(a, b)| (*a, *b, None)).collect::<Vec<_>>()).into_iter().map(|k| k.unwrap_or_default()).collect::<Vec<_>>();
+        // with receive times: a run whose @home failed, then one in the same minute that names
+        // its @home without a suffix: two runs, the first partial, never one mixed run
+        let timed = run_keys(&[("@.20261110T0300", "@", Some(1)), ("@.20261110T0300_1", "@", Some(5)), ("@home.20261110T0300", "@home", Some(7))]);
+        assert_eq!(timed, [Some("20261110T0300".to_string()), Some("20261110T0300_1".to_string()), Some("20261110T0300_1".to_string())]);
         // btrbk's `_N` of a name taken belongs to the same run; `short` names keep it
         assert_eq!(k(&[("home.20261110T0300_2", "home"), ("root.20261110T0300", "root")]), ["20261110T0300", "20261110T0300"]);
         assert_eq!(k(&[("home.20261110_101500", "home")]), ["20261110_101500"]);
@@ -4684,6 +4771,35 @@ mod tests {
         let loose = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000);
         assert_eq!(keep_of(&loose, &e[4].name), (true, RetentionReason::Daily));
         assert_eq!(keep_of(&loose, &e[2].name), (false, RetentionReason::Expired));
+    }
+
+    /// A btrbk PC that snapshots its subvolumes at different minutes (`@home` every few hours,
+    /// `@` once a day) has no complete run: each subvolume keeps its first snapshot of every
+    /// period, as before runs counted.
+    #[test]
+    fn retention_without_complete_runs_keeps_each_subvolume() {
+        let now = now_s();
+        let day_start = |back: i64| (bucket_start(1, buckets(now as u64 * 1000).unwrap()[1] - back).unwrap() / 1000) as i64;
+        let mut e = Vec::new();
+        for back in 1..=5 {
+            let d = day_start(back);
+            e.push(entry("@", d + 2 * 3600 + 120, true));
+            for h in [1, 7, 13, 19] {
+                e.push(entry("@home", d + h * 3600, true));
+            }
+        }
+        e.sort_by_key(|a| std::cmp::Reverse(a.info.as_ref().unwrap().otime));
+        let gfs = Retention { preset: None, hourly: 0, daily: 7, weekly: 0, monthly: 0, yearly: 0, min: "latest".into() };
+        let floor = DeletePolicy { allowed: false, keep_last: 0, min_age_days: 0 };
+        let expected = BTreeSet::from(["@".to_string(), "@home".to_string()]);
+        let plan = retention_plan(&e, &gfs, &floor, &expected, false, now as u64 * 1000);
+        let kept = |g: &str| plan.iter().filter(|i| i.group == g && i.keep).count();
+        // one @ a day for the five days, and the first @home of each day (the newest of each
+        // subvolume is its parent on top)
+        assert_eq!(kept("@"), 5, "{plan:?}");
+        assert_eq!(kept("@home"), 6, "{plan:?}");
+        let first_home = entry("@home", day_start(3) + 3600, true).name;
+        assert_eq!(keep_of(&plan, &first_home), (true, RetentionReason::Daily));
     }
 
     #[test]
@@ -4798,7 +4914,7 @@ mod tests {
         let e = vec![entry("home", now - 4000, true), entry("root", now - 3 * 86_400, true), entry("home", now - 2 * 3600, false)];
         let l = listed(&e);
         let expected = BTreeSet::from(["home".to_string(), "root".to_string()]);
-        let g = |receiving, alert_hours, space, recent_bytes| HealthFacts {
+        let h = |receiving, alert_hours, space, recent_bytes, was_low| HealthFacts {
             list: &l,
             expected: &expected,
             alert_hours,
@@ -4806,8 +4922,15 @@ mod tests {
             space,
             full_set_bytes: Some(100 << 30),
             recent_bytes,
+            was_low,
             now_ms: now as u64 * 1000,
         };
+        let g = |receiving, alert_hours, space, recent_bytes| h(receiving, alert_hours, space, recent_bytes, false);
+        // the open error steps back to the warning only with a margin: 31 GiB free is over the
+        // threshold (10 GiB + 2 % of 1 TiB) but within the margin
+        let code_of = |was_low| issues(&h(true, 24, Some((31 << 30, 1 << 40)), Some(10 << 30), was_low)).into_iter().find(|i| matches!(i.code, PcIssueCode::LowSpace | PcIssueCode::SpaceTight)).map(|i| i.code);
+        assert_eq!(code_of(false), Some(PcIssueCode::SpaceTight));
+        assert_eq!(code_of(true), Some(PcIssueCode::LowSpace));
         let f = |receiving, alert_hours, space| g(receiving, alert_hours, space, None);
         let codes = |v: Vec<PcIssue>| v.into_iter().map(|i| (i.code, i.subject)).collect::<Vec<_>>();
         let i = codes(issues(&f(false, 24, Some((50 << 30, 1 << 40)))));

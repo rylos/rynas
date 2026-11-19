@@ -451,8 +451,8 @@ async fn nas_retention_keeps_the_parent_and_the_pc_can_only_add() {
     e.host.busy.lock().unwrap().push(path.into());
     let t = task(&e, "POST", "/v1/pc-backups/targets/pc/prune", None).await;
     assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
-    let skipped = list(&e).await[0].last_prune.clone().unwrap();
-    assert!(skipped.postponed && skipped.error.is_none() && skipped.deleted == 0, "{skipped:?}");
+    let skipped = list(&e).await[0].clone();
+    assert!(skipped.prune_postponed_ms.is_some() && skipped.last_prune.is_none(), "{skipped:?}");
     e.host.busy.lock().unwrap().clear();
     let t = task(&e, "POST", "/v1/pc-backups/targets/pc/prune", None).await;
     assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
@@ -461,6 +461,13 @@ async fn nas_retention_keeps_the_parent_and_the_pc_can_only_add() {
     assert_eq!(d.list.len(), 10);
     assert!(d.list.iter().any(|s| s.name == parent && s.parent));
     assert_eq!(d.target.last_prune.as_ref().map(|r| (r.deleted, r.error.is_none())), Some((29, true)));
+    assert!(d.target.prune_postponed_ms.is_none());
+    // a pass postponed after it keeps that real pass
+    e.host.busy.lock().unwrap().push(path.into());
+    task(&e, "POST", "/v1/pc-backups/targets/pc/prune", None).await;
+    e.host.busy.lock().unwrap().clear();
+    let d = detail(&e, "pc").await;
+    assert!(d.target.prune_postponed_ms.is_some() && d.target.last_prune.as_ref().is_some_and(|r| r.deleted == 29));
     // a PC that deletes for itself has no NAS passes
     task(&e, "PUT", "/v1/pc-backups/targets/pc", Some(json!({"public_key": KEY, "alert_days": 3, "delete": {"allowed": true, "keep_last": 1, "min_age_days": 0}, "retention": {"owner": "pc"}}))).await;
     let (s, _) = call(&e, "POST", "/v1/pc-backups/targets/pc/prune", None).await;

@@ -1084,6 +1084,7 @@ fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyVie
     let sched = crate::schedule::interval::IntervalEditor::new(
         &plan,
         live.as_ref().and_then(|d| d.last_ok_ms),
+        live.as_ref().and_then(|d| d.interval_from_ms),
         live.as_ref().map(|d| d.agent_version.as_str()).unwrap_or_default(),
     );
     // a subvolume left out = its mount point in the agent's excludes and no alert for it on
@@ -1794,12 +1795,17 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             h if h % 24 == 0 => tf("bk.alert_days", &[("n", &(h / 24).to_string())]),
             h => tf("bkpc.alert_hours", &[("n", &h.to_string())]),
         };
-        let last_prune = p.last_prune.clone().map(|r| match r.error {
+        // the last real pass, then a pass postponed since (a receive was running: the next one
+        // goes on, nothing failed)
+        let real = p.last_prune.clone().map(|r| match r.error {
             Some(e) => format!("{}: {e}", i18n::datetime(r.at_ms)),
-            // a receive was running: waits for the next pass, nothing failed
-            None if r.postponed => tf("bkpc.prune_postponed", &[("when", &i18n::datetime(r.at_ms))]),
             None => tf("bkpc.last_prune_text", &[("when", &i18n::datetime(r.at_ms)), ("n", &r.deleted.to_string())]),
         });
+        let postponed = p.prune_postponed_ms.map(|ms| tf("bkpc.prune_postponed", &[("when", &i18n::datetime(ms))]));
+        let last_prune = match (real, postponed) {
+            (Some(r), Some(q)) => Some(format!("{r} · {q}")),
+            (r, q) => r.or(q),
+        };
         let size_note = if d.sizes_from_quota { t("bkpc.sizes_quota") } else { t("bkpc.sizes_note") };
         const VIEWS: &[(&str, &str)] = &[("run", "bkpc.view.run"), ("subvolume", "bk.col.subvolume")];
         let rules = rules_text(&p);
@@ -1920,6 +1926,10 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             let mut text = tf("snap.preview_counts", &[("keep", &keep.to_string()), ("delete", &p.delete.to_string())]);
             if let Some(b) = p.frees_at_least_bytes.filter(|b| *b > 0) {
                 text = format!("{text} {}", tf("bkpc.preview_frees", &[("bytes", &i18n::bytes(b))]));
+            }
+            // one pass deletes at most so many: the hourly ones do the rest
+            if p.per_pass > 0 && p.delete > p.per_pass {
+                text = format!("{text} {}", tf("bkpc.prune_batch", &[("n", &p.per_pass.to_string())]));
             }
             ui::confirm(Confirm { busy: pruning, error: prune_err, ..Confirm::new(tf("bkpc.prune_title", &[("device", &dev.get_value())]), text, "bkpc.prune", true, do_prune, Callback::new(move |_| prune_ask.set(None))) })
         })}

@@ -589,6 +589,10 @@ pub struct PcDevice {
     pub next_due_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ok_ms: Option<u64>,
+    /// When the PC's interval counts from: the last good run's start (agents from 0.8.24),
+    /// else its end, as its agent counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_from_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<PcRun>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
