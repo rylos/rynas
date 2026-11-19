@@ -569,11 +569,33 @@ pub struct ScrubStatus {
     pub pct: Option<f32>,
     pub rate_bps: Option<u64>,
     pub time_left_s: Option<u64>,
-    /// "no errors found" or e.g. "csum=3 read=1".
+    /// "no errors found" or e.g. "csum=3 read=1" (btrfs-progs' words: shown translated from
+    /// [`ScrubStatus::error_kinds`]).
     pub error_summary: String,
     pub errors: u64,
     pub corrected: Option<u64>,
     pub uncorrectable: Option<u64>,
+    /// When the scrub started, ms since the epoch (`started` read in the NAS's time zone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
+    /// The errors by kind, from the error summary: `read`, `csum`, `verify`, `super`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub error_kinds: Vec<ScrubErrorCount>,
+}
+
+impl ScrubStatus {
+    /// Errors were found and every one was corrected (btrfs-progs gives the counts).
+    pub fn all_corrected(&self) -> bool {
+        self.errors > 0 && self.uncorrectable == Some(0) && self.corrected.is_some()
+    }
+}
+
+/// One kind of error a scrub found, e.g. `csum` 3.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ScrubErrorCount {
+    /// btrfs-progs' word: `read`, `csum`, `verify`, `super` (another word is kept as is).
+    pub kind: String,
+    pub count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

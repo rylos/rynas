@@ -577,6 +577,7 @@ like every configuration key (A19). Types in `rynas_api_types::storage`.
 | POST | `/api/v1/storage/btrfs/{uuid}/replace` | `BtrfsReplaceRequest` {devid, new_disk, confirm, serials, dry_run} | 202 (`storage.btrfs-replace`) / 200 |
 | POST | `/api/v1/storage/btrfs/{uuid}/remove-missing` | `BtrfsRepairRequest` {confirm, dry_run} | 202 (`storage.btrfs-remove-missing`) / 200 |
 | POST | `/api/v1/storage/btrfs/{uuid}/convert` | `BtrfsRepairRequest` {dry_run} | 202 (`storage.btrfs-convert`) / 200 |
+| POST | `/api/v1/storage/btrfs/{uuid}/reset-errors` | — | 202 (`storage.btrfs-reset-errors`): `btrfs device stats -z` on every device of the mounted filesystem (the old values stay in the task log); administrators only, rynasd checks too |
 | GET / PUT | `/api/v1/storage/btrfs/{uuid}/settings` | `BtrfsSettings` {auto_degraded} | `BtrfsSettingsState` {applied, pending?} (PUT stages `storage.disks`: `btrfs_manual`) |
 | POST | `/api/v1/shares` | `Share` with `subvolume` {volume, compression} and an empty `path` | as before: the share is staged with path `/<volume>/<name>`, its subvolume is created by the apply |
 
@@ -613,7 +614,17 @@ Rules:
   reshape/rebuild) and the report says so. Waits follow `sync_action`/`degraded`/
   `sync_completed` in sysfs with progress; cancelling stops the wait, not the md operation.
 - **Scrub**: `btrfs scrub start -B -d` then the md `check` with its `mismatch_cnt` in the
-  log; cancel or stop runs `btrfs scrub cancel` and writes `idle` to `sync_action`.
+  log; cancel or stop runs `btrfs scrub cancel` and writes `idle` to `sync_action`. While the
+  scrub command runs, `btrfs scrub status --raw` is read every 4 s (not logged) and the bytes
+  scrubbed become the task's progress inside the scrub's step. `ScrubStatus` carries the start
+  as `started_ms` (btrfs prints it in the system zone), the errors by kind (`error_kinds`:
+  `read`, `csum`, `verify`, `super`) and the corrected/uncorrectable counts; the UI shows
+  errors that were all corrected as a warning, uncorrectable ones as an error.
+- **Device error counters** (`btrfs device stats`): kept on disk by btrfs until reset. Any
+  counter above zero makes the volume a warning (`inventory::device_verdict`), also after a
+  clean scrub: the scrub proves the data good again, not the device. The reset
+  (`reset-errors`, confirmed in the UI) is the acknowledgement, as "Mark as seen" is for SMART
+  counters that cannot be reset.
 - **Unlock/lock**: `cryptsetup open --key-file -` (exit 2 → "wrong passphrase or recovery
   key"), the mount unit (units that need the mount follow), `systemctl
   try-reload-or-restart smbd nfs-server`; lock stops the mount unit and closes LUKS. Only

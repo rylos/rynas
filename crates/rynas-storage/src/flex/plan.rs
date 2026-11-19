@@ -2009,9 +2009,9 @@ fn scrub_check(p: &mut StoragePlan, inv: &Inventory, v: &View, now_s: u64, stric
         sc.status == ScrubState::Finished
             && sc.uncorrectable.unwrap_or(0) == 0
             && sc
-                .started
-                .as_deref()
-                .and_then(scrub_epoch)
+                .started_ms
+                .map(|ms| ms / 1000)
+                .or_else(|| sc.started.as_deref().and_then(scrub_epoch))
                 .is_some_and(|t| now_s.saturating_sub(t) <= SCRUB_MAX_AGE_DAYS * 86_400)
     });
     if !recent {

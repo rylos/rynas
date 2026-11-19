@@ -147,6 +147,16 @@ impl Sto {
         });
     }
 
+    /// Read the filesystems again now (a running scrub's progress: rynasd reads the scrub
+    /// status on every request, usage and subvolumes come from its cache).
+    pub fn reload_fss(self) {
+        spawn_local(async move {
+            if let Ok(text) = api::get_text("/api/v1/storage/filesystems").await {
+                put(self.fss, &text);
+            }
+        });
+    }
+
     /// Everything needed by the overview has arrived at least once.
     pub fn ready(self) -> bool {
         self.tree.with(Option::is_some) && self.arrays.with(Option::is_some) && self.disks.with(Option::is_some)

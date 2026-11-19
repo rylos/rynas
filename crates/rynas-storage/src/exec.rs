@@ -33,6 +33,9 @@ pub struct RunOpts {
     pub quiet: bool,
     /// Killed when the task is cancelled. Rollback and cleanup commands are not.
     pub cancellable: bool,
+    /// Neither the command line nor its output go to the log (a status read every few
+    /// seconds while a step runs).
+    pub silent: bool,
     pub timeout: Duration,
 }
 
@@ -42,6 +45,7 @@ impl RunOpts {
             stdin: None,
             quiet: false,
             cancellable: true,
+            silent: false,
             timeout,
         }
     }
@@ -53,6 +57,7 @@ impl std::fmt::Debug for RunOpts {
             .field("stdin", &self.stdin.as_ref().map(|_| "<secret>"))
             .field("quiet", &self.quiet)
             .field("cancellable", &self.cancellable)
+            .field("silent", &self.silent)
             .field("timeout", &self.timeout)
             .finish()
     }
@@ -553,6 +558,62 @@ async fn run_cmd<M: Machine>(
                 waited += LVM_LOCK_PAUSE;
             }
             r => return r,
+        }
+    }
+}
+
+/// How often a running scrub is asked how far it is.
+const SCRUB_POLL: Duration = Duration::from_secs(4);
+
+/// The task's progress inside step `step` of `total` that is `frac` (0..=1) done.
+pub(crate) fn step_pct(step: usize, total: usize, frac: f32) -> u8 {
+    let total = total.max(1) as f32;
+    let pct = (step as f32 + frac.clamp(0.0, 1.0)) * 100.0 / total;
+    pct.clamp(0.0, 99.0) as u8
+}
+
+/// Runs `work` and, while it runs, `side` (which never needs to end): the result of `work`.
+pub(crate) async fn with_progress<T>(work: impl Future<Output = T>, side: impl Future<Output = ()>) -> T {
+    use std::task::Poll;
+    let mut work = std::pin::pin!(work);
+    let mut side = std::pin::pin!(side);
+    let mut side_done = false;
+    std::future::poll_fn(move |cx| {
+        if let Poll::Ready(v) = work.as_mut().poll(cx) {
+            return Poll::Ready(v);
+        }
+        if !side_done && side.as_mut().poll(cx).is_ready() {
+            side_done = true;
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+/// While `btrfs scrub start -B` (step `step`) runs: reads `btrfs scrub status` every few
+/// seconds, without logging it, and turns the bytes scrubbed into the task's progress. Ends
+/// when the task is cancelled (the scrub command is killed meanwhile).
+async fn scrub_progress<M: Machine>(m: &M, mountpoint: &str, step: usize, total: usize) {
+    if mountpoint.is_empty() {
+        return;
+    }
+    let mut last = None;
+    loop {
+        m.sleep(SCRUB_POLL).await;
+        if m.is_cancelled() {
+            return;
+        }
+        let mut o = RunOpts::new(Duration::from_secs(30));
+        o.silent = true;
+        let argv = strs(&["btrfs", "scrub", "status", "--raw", mountpoint]);
+        let Ok(out) = m.run(argv, o).await else { continue };
+        let st = crate::btrfs::parse_scrub(&out.stdout);
+        if let Some(f) = crate::btrfs::scrub_fraction(&st) {
+            let pct = step_pct(step, total, f);
+            if last != Some(pct) {
+                m.progress(pct);
+                last = Some(pct);
+            }
         }
     }
 }
@@ -1293,7 +1354,14 @@ pub async fn run_plan_with<M: Machine>(
                         Err(e) => Err(e),
                         Ok(stdin) => {
                             let argv = mount_argv(m, argv, mountpoint);
-                            match run_cmd(m, argv, stdin, false, true).await {
+                            let scrubbing = scrub && argv.starts_with(&strs(&["btrfs", "scrub", "start"]));
+                            let run = run_cmd(m, argv, stdin, false, true);
+                            let r = if scrubbing {
+                                with_progress(run, scrub_progress(m, mountpoint, i, total)).await
+                            } else {
+                                run.await
+                            };
+                            match r {
                                 Err(e) if prog == "udevadm" => {
                                     m.log(&format!("udevadm settle: {e} (ignored)"));
                                     Ok(())
@@ -1561,7 +1629,7 @@ impl Machine for FakeMachine {
         } else {
             line.clone()
         });
-        if !opts.quiet {
+        if !opts.quiet && !opts.silent {
             self.log(&format!("$ {line}"));
         }
         if self

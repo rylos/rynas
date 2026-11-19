@@ -704,7 +704,15 @@ impl Storage {
                         .map(|s| btrfs::parse_device_stats(&s));
                     scrub = self
                         .run_ok("btrfs", &["scrub", "status", "--raw", mnt], T_BTRFS)
-                        .map(|s| btrfs::parse_scrub(&s));
+                        .map(|s| {
+                            let mut st = btrfs::parse_scrub(&s);
+                            // btrfs prints the start in the system zone (its environment is cleared)
+                            st.started_ms = st
+                                .started
+                                .as_deref()
+                                .and_then(|t| btrfs::ctime_ms(t, &rynas_tz::system_tz()));
+                            st
+                        });
                     let fresh = cache_entry
                         .as_ref()
                         .is_some_and(|c| now.saturating_sub(c.read_ms) < max_age);

@@ -282,17 +282,21 @@ impl Machine for TaskMachine {
             if let Some(s) = opts.stdin {
                 cmd = cmd.stdin(s);
             }
-            ctx.log(&format!(
-                "$ {}{}",
-                cmd.display(),
-                if opts.quiet {
-                    "  (output not logged)"
-                } else {
-                    ""
-                }
-            ));
+            if !opts.silent {
+                ctx.log(&format!(
+                    "$ {}{}",
+                    cmd.display(),
+                    if opts.quiet {
+                        "  (output not logged)"
+                    } else {
+                        ""
+                    }
+                ));
+            }
             if dry {
-                ctx.log("(dry system: not run)");
+                if !opts.silent {
+                    ctx.log("(dry system: not run)");
+                }
                 return Ok(dry_output(&argv));
             }
             let token = ctx.token().clone();
@@ -300,7 +304,7 @@ impl Machine for TaskMachine {
             let r = cmd
                 .run_checked(
                     opts.cancellable.then_some(&token),
-                    if opts.quiet { None } else { Some(&sink) },
+                    if opts.quiet || opts.silent { None } else { Some(&sink) },
                 )
                 .await;
             if let Some(unit) = unit.filter(|_| r.is_err() && token.is_cancelled()) {

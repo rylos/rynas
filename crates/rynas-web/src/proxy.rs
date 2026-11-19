@@ -95,6 +95,7 @@ pub fn routes() -> Router<AppState> {
         .route("/storage/btrfs/{uuid}/convert", post(forward))
         .route("/storage/btrfs/{uuid}/mount-degraded", post(forward))
         .route("/storage/btrfs/{uuid}/settings", get(forward).put(forward))
+        .route("/storage/btrfs/{uuid}/reset-errors", post(forward))
         // SMART warnings marked as seen (counts read by rynasd, never sent by the client)
         .route(
             "/storage/disks/{name}/health-ack",

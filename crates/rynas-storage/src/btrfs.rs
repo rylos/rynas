@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rynas_api_types::storage::{
-    BtrfsDeviceErrors, BtrfsProfile, QuotaMode, ScrubState, ScrubStatus, Subvolume,
+    BtrfsDeviceErrors, BtrfsProfile, QuotaMode, ScrubErrorCount, ScrubState, ScrubStatus, Subvolume,
 };
 
 use crate::host::Host;
@@ -315,11 +315,15 @@ pub fn parse_scrub(s: &str) -> ScrubStatus {
                 st.error_summary = v.to_string();
                 in_errors = true;
                 if v != "no errors found" {
-                    st.errors = v
+                    st.error_kinds = v
                         .split_whitespace()
                         .filter_map(|kv| kv.split_once('='))
-                        .filter_map(|(_, n)| n.parse::<u64>().ok())
-                        .sum();
+                        .filter_map(|(k, n)| {
+                            let count = n.parse::<u64>().ok()?;
+                            Some(ScrubErrorCount { kind: k.to_string(), count })
+                        })
+                        .collect();
+                    st.errors = st.error_kinds.iter().map(|e| e.count).sum();
                 }
             }
             "Corrected" if in_errors => st.corrected = first_num(v),
@@ -335,6 +339,40 @@ pub fn parse_scrub(s: &str) -> ScrubStatus {
         st.pct = Some((done as f64 * 100.0 / total as f64) as f32);
     }
     st
+}
+
+/// The wall clock of a btrfs-progs date ("Thu Nov 19 17:45:23 2026", glibc's `ctime`, in the
+/// time zone of the process that printed it).
+pub fn ctime_civil(text: &str) -> Option<jiff::civil::DateTime> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let w: Vec<&str> = text.split_whitespace().collect();
+    let mi = w.iter().position(|x| MONTHS.contains(x))?;
+    let month = MONTHS.iter().position(|m| *m == w[mi])? as i8 + 1;
+    let day: i8 = w.get(mi + 1)?.parse().ok()?;
+    let hms: Vec<i8> = w.get(mi + 2)?.split(':').filter_map(|x| x.parse().ok()).collect();
+    let year: i16 = w.iter().skip(mi + 3).find_map(|x| x.parse().ok())?;
+    let [h, m, s] = hms[..] else { return None };
+    jiff::civil::DateTime::new(year, month, day, h, m, s, 0).ok()
+}
+
+/// Milliseconds since the epoch of a btrfs-progs date printed in the zone `tz` (rynasd runs
+/// btrfs with the system zone); a time a DST change repeats or skips is read the way
+/// `mktime` reads it (jiff's "compatible" choice).
+pub fn ctime_ms(text: &str, tz: &jiff::tz::TimeZone) -> Option<u64> {
+    let civil = ctime_civil(text)?;
+    let z = tz.to_ambiguous_zoned(civil).compatible().ok()?;
+    u64::try_from(z.timestamp().as_millisecond()).ok()
+}
+
+/// How far a running scrub is, 0.0..=1.0, from `btrfs scrub status` (None when it says
+/// nothing about the progress).
+pub fn scrub_fraction(st: &ScrubStatus) -> Option<f32> {
+    if st.status != ScrubState::Running {
+        return None;
+    }
+    st.pct.map(|p| (p / 100.0).clamp(0.0, 1.0))
 }
 
 /// Quota mode from `/sys/fs/btrfs/<uuid>/qgroups` (the `mode` file exists since 6.7).
@@ -494,6 +532,49 @@ mod tests {
         );
         assert_eq!(s.status, ScrubState::Never);
         assert_eq!(s.total_bytes, Some(9_812_337_541_120));
+    }
+
+    #[test]
+    fn scrub_error_kinds() {
+        let s = parse_scrub(include_str!("../tests/fixtures/btrfs-scrub-running.txt"));
+        assert_eq!(
+            s.error_kinds,
+            vec![
+                ScrubErrorCount { kind: "csum".into(), count: 3 },
+                ScrubErrorCount { kind: "read".into(), count: 1 },
+            ]
+        );
+        assert!(!s.all_corrected());
+        assert_eq!(scrub_fraction(&s), Some(0.1118));
+        // what the degraded-mount test leaves: a device back with older copies, all repaired
+        let s = parse_scrub(
+            "UUID:             5c2d8e1f-0a3b-4c6d-9e8f-7a6b5c4d3e2f\nScrub started:    Thu Nov 19 17:45:23 2026\nStatus:           finished\nDuration:         0:00:21\nTotal to scrub:   630243328\nRate:             30011587/s\nError summary:    verify=8\n  Corrected:      8\n  Uncorrectable:  0\n  Unverified:     0\n",
+        );
+        assert_eq!(s.status, ScrubState::Finished);
+        assert_eq!(s.errors, 8);
+        assert_eq!(s.error_kinds, vec![ScrubErrorCount { kind: "verify".into(), count: 8 }]);
+        assert!(s.all_corrected());
+        assert_eq!(scrub_fraction(&s), None);
+        let clean = parse_scrub(include_str!("../tests/fixtures/btrfs-scrub-finished.txt"));
+        assert!(clean.error_kinds.is_empty());
+        assert!(!clean.all_corrected());
+        // without the counts (an old btrfs-progs) nothing says the errors were corrected
+        let old = ScrubStatus { errors: 2, ..Default::default() };
+        assert!(!old.all_corrected());
+    }
+
+    #[test]
+    fn scrub_start_time() {
+        use jiff::tz::{Offset, TimeZone};
+        let utc = TimeZone::UTC;
+        assert_eq!(ctime_ms("Thu Oct 22 15:35:01 2026", &utc), Some(1_792_683_301_000));
+        // the day padded with a space, as ctime prints it
+        assert_eq!(ctime_ms("Thu Nov  5 00:30:00 2026", &utc), Some(1_793_838_600_000));
+        // printed in a zone one hour east of UTC: one hour earlier
+        let cet = TimeZone::fixed(Offset::constant(1));
+        assert_eq!(ctime_ms("Thu Oct 22 15:35:01 2026", &cet), Some(1_792_679_701_000));
+        assert_eq!(ctime_ms("no date", &utc), None);
+        assert_eq!(ctime_ms("Thu Feb 30 10:00:00 2026", &utc), None);
     }
 
     #[test]

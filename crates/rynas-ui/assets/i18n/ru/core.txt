@@ -456,6 +456,7 @@ task.storage.btrfs-replace	Замена отсутствующего устро�
 task.storage.btrfs-remove-missing	Удаление отсутствующего устройства
 task.storage.btrfs-convert	Восстановление избыточности
 task.storage.btrfs-mount-degraded	Монтирование тома в деградированном режиме
+task.storage.btrfs-reset-errors	Сброс счётчиков ошибок устройств
 task.snapshot.run	Создание снимков
 task.snapshot.restore	Восстановление из снимка
 task.snapshot.rollback	Откат к снимку
@@ -1343,6 +1344,55 @@ sto.started	Начало
 sto.duration	Длительность
 sto.progress	Ход выполнения
 sto.scrub_result	Результат
+sto.scrub_checked	Проверено данных
+sto.scrub_kinds	Ошибки по типам
+sto.scrub_no_errors	Ошибок не найдено
+sto.scrub_corrected.one	Исправлена {n} ошибка
+sto.scrub_corrected.few	Исправлены {n} ошибки
+sto.scrub_corrected.many	Исправлено {n} ошибок
+sto.scrub_corrected.other	Исправлено {n} ошибки
+sto.scrub_uncorrectable.one	{n} неисправимая ошибка
+sto.scrub_uncorrectable.few	{n} неисправимые ошибки
+sto.scrub_uncorrectable.many	{n} неисправимых ошибок
+sto.scrub_uncorrectable.other	{n} неисправимой ошибки
+sto.scrub_res_corrected.one	Найдена {n} ошибка, исправлена по исправной копии
+sto.scrub_res_corrected.few	Найдены {n} ошибки, все исправлены по исправной копии
+sto.scrub_res_corrected.many	Найдено {n} ошибок, все исправлены по исправной копии
+sto.scrub_res_corrected.other	Найдено {n} ошибки, все исправлены по исправной копии
+sto.scrub_res_left.one	{n} ошибку не удалось исправить (исправлено: {fixed})
+sto.scrub_res_left.few	{n} ошибки не удалось исправить (исправлено: {fixed})
+sto.scrub_res_left.many	{n} ошибок не удалось исправить (исправлено: {fixed})
+sto.scrub_res_left.other	{n} ошибки не удалось исправить (исправлено: {fixed})
+sto.scrub_res_errors.one	Найдена {n} ошибка
+sto.scrub_res_errors.few	Найдены {n} ошибки
+sto.scrub_res_errors.many	Найдено {n} ошибок
+sto.scrub_res_errors.other	Найдено {n} ошибки
+sto.scrub_kind_n	{kind}: {n}
+sto.scrub_kind.read	Чтение
+sto.scrub_kind.csum	Контрольная сумма
+sto.scrub_kind.verify	Проверка метаданных
+sto.scrub_kind.super	Суперблок
+sto.scrub_kind.malloc	Нехватка памяти
+sto.err.title	Счётчики ошибок устройств
+sto.err.state	Есть ошибки
+sto.err.text	btrfs считает ошибки каждого устройства и хранит счётчики, пока их не сбросят. Пока хотя бы один счётчик больше нуля, том показывает предупреждение.
+sto.err.k.write	Запись
+sto.err.k.read	Чтение
+sto.err.k.flush	Сброс кэша
+sto.err.k.corruption	Повреждение
+sto.err.k.generation	Поколение
+sto.err.d.write	неудачные записи на устройство: неисправный диск, кабель или контроллер.
+sto.err.d.read	неудачные чтения с устройства: неисправный диск, кабель или контроллер.
+sto.err.d.flush	неудачные сбросы кэша: последние записи могли не дойти до диска.
+sto.err.d.corruption	блоки с неверной контрольной суммой: прочитанные данные были повреждены. Проверка данных восстанавливает их по исправной копии, если она есть.
+sto.err.d.generation	блоки старее ожидаемого: нормально для устройства, которое отсутствовало при деградированном монтировании и вернулось. Проверка данных их обновляет.
+sto.err.hint_clean	Последняя проверка данных не оставила неисправимых ошибок: данные в порядке. Когда причина устранена, сбросьте счётчики: том снова станет исправным, а новые ошибки будут видны снова.
+sto.err.hint_bad	Последняя проверка данных нашла ошибки, которые не удалось исправить: проверьте диски и восстановите повреждённые файлы, прежде чем сбрасывать счётчики.
+sto.err.hint_scrub	Запустите проверку данных, чтобы проверить и восстановить данные, затем сбросьте счётчики, когда причина будет устранена.
+sto.err.reset	Сбросить счётчики ошибок
+sto.err.reset_title	Сбросить счётчики ошибок {name}?
+sto.err.reset_text	Счётчики ошибок всех устройств {name} обнулятся; текущие значения останутся в журнале задачи. Ошибки после сброса будут видны снова.
+sto.err.reset_done	Счётчики ошибок сброшены
 sto.scrub_stop	Остановить проверку данных
 run_now	Запустить сейчас
 sto.scrub_title	Проверка данных на {name}

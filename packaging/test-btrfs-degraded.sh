@@ -20,7 +20,8 @@
 #   B. a 2-device raid1 loses a device and is mounted degraded on the other (recorded); with
 #      only the missing one back, the degraded mount is refused (split brain); with both back
 #      it mounts normally, the single data chunks written meanwhile are converted back, the
-#      record stays (scrub needed) until a scrub finishes without errors;
+#      record stays (scrub needed) until a scrub finishes without errors; the error counters
+#      of the device that was away keep the volume a warning until they are reset;
 #   C. a 3-device raid1 loses a device: mounted degraded, the missing device removed (the
 #      other two take its chunks), two devices left, the data intact.
 # At the end the host must have no loop device and no btrfs filesystem of this test left.
@@ -147,6 +148,8 @@ step "rynasd and rynas-web (root, no systemd)"
 install -d /usr/libexec/rynas /var/lib/rynas /run/rynas /etc
 install -m 755 /opt/rynas/rynasd /opt/rynas/rynas-web /usr/libexec/rynas/
 touch /etc/fstab
+# a system user in an admin group: rynasd checks administrators from the system groups
+groupadd -f rynas-admin; id admin1 >/dev/null 2>&1 || useradd -M -G rynas-admin admin1
 HASH=$(printf 'Adm1n-test-pw\n' | /usr/libexec/rynas/rynas-web hash-password)
 printf '[[user]]\nname = "admin1"\nhash = "%s"\ngroups = ["rynas-admin"]\n' "$HASH" >/etc/rynas-users.toml
 RYNAS_CGROUP_DAEMON=max:max RYNAS_CGROUP_WORKERS=max:max /usr/libexec/rynas/rynasd --socket /run/rynas/rynasd.sock \
@@ -323,6 +326,19 @@ done
 jq -e --arg u "$UB" '.mounts[$u] == null' /var/lib/rynas/storage/btrfs-degraded.json >/dev/null || fail "B: the record stays after a clean scrub"
 fs "$UB" '.repair == null' "B: still something to repair after the scrub"
 echo "  degraded-mount record of $B forgotten after the scrub"
+# the scrub's start is a timestamp and its errors come by kind; the error counters of the
+# device that was away keep the volume a warning until an administrator resets them
+jq -e '.scrub.status == "finished" and (.scrub.started_ms | type) == "number"' /tmp/fs.json >/dev/null || fail "B: no start time of the scrub"
+echo "  scrub: $(jq -c '.scrub | {errors, corrected, uncorrectable, error_kinds}' /tmp/fs.json)"
+echo "  counters: $(jq -c '[.devices[] | {devid, errors}]' /tmp/fs.json)"
+health() { api GET /storage/tree; echo "$BODY" | jq -r --arg u "$UB" '.volumes[] | select(.id == $u) | .health'; }
+if jq -e '[.devices[].errors[]] | add > 0' /tmp/fs.json >/dev/null; then
+    [ "$(health)" = warning ] || fail "B: counters above zero but the volume is $(health)"
+fi
+run "/storage/btrfs/$UB/reset-errors" "{}"
+fs "$UB" '[.devices[].errors[]] | add == 0' "B: error counters not zero after the reset"
+[ "$(health)" != warning ] || fail "B: still a warning after the reset of the counters"
+echo "  error counters reset, volume $(health)"
 umount "/$B"
 
 # ===================================================================== C

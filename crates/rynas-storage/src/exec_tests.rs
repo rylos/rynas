@@ -1196,3 +1196,39 @@ fn a_resumed_reshape_is_not_killed_after_a_day() {
     assert!(t > CRITICAL_TIMEOUT * 30);
     assert_eq!(timeout_for(&s(&["mdadm", "--grow", "/dev/md2", "--raid-devices=4"])), CRITICAL_TIMEOUT);
 }
+
+/// A scrub's progress fills its own step of the plan, never 100 before the plan ends.
+#[test]
+fn scrub_progress_fills_its_step() {
+    assert_eq!(step_pct(0, 1, 0.0), 0);
+    assert_eq!(step_pct(0, 1, 0.61), 61);
+    assert_eq!(step_pct(0, 1, 1.0), 99);
+    // after the md check (step 1 of 3 done), half of the btrfs scrub
+    assert_eq!(step_pct(2, 3, 0.5), 83);
+    assert_eq!(step_pct(0, 0, 2.0), 99);
+}
+
+/// The status reads run beside the scrub command and stop with it; the command's result is
+/// the step's.
+#[tokio::test]
+async fn progress_reads_run_while_the_command_runs() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::task::Poll;
+    // a command that needs three polls, a side that counts its polls and never ends
+    let mut left = 3u32;
+    let work = std::future::poll_fn(move |cx| {
+        if left == 0 {
+            return Poll::Ready("done");
+        }
+        left -= 1;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    });
+    let polls = AtomicU32::new(0);
+    let side = std::future::poll_fn(|_| {
+        polls.fetch_add(1, Ordering::SeqCst);
+        Poll::<()>::Pending
+    });
+    assert_eq!(with_progress(work, side).await, "done");
+    assert_eq!(polls.load(Ordering::SeqCst), 3);
+}

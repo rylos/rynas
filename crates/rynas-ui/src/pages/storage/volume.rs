@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_params_map;
 use rynas_api_types::storage::{
-    DiskSummary, FlexBlocker, FlexLayout, FlexPending, MdArray, ScrubState, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings,
+    DiskSummary, FlexBlocker, FlexLayout, FlexPending, MdArray, ScrubState, ScrubStatus, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings,
     VolumeSettingsState,
 };
 use rynas_api_types::{TaskInfo, TaskStarted, TaskStatus};
@@ -335,6 +335,9 @@ struct Stable {
     btrfs_boot: Option<String>,
 }
 
+/// How often the page reads a running scrub's progress.
+const SCRUB_POLL_MS: u32 = 4000;
+
 #[component]
 pub fn VolumePage() -> impl IntoView {
     let s = use_refresh();
@@ -371,6 +374,22 @@ pub fn VolumePage() -> impl IntoView {
     let selected = RwSignal::new(None::<String>);
     let close = Callback::new(move |_| modal.set(Open::None));
     let current = move || vol.get_untracked().unwrap_or_default();
+    // a scrub of this volume runs, or a scrub task was just started (btrfs may still say
+    // "never" for a second): the scrub card follows it, then everything is read again once
+    // (the volume's health, the device error counters)
+    let scrubbing = move || {
+        vol.with(|v| v.as_ref().and_then(|v| v.fs.as_ref()).and_then(|f| f.scrub.as_ref()).is_some_and(|x| x.status == ScrubState::Running))
+            || crate::tasks::tasks().list.with(|l| l.iter().any(|t| t.kind.strip_prefix("storage.") == Some("scrub") && !t.status.is_finished()))
+    };
+    crate::live::poll_while(SCRUB_POLL_MS, scrubbing, move || s.reload_fss());
+    let was_scrubbing = StoredValue::new(false);
+    Effect::new(move |_| {
+        let now = scrubbing();
+        if was_scrubbing.get_value() && !now {
+            s.load();
+        }
+        was_scrubbing.set_value(now);
+    });
     view! {
         <div class="page">
             <Show when=move || s.ready() fallback=move || loading(s, 8)>
@@ -404,6 +423,7 @@ pub fn VolumePage() -> impl IntoView {
                 Open::Lock => view! { <LockDialog id=current().id on_close=close /> }.into_any(),
                 Open::Reveal => view! { <RevealDialog id=current().id on_close=close /> }.into_any(),
                 Open::Btrfs(what) => view! { <super::btrfs::RepairDialog vol=current() what=what on_close=close /> }.into_any(),
+                Open::ResetErrors => view! { <super::btrfs::ResetErrorsDialog vol=current() on_close=close /> }.into_any(),
             }}
             {move || selected.get().map(|name| view! { <super::disks::DiskDrawer name=name on_close=Callback::new(move |_| selected.set(None)) /> })}
         </div>
@@ -423,6 +443,8 @@ enum Open {
     Reveal,
     /// A repair of a btrfs volume of several devices.
     Btrfs(super::btrfs::Repair),
+    /// Reset the device error counters of the btrfs volume.
+    ResetErrors,
 }
 
 fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String>>) -> AnyView {
@@ -491,6 +513,7 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
                 super::btrfs::devices_card(&vol, Callback::new(move |r| modal.set(if r == super::btrfs::Repair::Scrub { Open::Scrub } else { Open::Btrfs(r) })), selected)
             })}
             {(!vol.locked && !waiting && vol.fs.is_some()).then(|| scrub_card(&vol, modal))}
+            {(!vol.locked).then(|| super::btrfs::errors_card(&vol, Callback::new(move |_| modal.set(Open::ResetErrors)), selected))}
             {(!vol.locked && vol.mountpoint.is_some()).then(|| view! { <super::dedup::DedupCard key=vol.id.clone() /> })}
         </div>
     }
@@ -656,7 +679,8 @@ fn raid_card(a: MdArray, selected: RwSignal<Option<String>>) -> AnyView {
 }
 
 fn scrub_card(v: &Vol, modal: RwSignal<Open>) -> AnyView {
-    let sc = v.fs.as_ref().and_then(|f| f.scrub.clone());
+    // "never" carries btrfs's totals only: nothing to show but the state
+    let sc = v.fs.as_ref().and_then(|f| f.scrub.clone()).filter(|s| s.status != ScrubState::Never);
     let running = sc.as_ref().is_some_and(|s| s.status == ScrubState::Running);
     let id = v.id.clone();
     let managed = v.managed;
@@ -666,25 +690,34 @@ fn scrub_card(v: &Vol, modal: RwSignal<Open>) -> AnyView {
     let stop = move |_| {
         start_task(vol_url(&id, "scrub"), Some(json!({"action": "stop", "md_check": false, "dry_run": false})), false, stage, busy, error);
     };
-    let (tone, key) = match sc.as_ref().map(|s| s.status) {
-        Some(ScrubState::Finished) if sc.as_ref().is_some_and(|s| s.errors > 0) => (Tone::Err, "sto.scrub_errors"),
-        Some(ScrubState::Finished) => (Tone::Ok, "sto.scrub_finished"),
-        Some(ScrubState::Running) => (Tone::Info, "sto.scrub_running"),
-        Some(ScrubState::Aborted | ScrubState::Interrupted) => (Tone::Warn, "sto.scrub_aborted"),
-        _ => (Tone::Unknown, "never_run"),
+    let (tone, text) = match &sc {
+        Some(s) => scrub_state(s),
+        None => (Tone::Unknown, t("never_run").to_string()),
     };
-    let s2 = sc.clone().unwrap_or_default();
     view! {
         <section class="card widget w-6">
-            <WidgetHead icon=icons::SHIELD_CHECK title="sto.scrub"><Status tone=tone text=t(key).to_string() /></WidgetHead>
+            <WidgetHead icon=icons::SHIELD_CHECK title="sto.scrub"><Status tone=tone text=text /></WidgetHead>
             <p class="muted small">{tr("sto.scrub_text")}</p>
-            {sc.map(|_| view! {
-                <dl class="kvs">
-                    {kv_row("sto.started", sig(s2.started.clone().unwrap_or_else(|| ui::DASH.into())), "")}
-                    {kv_row("sto.duration", sig(s2.duration_s.map(i18n::duration).unwrap_or_else(|| ui::DASH.into())), "tnum")}
-                    {s2.pct.filter(|_| running).map(|p| kv_row("sto.progress", sig(i18n::pct(p as f64)), "tnum"))}
-                    {kv_row("sto.scrub_result", sig(s2.error_summary.clone()), "")}
-                </dl>
+            {sc.map(|s| {
+                let kinds = scrub_kinds(&s);
+                view! {
+                    <dl class="kvs">
+                        {kv_row("sto.started", sig(s.started_ms.map(i18n::datetime).unwrap_or_else(|| ui::DASH.into())), "tnum")}
+                        {kv_row("sto.duration", sig(s.duration_s.map(i18n::duration).unwrap_or_else(|| ui::DASH.into())), "tnum")}
+                        {if running {
+                            let pct = s.pct.map(|p| i18n::pct(p as f64)).unwrap_or_else(|| ui::DASH.into());
+                            let done = match (s.scrubbed_bytes, s.total_bytes) {
+                                (Some(d), Some(t)) => format!("{pct} · {}", i18n::bytes_of(d, t)),
+                                _ => pct,
+                            };
+                            kv_row("sto.progress", sig(done), "tnum").into_any()
+                        } else {
+                            s.total_bytes.map(|b| kv_row("sto.scrub_checked", sig(i18n::bytes(b)), "tnum")).into_any()
+                        }}
+                        {kv_row("sto.scrub_result", sig(scrub_result(&s)), "")}
+                        {(!kinds.is_empty()).then(|| kv_row("sto.scrub_kinds", sig(kinds), ""))}
+                    </dl>
+                }
             })}
             {managed.then(|| view! {
                 <div class="card-actions">
@@ -703,6 +736,50 @@ fn scrub_card(v: &Vol, modal: RwSignal<Open>) -> AnyView {
         </section>
     }
     .into_any()
+}
+
+/// The state chip of a scrub that ran: errors that were all corrected are a warning (the data
+/// is good again), errors left uncorrected an error.
+pub fn scrub_state(s: &ScrubStatus) -> (Tone, String) {
+    match s.status {
+        ScrubState::Running => (Tone::Info, t("sto.scrub_running").to_string()),
+        ScrubState::Aborted | ScrubState::Interrupted => (Tone::Warn, t("sto.scrub_aborted").to_string()),
+        ScrubState::Finished if s.errors == 0 => (Tone::Ok, t("sto.scrub_finished").to_string()),
+        ScrubState::Finished if s.all_corrected() => (Tone::Warn, i18n::tn("sto.scrub_corrected", s.errors, &[])),
+        ScrubState::Finished => match s.uncorrectable.filter(|n| *n > 0) {
+            Some(n) => (Tone::Err, i18n::tn("sto.scrub_uncorrectable", n, &[])),
+            None => (Tone::Err, t("sto.scrub_errors").to_string()),
+        },
+        ScrubState::Never => (Tone::Unknown, t("never_run").to_string()),
+        ScrubState::Unknown => (Tone::Unknown, t("health.unknown").to_string()),
+    }
+}
+
+/// What the scrub found, in words: no errors, all corrected, or how many are left.
+fn scrub_result(s: &ScrubStatus) -> String {
+    if s.errors == 0 {
+        return t("sto.scrub_no_errors").to_string();
+    }
+    if s.all_corrected() {
+        return i18n::tn("sto.scrub_res_corrected", s.errors, &[]);
+    }
+    match (s.uncorrectable, s.corrected) {
+        (Some(bad), Some(fixed)) => i18n::tn("sto.scrub_res_left", bad, &[("fixed", &i18n::count(fixed))]),
+        _ => i18n::tn("sto.scrub_res_errors", s.errors, &[]),
+    }
+}
+
+/// The errors by kind ("Checksum: 3, Read: 1"); a kind this build has no name for keeps
+/// btrfs's word.
+fn scrub_kinds(s: &ScrubStatus) -> String {
+    s.error_kinds
+        .iter()
+        .map(|k| {
+            let name = i18n::try_t(&format!("sto.scrub_kind.{}", k.kind)).map_or_else(|| k.kind.clone(), str::to_string);
+            tf("sto.scrub_kind_n", &[("kind", &name), ("n", &i18n::count(k.count))])
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn crypt_card(id: &str, locked: bool, managed: bool, modal: RwSignal<Open>) -> AnyView {

@@ -8,7 +8,9 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::storage::{BtrfsBlocker, BtrfsFilesystem, BtrfsRepair, BtrfsSettings, BtrfsSettingsState, StoragePlan};
+use rynas_api_types::storage::{
+    BtrfsBlocker, BtrfsDevice, BtrfsDeviceErrors, BtrfsFilesystem, BtrfsRepair, BtrfsSettings, BtrfsSettingsState, ScrubState, StoragePlan,
+};
 use serde_json::{Value, json};
 
 use super::volume::{Flow, Stage, start_task};
@@ -202,6 +204,113 @@ pub fn devices_card(v: &Vol, open: Callback<Repair>, selected: RwSignal<Option<S
         </section>
     }
     .into_any()
+}
+
+/// The error counters of a device (`btrfs device stats`) above zero: (i18n kind, count).
+fn counters(e: &BtrfsDeviceErrors) -> Vec<(&'static str, u64)> {
+    [("write", e.write_io), ("read", e.read_io), ("flush", e.flush_io), ("corruption", e.corruption), ("generation", e.generation)]
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .collect()
+}
+
+/// "Generation: 2, Read: 1".
+fn counters_text(c: &[(&'static str, u64)]) -> String {
+    c.iter()
+        .map(|(k, n)| {
+            let name = i18n::try_t(&format!("sto.err.k.{k}")).unwrap_or(k);
+            tf("sto.scrub_kind_n", &[("kind", name), ("n", &i18n::count(*n))])
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The devices of a btrfs volume whose error counters are above zero (what keeps the volume
+/// at "Warning"), what each kind means, what the last scrub says about the data, and the
+/// reset of the counters. Nothing when every counter is zero.
+pub fn errors_card(v: &Vol, reset: Callback<()>, selected: RwSignal<Option<String>>) -> AnyView {
+    let Some(fs) = v.fs.clone() else { return ().into_any() };
+    let bad: Vec<(BtrfsDevice, Vec<(&'static str, u64)>)> =
+        fs.devices.iter().filter(|d| !d.missing).map(|d| (d.clone(), counters(&d.errors))).filter(|(_, c)| !c.is_empty()).collect();
+    if bad.is_empty() {
+        return ().into_any();
+    }
+    let s = super::sto();
+    let mut kinds: Vec<&'static str> = bad.iter().flat_map(|(_, c)| c.iter().map(|(k, _)| *k)).collect();
+    kinds.sort_by_key(|k| ["write", "read", "flush", "corruption", "generation"].iter().position(|x| x == k));
+    kinds.dedup();
+    let scrub = fs.scrub.clone().filter(|x| x.status == ScrubState::Finished);
+    let hint = match &scrub {
+        Some(x) if x.uncorrectable.unwrap_or(0) > 0 || (x.errors > 0 && !x.all_corrected()) => "sto.err.hint_bad",
+        Some(_) => "sto.err.hint_clean",
+        None => "sto.err.hint_scrub",
+    };
+    let mounted = fs.mountpoint.is_some();
+    view! {
+        <section class="card widget w-6">
+            <WidgetHead icon=icons::TRIANGLE_ALERT title="sto.err.title"><Status tone=Tone::Warn text=t("sto.err.state").to_string() /></WidgetHead>
+            <p class="muted small">{tr("sto.err.text")}</p>
+            <ul class="members-list">
+                {bad.into_iter().map(|(d, c)| {
+                    let disk = disk_of(&d.path, &v.disks);
+                    let info = disk.as_ref().and_then(|n| s.disk(n));
+                    let d2 = disk.clone();
+                    let name = d.path.trim_start_matches("/dev/").to_string();
+                    view! {
+                        <li>
+                            <button class="cell-btn" type="button" disabled=d2.is_none() on:click=move |_| selected.set(d2.clone())>
+                                <span class="mono strong">{name}</span>
+                                <span class="muted small ellipsis">{info.map(|x| disk_title(&x)).unwrap_or_else(|| tf("sto.bt.devid", &[("n", &d.devid.to_string())]))}</span>
+                                <span class="warn tone-text small">{counters_text(&c)}</span>
+                            </button>
+                        </li>
+                    }
+                }).collect_view()}
+            </ul>
+            {kinds.into_iter().map(|k| {
+                let name = i18n::try_t(&format!("sto.err.k.{k}")).unwrap_or(k);
+                let what = i18n::try_t(&format!("sto.err.d.{k}")).unwrap_or("");
+                view! { <p class="muted small"><strong>{name}</strong>": "{what}</p> }
+            }).collect_view()}
+            {ui::note(Tone::Info, icons::INFO, view! { {tr(hint)} }.into_any())}
+            {mounted.then(|| view! {
+                <div class="card-actions">
+                    <button class="btn ghost sm" type="button" on:click=move |_| reset.run(())><Icon icon=icons::ROTATE_CCW size=14 />{tr("sto.err.reset")}</button>
+                </div>
+            })}
+        </section>
+    }
+    .into_any()
+}
+
+/// Confirms and runs the reset of the error counters of a btrfs volume (`btrfs device stats
+/// -z` as a task), then reads the storage again.
+#[component]
+pub fn ResetErrorsDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
+    let uuid = vol.fs.as_ref().map(|f| f.uuid.clone()).unwrap_or_default();
+    let c = ui::Confirm::new(
+        tf("sto.err.reset_title", &[("name", &vol.name)]),
+        tf("sto.err.reset_text", &[("name", &vol.name)]),
+        "sto.err.reset",
+        false,
+        Callback::new(|_| {}),
+        on_close,
+    );
+    let (busy, error) = (c.busy, c.error);
+    let go = Callback::new(move |_| {
+        let url = url(&uuid, "reset-errors");
+        crate::tasks::run_and_report(
+            async move { api::start_task(&url, None).await },
+            t("sto.err.reset_done").to_string(),
+            busy,
+            error,
+            Callback::new(move |_| {
+                super::sto().load();
+                on_close.run(());
+            }),
+        );
+    });
+    ui::confirm(ui::Confirm { on_confirm: go, ..c })
 }
 
 /// A repair of a btrfs volume: its form (only the replace has one), the plan, the task.

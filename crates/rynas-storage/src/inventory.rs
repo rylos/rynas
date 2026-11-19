@@ -411,6 +411,21 @@ fn layer(inv: &Inventory, kname: &str, depth: usize) -> Option<TreeNode> {
     Some(n)
 }
 
+/// What one device makes of its btrfs volume: missing, or with error counters above zero, a
+/// warning. btrfs keeps the counters on disk for ever (`btrfs device stats`); they only go
+/// back to zero when an administrator resets them (`btrfs device stats -z`), so zero means
+/// "nothing new since the last reset". A later clean scrub does not clear the warning by
+/// itself: it proves the data good again, not the device (a cable or a disk that failed a
+/// write fails again), and the counters are the only trace of it. The reset is the
+/// acknowledgement, as "Mark as seen" is for SMART, which cannot reset its counters.
+pub fn device_verdict(dev: &BtrfsDevice) -> HealthVerdict {
+    if dev.missing || total_errors(&dev.errors) > 0 {
+        HealthVerdict::Warning
+    } else {
+        HealthVerdict::Healthy
+    }
+}
+
 /// The flexible RAID under a filesystem device: its logical volume is the device itself or
 /// lies below it (through LUKS).
 fn flex_under<'a>(
@@ -452,9 +467,7 @@ pub fn tree(inv: &Inventory) -> StorageTree {
             _ => {}
         }
         for dev in &f.devices {
-            if total_errors(&dev.errors) > 0 || dev.missing {
-                v.health = worst(v.health, HealthVerdict::Warning);
-            }
+            v.health = worst(v.health, device_verdict(dev));
             if let Some(b) = inv.graph.find(&dev.path) {
                 covered.insert(b.kname.clone());
                 if v.flexible.is_none() {
@@ -627,6 +640,23 @@ mod tests {
         let parts = partitions(&inv.graph, "nvme0n1");
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[1].holders, ["md0"]);
+    }
+
+    #[test]
+    fn device_errors_warn_until_reset() {
+        let mut d = BtrfsDevice { devid: 1, path: "/dev/md2".into(), ..Default::default() };
+        assert_eq!(device_verdict(&d), HealthVerdict::Healthy);
+        // a device back after a degraded mount: older copies (generation), repaired by a
+        // scrub; the counters stay until they are reset, and so does the warning
+        d.errors.generation = 2;
+        assert_eq!(device_verdict(&d), HealthVerdict::Warning);
+        d.errors = BtrfsDeviceErrors { read_io: 1, ..Default::default() };
+        assert_eq!(device_verdict(&d), HealthVerdict::Warning);
+        // reset (`btrfs device stats -z`): healthy again
+        d.errors = BtrfsDeviceErrors::default();
+        assert_eq!(device_verdict(&d), HealthVerdict::Healthy);
+        d.missing = true;
+        assert_eq!(device_verdict(&d), HealthVerdict::Warning);
     }
 
     #[test]

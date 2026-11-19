@@ -456,6 +456,7 @@ task.storage.btrfs-replace	Sostituzione di un dispositivo mancante
 task.storage.btrfs-remove-missing	Rimozione di un dispositivo mancante
 task.storage.btrfs-convert	Ripristino della ridondanza
 task.storage.btrfs-mount-degraded	Montaggio di un volume in modalità degradata
+task.storage.btrfs-reset-errors	Azzeramento dei contatori di errori
 task.snapshot.run	Creazione snapshot
 task.snapshot.restore	Ripristino da snapshot
 task.snapshot.rollback	Ritorno alla versione precedente
@@ -1327,6 +1328,45 @@ sto.started	Avviata
 sto.duration	Durata
 sto.progress	Avanzamento
 sto.scrub_result	Risultato
+sto.scrub_checked	Dati verificati
+sto.scrub_kinds	Errori per tipo
+sto.scrub_no_errors	Nessun errore trovato
+sto.scrub_corrected.one	{n} errore corretto
+sto.scrub_corrected.other	{n} errori corretti
+sto.scrub_uncorrectable.one	{n} errore non correggibile
+sto.scrub_uncorrectable.other	{n} errori non correggibili
+sto.scrub_res_corrected.one	{n} errore trovato e corretto da una copia integra
+sto.scrub_res_corrected.other	{n} errori trovati, tutti corretti da una copia integra
+sto.scrub_res_left.one	{n} errore non correggibile ({fixed} corretti)
+sto.scrub_res_left.other	{n} errori non correggibili ({fixed} corretti)
+sto.scrub_res_errors.one	{n} errore trovato
+sto.scrub_res_errors.other	{n} errori trovati
+sto.scrub_kind_n	{kind}: {n}
+sto.scrub_kind.read	Lettura
+sto.scrub_kind.csum	Checksum
+sto.scrub_kind.verify	Controllo dei metadati
+sto.scrub_kind.super	Superblocco
+sto.scrub_kind.malloc	Memoria esaurita
+sto.err.title	Contatori di errori dei dispositivi
+sto.err.state	Errori registrati
+sto.err.text	btrfs conta gli errori di ogni dispositivo e conserva i conteggi finché non vengono azzerati. Finché un conteggio è sopra zero, il volume mostra un avviso.
+sto.err.k.write	Scrittura
+sto.err.k.read	Lettura
+sto.err.k.flush	Svuotamento della cache
+sto.err.k.corruption	Corruzione
+sto.err.k.generation	Generazione
+sto.err.d.write	scritture fallite sul dispositivo: disco, cavo o controller difettoso.
+sto.err.d.read	letture fallite sul dispositivo: disco, cavo o controller difettoso.
+sto.err.d.flush	svuotamenti della cache falliti: le scritture recenti potrebbero non essere arrivate sul disco.
+sto.err.d.corruption	blocchi con checksum errato: i dati letti erano danneggiati. La pulizia dati li ripara da una copia integra, quando c'è.
+sto.err.d.generation	blocchi più vecchi del previsto: normale su un dispositivo che mancava durante un montaggio degradato ed è tornato. La pulizia dati li aggiorna.
+sto.err.hint_clean	L'ultima pulizia dati non ha lasciato errori non correggibili: i dati sono integri. Risolta la causa, azzera i contatori: il volume torna integro e i nuovi errori si vedranno di nuovo.
+sto.err.hint_bad	L'ultima pulizia dati ha trovato errori che non ha potuto correggere: controlla i dischi e ripristina i file danneggiati prima di azzerare i contatori.
+sto.err.hint_scrub	Esegui una pulizia dati per verificare e riparare i dati, poi azzera i contatori quando la causa è risolta.
+sto.err.reset	Azzera i contatori di errori
+sto.err.reset_title	Azzerare i contatori di errori di {name}?
+sto.err.reset_text	I contatori di errori di tutti i dispositivi di {name} tornano a zero; i valori attuali restano nel log dell'attività. Gli errori successivi all'azzeramento si vedranno di nuovo.
+sto.err.reset_done	Contatori di errori azzerati
 sto.scrub_stop	Interrompi la pulizia dati
 run_now	Esegui ora
 sto.scrub_title	Pulizia dati su {name}

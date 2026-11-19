@@ -39,6 +39,29 @@ pub fn router() -> Router<StoState> {
         .route("/v1/storage/btrfs/{uuid}/convert", post(convert))
         .route("/v1/storage/btrfs/{uuid}/mount-degraded", post(mount_degraded))
         .route("/v1/storage/btrfs/{uuid}/settings", get(settings_get).put(settings_put))
+        .route("/v1/storage/btrfs/{uuid}/reset-errors", post(reset_errors))
+}
+
+/// `POST /v1/storage/btrfs/{uuid}/reset-errors`: sets the error counters of every device of a
+/// mounted filesystem back to zero (`btrfs device stats -z`), as a task. Administrators only.
+/// The counters are what keeps the volume at "Warning" after errors
+/// ([`rynas_storage::inventory::device_verdict`]): the reset is their acknowledgement, and
+/// the task log keeps the values from before it.
+async fn reset_errors(State(st): State<StoState>, h: HeaderMap, UrlPath(uuid): UrlPath<String>) -> Res<Response> {
+    let (s, user) = (sto(&st)?, user(&h)?);
+    s.ops.admins.require_admin(&user, "resetting btrfs error counters")?;
+    check_uuid(&uuid)?;
+    let inv = s.inventory(false).await?;
+    let fs = find(&inv, &uuid)?;
+    let mnt = fs.mountpoint.clone().ok_or_else(|| conflict(format!("filesystem {} is not mounted", name_of(&fs))))?;
+    let held = s.reserve(vec![format!("btrfs-stats:{}", fs.uuid)])?;
+    let id = spawn(&s, "storage.btrfs-reset-errors", &user, held, move |m| async move {
+        let mut o = rynas_storage::exec::RunOpts::new(std::time::Duration::from_secs(60));
+        o.cancellable = false;
+        // `-z` prints the values it resets: they stay in the task log
+        m.run(vec!["btrfs".into(), "device".into(), "stats".into(), "-z".into(), mnt], o).await.map(|_| ())
+    })?;
+    Ok(started(id))
 }
 
 /// What the storage pages call the filesystem, and what a confirmation types: its label, or

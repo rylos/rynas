@@ -172,6 +172,14 @@ that stayed die before it, the returned ones are refused alone (split brain). A 
 removal that leaves nothing missing ends the record at once: the missing device was rebuilt
 from the copies or is gone.
 
+The returned device also keeps error counters (`btrfs device stats`, typically
+`generation_errs` from the stale copies read before the scrub). btrfs keeps them until they
+are reset, and any counter above zero keeps the volume at "Warning", also after the clean
+scrub: the scrub proves the data good again, not the device. The volume page lists the devices
+with counters above zero, says what each kind means and what the last scrub found, and offers
+"Reset error counters" (`POST /api/v1/storage/btrfs/{uuid}/reset-errors`, confirmed, a task
+running `btrfs device stats -z`): the reset is the administrator's acknowledgement.
+
 Limit: a scrub repairs what it can verify by checksum. Files without checksums (`nodatacow`
 mounts, folders with `chattr +C`, the NOCOW shared folders and app folders of rynas) are not
 rewritten: on the device that came back their blocks written while it was away stay old, and
