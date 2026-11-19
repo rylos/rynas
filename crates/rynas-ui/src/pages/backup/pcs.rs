@@ -182,6 +182,31 @@ fn snapshot_flag(s: &ReceivedSnapshot) -> Option<AnyView> {
     Some(ui::status(tone, t(k).to_string()))
 }
 
+/// Why the NAS keeps a snapshot at its next pass, and about until when the counts keep it
+/// ("Kept: one per day · goes after 26 Nov 2026"), or that the pass takes it. `None` for an
+/// interrupted receive (its state says it).
+fn kept_text(i: &RetentionItem) -> Option<String> {
+    let k = match (i.keep, i.reason) {
+        (_, RetentionReason::Interrupted) => return None,
+        (false, _) => "pcb.goes_next",
+        (true, RetentionReason::Parent) => "pcb.kept.parent",
+        (true, RetentionReason::Floor) => "pcb.kept.floor",
+        (true, RetentionReason::Recent) => "pcb.kept.recent",
+        (true, RetentionReason::Hourly) => "pcb.kept.hourly",
+        (true, RetentionReason::Daily) => "pcb.kept.daily",
+        (true, RetentionReason::Weekly) => "pcb.kept.weekly",
+        (true, RetentionReason::Monthly) => "pcb.kept.monthly",
+        (true, RetentionReason::Yearly) => "pcb.kept.yearly",
+        (true, RetentionReason::Future) => "pcb.kept.future",
+        (true, RetentionReason::Expired) => return None,
+    };
+    let text = t(k).to_string();
+    Some(match i.until_ms.filter(|_| i.keep) {
+        Some(u) => format!("{text} · {}", tf("pcb.goes_after", &[("when", &i18n::date(u))])),
+        None => text,
+    })
+}
+
 fn fold(folds: Folds, title: &'static str, open: bool, summary: AnyView, body: AnyView) -> AnyView {
     ui::fold(Some(folds), title, open, Some(summary), body)
 }
@@ -516,8 +541,6 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
             }
             .into_any();
         }
-        // the space column once some folder was measured
-        let measured = list.iter().any(|p| p.usage.is_some());
         let rows = list
             .iter()
             .map(|p| {
@@ -533,13 +556,19 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                     let tone = if i.code == PcIssueCode::LowSpace { Tone::Err } else { Tone::Warn };
                     ui::status(tone, t(issue_short(i)).to_string())
                 });
+                let paired = p.agent.then(|| device_of(&p.device)).flatten();
+                // what the last backup sent (rynas-agent tells), under the space on disk
+                let last_sent = paired.as_ref().and_then(|d| d.last_run.as_ref()).filter(|r| r.ok && r.bytes_added > 0).map(|r| tf("pcb.last_sent", &[("size", &i18n::bytes(r.bytes_added))]));
+                let stale = p.usage_stale.then(|| t("bk.usage_stale_short").to_string());
+                let space_sub = match (stale, last_sent) {
+                    (Some(s), Some(l)) => Some(format!("{s} · {l}")),
+                    (s, l) => s.or(l),
+                };
                 let mut cells = vec![
                     ui::cell("bk.col.pc", "wrap", ui::two_lines(view! { <strong>{p.device.clone()}</strong> }.into_any(), sub, "cell-sub small")),
-                    ui::cell("bk.col.folder", "wrap", ui::breakable(&p.path, "mono small")),
                     ui::cell("col.status", "wrap", {
                         // with rynas-agent the PC's chip, the drawer's (agent::device_chip); a
                         // backup running: its progress instead of the last date
-                        let paired = p.agent.then(|| device_of(&p.device)).flatten();
                         let progress = paired.as_ref().and_then(|d| d.progress.clone());
                         let (chip, not_seen, off) = match &paired {
                             _ if progress.is_some() => (ui::status(Tone::Info, t("pca.st.running").to_string()), None, None),
@@ -561,19 +590,17 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                     }),
                     // the backups (runs), as the drawer counts them, and the subvolumes they hold
                     ui::cell("pcb.backups", "wrap", ui::two_lines(view! { <span class="tnum">{i18n::count(u64::from(p.runs))}</span> }.into_any(), (!groups.is_empty()).then_some(groups), "cell-sub small mono")),
+                    // on disk (measured), what the last backup sent below it
+                    ui::cell("pcb.col.on_disk", "num", ui::two_lines(view! { <span class="tnum">{space}</span> }.into_any(), space_sub, "cell-sub small")),
                 ];
-                if measured {
-                    let stale = p.usage_stale.then(|| t("bk.usage_stale_short").to_string());
-                    cells.push(ui::cell("bk.col.space", "num", ui::two_lines(view! { <span class="tnum">{space}</span> }.into_any(), stale, "cell-sub small")));
-                }
                 cells.push(ui::cell("bkpc.col.restore", "", bm_status(&p.bare_metal)));
                 cells.push(ui::actions(view! { <button class="btn ghost sm" aria-label=label on:click=move |_| pcs.open.set(Some(dev.clone()))><Icon icon=icons::EYE size=14 />{tr("bk.open")}</button> }.into_any()));
                 ui::row(cells)
             })
             .collect::<Vec<_>>();
-        const HEADS: &[&str] = &["bk.col.pc", "bk.col.folder", "col.status", "pcb.backups", "#bk.col.space", "bkpc.col.restore", ""];
-        const HEADS_UNMEASURED: &[&str] = &["bk.col.pc", "bk.col.folder", "col.status", "pcb.backups", "bkpc.col.restore", ""];
-        ui::table("bk-table", if measured { HEADS } else { HEADS_UNMEASURED }, rows)
+        // the folder is in the panel; the same names as the file backups' tab
+        const HEADS: &[&str] = &["bk.col.pc", "col.status", "pcb.backups", "#pcb.col.on_disk", "bkpc.col.restore", ""];
+        ui::table("bk-table", HEADS, rows)
     };
     view! {
         <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("bk.intro")}</p>
@@ -1330,8 +1357,34 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
     });
     let pruning = RwSignal::new(false);
     let prune_err = RwSignal::new(None::<String>);
-    let reload = Callback::new(move |_| detail.reload());
-    let prune = move |_| run(pcs, ("POST", format!("{}/prune", target_url(&dev.get_value())), None), t("bkpc.pruned").to_string(), (pruning, prune_err, None), reload);
+    // Delete old now: first what the saved rules delete and keep (the plan endpoint), then
+    // the pass once confirmed
+    let prune_ask = RwSignal::new(None::<PcRetentionPreview>);
+    let prune = move |_| {
+        let Some(tg) = detail.data.with_untracked(|d| d.as_ref().map(|d| d.target.clone())) else { return };
+        pruning.set(true);
+        prune_err.set(None);
+        let body = PcRetentionPlanRequest { device: tg.device.clone(), retention: tg.retention.clone(), delete: tg.delete };
+        spawn_local(async move {
+            let r = api::post::<_, PcRetentionPreview>("/api/v1/pc-backups/plan/retention", Some(&body)).await;
+            let _ = pruning.try_set(false);
+            match r {
+                Ok(p) if p.delete == 0 => toast(Tone::Info, t("bkpc.prune_nothing").to_string()),
+                Ok(p) => {
+                    let _ = prune_ask.try_set(Some(p));
+                }
+                Err(e) => {
+                    let _ = prune_err.try_set(Some(e.text()));
+                }
+            }
+        });
+    };
+    let do_prune = Callback::new(move |_| {
+        run(pcs, ("POST", format!("{}/prune", target_url(&dev.get_value())), None), t("bkpc.pruned").to_string(), (pruning, prune_err, None), Callback::new(move |_| {
+            prune_ask.set(None);
+            detail.reload();
+        }));
+    });
     // the backups listed by run (newest first) or by subvolume (Folder and rules)
     let by_run = RwSignal::new("run".to_string());
     // kept while the PC is read again (a Measure, a poll): what is open, a restore code
@@ -1411,6 +1464,8 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
 
         // ---- snapshots
         let snaps: std::collections::HashMap<&str, &ReceivedSnapshot> = d.list.iter().map(|s| (s.name.as_str(), s)).collect();
+        // with the NAS owning retention: the plan of its next pass, per snapshot
+        let plan: std::collections::HashMap<&str, &RetentionItem> = d.plan.iter().map(|i| (i.name.as_str(), i)).collect();
         let browsable = |s: &ReceivedSnapshot| s.readonly && !s.not_subvolume;
         // a snapshot in the file manager (read only, copied out from there)
         let files_href = |name: &str| format!("/files/{}/{}/{}", api::encode(BACKUPS_SHARE), api::encode(&device), api::encode(name));
@@ -1437,9 +1492,16 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 view! { <button class="icon-btn sm" title=tr("bk.browse") aria-label=label disabled=true><Icon icon=icons::FOLDER_OPEN size=16 /></button> }.into_any()
             };
             let head = if shown == Shown::Subvolume { "bk.col.subvolume" } else { "bk.col.snapshot" };
+            // why the NAS keeps it (its rules: the counts, the base of the next backup, the
+            // floor) and about until when, or that the next cleanup takes it
+            let kept = plan.get(s.name.as_str()).and_then(|i| kept_text(i));
+            let flag = if kept.is_some() && s.protected && !s.incomplete && !s.not_subvolume { None } else { snapshot_flag(s) };
             ui::row(vec![
                 ui::cell(head, "wrap", view! {
-                    <div class="chips"><span class=if shown == Shown::Time { "small bk-wrap" } else { "mono small bk-wrap" } title=title>{text}</span>{snapshot_flag(s)}</div>
+                    <div class="cell-main">
+                        <div class="chips"><span class=if shown == Shown::Time { "small bk-wrap" } else { "mono small bk-wrap" } title=title>{text}</span>{flag}</div>
+                        {kept.map(|k| view! { <span class="cell-sub small">{k}</span> })}
+                    </div>
                 }.into_any()),
                 ui::text_cell("snap.col.size", "tnum", size_text(s.size)),
                 ui::actions(view! {
@@ -1526,19 +1588,24 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                     if let Some(h) = h.filter(|h| h.bytes_added > 0) {
                         sub.push(tf("pcb.sent_size", &[("size", &i18n::bytes(h.bytes_added))]));
                     }
-                    if !r.lacks.is_empty() && !r.incomplete && !h.is_some_and(|h| !h.ok) {
+                    // a run that brought some subvolumes and not others is partial, also when
+                    // the agent's run failed on the missing one
+                    let failed = h.is_some_and(|h| !h.ok);
+                    let partial = !r.lacks.is_empty() && !r.incomplete && !parts.is_empty();
+                    if partial {
                         sub.push(tf("bkpc.run.lacks", &[("names", &r.lacks.join(", "))]));
                     }
                     if let Some(x) = r.exclusive_bytes {
                         sub.push(i18n::bytes(x));
                     }
-                    let flag = if h.is_some_and(|h| !h.ok) {
+                    let flag = if partial {
+                        // the pill stays short: the missing names are on the line below, the
+                        // agent's error (when its run failed on one) in the body
+                        ui::status(if failed { Tone::Warn } else { Tone::Info }, t("bkpc.run.partial").to_string())
+                    } else if failed {
                         ui::status(Tone::Err, t("pca.st.failed").to_string())
                     } else if r.incomplete {
                         ui::status(Tone::Warn, t("bk.snap.incomplete").to_string())
-                    } else if !r.lacks.is_empty() {
-                        // the pill stays short: the missing names are on the line below
-                        ui::status(Tone::Info, t("bkpc.run.partial").to_string())
                     } else {
                         ui::status(Tone::Ok, t("pca.h.ok").to_string())
                     };
@@ -1715,7 +1782,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 let title = p.usage.map(|u| tf("bk.usage_title", &[("excl", &i18n::bytes(u.exclusive_bytes)), ("shared", &i18n::bytes(u.shared_bytes)), ("when", &i18n::datetime(u.read_at_ms))])).unwrap_or_default();
                 view! {
                     <span title=title>{text}</span>
-                    {p.usage_stale.then(|| view! { <span class="warn-text">" · "{tr("bk.usage_stale")}</span> })}
+                    {p.usage_stale.then(|| view! { <div class="warn-text">{tr("bk.usage_stale")}</div> })}
                 }
                 .into_any()
             }
@@ -1848,6 +1915,14 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         {ui::detail_drawer(title, close, true, body, Some(remove_btn), Some(secondary))}
         {ctl.confirm()}
         {move || ask.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(tf("bk.remove_title", &[("device", &dev.get_value())]), t("bk.remove_text").to_string(), "bk.remove", true, remove, Callback::new(move |_| ask.set(false))) }))}
+        {move || prune_ask.get().map(|p| {
+            let keep = (p.items.len() as u32).saturating_sub(p.delete);
+            let mut text = tf("snap.preview_counts", &[("keep", &keep.to_string()), ("delete", &p.delete.to_string())]);
+            if let Some(b) = p.frees_at_least_bytes.filter(|b| *b > 0) {
+                text = format!("{text} {}", tf("bkpc.preview_frees", &[("bytes", &i18n::bytes(b))]));
+            }
+            ui::confirm(Confirm { busy: pruning, error: prune_err, ..Confirm::new(tf("bkpc.prune_title", &[("device", &dev.get_value())]), text, "bkpc.prune", true, do_prune, Callback::new(move |_| prune_ask.set(None))) })
+        })}
         {move || del.get().map(|n| ui::confirm(Confirm { busy: del_busy, error: del_err, ..Confirm::new(tf("bkpc.delete_snap_title", &[("name", &snapshot_label(&n))]), t("bkpc.delete_snap_text").to_string(), "bkpc.delete_snap", true, delete_snap, Callback::new(move |_| del.set(None))) }))}
     }
     .into_any()

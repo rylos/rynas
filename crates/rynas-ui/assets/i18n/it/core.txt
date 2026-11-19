@@ -5182,7 +5182,7 @@ bk.measured	Spazio misurato
 bk.usage_text	{disk} su disco · {data} di dati in {backups} · misurato {ago}
 bk.on_disk	{size} su disco
 bk.usage_title	{excl} solo in questi snapshot, {shared} in comune contati una volta (misurato il {when})
-bk.usage_stale	non aggiornato: da allora sono arrivati o spariti dei backup
+bk.usage_stale	Non aggiornato: da allora sono arrivati o spariti dei backup
 bk.usage_stale_short	Non aggiornato
 bk.usage_none	Non ancora misurato
 bk.rules.off	Elimina solo il NAS
@@ -5285,6 +5285,19 @@ pcb.show_all	Mostra tutto ({n})
 pcb.show_fewer	Mostra meno
 pcb.folder_rules	Cartella e regole
 pcb.backups	Backup
+pcb.col.on_disk	Su disco
+pcb.last_sent	ultimo backup +{size}
+pcb.kept.parent	Tenuto: base del prossimo backup
+pcb.kept.floor	Tenuto: il minimo del NAS
+pcb.kept.recent	Tenuto: recente
+pcb.kept.hourly	Tenuto: uno all'ora
+pcb.kept.daily	Tenuto: uno al giorno
+pcb.kept.weekly	Tenuto: uno alla settimana
+pcb.kept.monthly	Tenuto: uno al mese
+pcb.kept.yearly	Tenuto: uno all'anno
+pcb.kept.future	Tenuto: data nel futuro
+pcb.goes_next	Va via alla prossima pulizia
+pcb.goes_after	va via dopo il {when}
 pcb.n_backups.one	{n} backup
 pcb.n_backups.other	{n} backup
 pcb.sent_size	{size} inviati
@@ -5364,6 +5377,8 @@ bkpc.f.ignored_help	Nessun avviso per loro e non previsti in una serie completa.
 bkpc.ret.nas	Gestita dal NAS: conserva {counts}, e tutto ciò che ha meno di {min}
 bkpc.prune	Elimina i vecchi ora
 bkpc.pruned	Vecchi snapshot eliminati
+bkpc.prune_title	Eliminare gli snapshot vecchi di {device}?
+bkpc.prune_nothing	Niente da eliminare ora: le regole tengono ogni snapshot.
 bkpc.last_prune	Ultima pulizia
 bkpc.last_prune_text	{when}: {n} eliminati
 bkpc.prune_postponed	{when}: rimandata, si stava ricevendo un backup; la prossima passata è entro un'ora
@@ -5482,7 +5497,6 @@ pca.choose_folder	Scegli la cartella
 pca.empty_text	Aggiungi un PC: ricevi un codice valido una volta e il comando da eseguire sul PC.
 pca.col.pc	PC
 pca.col.group	Gruppo
-pca.col.versions	Versioni
 pca.col.uploaded	Inviati (compressi)
 pca.col.pcs	PC
 pca.col.size	Dimensione

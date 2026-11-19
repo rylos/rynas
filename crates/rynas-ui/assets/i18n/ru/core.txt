@@ -5216,7 +5216,7 @@ bk.measured	Место измерено
 bk.usage_text	{disk} на диске · {data} данных · {backups} · измерено {ago}
 bk.on_disk	{size} на диске
 bk.usage_title	{excl} только в этих снимках, {shared} общих, учтены один раз (измерено {when})
-bk.usage_stale	устарело: с тех пор копии добавились или удалились
+bk.usage_stale	Устарело: с тех пор копии добавились или удалились
 bk.usage_stale_short	Устарело
 bk.usage_none	Ещё не измерено
 bk.rules.off	Удаляет только NAS
@@ -5385,6 +5385,8 @@ bkpc.f.ignored_help	Для них нет оповещений, и они не о
 bkpc.ret.nas	Управляет NAS: хранит {counts} и всё, что моложе {min}
 bkpc.prune	Удалить старые сейчас
 bkpc.pruned	Старые снимки удалены
+bkpc.prune_title	Удалить старые снимки «{device}»?
+bkpc.prune_nothing	Сейчас удалять нечего: правила сохраняют все снимки.
 bkpc.last_prune	Последняя очистка
 bkpc.last_prune_text	{when}: удалено {n}
 bkpc.prune_postponed	{when}: отложено, шёл приём копии; следующий проход в течение часа
@@ -5503,7 +5505,6 @@ pca.choose_folder	Выбрать папку
 pca.empty_text	Добавьте ПК: вы получите одноразовый код и команду для запуска на нём.
 pca.col.pc	ПК
 pca.col.group	Группа
-pca.col.versions	Версии
 pca.col.uploaded	Отправлено (сжато)
 pca.col.pcs	ПК
 pca.col.size	Размер
@@ -5732,6 +5733,19 @@ sto.h.more.few	+ещё {n}
 sto.h.more.many	+ещё {n}
 sto.h.more.other	+ещё {n}
 pcb.backups	Резервные копии
+pcb.col.on_disk	На диске
+pcb.last_sent	последняя копия +{size}
+pcb.kept.parent	Хранится: основа следующей копии
+pcb.kept.floor	Хранится: минимум NAS
+pcb.kept.recent	Хранится: недавний
+pcb.kept.hourly	Хранится: один в час
+pcb.kept.daily	Хранится: один в день
+pcb.kept.weekly	Хранится: один в неделю
+pcb.kept.monthly	Хранится: один в месяц
+pcb.kept.yearly	Хранится: один в год
+pcb.kept.future	Хранится: дата в будущем
+pcb.goes_next	Удаляется при следующей очистке
+pcb.goes_after	удаляется после {when}
 pcb.n_backups.one	{n} копия
 pcb.n_backups.few	{n} копии
 pcb.n_backups.many	{n} копий

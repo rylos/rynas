@@ -292,13 +292,15 @@ pub fn panel(header: RwSignal<Option<bool>>, to_btrfs: Callback<()>) -> AnyView 
                             </div>
                         }.into_any()),
                         ui::text_cell("pca.col.group", "mono small", d.group.clone()),
-                        ui::text_cell("pca.col.versions", "num tnum", i18n::count(u64::from(d.versions))),
+                        ui::text_cell("pcb.backups", "num tnum", i18n::count(u64::from(d.versions))),
                         ui::text_cell("pca.col.uploaded", "num tnum", i18n::bytes(d.uploaded_bytes)),
                         ui::actions(view! { <button class="btn ghost sm" aria-label=label on:click=move |_| tab.open.set(Some(dev.clone()))><Icon icon=icons::EYE size=14 />{tr("bk.open")}</button> }.into_any()),
                     ])
                 })
                 .collect::<Vec<_>>();
-            ui::table("pca-table", &["pca.col.pc", "col.status", "pca.col.group", "#pca.col.versions", "#pca.col.uploaded", ""], rows)
+            // the same names as the btrfs tab: backups held, then the data (sent here, as
+            // the group's repository holds several PCs; on disk there)
+            ui::table("pca-table", &["pca.col.pc", "col.status", "pca.col.group", "#pcb.backups", "#pca.col.uploaded", ""], rows)
         };
         let budget = o.memory_budget_bytes;
         let groups = o
@@ -802,7 +804,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                 }.into_any())}
                 {ui::kv("pca.last_ok", ui::text(when(p.last_ok_ms)))}
                 {ui::kv("pca.col.group", ui::text(p.group.clone()))}
-                {ui::kv("pca.col.versions", ui::text(i18n::count(u64::from(p.versions))))}
+                {ui::kv("pcb.backups", ui::text(i18n::count(u64::from(p.versions))))}
                 {ui::kv("pca.col.uploaded", ui::text(i18n::bytes(p.uploaded_bytes)))}
                 {ui::kv("pca.os", ui::text(format!("{} {} · rynas-agent {}", p.os, p.arch, p.agent_version)))}
                 {ui::kv("pca.last_seen", ui::text(when(p.last_seen_ms)))}
