@@ -745,6 +745,7 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
         let d = reg.devices.get_mut(device).ok_or_else(|| Error::internal("device vanished"))?;
         if ok {
             d.last_ok_ms = Some(run.ended_ms.max(run.started_ms));
+            d.last_ok_start_ms = Some(run.started_ms);
             d.versions += 1;
         }
         if !r.agent_version.is_empty() {
@@ -1135,7 +1136,7 @@ fn backup_pending(reg: &Registry, group: &str, now: u64, paused_all: bool) -> bo
         };
         let due = !p.paused
             && !paused_all
-            && rynas_schedule::window::plan_due(spec.as_ref(), u64::from(every_h) * 3_600_000, &tz, d.last_ok_ms, 0, 0) <= now
+            && rynas_schedule::window::plan_due(spec.as_ref(), u64::from(every_h) * 3_600_000, &tz, super::last_ok(d), 0, 0) <= now
             && p.window.as_deref().is_none_or(|w| rynas_schedule::window::is_open(w, &tz, now));
         d.group == group && !d.revoked && online && (d.command.is_some() || due)
     })

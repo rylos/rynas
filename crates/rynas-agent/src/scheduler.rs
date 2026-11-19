@@ -56,7 +56,10 @@ pub fn due_ms_at(st: &State, started_ms: u64, boot: Option<&str>) -> u64 {
     // also at every start of the PC: whichever comes first (after the boot's backup the
     // interval counts from it; a calendar's next time still comes)
     let boot_done = s.at_boot.then(|| boot.is_none_or(|b| st.last_ok_boot.as_deref() == Some(b)));
-    let due = window::agent_due(spec.as_ref(), interval, &zone(&st.plan), st.last_ok_ms, started_ms, delay, boot_done);
+    // the interval from the last good run's start (no drift by the run's length), a calendar
+    // from its end: the NAS judges this PC by the same `LastOk`
+    let last_ok = st.last_ok_ms.map(|end| window::LastOk::new(st.last_ok_start_ms, end));
+    let due = window::agent_due(spec.as_ref(), interval, &zone(&st.plan), last_ok, started_ms, delay, boot_done);
     // a failed run: again after 5, 10, 20… minutes, never later than the interval
     let retry = match (st.failures, st.last_attempt_ms) {
         (n, Some(at)) if n > 0 => at + ((5 * 60_000u64) << n.min(6)).min(interval),
@@ -372,6 +375,7 @@ pub fn run_service(mode: Mode) -> Result<(), String> {
                     let _ = State::update(|s| s.last_ok_boot = boot);
                 }
                 st.last_ok_ms = fresh.last_ok_ms;
+                st.last_ok_start_ms = fresh.last_ok_start_ms;
                 st.last_attempt_ms = fresh.last_attempt_ms;
                 st.failures = fresh.failures;
             }

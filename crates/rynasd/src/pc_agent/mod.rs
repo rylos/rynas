@@ -186,6 +186,9 @@ pub struct Dev {
     pub settings: PcDeviceSettings,
     #[serde(default)]
     pub last_ok_ms: Option<u64>,
+    /// When the last good run started (its interval counts from there, [`last_ok`]).
+    #[serde(default)]
+    pub last_ok_start_ms: Option<u64>,
     #[serde(default)]
     pub history: VecDeque<PcRun>,
     #[serde(default)]
@@ -998,6 +1001,14 @@ fn followed(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u64) -> Opt
     Some((s, spec))
 }
 
+/// The device's last good run as its agent counts the next one from it: the interval from the
+/// run's start (agents from [`rynas_api_types::pcagent::START_ANCHORED_AGENT`]), else from its
+/// end, as an older agent does; a calendar always from the end.
+pub fn last_ok(d: &Dev) -> Option<rynas_schedule::window::LastOk> {
+    let start = d.last_ok_start_ms.filter(|_| rynas_api_types::pcagent::agent_counts_from_start(&d.agent_version));
+    d.last_ok_ms.map(|end| rynas_schedule::window::LastOk::new(start, end))
+}
+
 /// A scheduled backup of the device was due while the PC was online and none ran: the
 /// agent would have started it ([`rynas_schedule::window::agent_due`] from the last good run,
 /// at least the plan's delay after the PC came online, then [`start_at`] for the allowed
@@ -1017,7 +1028,7 @@ pub fn missed_online(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u6
         spec.as_ref(),
         u64::from(s.every_h.max(1)) * 3_600_000,
         tz,
-        d.last_ok_ms,
+        last_ok(d),
         since,
         u64::from(s.delay_min) * 60_000,
         None,
@@ -1033,7 +1044,7 @@ pub fn missed_online(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u6
 /// catches up once, soon after the PC starts), else the next start inside the allowed window.
 pub fn next_due(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u64) -> Option<u64> {
     let (s, spec) = followed(d, paused_all, tz, now)?;
-    let due = rynas_schedule::window::agent_due(spec.as_ref(), u64::from(s.every_h.max(1)) * 3_600_000, tz, d.last_ok_ms, 0, 0, None);
+    let due = rynas_schedule::window::agent_due(spec.as_ref(), u64::from(s.every_h.max(1)) * 3_600_000, tz, last_ok(d), 0, 0, None);
     if due == u64::MAX {
         return None;
     }

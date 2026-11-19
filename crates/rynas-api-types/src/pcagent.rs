@@ -856,6 +856,16 @@ pub fn agent_follows_calendar(agent_version: &str) -> bool {
     agent_at_least(agent_version, CALENDAR_AGENT)
 }
 
+/// The first agent version that counts its interval from the start of the last good run
+/// (older ones count from its end, so their start time drifts by each run's length).
+pub const START_ANCHORED_AGENT: (u32, u32, u32) = (0, 8, 24);
+
+/// The agent of this version counts its interval from the last good run's start (the NAS
+/// judges an older one by its end, as that agent counts); an unknown one is taken as current.
+pub fn agent_counts_from_start(agent_version: &str) -> bool {
+    agent_at_least(agent_version, START_ANCHORED_AGENT)
+}
+
 fn agent_at_least(agent_version: &str, min: (u32, u32, u32)) -> bool {
     let mut p = agent_version.trim().trim_start_matches('v').split(['.', '-', '+']);
     let mut num = || p.next().and_then(|x| x.parse::<u32>().ok());

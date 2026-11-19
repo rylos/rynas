@@ -7,7 +7,8 @@
 //! no cell to be in, and the repeated hour of the fall-back night is the same cell twice.
 //!
 //! The interval schedule ([`interval_due`], [`start_at`]): a backup is due `every` after the
-//! end of the last good one, never before `delay` after the start of the agent (anacron-like:
+//! start of the last good one (so the start time does not drift later by each run's length;
+//! a calendar counts from its end, [`LastOk`]), never before `delay` after the start of the agent (anacron-like:
 //! a PC that was off is backed up soon after it comes back); with an allowed window it starts
 //! only inside it, at the first moment the window is open from the due time on.
 
@@ -19,6 +20,28 @@ use crate::spec::CalendarSpec;
 
 /// Cells of a weekly window (one per hour, Sunday first).
 pub const CELLS: usize = 168;
+
+/// The last good run of a PC: an interval counts from its start (a daily backup at 03:00 stays
+/// at 03:00 however long it runs), a calendar from its end (its next time after the run, so
+/// a run that crossed a calendar time does not start again at once).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LastOk {
+    pub started_ms: u64,
+    pub ended_ms: u64,
+}
+
+impl LastOk {
+    /// From the end and, when known, the start (records written before the start was kept
+    /// count from the end, as before). A start after the end (clock steps) is the end.
+    pub fn new(started_ms: Option<u64>, ended_ms: u64) -> LastOk {
+        LastOk { started_ms: started_ms.filter(|s| *s <= ended_ms).unwrap_or(ended_ms), ended_ms }
+    }
+
+    /// Both at `ms` (tests, a single time).
+    pub fn at(ms: u64) -> LastOk {
+        LastOk { started_ms: ms, ended_ms: ms }
+    }
+}
 
 /// How far ahead [`opens_at`] looks (a week and a day: every cell is met).
 const LOOK_AHEAD_H: u64 = 8 * 24;
@@ -99,10 +122,10 @@ pub fn closes_at(window: &str, tz: &TimeZone, ms: u64) -> Option<u64> {
 }
 
 /// When an interval backup is due (ignoring any window): `every_ms` after the last good
-/// run's end, at least `delay_ms` after the agent started (`started_ms`); never backed up:
-/// after the delay.
-pub fn interval_due(last_ok_ms: Option<u64>, every_ms: u64, started_ms: u64, delay_ms: u64) -> u64 {
-    let due = last_ok_ms.map_or(0, |ok| ok.saturating_add(every_ms.max(1)));
+/// run's start (`last_ok_start_ms`), at least `delay_ms` after the agent started
+/// (`started_ms`); never backed up: after the delay.
+pub fn interval_due(last_ok_start_ms: Option<u64>, every_ms: u64, started_ms: u64, delay_ms: u64) -> u64 {
+    let due = last_ok_start_ms.map_or(0, |ok| ok.saturating_add(every_ms.max(1)));
     due.max(started_ms.saturating_add(delay_ms))
 }
 
@@ -117,8 +140,8 @@ pub fn start_at(window: Option<&str>, tz: &TimeZone, due_ms: u64) -> Option<u64>
 
 /// The next starts of an interval schedule from `first_due_ms`, up to `to_ms` and at most
 /// `max` (`true` when cut): each start where [`start_at`] puts it, the next one due
-/// `every_ms` plus the run's expected length (`length_ms`) after it, as the agent counts from
-/// the end of the last good run.
+/// `every_ms` after it, as the agent counts from the start of the last good run, and not
+/// before the run's expected length (`length_ms`) is over.
 pub fn interval_starts(
     first_due_ms: u64,
     every_ms: u64,
@@ -131,7 +154,7 @@ pub fn interval_starts(
     if every_ms == 0 {
         return (Vec::new(), false);
     }
-    next_starts(first_due_ms, |end| Some(end.saturating_add(every_ms)), length_ms, window, tz, to_ms, max)
+    next_starts(first_due_ms, |end| Some(end.saturating_sub(length_ms).saturating_add(every_ms).max(end)), length_ms, window, tz, to_ms, max)
 }
 
 /// When a calendar backup is due (ignoring any window), the way `Persistent=true` catches up:
@@ -177,13 +200,13 @@ pub fn calendar_starts(
     next_starts(first_due_ms, |end| next_time(spec, tz, end), length_ms, window, tz, to_ms, max)
 }
 
-/// A PC's backup plan: due by its calendar (when it has one) or every `every_ms`, from the
-/// last good run, not before the delay after the agent's start. One rule for the agent's loop,
-/// the NAS's overview and previews.
-pub fn plan_due(calendar: Option<&CalendarSpec>, every_ms: u64, tz: &TimeZone, last_ok_ms: Option<u64>, started_ms: u64, delay_ms: u64) -> u64 {
+/// A PC's backup plan: due by its calendar (when it has one, from the last good run's end) or
+/// every `every_ms` (from its start), not before the delay after the agent's start. One rule
+/// for the agent's loop, the NAS's overview and previews.
+pub fn plan_due(calendar: Option<&CalendarSpec>, every_ms: u64, tz: &TimeZone, last_ok: Option<LastOk>, started_ms: u64, delay_ms: u64) -> u64 {
     match calendar {
-        Some(spec) => calendar_due(spec, tz, last_ok_ms, started_ms, delay_ms),
-        None => interval_due(last_ok_ms, every_ms, started_ms, delay_ms),
+        Some(spec) => calendar_due(spec, tz, last_ok.map(|l| l.ended_ms), started_ms, delay_ms),
+        None => interval_due(last_ok.map(|l| l.started_ms), every_ms, started_ms, delay_ms),
     }
 }
 
@@ -198,14 +221,14 @@ pub fn agent_due(
     calendar: Option<&CalendarSpec>,
     every_ms: u64,
     tz: &TimeZone,
-    last_ok_ms: Option<u64>,
+    last_ok: Option<LastOk>,
     started_ms: u64,
     delay_ms: u64,
     boot_done: Option<bool>,
 ) -> u64 {
-    let mut due = plan_due(calendar, every_ms, tz, last_ok_ms, started_ms, delay_ms);
+    let mut due = plan_due(calendar, every_ms, tz, last_ok, started_ms, delay_ms);
     if calendar.is_some() && due == u64::MAX {
-        due = interval_due(last_ok_ms, every_ms, started_ms, delay_ms);
+        due = interval_due(last_ok.map(|l| l.started_ms), every_ms, started_ms, delay_ms);
     }
     match boot_done {
         Some(done) => due.min(boot_due(done, started_ms, delay_ms)),
@@ -347,8 +370,10 @@ mod tests {
         assert_eq!(s, vec![ms("2026-11-17T22:00"), ms("2026-11-18T22:00"), ms("2026-11-19T22:00")]);
         let (s, _) = interval_starts(ms("2026-11-17T14:00"), h, 0, Some(&w), &tz(), ms("2026-11-18T00:00"), 10);
         assert_eq!(s, vec![ms("2026-11-17T22:00"), ms("2026-11-17T23:00")]);
-        // the length of a run counts (from the end of the last good one)
-        let (s, cut) = interval_starts(0, h, h, None, &tz(), 5 * h, 2);
+        // the next start counts from the previous start, never before that run is over
+        let (s, cut) = interval_starts(0, 2 * h, h, None, &tz(), 5 * h, 2);
+        assert_eq!((s, cut), (vec![0, 2 * h], true));
+        let (s, cut) = interval_starts(0, h, 2 * h, None, &tz(), 5 * h, 2);
         assert_eq!((s, cut), (vec![0, 2 * h], true));
     }
 
@@ -388,13 +413,13 @@ mod tests {
         assert_eq!(calendar_min_gap_ms(&CalendarSpec::parse("*:0/5").unwrap(), &tz(), last), Some(300_000));
         assert_eq!(calendar_min_gap_ms(&CalendarSpec::parse("*-*-* 08,20:00").unwrap(), &tz(), last), Some(12 * h));
         assert_eq!(calendar_min_gap_ms(&gone, &tz(), last), None);
-        assert_eq!(plan_due(None, 24 * h, &tz(), Some(last), 0, 0), last + 24 * h);
+        assert_eq!(plan_due(None, 24 * h, &tz(), Some(LastOk::at(last)), 0, 0), last + 24 * h);
         // at every start: after the delay, however recent the last run of an earlier boot;
         // not again in the same boot (an agent restart is not a boot)
         let boot = ms("2026-11-17T08:00");
         assert_eq!(boot_due(false, boot + 20_000, 600_000), boot + 620_000);
         assert_eq!(boot_due(true, boot + 3 * h, 600_000), u64::MAX);
-        assert_eq!(plan_due(Some(&daily), 24 * h, &tz(), Some(last), 0, 0), ms("2026-11-17T02:00"));
+        assert_eq!(plan_due(Some(&daily), 24 * h, &tz(), Some(LastOk::at(last)), 0, 0), ms("2026-11-17T02:00"));
     }
 
     #[test]
@@ -404,14 +429,22 @@ mod tests {
         let spec = CalendarSpec::parse("*-*-* 04:00:00").unwrap();
         // set times: the next one after the last good run; a missed one at least the delay
         // after the start
-        assert_eq!(agent_due(Some(&spec), 24 * h, &tz(), Some(ok), 0, 0, None), ms("2026-11-17T04:00"));
-        assert_eq!(agent_due(Some(&spec), 24 * h, &tz(), Some(ok), ms("2026-11-18T09:00"), 600_000, None), ms("2026-11-18T09:10"));
+        assert_eq!(agent_due(Some(&spec), 24 * h, &tz(), Some(LastOk::at(ok)), 0, 0, None), ms("2026-11-17T04:00"));
+        assert_eq!(agent_due(Some(&spec), 24 * h, &tz(), Some(LastOk::at(ok)), ms("2026-11-18T09:00"), 600_000, None), ms("2026-11-18T09:10"));
         // an expression without any time left: the interval, so backups go on
         let past = CalendarSpec::parse("2020-01-01 00:00:00").unwrap();
-        assert_eq!(agent_due(Some(&past), 24 * h, &tz(), Some(ok), 0, 0, None), ok + 24 * h);
+        assert_eq!(agent_due(Some(&past), 24 * h, &tz(), Some(LastOk::at(ok)), 0, 0, None), ok + 24 * h);
         // also at every start: whichever comes first, nothing more once done in this boot
         let start = ms("2026-11-16T08:00");
-        assert_eq!(agent_due(None, 24 * h, &tz(), Some(ok), start, 600_000, Some(false)), start + 600_000);
-        assert_eq!(agent_due(None, 24 * h, &tz(), Some(ok), start, 600_000, Some(true)), ok + 24 * h);
+        assert_eq!(agent_due(None, 24 * h, &tz(), Some(LastOk::at(ok)), start, 600_000, Some(false)), start + 600_000);
+        assert_eq!(agent_due(None, 24 * h, &tz(), Some(LastOk::at(ok)), start, 600_000, Some(true)), ok + 24 * h);
+        // an interval counts from the last good run's start (no drift by the run's length), a
+        // calendar from its end (a run that crossed 04:00 does not start again at once)
+        let run = LastOk::new(Some(ms("2026-11-16T03:00")), ms("2026-11-16T04:30"));
+        assert_eq!(agent_due(None, 24 * h, &tz(), Some(run), 0, 0, None), ms("2026-11-17T03:00"));
+        assert_eq!(agent_due(Some(&spec), 24 * h, &tz(), Some(run), 0, 0, None), ms("2026-11-17T04:00"));
+        // records without a start count from the end; a start after the end is the end
+        assert_eq!(LastOk::new(None, ok), LastOk::at(ok));
+        assert_eq!(LastOk::new(Some(ok + 1), ok), LastOk::at(ok));
     }
 }

@@ -44,6 +44,9 @@ pub struct State {
     pub plan: AgentPlan,
     #[serde(default)]
     pub last_ok_ms: Option<u64>,
+    /// When the last good run started: the interval counts from there.
+    #[serde(default)]
+    pub last_ok_start_ms: Option<u64>,
     #[serde(default)]
     pub last_attempt_ms: Option<u64>,
     /// Failed runs in a row (the retry delay grows with them).

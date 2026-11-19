@@ -273,6 +273,7 @@ fn backup_cmd(args: &[String]) -> Result<(), String> {
     let _ = State::update(|s| {
         if run.ok {
             s.last_ok_ms = Some(run.ended_ms);
+            s.last_ok_start_ms = Some(run.started_ms);
             s.failures = 0;
         } else {
             s.failures += 1;
@@ -323,6 +324,7 @@ fn test_run(args: &[String]) -> Result<(), String> {
     backup::client_of(&st)?.post_json::<_, serde_json::Value>("/api/v1/pcbackup/agent/report", &r)?;
     let _ = State::update(|s| {
         s.last_ok_ms = Some(run.ended_ms);
+        s.last_ok_start_ms = Some(run.started_ms);
         s.failures = 0;
     });
     println!("test run reported");
