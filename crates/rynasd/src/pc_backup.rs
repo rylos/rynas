@@ -1405,8 +1405,9 @@ impl ReceiveHost for MemoryReceive {
     }
     fn usage(&self, path: &Path) -> Result<(u64, u64, u64), String> {
         let n = self.folders.lock().unwrap().get(path).map(|f| f.1.len()).unwrap_or(0) as u64;
+        // snapshots of one PC share most of their data: about one copy on disk plus changes
         let (total, excl) = ((n * 12) << 30, (n * 300) << 20);
-        Ok((total, excl, total - excl))
+        Ok((total, excl, (12 << 30) + n * (500 << 20)))
     }
     fn browse(&self, _: &Path, rel: &str) -> Result<(Vec<SnapshotEntry>, bool), Error> {
         rynas_btrfs::browse::components(rel)?;
@@ -1641,6 +1642,23 @@ pub fn retention_plan(
         out.push(RetentionItem { name: e.name.clone(), group, keep, reason });
     }
     out
+}
+
+/// A fingerprint of the complete snapshots in a folder (their subvolume UUIDs, else names;
+/// FNV-1a over the sorted list): a measured space is out of date once it changes.
+fn snapshot_set(entries: &[Entry]) -> u64 {
+    let mut ids: Vec<String> = entries
+        .iter()
+        .filter(|e| e.info.is_some() && !e.incomplete())
+        .map(|e| e.info.as_ref().and_then(|i| i.uuid.clone()).unwrap_or_else(|| e.name.clone()))
+        .collect();
+    ids.sort_unstable();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in ids.iter().flat_map(|s| s.bytes().chain([0])) {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
 }
 
 /// The time part of a snapshot name without btrbk's `_N` suffix: the run it belongs to.
@@ -1939,6 +1957,9 @@ struct Stored {
     adopted: bool,
     created_at_ms: u64,
     usage: Option<ReceiveUsage>,
+    /// [`snapshot_set`] when `usage` was measured: another set now makes it out of date.
+    #[serde(default)]
+    usage_set: Option<u64>,
     /// The late notification is open.
     #[serde(default)]
     alerted: bool,
@@ -2243,6 +2264,17 @@ impl PcBackup {
             r.snapshots.iter().any(|n| s.list.iter().any(|x| &x.name == n && !x.incomplete))
         });
         let bare_metal = bare_metal(&complete, manifest, newest_run);
+        // the measured space no longer matches what is there: snapshots came or went (a
+        // receive, a retention pass, a delete from the PC or by hand); records from before the
+        // set was kept compare times
+        let usage_stale = present
+            && t.usage.is_some_and(|u| match t.usage_set {
+                Some(set) => set != snapshot_set(&entries),
+                None => {
+                    s.list.iter().any(|x| !x.incomplete && x.received_at_ms.is_some_and(|r| r > u.read_at_ms))
+                        || t.last_prune.as_ref().is_some_and(|p| p.deleted > 0 && p.at_ms > u.read_at_ms)
+                }
+            });
         let fp = receive::parse_public_key(&t.public_key)
             .ok()
             .and_then(|(k, b)| receive::fingerprint(&b).map(|f| format!("{k} {f}")));
@@ -2262,6 +2294,7 @@ impl PcBackup {
             last_received_ms: s.last_received_ms,
             groups: s.groups,
             usage: t.usage,
+            usage_stale,
             alert_hours: t.alert_hours,
             retention: t.retention.clone(),
             ignored_groups: t.ignored_groups.clone(),
@@ -3953,9 +3986,15 @@ async fn usage_post(
         let s = s2;
         let s3 = s.clone();
         let path = t.path.clone();
-        let (total, excl, shared) = tokio::task::spawn_blocking(move || s3.host.usage(Path::new(&path)))
-            .await
-            .map_err(|e| e.to_string())??;
+        // the set measured: read after `du`, so a snapshot that came meanwhile marks it stale
+        let ((total, excl, shared), set) = tokio::task::spawn_blocking(move || {
+            let root = Path::new(&path);
+            let u = s3.host.usage(root)?;
+            let set = s3.host.scan(root).ok().flatten().map(|(_, e, _)| snapshot_set(&e));
+            Ok::<_, String>((u, set))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         let u = ReceiveUsage {
             total_bytes: total,
             exclusive_bytes: excl,
@@ -3965,9 +4004,10 @@ async fn usage_post(
         s.edit(|r| {
             if let Some(x) = r.targets.get_mut(&device) {
                 x.usage = Some(u);
+                x.usage_set = set;
             }
         })?;
-        ctx.log(&format!("{device}: {total} bytes in all, {excl} only in these snapshots"));
+        ctx.log(&format!("{device}: {} bytes on disk ({excl} only in these snapshots, {shared} shared), {total} bytes of data", u.on_disk_bytes()));
         Ok(())
     })?;
     Ok(started(id))

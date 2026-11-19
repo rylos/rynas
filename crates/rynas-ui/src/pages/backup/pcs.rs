@@ -519,7 +519,8 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                 let groups = p.groups.iter().map(|g| g.name.clone()).collect::<Vec<_>>().join(", ");
                 let via = t(if p.agent { "pcb.via.agent" } else { "pcb.via.ssh" });
                 let sub = Some(if p.description.is_empty() { via.to_string() } else { format!("{} · {via}", p.description) });
-                let space = p.usage.map(|u| i18n::bytes(u.exclusive_bytes)).unwrap_or_else(|| ui::DASH.into());
+                // the space the backups take on disk (shared data once), as the drawer says it
+                let space = p.usage.map(|u| i18n::bytes(u.on_disk_bytes())).unwrap_or_else(|| ui::DASH.into());
                 let label = ui::verb_name("bk.open", &p.device);
                 // the first problem other than "late" (the state already says that)
                 let problem = p.issues.iter().find(|i| i.code != PcIssueCode::Late).map(|i| {
@@ -556,7 +557,8 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                     ui::cell("pcb.backups", "wrap", ui::two_lines(view! { <span class="tnum">{i18n::count(u64::from(p.runs))}</span> }.into_any(), (!groups.is_empty()).then_some(groups), "cell-sub small mono")),
                 ];
                 if measured {
-                    cells.push(ui::text_cell("bk.col.space", "num tnum", space));
+                    let stale = p.usage_stale.then(|| t("bk.usage_stale_short").to_string());
+                    cells.push(ui::cell("bk.col.space", "num", ui::two_lines(view! { <span class="tnum">{space}</span> }.into_any(), stale, "cell-sub small")));
                 }
                 cells.push(ui::cell("bkpc.col.restore", "", bm_status(&p.bare_metal)));
                 cells.push(ui::actions(view! { <button class="btn ghost sm" aria-label=label on:click=move |_| pcs.open.set(Some(dev.clone()))><Icon icon=icons::EYE size=14 />{tr("bk.open")}</button> }.into_any()));
@@ -1569,7 +1571,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             // the backups held (the list's number too); failed attempts are rows, not backups
             let mut s = format!("{} · {}", i18n::tn("pcb.n_backups", u64::from(p.runs), &[]), tf(if n == 1 { "pcb.n_snaps1" } else { "pcb.n_snaps" }, &[("n", &i18n::count(n))]));
             if let Some(u) = p.usage {
-                s = format!("{s} · {}", i18n::bytes(u.exclusive_bytes));
+                s = format!("{s} · {}", tf("bk.on_disk", &[("size", &i18n::bytes(u.on_disk_bytes()))]));
             }
             s
         };
@@ -1689,7 +1691,29 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
 
         // ---- the folder and its rules: settings and facts that rarely change, with their
         // actions (Measure on the space, Delete old now on the rules)
-        let usage = p.usage.map(|u| tf("bk.usage_text", &[("excl", &i18n::bytes(u.exclusive_bytes)), ("total", &i18n::bytes(u.total_bytes)), ("when", &i18n::datetime(u.read_at_ms))])).unwrap_or_else(|| t("bk.usage_none").to_string());
+        // on disk first (shared data once), then the data the backups hold and the measure's
+        // age; snapshots that came or went since make it out of date
+        let usage = p.usage.map(|u| {
+            let ago = i18n::ago((js_sys::Date::now() as u64).saturating_sub(u.read_at_ms) / 1000);
+            tf("bk.usage_text", &[
+                ("disk", &i18n::bytes(u.on_disk_bytes())),
+                ("data", &i18n::bytes(u.total_bytes)),
+                ("backups", &i18n::tn("pcb.n_backups", u64::from(p.runs), &[])),
+                ("n", &i18n::count(u64::from(p.runs))),
+                ("ago", &ago),
+            ])
+        });
+        let usage_view = match usage {
+            Some(text) => {
+                let title = p.usage.map(|u| tf("bk.usage_title", &[("excl", &i18n::bytes(u.exclusive_bytes)), ("shared", &i18n::bytes(u.shared_bytes)), ("when", &i18n::datetime(u.read_at_ms))])).unwrap_or_default();
+                view! {
+                    <span title=title>{text}</span>
+                    {p.usage_stale.then(|| view! { <span class="warn-text">" · "{tr("bk.usage_stale")}</span> })}
+                }
+                .into_any()
+            }
+            None => ui::text(t("bk.usage_none").to_string()),
+        };
         let free = p.free_bytes.zip(p.volume_bytes).map(|(f, v)| tf("bkpc.free_text", &[("free", &i18n::bytes(f)), ("total", &i18n::bytes(v))]));
         let alert = match p.alert_after_hours() {
             0 => t("bk.alert_off").to_string(),
@@ -1713,7 +1737,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 {kv("bk.col.folder", ui::breakable(&p.path, "mono"))}
                 {(p.incomplete > 0).then(|| kv("bk.incomplete", ui::text(i18n::count(u64::from(p.incomplete)))))}
                 {free.map(|f| kv("bkpc.free", ui::text(f)))}
-                {kv_act("bk.col.space", Some(ui::text(usage)), Some(measure_btn), has_snaps.then(|| view! { <span class="small muted">{size_note}</span> }.into_any()))}
+                {kv_act("bk.col.space", Some(usage_view), Some(measure_btn), has_snaps.then(|| view! { <span class="small muted">{size_note}</span> }.into_any()))}
                 {kv_act("bk.f.rules", None, prune_btn, Some(ui::text(rules)))}
                 {last_prune.filter(|_| nas).map(|l| kv("bkpc.last_prune", ui::text(l)))}
                 // what the alert time does: with rynas-agent a warning only when the PC was on

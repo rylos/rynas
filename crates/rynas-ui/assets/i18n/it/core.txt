@@ -5179,7 +5179,11 @@ bk.remove_text	La chiave del PC smette di funzionare. La cartella e i suoi snaps
 bk.removed	{device} rimosso, i suoi snapshot restano
 bk.measure	Misura lo spazio
 bk.measured	Spazio misurato
-bk.usage_text	{excl} solo in questi snapshot, {total} in tutto (misurato il {when})
+bk.usage_text	{disk} su disco · {data} di dati in {backups} · misurato {ago}
+bk.on_disk	{size} su disco
+bk.usage_title	{excl} solo in questi snapshot, {shared} in comune contati una volta (misurato il {when})
+bk.usage_stale	non aggiornato: da allora sono arrivati o spariti dei backup
+bk.usage_stale_short	Non aggiornato
 bk.usage_none	Non ancora misurato
 bk.rules.off	Elimina solo il NAS
 bk.rules.on	Gestita dal PC: restano i {keep} più recenti, nessuno più giovane di {days} giorni

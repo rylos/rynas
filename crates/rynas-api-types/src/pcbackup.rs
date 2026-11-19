@@ -158,9 +158,19 @@ pub struct ReceiveUsage {
     pub total_bytes: u64,
     /// Data only these snapshots hold (freed if the folder went).
     pub exclusive_bytes: u64,
-    /// Data shared with other subvolumes of the volume (or between snapshots).
+    /// `du`'s "Set shared": data the snapshots share (among themselves or with other
+    /// subvolumes), counted once. Records written before this note hold the same column.
     pub shared_bytes: u64,
     pub read_at_ms: u64,
+}
+
+impl ReceiveUsage {
+    /// About what the snapshots take on the disk: what only they hold plus what they share,
+    /// counted once (Exclusive + Set shared). `total_bytes` counts shared data once per
+    /// snapshot, so it is the data the backups hold, not the space they take.
+    pub fn on_disk_bytes(&self) -> u64 {
+        self.exclusive_bytes.saturating_add(self.shared_bytes)
+    }
 }
 
 /// One subvolume of the PC (snapshots grouped by the name before the timestamp).
@@ -391,6 +401,9 @@ pub struct PcTarget {
     pub last_received_ms: Option<u64>,
     pub groups: Vec<ReceivedGroup>,
     pub usage: Option<ReceiveUsage>,
+    /// Snapshots arrived or went since `usage` was measured: its figures are out of date.
+    #[serde(default)]
+    pub usage_stale: bool,
     /// Alert after this many hours without a new snapshot (0: `alert_days` counts).
     #[serde(default)]
     pub alert_hours: u32,

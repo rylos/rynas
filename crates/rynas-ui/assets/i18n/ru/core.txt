@@ -5213,7 +5213,11 @@ bk.remove_text	Ключ ПК перестанет работать. Папка �
 bk.removed	«{device}» убран, снимки сохранены
 bk.measure	Измерить место
 bk.measured	Место измерено
-bk.usage_text	{excl} только в этих снимках, {total} всего (измерено {when})
+bk.usage_text	{disk} на диске · {data} данных · {backups} · измерено {ago}
+bk.on_disk	{size} на диске
+bk.usage_title	{excl} только в этих снимках, {shared} общих, учтены один раз (измерено {when})
+bk.usage_stale	устарело: с тех пор копии добавились или удалились
+bk.usage_stale_short	Устарело
 bk.usage_none	Ещё не измерено
 bk.rules.off	Удаляет только NAS
 bk.rules.on	Управляет ПК: остаются последние ({keep}), не моложе {days} дн.
