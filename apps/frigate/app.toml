@@ -1,8 +1,8 @@
 schema = 1
 id = "frigate"
 name = "Frigate"
-version = "1.0.1"
-app_version = "0.18.2"
+version = "1.0.2"
+app_version = "0.18.3"
 update_policy = "patch"
 description = "Network video recorder with local AI object detection for IP cameras."
 homepage = "https://frigate.video"
