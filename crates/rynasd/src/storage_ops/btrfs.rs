@@ -43,25 +43,49 @@ pub fn router() -> Router<StoState> {
 }
 
 /// `POST /v1/storage/btrfs/{uuid}/reset-errors`: sets the error counters of every device of a
-/// mounted filesystem back to zero (`btrfs device stats -z`), as a task. Administrators only.
-/// The counters are what keeps the volume at "Warning" after errors
+/// mounted filesystem back to zero (`btrfs device stats -z`), as a task. Administrators only;
+/// 409 while a device is missing (btrfs cannot reset a device it does not have). The counters
+/// are what keeps the volume at "Warning" after errors
 /// ([`rynas_storage::inventory::device_verdict`]): the reset is their acknowledgement, and
-/// the task log keeps the values from before it.
+/// the task log keeps the values from before it. The volume is reserved like any other
+/// operation on it, and the task checks again that the mount point still holds this
+/// filesystem: on an empty mount point `-z` would reset the counters of the one below.
 async fn reset_errors(State(st): State<StoState>, h: HeaderMap, UrlPath(uuid): UrlPath<String>) -> Res<Response> {
     let (s, user) = (sto(&st)?, user(&h)?);
     s.ops.admins.require_admin(&user, "resetting btrfs error counters")?;
     check_uuid(&uuid)?;
     let inv = s.inventory(false).await?;
     let fs = find(&inv, &uuid)?;
-    let mnt = fs.mountpoint.clone().ok_or_else(|| conflict(format!("filesystem {} is not mounted", name_of(&fs))))?;
-    let held = s.reserve(vec![format!("btrfs-stats:{}", fs.uuid)])?;
+    let name = name_of(&fs);
+    let mnt = fs.mountpoint.clone().ok_or_else(|| conflict(format!("filesystem {name} is not mounted")))?;
+    if fs.devices.iter().any(|d| d.missing) || fs.repair.as_ref().is_some_and(|r| r.degraded()) {
+        return Err(conflict(format!("{name}: a device is missing; replace or remove it before resetting the error counters")));
+    }
+    let held = s.reserve(vec![format!("volume:{name}"), format!("btrfs-stats:{}", fs.uuid)])?;
+    let want = fs.uuid.clone();
     let id = spawn(&s, "storage.btrfs-reset-errors", &user, held, move |m| async move {
+        let mut o = rynas_storage::exec::RunOpts::new(std::time::Duration::from_secs(30));
+        o.cancellable = false;
+        let argv = ["findmnt", "-n", "-r", "-o", "UUID,FSTYPE", "--mountpoint", &mnt].map(String::from).to_vec();
+        let found = m.run(argv, o.clone()).await.unwrap_or_default();
+        if !mounted_as(&found.stdout, &want) {
+            return Err(format!("{mnt} no longer holds btrfs filesystem {want}: nothing reset"));
+        }
         let mut o = rynas_storage::exec::RunOpts::new(std::time::Duration::from_secs(60));
         o.cancellable = false;
         // `-z` prints the values it resets: they stay in the task log
         m.run(vec!["btrfs".into(), "device".into(), "stats".into(), "-z".into(), mnt], o).await.map(|_| ())
     })?;
     Ok(started(id))
+}
+
+/// `findmnt -n -r -o UUID,FSTYPE --mountpoint <dir>` says the btrfs filesystem `uuid` is
+/// mounted there (the last line: the mount on top).
+fn mounted_as(findmnt: &str, uuid: &str) -> bool {
+    findmnt.lines().rfind(|l| !l.trim().is_empty()).is_some_and(|l| {
+        let mut w = l.split_whitespace();
+        matches!((w.next(), w.next()), (Some(u), Some("btrfs")) if u.eq_ignore_ascii_case(uuid))
+    })
 }
 
 /// What the storage pages call the filesystem, and what a confirmation types: its label, or
@@ -317,4 +341,24 @@ async fn settings_put(State(st): State<StoState>, h: HeaderMap, UrlPath(uuid): U
     .await
     .map_err(Error::internal)?
     .map(Json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mounted_as;
+
+    const U: &str = "855bfa9a-2d80-43db-80a8-767697cd9bc9";
+
+    #[test]
+    fn the_reset_runs_only_on_its_own_mount() {
+        assert!(mounted_as(&format!("{U} btrfs\n"), U));
+        assert!(mounted_as(&format!("{} btrfs\n", U.to_uppercase()), U));
+        // unmounted meanwhile: nothing, or the filesystem below (the root's)
+        assert!(!mounted_as("", U));
+        assert!(!mounted_as("24a82255-ac7d-4198-b5d4-8dba11c8f5ed btrfs\n", U));
+        assert!(!mounted_as(&format!("{U} ext4\n"), U));
+        // another filesystem mounted over it: the last line is the one on top
+        assert!(!mounted_as(&format!("{U} btrfs\n24a82255-ac7d-4198-b5d4-8dba11c8f5ed btrfs\n"), U));
+        assert!(mounted_as(&format!("24a82255-ac7d-4198-b5d4-8dba11c8f5ed btrfs\n{U} btrfs\n"), U));
+    }
 }

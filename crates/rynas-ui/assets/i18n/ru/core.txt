@@ -1359,10 +1359,15 @@ sto.scrub_res_corrected.one	Найдена {n} ошибка, исправлен�
 sto.scrub_res_corrected.few	Найдены {n} ошибки, все исправлены по исправной копии
 sto.scrub_res_corrected.many	Найдено {n} ошибок, все исправлены по исправной копии
 sto.scrub_res_corrected.other	Найдено {n} ошибки, все исправлены по исправной копии
-sto.scrub_res_left.one	{n} ошибку не удалось исправить (исправлено: {fixed})
-sto.scrub_res_left.few	{n} ошибки не удалось исправить (исправлено: {fixed})
-sto.scrub_res_left.many	{n} ошибок не удалось исправить (исправлено: {fixed})
-sto.scrub_res_left.other	{n} ошибки не удалось исправить (исправлено: {fixed})
+sto.scrub_res_left.one	{n} ошибку не удалось исправить
+sto.scrub_res_left.few	{n} ошибки не удалось исправить
+sto.scrub_res_left.many	{n} ошибок не удалось исправить
+sto.scrub_res_left.other	{n} ошибки не удалось исправить
+sto.scrub_res_fixed.one	исправлено: {n}
+sto.scrub_res_fixed.few	исправлено: {n}
+sto.scrub_res_fixed.many	исправлено: {n}
+sto.scrub_res_fixed.other	исправлено: {n}
+sto.err.missing	Отсутствует устройство: сначала замените или удалите его, затем можно будет сбросить счётчики.
 sto.scrub_res_errors.one	Найдена {n} ошибка
 sto.scrub_res_errors.few	Найдены {n} ошибки
 sto.scrub_res_errors.many	Найдено {n} ошибок

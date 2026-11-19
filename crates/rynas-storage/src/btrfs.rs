@@ -297,6 +297,11 @@ pub fn parse_scrub(s: &str) -> ScrubStatus {
         let v = v.trim();
         match k.trim() {
             "Scrub started" => st.started = Some(v.to_string()),
+            // a resumed scrub shows only the time of the resume
+            "Scrub resumed" => {
+                st.started = Some(v.to_string());
+                st.resumed = true;
+            }
             "Status" => st.status = ScrubState::from_btrfs(v),
             "Duration" => st.duration_s = hms(v),
             "Time left" => st.time_left_s = hms(v),
@@ -575,6 +580,32 @@ mod tests {
         assert_eq!(ctime_ms("Thu Oct 22 15:35:01 2026", &cet), Some(1_792_679_701_000));
         assert_eq!(ctime_ms("no date", &utc), None);
         assert_eq!(ctime_ms("Thu Feb 30 10:00:00 2026", &utc), None);
+    }
+
+    #[test]
+    fn scrub_superblock_error_is_not_corrected() {
+        // btrfs counts a superblock error neither as corrected nor as uncorrectable
+        let s = parse_scrub(
+            "UUID:             5c2d8e1f-0a3b-4c6d-9e8f-7a6b5c4d3e2f\nScrub started:    Thu Nov 19 17:45:23 2026\nStatus:           finished\nDuration:         0:00:21\nTotal to scrub:   630243328\nRate:             30011587/s\nError summary:    super=1\n  Corrected:      0\n  Uncorrectable:  0\n  Unverified:     0\n",
+        );
+        assert_eq!(s.errors, 1);
+        assert_eq!(s.error_kinds, vec![ScrubErrorCount { kind: "super".into(), count: 1 }]);
+        assert!(!s.all_corrected());
+        // some corrected, some not counted: not all corrected either
+        let s = ScrubStatus { errors: 3, corrected: Some(2), uncorrectable: Some(0), ..Default::default() };
+        assert!(!s.all_corrected());
+    }
+
+    #[test]
+    fn scrub_resumed() {
+        let s = parse_scrub(
+            "UUID:             5c2d8e1f-0a3b-4c6d-9e8f-7a6b5c4d3e2f\nScrub resumed:    Thu Nov 19 18:00:00 2026\nStatus:           finished\nDuration:         0:01:10\nTotal to scrub:   630243328\nRate:             9003475/s\nError summary:    no errors found\n",
+        );
+        assert_eq!(s.status, ScrubState::Finished);
+        assert!(s.resumed);
+        assert_eq!(s.started.as_deref(), Some("Thu Nov 19 18:00:00 2026"));
+        let fresh = parse_scrub(include_str!("../tests/fixtures/btrfs-scrub-finished.txt"));
+        assert!(!fresh.resumed);
     }
 
     #[test]

@@ -1337,8 +1337,11 @@ sto.scrub_uncorrectable.one	{n} errore non correggibile
 sto.scrub_uncorrectable.other	{n} errori non correggibili
 sto.scrub_res_corrected.one	{n} errore trovato e corretto da una copia integra
 sto.scrub_res_corrected.other	{n} errori trovati, tutti corretti da una copia integra
-sto.scrub_res_left.one	{n} errore non correggibile ({fixed} corretti)
-sto.scrub_res_left.other	{n} errori non correggibili ({fixed} corretti)
+sto.scrub_res_left.one	{n} errore non correggibile
+sto.scrub_res_left.other	{n} errori non correggibili
+sto.scrub_res_fixed.one	{n} corretto
+sto.scrub_res_fixed.other	{n} corretti
+sto.err.missing	Manca un dispositivo: sostituiscilo o rimuovilo, poi potrai azzerare i contatori.
 sto.scrub_res_errors.one	{n} errore trovato
 sto.scrub_res_errors.other	{n} errori trovati
 sto.scrub_kind_n	{kind}: {n}

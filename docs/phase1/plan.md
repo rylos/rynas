@@ -577,7 +577,7 @@ like every configuration key (A19). Types in `rynas_api_types::storage`.
 | POST | `/api/v1/storage/btrfs/{uuid}/replace` | `BtrfsReplaceRequest` {devid, new_disk, confirm, serials, dry_run} | 202 (`storage.btrfs-replace`) / 200 |
 | POST | `/api/v1/storage/btrfs/{uuid}/remove-missing` | `BtrfsRepairRequest` {confirm, dry_run} | 202 (`storage.btrfs-remove-missing`) / 200 |
 | POST | `/api/v1/storage/btrfs/{uuid}/convert` | `BtrfsRepairRequest` {dry_run} | 202 (`storage.btrfs-convert`) / 200 |
-| POST | `/api/v1/storage/btrfs/{uuid}/reset-errors` | — | 202 (`storage.btrfs-reset-errors`): `btrfs device stats -z` on every device of the mounted filesystem (the old values stay in the task log); administrators only, rynasd checks too |
+| POST | `/api/v1/storage/btrfs/{uuid}/reset-errors` | — | 202 (`storage.btrfs-reset-errors`): `btrfs device stats -z` on every device of the mounted filesystem (the old values stay in the task log), after checking with `findmnt` that the mount point still holds that filesystem; reserves the volume; 409 while a device is missing; administrators only, rynasd checks too |
 | GET / PUT | `/api/v1/storage/btrfs/{uuid}/settings` | `BtrfsSettings` {auto_degraded} | `BtrfsSettingsState` {applied, pending?} (PUT stages `storage.disks`: `btrfs_manual`) |
 | POST | `/api/v1/shares` | `Share` with `subvolume` {volume, compression} and an empty `path` | as before: the share is staged with path `/<volume>/<name>`, its subvolume is created by the apply |
 

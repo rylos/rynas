@@ -638,7 +638,9 @@ impl Guard {
             // the scrub status could not be read: nothing is noted (a status read later would
             // otherwise make an old, clean scrub look newer than the reunion)
             let Some(scrub) = fs.scrub.as_ref() else { continue };
-            let started = scrub.started.clone().unwrap_or_default();
+            // a resumed scrub names only its resume: it may have started before the reunion,
+            // so it never ends the record (as when no start was printed)
+            let started = if scrub.resumed { String::new() } else { scrub.started.clone().unwrap_or_default() };
             match &r.whole_scrub {
                 None => r.whole_scrub = Some(started),
                 Some(seen) => {

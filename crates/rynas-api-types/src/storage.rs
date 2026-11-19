@@ -581,12 +581,17 @@ pub struct ScrubStatus {
     /// The errors by kind, from the error summary: `read`, `csum`, `verify`, `super`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub error_kinds: Vec<ScrubErrorCount>,
+    /// The scrub was resumed: `started`/`started_ms` are the time of the resume
+    /// (btrfs-progs prints `Scrub resumed:` instead of `Scrub started:`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resumed: bool,
 }
 
 impl ScrubStatus {
-    /// Errors were found and every one was corrected (btrfs-progs gives the counts).
+    /// Errors were found and btrfs-progs counts every one as corrected (none uncorrectable,
+    /// corrected at least as many as found: a superblock error is counted in neither).
     pub fn all_corrected(&self) -> bool {
-        self.errors > 0 && self.uncorrectable == Some(0) && self.corrected.is_some()
+        self.errors > 0 && self.uncorrectable == Some(0) && self.corrected.is_some_and(|c| c >= self.errors)
     }
 }
 

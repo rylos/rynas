@@ -245,7 +245,10 @@ pub fn errors_card(v: &Vol, reset: Callback<()>, selected: RwSignal<Option<Strin
         Some(_) => "sto.err.hint_clean",
         None => "sto.err.hint_scrub",
     };
-    let mounted = fs.mountpoint.is_some();
+    // administrators only (rynasd checks too); btrfs cannot reset a device it does not have
+    let admin = crate::auth::auth().session.with_untracked(|x| x.as_ref().is_some_and(|x| x.user.role == rynas_api_types::Role::Admin));
+    let missing = fs.devices.iter().any(|d| d.missing) || fs.repair.as_ref().is_some_and(|r| r.degraded());
+    let mounted = fs.mountpoint.is_some() && admin;
     view! {
         <section class="card widget w-6">
             <WidgetHead icon=icons::TRIANGLE_ALERT title="sto.err.title"><Status tone=Tone::Warn text=t("sto.err.state").to_string() /></WidgetHead>
@@ -273,7 +276,8 @@ pub fn errors_card(v: &Vol, reset: Callback<()>, selected: RwSignal<Option<Strin
                 view! { <p class="muted small"><strong>{name}</strong>": "{what}</p> }
             }).collect_view()}
             {ui::note(Tone::Info, icons::INFO, view! { {tr(hint)} }.into_any())}
-            {mounted.then(|| view! {
+            {(mounted && missing).then(|| view! { <p class="muted small">{tr("sto.err.missing")}</p> })}
+            {(mounted && !missing).then(|| view! {
                 <div class="card-actions">
                     <button class="btn ghost sm" type="button" on:click=move |_| reset.run(())><Icon icon=icons::ROTATE_CCW size=14 />{tr("sto.err.reset")}</button>
                 </div>

@@ -408,6 +408,11 @@ fn the_record_waits_for_a_clean_scrub() {
     assert!(g.mounts.contains_key(UUID));
     // the device that came back is still refused alone meanwhile
     assert!(g.split_brain(UUID, &[member(2)]));
+    // a clean scrub resumed after the reunion may have started before it: not enough
+    let mut resumed = fs(false, Some(("Wed Nov 18 12:30:00 2026", ScrubState::Finished, 0)));
+    resumed.scrub.as_mut().unwrap().resumed = true;
+    g.settle(&[resumed]);
+    assert!(g.mounts.contains_key(UUID));
     // a clean scrub after the reunion ends it
     g.settle(&[fs(false, Some(("Wed Nov 18 13:00:00 2026", ScrubState::Finished, 0)))]);
     assert!(g.mounts.is_empty());

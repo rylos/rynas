@@ -374,12 +374,15 @@ pub fn VolumePage() -> impl IntoView {
     let selected = RwSignal::new(None::<String>);
     let close = Callback::new(move |_| modal.set(Open::None));
     let current = move || vol.get_untracked().unwrap_or_default();
-    // a scrub of this volume runs, or a scrub task was just started (btrfs may still say
-    // "never" for a second): the scrub card follows it, then everything is read again once
-    // (the volume's health, the device error counters)
+    // a scrub of this volume runs, or the scrub task this page started still runs (btrfs may
+    // still say "never" for a second): the scrub card follows it, then everything is read
+    // again once (the volume's health, the device error counters)
+    let own_scrub = RwSignal::new(None::<String>);
     let scrubbing = move || {
         vol.with(|v| v.as_ref().and_then(|v| v.fs.as_ref()).and_then(|f| f.scrub.as_ref()).is_some_and(|x| x.status == ScrubState::Running))
-            || crate::tasks::tasks().list.with(|l| l.iter().any(|t| t.kind.strip_prefix("storage.") == Some("scrub") && !t.status.is_finished()))
+            || own_scrub.with(|id| {
+                id.as_ref().is_some_and(|id| crate::tasks::tasks().list.with(|l| l.iter().any(|t| &t.id == id && !t.status.is_finished())))
+            })
     };
     crate::live::poll_while(SCRUB_POLL_MS, scrubbing, move || s.reload_fss());
     let was_scrubbing = StoredValue::new(false);
@@ -415,7 +418,7 @@ pub fn VolumePage() -> impl IntoView {
             </Show>
             {move || match modal.get() {
                 Open::None => ().into_any(),
-                Open::Scrub => view! { <ScrubDialog vol=current() on_close=close /> }.into_any(),
+                Open::Scrub => view! { <ScrubDialog vol=current() started=own_scrub on_close=close /> }.into_any(),
                 Open::Grow => view! { <GrowDialog vol=current() on_close=close /> }.into_any(),
                 Open::Replace => view! { <ReplaceDialog vol=current() on_close=close /> }.into_any(),
                 Open::Complete => view! { <CompleteDialog vol=current() on_close=close /> }.into_any(),
@@ -745,7 +748,7 @@ pub fn scrub_state(s: &ScrubStatus) -> (Tone, String) {
         ScrubState::Running => (Tone::Info, t("sto.scrub_running").to_string()),
         ScrubState::Aborted | ScrubState::Interrupted => (Tone::Warn, t("sto.scrub_aborted").to_string()),
         ScrubState::Finished if s.errors == 0 => (Tone::Ok, t("sto.scrub_finished").to_string()),
-        ScrubState::Finished if s.all_corrected() => (Tone::Warn, i18n::tn("sto.scrub_corrected", s.errors, &[])),
+        ScrubState::Finished if s.all_corrected() => (Tone::Warn, i18n::tn("sto.scrub_corrected", s.corrected.unwrap_or(s.errors), &[])),
         ScrubState::Finished => match s.uncorrectable.filter(|n| *n > 0) {
             Some(n) => (Tone::Err, i18n::tn("sto.scrub_uncorrectable", n, &[])),
             None => (Tone::Err, t("sto.scrub_errors").to_string()),
@@ -755,18 +758,21 @@ pub fn scrub_state(s: &ScrubStatus) -> (Tone, String) {
     }
 }
 
-/// What the scrub found, in words: no errors, all corrected, or how many are left.
+/// What the scrub found, in words: no errors, all corrected, or how many are left (and how
+/// many were corrected, each count with its own plural form).
 fn scrub_result(s: &ScrubStatus) -> String {
     if s.errors == 0 {
         return t("sto.scrub_no_errors").to_string();
     }
+    let fixed = s.corrected.unwrap_or(0);
     if s.all_corrected() {
-        return i18n::tn("sto.scrub_res_corrected", s.errors, &[]);
+        return i18n::tn("sto.scrub_res_corrected", fixed, &[]);
     }
-    match (s.uncorrectable, s.corrected) {
-        (Some(bad), Some(fixed)) => i18n::tn("sto.scrub_res_left", bad, &[("fixed", &i18n::count(fixed))]),
-        _ => i18n::tn("sto.scrub_res_errors", s.errors, &[]),
-    }
+    let found = match s.uncorrectable.filter(|n| *n > 0) {
+        Some(bad) => i18n::tn("sto.scrub_res_left", bad, &[]),
+        None => i18n::tn("sto.scrub_res_errors", s.errors, &[]),
+    };
+    if fixed > 0 { format!("{found}; {}", i18n::tn("sto.scrub_res_fixed", fixed, &[])) } else { found }
 }
 
 /// The errors by kind ("Checksum: 3, Read: 1"); a kind this build has no name for keeps
@@ -1010,8 +1016,18 @@ pub fn key_once_foot(stored: RwSignal<bool>, on_done: Callback<()>) -> AnyView {
 }
 
 #[component]
-fn ScrubDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
+fn ScrubDialog(
+    vol: Vol,
+    /// Gets the id of the scrub task once it runs (the page follows that task, not others).
+    started: RwSignal<Option<String>>,
+    on_close: Callback<()>,
+) -> impl IntoView {
     let stage = RwSignal::new(Stage::Form);
+    Effect::new(move |_| {
+        if let Stage::Running(id) = stage.get() {
+            started.set(Some(id));
+        }
+    });
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let md_check = RwSignal::new(vol.md.is_some());
