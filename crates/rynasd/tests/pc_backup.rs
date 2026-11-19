@@ -446,11 +446,13 @@ async fn nas_retention_keeps_the_parent_and_the_pc_can_only_add() {
     assert!(old.starts_with("home."));
     let t = task(&e, "DELETE", &format!("/v1/pc-backups/targets/pc/snapshots/{old}"), None).await;
     assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
-    // a pass while a receive runs does nothing; then it deletes what the preview said
+    // a pass while a receive runs does nothing and is postponed, not failed; then it deletes
+    // what the preview said
     e.host.busy.lock().unwrap().push(path.into());
     let t = task(&e, "POST", "/v1/pc-backups/targets/pc/prune", None).await;
-    assert_eq!(t.status, TaskStatus::Error);
-    assert!(list(&e).await[0].last_prune.as_ref().unwrap().error.is_some());
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    let skipped = list(&e).await[0].last_prune.clone().unwrap();
+    assert!(skipped.postponed && skipped.error.is_none() && skipped.deleted == 0, "{skipped:?}");
     e.host.busy.lock().unwrap().clear();
     let t = task(&e, "POST", "/v1/pc-backups/targets/pc/prune", None).await;
     assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);

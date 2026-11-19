@@ -5355,11 +5355,13 @@ bkpc.issue.subvolume_late	{subject}: ничего нового с {when}, хот
 bkpc.issue.subvolume_never	{subject} ожидается, но ни разу не был принят.
 bkpc.issue.receive_failed	Приём был прерван ({subject}), и сейчас ничего не принимается. ПК отправит этот снимок снова при следующем запуске.
 bkpc.issue.receive_stuck	Приём выполняется с {when} ({subject}).
-bkpc.issue.low_space	Свободно на томе: {free}; для ещё одного полного набора снимков нужно {needed}.
+bkpc.issue.low_space	Свободно на томе: {free}; для следующей копии нужно {needed} (размер недавних копий плюс место, которое приём оставляет свободным): она будет отклонена.
+bkpc.issue.space_tight	Свободно на томе: {free}; для новой полной копии нужно {needed}: инкрементные копии продолжаются, новая полная (новый подтом, разорванная цепочка) не поместится.
 bkpc.short.subvolume_late	Подтом перестал поступать
 bkpc.short.receive_failed	Приём прерван
 bkpc.short.receive_stuck	Приём завис
 bkpc.short.low_space	Мало места
+bkpc.short.space_tight	Нет места для полной копии
 bkpc.issue.shared_folder	Эта папка является общей папкой {subject}, находится внутри неё или содержит её: {subject} остаётся доступной только для чтения в «Файлах», пока резервные копии ПК не будут перенесены в отдельную папку.
 bkpc.short.shared_folder	В общей папке
 bkpc.f.owner	Кто удаляет старые снимки
@@ -5385,6 +5387,7 @@ bkpc.prune	Удалить старые сейчас
 bkpc.pruned	Старые снимки удалены
 bkpc.last_prune	Последняя очистка
 bkpc.last_prune_text	{when}: удалено {n}
+bkpc.prune_postponed	{when}: отложено, шёл приём копии; следующий проход в течение часа
 bkpc.preview_frees	Освободится не менее {bytes}.
 bkpc.free	Свободно на томе
 bkpc.free_text	{free} из {total}
@@ -5429,7 +5432,9 @@ nev.pcbackup.receive_stuck.title	Резервное копирование с «
 nev.pcbackup.receive_stuck.body	{subject}: приём идёт больше суток.
 nev.pcbackup.receive_ok.title	Резервные копии с «{device}» снова принимаются нормально
 nev.pcbackup.low_space.title	Мало места для резервных копий «{device}»
-nev.pcbackup.low_space.body	Свободно {free_gib} ГиБ, для ещё одного полного набора снимков нужно {needed_gib} ГиБ.
+nev.pcbackup.low_space.body	Свободно {free_gib} ГиБ, для следующей копии нужно {needed_gib} ГиБ.
+nev.pcbackup.space_tight.title	Недостаточно места для новой полной копии «{device}»
+nev.pcbackup.space_tight.body	Свободно {free_gib} ГиБ, для ещё одного полного набора нужно {needed_gib} ГиБ; инкрементные копии продолжаются.
 nev.pcbackup.space_ok.title	Места для резервных копий «{device}» снова достаточно
 nev.pcbackup.resumed.title	Резервные копии с «{device}» снова поступают
 nev.pcbackup.revoked.title	Доступ «{device}» отозван

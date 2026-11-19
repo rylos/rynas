@@ -5334,11 +5334,13 @@ bkpc.issue.subvolume_late	{subject}: niente di nuovo dal {when}, mentre gli altr
 bkpc.issue.subvolume_never	{subject} è previsto ma non è mai stato ricevuto.
 bkpc.issue.receive_failed	Una ricezione si è interrotta ({subject}) e ora non si sta ricevendo niente. Il PC invia di nuovo quello snapshot alla prossima esecuzione.
 bkpc.issue.receive_stuck	Una ricezione è in corso dal {when} ({subject}).
-bkpc.issue.low_space	{free} liberi sul volume, {needed} necessari per un'altra serie completa di snapshot.
+bkpc.issue.low_space	{free} liberi sul volume, {needed} necessari per il prossimo backup (la dimensione dei recenti più lo spazio che una ricezione lascia libero): verrebbe rifiutato.
+bkpc.issue.space_tight	{free} liberi sul volume, {needed} necessari per una nuova copia completa: i backup incrementali continuano, una nuova copia completa (un nuovo sottovolume, una catena interrotta) non ci starebbe.
 bkpc.short.subvolume_late	Un sottovolume si è fermato
 bkpc.short.receive_failed	Ricezione interrotta
 bkpc.short.receive_stuck	Ricezione bloccata
 bkpc.short.low_space	Poco spazio
+bkpc.short.space_tight	Niente spazio per una copia completa
 bkpc.issue.shared_folder	Questa cartella è la cartella condivisa {subject}, sta al suo interno o la contiene: {subject} resta in sola lettura in File finché i backup del PC non passano a una cartella tutta loro.
 bkpc.short.shared_folder	In una cartella condivisa
 bkpc.f.owner	Chi elimina i vecchi snapshot
@@ -5364,6 +5366,7 @@ bkpc.prune	Elimina i vecchi ora
 bkpc.pruned	Vecchi snapshot eliminati
 bkpc.last_prune	Ultima pulizia
 bkpc.last_prune_text	{when}: {n} eliminati
+bkpc.prune_postponed	{when}: rimandata, si stava ricevendo un backup; la prossima passata è entro un'ora
 bkpc.preview_frees	Libera almeno {bytes}.
 bkpc.free	Libero sul volume
 bkpc.free_text	{free} su {total}
@@ -5408,7 +5411,9 @@ nev.pcbackup.receive_stuck.title	Un backup da {device} è in corso da più di un
 nev.pcbackup.receive_stuck.body	{subject} è in ricezione da più di un giorno.
 nev.pcbackup.receive_ok.title	I backup da {device} vengono di nuovo ricevuti normalmente
 nev.pcbackup.low_space.title	Poco spazio rimasto per i backup di {device}
-nev.pcbackup.low_space.body	{free_gib} GiB liberi, {needed_gib} GiB necessari per un'altra serie completa di snapshot.
+nev.pcbackup.low_space.body	{free_gib} GiB liberi, {needed_gib} GiB necessari per il prossimo backup.
+nev.pcbackup.space_tight.title	Spazio insufficiente per una nuova copia completa di {device}
+nev.pcbackup.space_tight.body	{free_gib} GiB liberi, {needed_gib} GiB necessari per un'altra serie completa; i backup incrementali continuano.
 nev.pcbackup.space_ok.title	Di nuovo spazio sufficiente per i backup di {device}
 nev.pcbackup.resumed.title	I backup da {device} arrivano di nuovo
 nev.pcbackup.revoked.title	{device} revocato

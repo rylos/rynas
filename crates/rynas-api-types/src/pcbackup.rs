@@ -257,9 +257,13 @@ pub struct PruneRun {
     /// Interrupted receives removed (part of `deleted`).
     #[serde(default)]
     pub interrupted: u32,
-    /// Why it did not run or stopped (a receive was running, a delete failed).
+    /// Why it stopped (a delete failed).
     #[serde(default)]
     pub error: Option<String>,
+    /// A receive was running: the pass waits for the next one (within the hour), nothing
+    /// failed.
+    #[serde(default)]
+    pub postponed: bool,
 }
 
 /// Something wrong with a PC's backups (the alerts).
@@ -274,8 +278,12 @@ pub enum PcIssueCode {
     ReceiveFailed,
     /// A receive has been running for many hours.
     ReceiveStuck,
-    /// The volume has less free space than one more full set of the PC's snapshots.
+    /// The volume has less free space than the next backup is likely to need: the recent
+    /// backups' size plus the space a receive keeps free (an error: it would be refused).
     LowSpace,
+    /// Less free space than one more full set of the PC's snapshots: incremental backups go
+    /// on, a new full copy (a new subvolume, a broken chain) would not fit (a warning).
+    SpaceTight,
     /// The PC's folder is a shared folder, a user's home or an apps' data folder, lies
     /// inside one or holds one (`subject`: the share's name, or the home's or apps' folder),
     /// made before rynas refused it: that place is read-only in the file manager until the

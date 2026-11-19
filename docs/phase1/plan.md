@@ -1053,7 +1053,8 @@ schema 2 added the `code` and `body_format` columns.
 | `pcbackup.late` / `pcbackup.resumed` | `device`, `days` (empty under 48 h), `hours`, `alert_hours`, `alert_days` (late) | No backup from {device} for {days} days (or {hours} hours) / Backups from {device} arrive again (`../research/pc-backup.md` §10, §11.8) |
 | `pcbackup.subvolume_late` / `pcbackup.subvolume_resumed` | `device`, `subject` (btrbk name) | {subject} of {device} is not backed up any more / is backed up again (§11.8) |
 | `pcbackup.receive_failed` / `pcbackup.receive_stuck` / `pcbackup.receive_ok` | `device`, `subject` (snapshot) | A backup from {device} was interrupted / has been running for over a day / is received normally again (§11.8) |
-| `pcbackup.low_space` / `pcbackup.space_ok` | `device`, `free_gib`, `needed_gib` | Little space left for the backups of {device} / enough again (§11.8) |
+| `pcbackup.low_space` / `pcbackup.space_ok` | `device`, `free_gib`, `needed_gib` | Little space left for the backups of {device}: less than the recent backups plus the receive reserve, the next one would be refused (error) / enough again (§11.8) |
+| `pcbackup.space_tight` / `pcbackup.space_ok` | `device`, `free_gib`, `needed_gib` | Not enough space for a new full copy of {device}: incremental backups go on (warning) / enough again |
 | `synodeb.<event>` | the forward's parameters | the forward's title; events and parameters in `../synodeb-integration.md` S1 |
 
 Not coded: the target test message (built in the target's language already) and events from

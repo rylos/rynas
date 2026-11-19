@@ -1518,6 +1518,8 @@ const PRUNE_MAX: usize = 50;
 const MANIFEST_STALE_DAYS: u64 = 7;
 /// Low space without known sizes: less than this share of the volume free.
 const LOW_SPACE_PCT: u64 = 5;
+/// How a pass skipped for a running receive was stored before [`PruneRun::postponed`].
+const PRUNE_POSTPONED: &str = "a receive is running";
 
 /// Calendar buckets of a time in the NAS's local time: hour, day, week (from Sunday), month,
 /// year (the counts of a [`Retention`], in that order).
@@ -1990,6 +1992,8 @@ struct HealthFacts<'a> {
     space: Option<(u64, u64)>,
     /// One more full set of snapshots, when every size is known.
     full_set_bytes: Option<u64>,
+    /// The largest of the recent incremental runs (their own data), when known.
+    recent_bytes: Option<u64>,
     now_ms: u64,
 }
 
@@ -2041,13 +2045,17 @@ fn issues(f: &HealthFacts) -> Vec<PcIssue> {
             out.push(issue(PcIssueCode::ReceiveFailed, Some(s.name.clone()), Some(since)));
         }
     }
+    // an error when the next backup would likely be refused (its recent size plus the space a
+    // receive keeps free); a warning when only a new full copy would not fit
     if let Some((free, total)) = f.space {
-        let needed = f.full_set_bytes.unwrap_or(total / 100 * LOW_SPACE_PCT);
+        let next = f.recent_bytes.unwrap_or(0).saturating_add(receive_reserve(total));
+        let full = f.full_set_bytes.unwrap_or(total / 100 * LOW_SPACE_PCT);
+        let (code, needed) = if free < next { (PcIssueCode::LowSpace, next) } else { (PcIssueCode::SpaceTight, full) };
         if free < needed {
             out.push(PcIssue {
                 free_bytes: Some(free),
                 needed_bytes: Some(needed),
-                ..issue(PcIssueCode::LowSpace, None, None)
+                ..issue(code, None, None)
             });
         }
     }
@@ -2345,6 +2353,10 @@ impl PcBackup {
             .map(|x| x.size.map(|z| z.referenced_bytes))
             .sum::<Option<u64>>()
             .filter(|&b| b > 0);
+        // what a recent incremental run added: the own data of the newest three runs (the
+        // oldest run holds the base, never an increment)
+        let increments = &runs[..runs.len().saturating_sub(1)];
+        let recent_bytes = increments.iter().filter(|r| !r.incomplete).take(3).map(|r| r.exclusive_bytes).collect::<Option<Vec<u64>>>().and_then(|v| v.into_iter().max());
         let alert_hours = alert_hours(t.alert_hours, t.alert_days);
         let mut issues = if present {
             issues(&HealthFacts {
@@ -2354,6 +2366,7 @@ impl PcBackup {
                 receiving,
                 space,
                 full_set_bytes,
+                recent_bytes,
                 now_ms,
             })
         } else {
@@ -2425,7 +2438,13 @@ impl PcBackup {
             free_bytes: space.map(|x| x.0),
             volume_bytes: space.map(|x| x.1),
             receiving,
-            last_prune: t.last_prune.clone(),
+            // a pass skipped for a receive was stored as an error before: postponed
+            last_prune: t.last_prune.clone().map(|mut r| {
+                if r.error.as_deref().is_some_and(|e| e.starts_with(PRUNE_POSTPONED)) {
+                    (r.error, r.postponed) = (None, true);
+                }
+                r
+            }),
             agent: t.agent,
             runs: runs.len() as u32,
         };
@@ -2580,7 +2599,19 @@ impl PcBackup {
                     NotifySeverity::Error,
                     format!("Little space left for the backups of {d}"),
                     format!(
-                        "{} GiB free on the volume of {}, {} GiB wanted for another full set.",
+                        "{} GiB free on the volume of {}, {} GiB wanted for the next backup.",
+                        gib(i.free_bytes.unwrap_or(0)),
+                        t.path,
+                        gib(i.needed_bytes.unwrap_or(0))
+                    ),
+                ),
+                PcIssueCode::SpaceTight => (
+                    "space".into(),
+                    "pcbackup.space_tight",
+                    NotifySeverity::Warning,
+                    format!("Not enough space for a new full copy of {d}"),
+                    format!(
+                        "{} GiB free on the volume of {}, {} GiB wanted for another full set; incremental backups go on.",
                         gib(i.free_bytes.unwrap_or(0)),
                         t.path,
                         gib(i.needed_bytes.unwrap_or(0))
@@ -2605,7 +2636,7 @@ impl PcBackup {
             }
             let (rc, title) = match c.as_str() {
                 "pcbackup.subvolume_late" => ("pcbackup.subvolume_resumed", format!("{} of {d} is backed up again", k.trim_start_matches("subvol:"))),
-                "pcbackup.low_space" => ("pcbackup.space_ok", format!("Enough space again for the backups of {d}")),
+                "pcbackup.low_space" | "pcbackup.space_tight" => ("pcbackup.space_ok", format!("Enough space again for the backups of {d}")),
                 _ => ("pcbackup.receive_ok", format!("Backups from {d} are received normally again")),
             };
             let ev = resolved(NotifyCategory::Backup, "pcbackup", format!("pcbackup:{k}:{d}"), title);
@@ -2790,9 +2821,12 @@ impl PcBackup {
         }
         let mut run = PruneRun { at_ms: rynas_tasks::now_ms(), ..Default::default() };
         let root = Path::new(&t.path);
+        let mut postponed = false;
         let result = (|| -> Result<(), String> {
             let Some(lock) = self.host.lock(root)? else {
-                return Err("a receive is running: the next pass goes on".into());
+                // not a failure: the next pass (within the hour) goes on
+                postponed = true;
+                return Ok(());
             };
             let Some((_, entries, _)) = self.host.scan(root)? else {
                 return Err(format!("{}: no such folder", t.path));
@@ -2822,6 +2856,7 @@ impl PcBackup {
             Ok(())
         })();
         run.error = result.err();
+        run.postponed = postponed;
         self.edit(|r| {
             if let Some(x) = r.targets.get_mut(device) {
                 x.last_prune = Some(run.clone());
@@ -3016,6 +3051,11 @@ fn started(id: String) -> Response {
 pub const RECEIVE_IDLE: Duration = Duration::from_secs(600);
 /// Free space kept on the volume during a receive: this much, or 2 % of the volume.
 pub const RECEIVE_RESERVE: u64 = 1 << 30;
+
+/// The free space a receive keeps on a volume of `total` bytes ([`RECEIVE_RESERVE`]).
+pub fn receive_reserve(total: u64) -> u64 {
+    RECEIVE_RESERVE.max(total / 50)
+}
 /// Receives running at once on the NAS, all PCs together: they share the disks and the free
 /// space (each one checks the space as it goes, see [`RECEIVE_SPACE_EVERY`]).
 pub const MAX_RECEIVES: usize = 2;
@@ -3345,7 +3385,7 @@ impl PcBackup {
                     }
                 }
             };
-            let reserve_of = |total: u64| RECEIVE_RESERVE.max(total / 50);
+            let reserve_of = receive_reserve;
             let room = match s.host.space(&root) {
                 Some((free, total)) => {
                     let reserve = reserve_of(total);
@@ -4304,6 +4344,10 @@ async fn prune_post(State(st): State<PbState>, hd: HeaderMap, UrlPath(device): U
         if let Some(e) = run.error {
             return Err(e);
         }
+        if run.postponed {
+            ctx.log(&format!("{device}: a backup is being received; the pass is postponed to the next one, within the hour"));
+            return Ok(());
+        }
         ctx.log(&format!("{device}: {} snapshots deleted", run.deleted));
         Ok(())
     })?;
@@ -4754,20 +4798,29 @@ mod tests {
         let e = vec![entry("home", now - 4000, true), entry("root", now - 3 * 86_400, true), entry("home", now - 2 * 3600, false)];
         let l = listed(&e);
         let expected = BTreeSet::from(["home".to_string(), "root".to_string()]);
-        let f = |receiving, alert_hours, space| HealthFacts {
+        let g = |receiving, alert_hours, space, recent_bytes| HealthFacts {
             list: &l,
             expected: &expected,
             alert_hours,
             receiving,
             space,
             full_set_bytes: Some(100 << 30),
+            recent_bytes,
             now_ms: now as u64 * 1000,
         };
+        let f = |receiving, alert_hours, space| g(receiving, alert_hours, space, None);
         let codes = |v: Vec<PcIssue>| v.into_iter().map(|i| (i.code, i.subject)).collect::<Vec<_>>();
         let i = codes(issues(&f(false, 24, Some((50 << 30, 1 << 40)))));
         assert_eq!(i[0], (PcIssueCode::SubvolumeLate, Some("root".into())));
         assert_eq!(i[1].0, PcIssueCode::ReceiveFailed);
-        assert_eq!(i[2].0, PcIssueCode::LowSpace);
+        // less than a full set but room for the next incremental one: a warning
+        assert_eq!(i[2].0, PcIssueCode::SpaceTight);
+        // less than the recent backups plus the reserve (2 % of 1 TiB): the next one would be
+        // refused, an error
+        let low = issues(&g(true, 24, Some((25 << 30, 1 << 40)), Some(10 << 30)));
+        let low = low.iter().find(|i| i.code == PcIssueCode::LowSpace).unwrap();
+        assert_eq!(low.needed_bytes, Some((10 << 30) + (1u64 << 40) / 50));
+        assert!(!issues(&g(true, 24, Some((25 << 30, 1 << 40)), Some(1 << 30))).iter().any(|i| i.code == PcIssueCode::LowSpace));
         // receiving for two hours: neither failed nor stuck yet; plenty of space
         let i = codes(issues(&f(true, 24, Some((500 << 30, 1 << 40)))));
         assert_eq!(i, [(PcIssueCode::SubvolumeLate, Some("root".into()))]);

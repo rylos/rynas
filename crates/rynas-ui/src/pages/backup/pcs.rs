@@ -208,6 +208,7 @@ fn issue_text(i: &PcIssue) -> String {
         PcIssueCode::ReceiveFailed => "bkpc.issue.receive_failed",
         PcIssueCode::ReceiveStuck => "bkpc.issue.receive_stuck",
         PcIssueCode::LowSpace => "bkpc.issue.low_space",
+        PcIssueCode::SpaceTight => "bkpc.issue.space_tight",
         PcIssueCode::SharedFolder => "bkpc.issue.shared_folder",
     };
     let b = |v: Option<u64>| i18n::bytes(v.unwrap_or(0));
@@ -222,6 +223,7 @@ fn issue_short(i: &PcIssue) -> &'static str {
         PcIssueCode::ReceiveFailed => "bkpc.short.receive_failed",
         PcIssueCode::ReceiveStuck => "bkpc.short.receive_stuck",
         PcIssueCode::LowSpace => "bkpc.short.low_space",
+        PcIssueCode::SpaceTight => "bkpc.short.space_tight",
         PcIssueCode::SharedFolder => "bkpc.short.shared_folder",
     }
 }
@@ -1727,6 +1729,8 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         };
         let last_prune = p.last_prune.clone().map(|r| match r.error {
             Some(e) => format!("{}: {e}", i18n::datetime(r.at_ms)),
+            // a receive was running: waits for the next pass, nothing failed
+            None if r.postponed => tf("bkpc.prune_postponed", &[("when", &i18n::datetime(r.at_ms))]),
             None => tf("bkpc.last_prune_text", &[("when", &i18n::datetime(r.at_ms)), ("n", &r.deleted.to_string())]),
         });
         let size_note = if d.sizes_from_quota { t("bkpc.sizes_quota") } else { t("bkpc.sizes_note") };
