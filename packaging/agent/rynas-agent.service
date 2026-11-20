@@ -2,7 +2,8 @@
 Description=rynas PC backup agent
 Documentation=https://github.com/rylos/rynas
 Wants=network-online.target
-After=network-online.target
+# ordering only (harmless when absent): at shutdown the agent stops before the network
+After=network-online.target tailscaled.service NetworkManager.service systemd-networkd.service
 
 [Service]
 Type=simple
@@ -26,9 +27,10 @@ StateDirectory=rynas-agent
 StateDirectoryMode=0700
 CacheDirectory=rynas-agent
 CacheDirectoryMode=0700
-# the service stops a running backup with SIGTERM: the child thaws first
+# SIGTERM: an idle service exits at once; a running backup child is stopped first (it
+# thaws and exits within seconds; the service waits for it at most 25 s)
 KillMode=mixed
-TimeoutStopSec=90
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

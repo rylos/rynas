@@ -7,9 +7,16 @@
 //! Each backup runs as a child process (`rynas-agent backup --service`): its private mount
 //! namespace and its freezes end with it, and a cancel is a SIGTERM (the child thaws first).
 //! While it runs, a `systemd-inhibit` lock keeps the PC from sleeping.
+//!
+//! Wake-on-LAN and power (`crate::power`, `crate::facts`): the PC's facts go to the NAS after
+//! the first contact and every 6 h when changed; `Sleep` is refused while a backup runs;
+//! `EnableWol` cards are switched on again at every start; a PC the NAS woke for a due backup
+//! starts it without the start delay and, after it, does the plan's "after a wake" action when
+//! nobody used the PC. Commands are acknowledged as before: only by the next poll (the NAS sees
+//! the contact) and `handled_command`; a refusal is a log line.
 
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use jiff::tz::TimeZone;
@@ -23,13 +30,84 @@ pub static STOP: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn on_term(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
+    // only async-signal-safe calls from here on: kill, waitpid, nanosleep, _exit
+    if let TermAction::StopChild(pid) = term_action(CHILD_PID.load(Ordering::SeqCst)) {
+        // SAFETY: async-signal-safe calls on our own child
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+            // the child thaws and exits within seconds; never longer than the unit's stop
+            // timeout allows (then it is killed)
+            let mut gone = false;
+            for _ in 0..CHILD_STOP_TICKS {
+                let mut status = 0;
+                let r = libc::waitpid(pid, &mut status, libc::WNOHANG);
+                // reaped here, or already by the main loop (ECHILD)
+                if r == pid || r < 0 {
+                    gone = true;
+                    break;
+                }
+                let ts = libc::timespec { tv_sec: 0, tv_nsec: 100_000_000 };
+                libc::nanosleep(&ts, std::ptr::null_mut());
+            }
+            if !gone {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+    let inhibit = INHIBIT_PID.load(Ordering::SeqCst);
+    if inhibit > 0 {
+        // SAFETY: async-signal-safe signal to our own child
+        unsafe {
+            libc::kill(inhibit, libc::SIGTERM);
+        }
+    }
+    // the state is written to a temporary file and renamed (`state::write_atomic`): an exit
+    // here never leaves half a state, and the lock (flock) ends with the process
+    // SAFETY: async-signal-safe exit
+    unsafe { libc::_exit(0) };
+}
+
+/// The running backup child (0: none): the signal handler stops it.
+pub static CHILD_PID: AtomicI32 = AtomicI32::new(0);
+/// The running `systemd-inhibit` (0: none).
+pub static INHIBIT_PID: AtomicI32 = AtomicI32::new(0);
+/// How long the handler waits for the child (100 ms ticks): under the unit's 30 s stop timeout.
+const CHILD_STOP_TICKS: u32 = 250;
+
+/// What SIGTERM/SIGINT does: exit at once (nothing runs; the long poll or a pause would keep
+/// the PC's shutdown waiting), or stop the backup child first (it thaws on SIGTERM).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TermAction {
+    ExitNow,
+    StopChild(i32),
+}
+
+pub fn term_action(child_pid: i32) -> TermAction {
+    if child_pid > 0 { TermAction::StopChild(child_pid) } else { TermAction::ExitNow }
+}
+
+/// A pause that ends early when the service is told to stop (checked every 500 ms).
+pub fn pause(d: Duration) {
+    let end = Instant::now() + d;
+    while !STOP.load(Ordering::SeqCst) {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(500)));
+    }
 }
 
 pub fn install_signals() {
-    // SAFETY: the handler only stores an atomic
+    // SAFETY: a zeroed sigaction with our handler; no SA_RESTART, so blocking calls return
+    // EINTR where they can
     unsafe {
-        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_term as *const () as libc::sighandler_t;
+        sa.sa_flags = 0;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
     }
 }
 
@@ -202,6 +280,7 @@ fn start_backup(trigger: RunTrigger, mode: Mode) -> Result<Running, String> {
         .stdin(Stdio::null())
         .spawn()
         .map_err(|e| format!("cannot start the backup: {e}"))?;
+    CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
     if mode.fake {
         return Ok(Running { child, inhibit: None, since: Instant::now() });
     }
@@ -220,6 +299,9 @@ fn start_backup(trigger: RunTrigger, mode: Mode) -> Result<Running, String> {
         .stderr(Stdio::null())
         .spawn()
         .ok();
+    if let Some(i) = &inhibit {
+        INHIBIT_PID.store(i.id() as i32, Ordering::SeqCst);
+    }
     Ok(Running {
         child,
         inhibit,
@@ -240,20 +322,52 @@ fn stop_child(r: &mut Running) {
     }
     let _ = r.child.kill();
     let _ = r.child.wait();
+    CHILD_PID.store(0, Ordering::SeqCst);
 }
 
 fn end_inhibit(r: &mut Running) {
     if let Some(i) = &mut r.inhibit {
+        INHIBIT_PID.store(0, Ordering::SeqCst);
         let _ = i.kill();
         let _ = i.wait();
     }
 }
 
-/// The plan, waiting up to `wait` s for a change; and the NAS address that answered.
 fn poll(st: &State, wait: u64) -> Result<(AgentPlan, String), String> {
     let c = client_of(st)?;
-    let plan = c.get_json(&format!("/api/v1/pcbackup/agent/plan?rev={}&wait={wait}", st.plan.rev))?;
+    let v: serde_json::Value = c.get_json(&format!("/api/v1/pcbackup/agent/plan?rev={}&wait={wait}", st.plan.rev))?;
+    let (plan, note) = parse_plan(v)?;
+    if let Some(n) = note {
+        eprintln!("{n}");
+    }
     Ok((plan, c.ep().url()))
+}
+
+/// The plan from the NAS' answer. A command this agent does not know (a newer NAS) would make
+/// the whole plan unreadable: the plan is read without it then, with a note for the log.
+pub fn parse_plan(mut v: serde_json::Value) -> Result<(AgentPlan, Option<String>), String> {
+    match serde_json::from_value::<AgentPlan>(v.clone()) {
+        Ok(p) => Ok((p, None)),
+        Err(e) => {
+            let cmd = v.as_object_mut().and_then(|o| o.remove("command"));
+            let Some(cmd) = cmd else {
+                return Err(format!("bad answer from the NAS: {e}"));
+            };
+            let p = serde_json::from_value::<AgentPlan>(v).map_err(|_| format!("bad answer from the NAS: {e}"))?;
+            let kind = cmd.get("kind").and_then(|k| k.as_str()).unwrap_or("?").to_string();
+            Ok((p, Some(format!("the NAS sent a command this agent does not know ({kind}): ignored; update rynas-agent"))))
+        }
+    }
+}
+
+/// The start of the service as the schedule sees it: a PC the NAS woke recently for a due
+/// backup ([`crate::power::recent_wake`]) starts it without the plan's start delay.
+pub fn effective_start(st: &State, started_ms: u64, now_ms: u64) -> u64 {
+    if crate::power::recent_wake(&st.plan, now_ms).is_some() {
+        started_ms.saturating_sub(u64::from(st.plan.schedule().delay_min) * 60_000)
+    } else {
+        started_ms
+    }
 }
 
 /// The trust and addresses from the NAS (`trust::refresh`), saved; when the next refresh is
@@ -296,7 +410,22 @@ pub fn run_service(mode: Mode) -> Result<(), String> {
     let started = now_ms();
     let mut st = State::load()?;
     eprintln!("rynas-agent {}: PC {} on {}", env!("CARGO_PKG_VERSION"), st.device, st.url);
+    // the schedule test never changes the PC's network or power: it logs instead
+    let exec: Box<dyn crate::power::Exec> = if mode.fake { Box::new(crate::power::DryRun) } else { Box::new(crate::power::System) };
+    let sys = std::path::Path::new("/sys");
+    // magic-packet wake kept on: drivers reset it at boot
+    let kept = crate::power::existing_nics(sys, &st.wol_kept);
+    if !kept.is_empty() {
+        let on = crate::power::enable_wol(exec.as_ref(), &kept);
+        if !on.is_empty() {
+            eprintln!("Wake-on-LAN kept on: {}", on.join(", "));
+        }
+    }
+    let mut facts = crate::facts::Sender::default();
+    let root_btrfs = crate::btrfs::root_is_btrfs();
     let mut running: Option<Running> = None;
+    // the wake by the NAS the running backup was started for
+    let mut woken_run: Option<u64> = None;
     let mut last_poll_error: Option<Instant> = None;
     // the trust and addresses: at the first contact, then every few hours
     let mut trust_due = 0u64;
@@ -307,7 +436,7 @@ pub fn run_service(mode: Mode) -> Result<(), String> {
         let wait = if running.is_some() {
             5
         } else {
-            next_due(&st, started, now_ms()).map_or(50, |d| (d.saturating_sub(now_ms()) / 1000).clamp(5, 50))
+            next_due(&st, effective_start(&st, started, now_ms()), now_ms()).map_or(50, |d| (d.saturating_sub(now_ms()) / 1000).clamp(5, 50))
         };
         let wait = end.map_or(wait, |e| wait.min(e.saturating_duration_since(Instant::now()).as_secs().max(1)));
         match poll(&st, wait) {
@@ -335,6 +464,7 @@ pub fn run_service(mode: Mode) -> Result<(), String> {
                         if running.is_none() {
                             eprintln!("back up now (from the NAS)");
                             running = start_backup(RunTrigger::Manual, mode).map_err(|e| eprintln!("{e}")).ok();
+                            woken_run = None;
                         }
                     }
                     Some(AgentCommand::Cancel { id }) if id > st.handled_command => {
@@ -345,7 +475,55 @@ pub fn run_service(mode: Mode) -> Result<(), String> {
                             stop_child(r);
                         }
                     }
+                    // handled before it is carried out: after the PC wakes again the same
+                    // command (still in the plan) does not put it to sleep once more
+                    Some(AgentCommand::Sleep { id, mode: sleep }) if id > st.handled_command => {
+                        st.handled_command = id;
+                        let _ = State::update(|s| s.handled_command = id);
+                        match crate::power::sleep_decision(sleep, running.is_some()) {
+                            crate::power::SleepDecision::RefuseBackup => {
+                                eprintln!("{} (from the NAS) refused: a backup is running", crate::power::verb(sleep));
+                            }
+                            crate::power::SleepDecision::RefuseUnknown => {
+                                eprintln!("a sleep mode this agent does not know (from the NAS): refused; update rynas-agent");
+                            }
+                            crate::power::SleepDecision::Go(m) => {
+                                eprintln!("{} (from the NAS)", crate::power::verb(m));
+                                if let Err(e) = crate::power::sleep_now(exec.as_ref(), m) {
+                                    eprintln!("{}: {e}", crate::power::verb(m));
+                                }
+                            }
+                        }
+                    }
+                    Some(AgentCommand::EnableWol { id, nics }) if id > st.handled_command => {
+                        st.handled_command = id;
+                        let present = crate::power::existing_nics(sys, &nics);
+                        let missing: Vec<&String> = nics.iter().filter(|n| !present.contains(n)).collect();
+                        if !missing.is_empty() {
+                            eprintln!("Wake-on-LAN: no card {missing:?} on this PC");
+                        }
+                        let on = crate::power::enable_wol(exec.as_ref(), &present);
+                        if !on.is_empty() {
+                            eprintln!("Wake-on-LAN on (from the NAS), kept at every start: {}", on.join(", "));
+                        }
+                        st.wol_kept = crate::power::merge_kept(&st.wol_kept, &on);
+                        let kept = st.wol_kept.clone();
+                        let _ = State::update(|s| {
+                            s.handled_command = id;
+                            s.wol_kept = kept;
+                        });
+                        facts.soon();
+                    }
                     _ => {}
+                }
+                // the PC's facts: after the first good contact, then every 6 h when changed
+                let now = now_ms();
+                if facts.addresses_due(now) {
+                    facts.check_addresses(now, &crate::facts::ipv4_by_name());
+                }
+                if facts.due(now) {
+                    let f = crate::facts::collect(exec.as_ref(), sys, &crate::facts::ipv4_by_name(), &st.wol_kept, root_btrfs);
+                    facts.tick(now, f, |f| client_of(&st).and_then(|c| crate::facts::post(&c, f)));
                 }
                 last_poll_error = None;
             }
@@ -357,13 +535,14 @@ pub fn run_service(mode: Mode) -> Result<(), String> {
                     eprintln!("NAS: {e}");
                     last_poll_error = Some(Instant::now());
                 }
-                std::thread::sleep(Duration::from_secs(30));
+                pause(Duration::from_secs(30));
             }
         }
         // the running backup
         if let Some(r) = &mut running
             && let Ok(Some(status)) = r.child.try_wait()
         {
+            CHILD_PID.store(0, Ordering::SeqCst);
             end_inhibit(r);
             let took = r.since.elapsed().as_secs();
             // the child wrote the outcome into the state
@@ -381,14 +560,23 @@ pub fn run_service(mode: Mode) -> Result<(), String> {
             }
             eprintln!("backup finished ({status}) in {took} s");
             running = None;
+            after_wake(&mut st, woken_run.take(), exec.as_ref());
         }
         if running.is_none() {
             let now = now_ms();
-            match decide(&st, started, now, &zone(&st.plan)) {
+            match decide(&st, effective_start(&st, started, now), now, &zone(&st.plan)) {
                 Decision::Idle => {}
                 Decision::Start(trigger) => {
-                    eprintln!("scheduled backup");
+                    woken_run = crate::power::recent_wake(&st.plan, now);
+                    if woken_run.is_some() {
+                        eprintln!("scheduled backup (the NAS woke this PC for it)");
+                    } else {
+                        eprintln!("scheduled backup");
+                    }
                     running = start_backup(trigger, mode).map_err(|e| eprintln!("{e}")).ok();
+                    if running.is_none() {
+                        woken_run = None;
+                    }
                     if running.is_some() && st.skip_noted.is_some() {
                         st.skip_noted = None;
                         let _ = State::update(|s| s.skip_noted = None);
@@ -414,6 +602,32 @@ pub fn run_service(mode: Mode) -> Result<(), String> {
         end_inhibit(r);
     }
     Ok(())
+}
+
+/// After the backup the NAS woke the PC for (good or failed): the plan's "after a wake"
+/// action, once per wake, only when nobody used the PC since the wake
+/// ([`crate::power::may_sleep_after_wake`]).
+fn after_wake(st: &mut State, woken: Option<u64>, exec: &dyn crate::power::Exec) {
+    let Some(mode) = crate::power::after_wake_mode(st.plan.plan.after_wake, woken, st.after_wake_done) else {
+        return;
+    };
+    let Some(w) = woken else { return };
+    // decided once, whatever comes of it
+    st.after_wake_done = woken;
+    let _ = State::update(|s| s.after_wake_done = woken);
+    let verb = crate::power::verb(mode);
+    let Some(sessions) = crate::power::sessions_now(exec) else {
+        eprintln!("after the wake: the PC stays on (its sessions cannot be read)");
+        return;
+    };
+    if !crate::power::may_sleep_after_wake(mode, &sessions, crate::power::wake_time(w)) {
+        eprintln!("after the wake: the PC stays on (someone is logged in or used it since the wake)");
+        return;
+    }
+    eprintln!("after the wake: {verb} (nobody used the PC since the wake)");
+    if let Err(e) = crate::power::sleep_now(exec, mode) {
+        eprintln!("{verb}: {e}");
+    }
 }
 
 #[cfg(test)]
@@ -512,6 +726,54 @@ mod tests {
         for t in [RunTrigger::Manual, RunTrigger::Retry, RunTrigger::Timer] {
             assert_eq!(trigger_of(Some(trigger_word(t))), t);
         }
+    }
+
+    /// A command from a newer NAS: the plan is still read, without it.
+    #[test]
+    fn unknown_commands_keep_the_plan() {
+        let mut v = serde_json::to_value(AgentPlan { rev: 7, ..Default::default() }).unwrap();
+        v["command"] = serde_json::json!({ "kind": "sleep", "id": 3, "mode": "suspend" });
+        let (p, note) = parse_plan(v.clone()).unwrap();
+        assert_eq!(p.command, Some(AgentCommand::Sleep { id: 3, mode: rynas_api_types::pcagent::SleepMode::Suspend }));
+        assert!(note.is_none());
+        v["command"] = serde_json::json!({ "kind": "reboot_into_mars", "id": 4 });
+        let (p, note) = parse_plan(v).unwrap();
+        assert_eq!((p.rev, p.command), (7, None));
+        assert!(note.unwrap().contains("reboot_into_mars"));
+        assert!(parse_plan(serde_json::json!({ "rev": "x" })).is_err());
+    }
+
+    /// SIGTERM: exit at once when idle (the PC's shutdown never waits for the long poll), the
+    /// backup child first when one runs.
+    #[test]
+    fn stopping_the_service() {
+        assert_eq!(term_action(0), TermAction::ExitNow);
+        assert_eq!(term_action(-1), TermAction::ExitNow);
+        assert_eq!(term_action(4242), TermAction::StopChild(4242));
+        // the pauses of the loop are short (STOP is never set in tests: it would stop others)
+        let t = Instant::now();
+        pause(Duration::from_millis(50));
+        assert!(t.elapsed() < Duration::from_millis(600));
+    }
+
+    /// A PC the NAS woke starts its due backup without the start delay (within 30 min).
+    #[test]
+    fn woken_pcs_skip_the_start_delay() {
+        let tz = TimeZone::UTC;
+        let mut st = State::default();
+        st.plan.plan.interval_hours = 24;
+        st.plan.plan.start_delay_min = 10;
+        let started = 100_000_000_000;
+        st.last_ok_ms = Some(started - 2 * 86_400_000);
+        assert_eq!(decide(&st, effective_start(&st, started, started + 1000), started + 1000, &tz), Decision::Idle);
+        st.plan.woken_ms = Some(started - 60_000);
+        assert_eq!(effective_start(&st, started, started + 1000), started - 600_000);
+        assert_eq!(decide(&st, effective_start(&st, started, started + 1000), started + 1000, &tz), Decision::Start(RunTrigger::Timer));
+        // an old wake: the delay again
+        assert_eq!(effective_start(&st, started, started + 31 * 60_000), started);
+        // woken, but nothing due: nothing starts
+        st.last_ok_ms = Some(started - 3_600_000);
+        assert_eq!(decide(&st, effective_start(&st, started, started + 1000), started + 1000, &tz), Decision::Idle);
     }
 
     /// Set times (0.8.21): a time missed while the PC was off is caught up once, the delay

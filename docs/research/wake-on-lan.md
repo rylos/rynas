@@ -73,8 +73,8 @@ Status: research 2026-11-20, phase 1 being implemented (0.8.26).
    passwords, no command templates): Suspend, Hibernate, Shut down, refused while a backup
    runs. Sent only to agents ≥ 0.8.26 (older agents cannot parse the new command).
 8. **Wake for backups** (PC backup setting, needs a linked WoL device): when a scheduled backup
-   is due inside its window and the PC is off, the NAS wakes it (at most once per due time,
-   no retry storm), marks the plan "woken by the NAS"; the agent then starts the backup without
+   is due inside its window and the PC is off, the NAS wakes it (at most once a day and
+   30 min after the previous one: a failed wake is tried again the next day, no retry storm), marks the plan "woken by the NAS"; the agent then starts the backup without
    the start delay and, after it, does the chosen "after a wake" action (stay on, suspend, shut
    down) only if nobody used the PC meanwhile (every logind session idle or none).
 9. **Later** (phase 2): wake and sleep schedules as scheduler tasks (presets + OnCalendar);
@@ -84,11 +84,13 @@ Status: research 2026-11-20, phase 1 being implemented (0.8.26).
 
 Types in `crates/rynas-api-types/src/wol.rs` (UI and server) and `pcagent.rs` (agent).
 Configuration in config key `wol` (`WolConfig`: revisions, export, rollback like every
-domain); runtime state (status, history) in `<state>/wol/state.json`.
+domain); runtime state (status, history) in `<state>/wol/state.json`. The device routes
+write `wol` directly (effective at once, one revision per change, no pending change).
 
 - `GET /api/v1/wol` → `WolOverview` (devices visible to the caller, NAS interfaces).
-- `POST /api/v1/wol/devices` (admin) `WolDevice` → created device; `PUT …/{id}`, `DELETE …/{id}`.
-- `POST /api/v1/wol/devices/{id}/wake` → `{ upid }` (task, live lines).
+- `POST /api/v1/wol/devices` (admin) `WolDevice` → 200 the stored device (id filled);
+  `PUT …/{id}` → 200, `DELETE …/{id}` → 204.
+- `POST /api/v1/wol/devices/{id}/wake` → 200 `WolWakeStarted` `{ upid, joined }` (task, live lines).
 - `POST /api/v1/wol/devices/{id}/sleep` `WolSleepRequest` → 202 (agent command).
 - `POST /api/v1/wol/devices/{id}/enable` (admin) → 202 (agent command, enable WoL on its NICs).
 - `GET /api/v1/wol/discover` (admin) → `Vec<WolCandidate>` (agents' NICs + neighbor table).

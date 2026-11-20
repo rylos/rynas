@@ -159,11 +159,15 @@ pub enum AfterWake {
     Stay,
     Suspend,
     Poweroff,
+    /// A value of a newer NAS: treated as [`AfterWake::Stay`].
+    #[serde(other)]
+    Unknown,
 }
 
 impl AfterWake {
+    /// Stay on (also an unknown value of a newer NAS).
     pub fn is_stay(&self) -> bool {
-        *self == AfterWake::Stay
+        matches!(self, AfterWake::Stay | AfterWake::Unknown)
     }
 }
 
@@ -174,6 +178,9 @@ pub enum SleepMode {
     Suspend,
     Hibernate,
     Poweroff,
+    /// A mode of a newer NAS or agent: never carried out, dropped from facts.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One network card of the PC, as its agent reports it ([`AgentFacts`]).

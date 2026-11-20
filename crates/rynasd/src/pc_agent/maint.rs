@@ -763,6 +763,8 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
             d.manifest_details.truncate(20);
         }
         d.command = None;
+        // the run the NAS woke the PC for (if any) is over
+        d.woken_ms = None;
         d.rev += 1;
         d.history.push_back(run);
         while d.history.len() > HISTORY {
@@ -1138,7 +1140,9 @@ fn backup_pending(reg: &Registry, group: &str, now: u64, paused_all: bool) -> bo
             && !paused_all
             && rynas_schedule::window::plan_due(spec.as_ref(), u64::from(every_h) * 3_600_000, &tz, super::last_ok(d), 0, 0) <= now
             && p.window.as_deref().is_none_or(|w| rynas_schedule::window::is_open(w, &tz, now));
-        d.group == group && !d.revoked && online && (d.command.is_some() || due)
+        // (a power command is no backup)
+        let now_cmd = matches!(d.command, Some(AgentCommand::BackupNow { .. }));
+        d.group == group && !d.revoked && online && (now_cmd || due)
     })
 }
 

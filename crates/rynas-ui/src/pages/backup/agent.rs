@@ -79,9 +79,15 @@ fn unreachable(p: &PcDevice) -> bool {
     !p.revoked && p.state != PcState::Running && p.last_seen_ms.is_some_and(|t| (js_sys::Date::now() as u64).saturating_sub(t) > UNREACHABLE_AFTER_MS)
 }
 
-/// A command (Run now, Cancel) the PC has not taken yet: queued after its last contact.
+/// A backup command (Run now, Cancel): what the backup views follow. A power command
+/// (sleep, enable Wake-on-LAN) may wait days for a PC that is off.
+fn backup_command(c: &Option<AgentCommand>) -> bool {
+    matches!(c, Some(AgentCommand::BackupNow { .. } | AgentCommand::Cancel { .. }))
+}
+
+/// A backup command (Run now, Cancel) the PC has not taken yet: queued after its last contact.
 fn command_waiting(p: &PcDevice) -> bool {
-    !p.revoked && p.command.is_some() && p.command_at_ms.is_some_and(|c| p.last_seen_ms.is_none_or(|t| t < c))
+    !p.revoked && backup_command(&p.command) && p.command_at_ms.is_some_and(|c| p.last_seen_ms.is_none_or(|t| t < c))
 }
 
 /// The one status chip of a PC fed by rynas-agent, the same in the lists and in the drawer:
@@ -239,7 +245,7 @@ pub fn panel(header: RwSignal<Option<bool>>, to_btrfs: Callback<()>) -> AnyView 
     // live progress: read again every 5 s while a PC backs up and the page is visible
     crate::live::poll_while(
         5000,
-        move || tab.data.data.with(|d| d.as_ref().is_some_and(|d| d.devices.iter().any(|x| x.state == PcState::Running || x.command.is_some()))),
+        move || tab.data.data.with(|d| d.as_ref().is_some_and(|d| d.devices.iter().any(|x| x.state == PcState::Running || backup_command(&x.command)))),
         move || tab.data.reload(),
     );
     let content = move || {
@@ -707,6 +713,9 @@ fn drawer(tab: Tab, device: String) -> AnyView {
         }
         was_running.set_value(running);
     });
+    // Wake (and Sleep) when a Wake-on-LAN device is linked to this PC
+    let wake = crate::pages::wake::pc::PcWake::new(device.clone());
+    wake.start();
     let browse = RwSignal::new(None::<String>);
     let edit = RwSignal::new(false);
     let ask_revoke = RwSignal::new(false);
@@ -883,7 +892,8 @@ fn drawer(tab: Tab, device: String) -> AnyView {
         }
         .into_any()
     };
-    let body = view! { {move || detail.view(8, content)} }.into_any();
+    // Wake and Power outside what the polls rebuild: an open menu stays open
+    let body = view! { {wake.row()}{move || detail.view(8, content)} }.into_any();
     // a revoked PC (or one not read yet) has nothing to revoke or set
     let gone = Signal::derive(move || detail.data.with(|d| d.as_ref().is_none_or(|d| d.device.revoked)));
     let settings = view! {
@@ -924,6 +934,8 @@ pub(super) struct AgentCtl {
     changed: Callback<()>,
     /// The last run's subvolumes are unfolded (kept across the progress polls).
     captures_open: RwSignal<bool>,
+    /// Wake (and Sleep) when a Wake-on-LAN device is linked to this PC.
+    wake: crate::pages::wake::pc::PcWake,
 }
 
 impl Clone for AgentCtl {
@@ -940,6 +952,7 @@ impl AgentCtl {
         let detail = Remote::<PcDeviceDetail>::idle(dev_url(&device));
         let ctl = AgentCtl {
             detail,
+            wake: crate::pages::wake::pc::PcWake::new(device.clone()),
             dev: StoredValue::new(device),
             busy: RwSignal::new(false),
             error: RwSignal::new(None),
@@ -966,6 +979,7 @@ impl AgentCtl {
 
     pub fn start(self) {
         self.detail.reload();
+        self.wake.start();
     }
 
     /// No agent is paired under this name (tracked).
@@ -1221,6 +1235,8 @@ impl AgentCtl {
                     {(waiting || away).then(|| view! { <span class="small muted">{tr("pca.starts_on_contact")}</span> })}
                 </div>
             })}
+            // Wake and Power outside what the polls rebuild: an open menu stays open
+            {self.wake.row()}
         }
         .into_any()
     }
@@ -1382,6 +1398,7 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
     let min_age = RwSignal::new(s.min_age_days.to_string());
     let alert = RwSignal::new(s.alert_hours.to_string());
     let critical = RwSignal::new(s.critical_hours.to_string());
+    let wake = crate::pages::wake::pc::WakeSettings::new(&s.plan, &p.device);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let dev = StoredValue::new(p.device.clone());
@@ -1398,6 +1415,7 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
             ..PcPlan::default()
         };
         schedule.apply(&mut plan);
+        wake.apply(&mut plan);
         let body = PcDeviceSettings {
             description: description.get_untracked().trim().to_string(),
             plan,
@@ -1454,6 +1472,7 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
         {text_field("bk.f.description", description.into(), Callback::new(move |v| description.set(v)), Signal::stored(None), In { maxlength: 120, ..In::default() })}
         <h3 class="mini-title">{tr("pca.f.schedule")}</h3>
         {schedule.view()}
+        {wake.view()}
         {files_only}
         {form_error(error)}
     }

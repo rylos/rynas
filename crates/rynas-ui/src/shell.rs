@@ -36,7 +36,7 @@ pub fn nav_shown(path: &str) -> bool {
     path != "/docker" || crate::docker::docker().present()
 }
 
-pub const NAV: [NavItem; 13] = [
+pub const NAV: [NavItem; 14] = [
     NavItem { id: "dashboard", path: "/", key: "nav.dashboard", icon: icons::LAYOUT_DASHBOARD },
     NavItem { id: "storage", path: "/storage", key: "nav.storage", icon: icons::HARD_DRIVE },
     NavItem { id: "files", path: "/files", key: "nav.files", icon: icons::FOLDER },
@@ -48,6 +48,7 @@ pub const NAV: [NavItem; 13] = [
     NavItem { id: "docker", path: "/docker", key: "nav.docker", icon: icons::CONTAINER },
     NavItem { id: "apps", path: "/apps", key: "nav.apps", icon: icons::PUZZLE },
     NavItem { id: "network", path: "/network", key: "nav.network", icon: icons::NETWORK },
+    NavItem { id: "wake", path: "/wake", key: "nav.wake", icon: icons::POWER },
     NavItem { id: "hardware", path: "/hardware", key: "nav.hardware", icon: icons::CPU },
     NavItem { id: "system", path: "/system", key: "nav.system", icon: icons::SETTINGS },
 ];
@@ -239,6 +240,7 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/network") view=pages::network::Network />
                     <Route path=path!("/network/web-access") view=pages::web_access::WebAccess />
                     <Route path=path!("/network/remote-access") view=pages::network::remote::RemoteAccess />
+                    <Route path=path!("/wake") view=pages::wake::WakePage />
                     <Route path=path!("/hardware") view=pages::hardware::Hardware />
                     <Route path=path!("/system") view=pages::system::System />
                     <Route path=path!("/system/configuration") view=pages::config::Configuration />

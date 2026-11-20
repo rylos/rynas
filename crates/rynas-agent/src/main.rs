@@ -2,7 +2,9 @@
 //!
 //! ```text
 //! rynas-agent pair <nas address> <code> [--fingerprint AA:BB…] [--yes] [--allow-http]
-//! rynas-agent run                 the service (systemd unit rynas-agent.service)
+//! rynas-agent run                 the service (systemd unit rynas-agent.service): backups,
+//!                                 the PC's facts for the NAS, and the NAS' Sleep and
+//!                                 Enable Wake-on-LAN commands
 //! rynas-agent backup              one backup now, in the foreground
 //! rynas-agent status              pairing, plan, last backup
 //! rynas-agent set-server <url>    a new NAS address, checked with the pinned CA and identity
@@ -19,6 +21,7 @@ mod backup;
 mod bootcopy;
 mod btrbk;
 mod btrfs;
+mod facts;
 mod freeze;
 // the whole GPT reader/writer of abb-restore: the btrfs method's restore will use the rest
 #[allow(dead_code)]
@@ -32,6 +35,7 @@ mod ioctl;
 mod lvm;
 mod manifest;
 mod mounts;
+mod power;
 mod probe;
 mod restore;
 mod scheduler;

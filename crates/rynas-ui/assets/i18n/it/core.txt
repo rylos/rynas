@@ -4065,6 +4065,9 @@ nev.apps.catalog_updates.body	Il catalogo delle app è stato aggiornato. Control
 nev.apps.catalog_refused.title	Catalogo online delle app rifiutato
 nev.apps.catalog_refused.body	rynas tiene il catalogo che ha. Il catalogo scaricato non ha superato la verifica: {reason}
 nev.apps.catalog_ok.title	Catalogo online delle app di nuovo verificato
+nev.wol.wake_failed.title	{device} non si è acceso
+nev.wol.wake_failed.body	Il NAS ha provato ad accenderlo per un backup programmato e non ha avuto risposta. Controlla il dispositivo nella pagina Wake-on-LAN.
+nev.wol.wake_resumed.title	{device} risponde di nuovo all'accensione
 nav.docker	Docker
 w.docker	Docker
 cfg.key.docker	Motore Docker e stack
@@ -4400,6 +4403,7 @@ dk.w.stopped_text	Docker è installato ma il motore non risponde. Apri Docker pe
 yes	Sì
 no	No
 task.apps.install	Installazione dell'app
+task.wol.wake	Accensione di un dispositivo
 task.apps.update	Aggiornamento dell'app
 task.apps.rollback	Ritorno alla versione precedente dell'app
 task.apps.uninstall	Disinstallazione dell'app
@@ -5858,3 +5862,156 @@ plan.after	Dopo
 plan.w.flex_no_recent_scrub	{subject}: nessuna pulizia dati senza errori negli ultimi {n} giorni; un errore di lettura durante i rimodellamenti è il rischio principale, quindi avvia prima una pulizia dati
 plan.e.scrub_errors	L'ultima pulizia dati ha trovato errori che non ha potuto riparare: un rimodellamento li diffonderebbe, ripristina prima i file danneggiati
 plan.e.lvm_missing	Il RAID flessibile richiede LVM: installa il pacchetto lvm2 (apt install lvm2), poi riprova
+
+# Wake-on-LAN
+nav.wake	Wake-on-LAN
+wol.title	Wake-on-LAN
+wol.subtitle	Accendi PC e altri dispositivi dalla rete e metti in sospensione i PC
+wol.add	Aggiungi dispositivo
+wol.empty	Ancora nessun dispositivo
+wol.empty_text	Wake-on-LAN accende un PC spento o in sospensione con un pacchetto inviato dal NAS sulla rete locale. Aggiungi i PC e i dispositivi che vuoi accendere da qui, anche da lontano.
+wol.empty_user	Non è ancora stato aggiunto nessun dispositivo che puoi accendere. Un amministratore può aggiungerne uno per te.
+wol.col.device	Dispositivo
+wol.col.address	Indirizzo
+wol.st.online	Acceso
+wol.st.offline	Spento
+wol.st.waking	In accensione…
+wol.st.unknown	Sconosciuto
+wol.since	da {time}
+wol.since_when	Dal {when}
+wol.agent	Agente
+wol.wake	Accendi
+wol.wake_failed	Impossibile accendere {name}
+wol.already_on	È già acceso
+wol.open_task	Mostra l'attività di questa accensione
+wol.waking_s	In accensione… {s} s
+wol.sleep.suspend	Sospendi
+wol.sleep.hibernate	Iberna
+wol.sleep_sent	Inviato a {name}: agisce al prossimo contatto, entro un minuto
+wol.sleep_busy	È in corso un backup
+wol.sleep_off	Il PC non è acceso
+wol.off_title	Spegnere {name}?
+wol.off_text	Il PC si spegne al prossimo contatto con il NAS. Quello che non è salvato va perso.
+wol.end.online	Acceso dopo {time}
+wol.end.already_on	Era già acceso
+wol.end.unconfirmed	Pacchetto inviato. Niente può confermare l'accensione: il dispositivo non ha un indirizzo o un agente da controllare.
+wol.end.send_failed	Impossibile inviare il pacchetto.
+wol.end.timeout	Nessuna risposta dopo {time}.
+wol.causes	Cause frequenti:
+wol.cause.wifi	il PC è in Wi-Fi: la maggior parte delle schede Wi-Fi non si può accendere
+wol.cause.off	Wake-on-LAN è disattivato nel firmware del PC (BIOS/UEFI) o nel suo sistema
+wol.cause.power	il PC è stato staccato dalla corrente o un risparmio energetico profondo spegne la scheda di rete
+wol.cause.subnet	il PC è su una sottorete diversa da quella del NAS
+wol.open_panel	Apri il dispositivo
+wol.warn.wireless	La scheda da accendere è Wi-Fi: la maggior parte delle schede Wi-Fi non si può accendere.
+wol.warn.unsupported	L'agente dice che la scheda cablata non supporta Wake-on-LAN.
+wol.warn.disabled	Wake-on-LAN è disattivato sulla scheda del PC.
+wol.warn.no_route	Nessuna interfaccia del NAS è sulla sottorete del dispositivo: i router non inoltrano il pacchetto.
+wol.warn.random_mac	L'indirizzo MAC sembra casuale e può cambiare: le accensioni potrebbero smettere di funzionare.
+wol.probe.agent	l'agente
+wol.probe.port	una porta TCP
+wol.probe.ping	ping
+wol.probe.neighbor	la tabella dei vicini
+wol.seen_by	Visto tramite {how}
+wol.sends_on	Invio dall'interfaccia {iface} del NAS
+wol.sends_all	Invio da tutte le interfacce del NAS
+wol.gone	Questo dispositivo non è più nell'elenco.
+wol.health	Wake-on-LAN sul PC
+wol.health.card	Scheda
+wol.health.wired	Cablata ({name})
+wol.health.wifi	Wi-Fi ({name})
+wol.health.no_card	Nessuna scheda segnalata
+wol.health.magic	Magic packet
+wol.health.supported	Supportato
+wol.health.not_supported	Non supportato
+wol.health.enabled	Stato
+wol.health.on	Attivo
+wol.health.off	Disattivo
+wol.health.unknown	Sconosciuto
+wol.health.kept	L'agente lo attiva a ogni avvio del PC.
+wol.health.agent	Versione dell'agente
+wol.health.old_agent	Questo agente è più vecchio della 0.8.26: non può sospendere il PC né attivare Wake-on-LAN. Aggiornalo sul PC.
+wol.enable	Attiva su questo PC
+wol.enable_sent	Inviato: il PC attiva Wake-on-LAN al prossimo contatto
+wol.history	Cronologia delle accensioni
+wol.no_history	Mai acceso da qui
+wol.col.by	Avviata da
+wol.col.result	Esito
+wol.col.secs	Tempo
+wol.col.ifaces	Interfacce
+wol.by_backup	Backup pianificato
+wol.h.online	Acceso
+wol.h.already_on	Già acceso
+wol.h.send_failed	Non inviato
+wol.h.unconfirmed	Non confermato
+wol.remove	Rimuovi dispositivo
+wol.remove_title	Rimuovere {name}?
+wol.remove_text	Il dispositivo esce dall'elenco e la sua cronologia delle accensioni va persa. Il dispositivo in sé non viene toccato.
+wol.removed	{name} rimosso
+wol.saved	{name} salvato
+wol.settings_title	Impostazioni di {name}
+wol.kind.desktop	PC desktop
+wol.kind.laptop	Portatile
+wol.kind.server	Server
+wol.kind.media	Lettore multimediale o TV
+wol.kind.other	Altro
+wol.f.name	Nome
+wol.f.name_missing	Inserisci un nome.
+wol.f.kind	Tipo
+wol.f.macs	Indirizzi MAC
+wol.f.macs_help	Separali con virgole: il pacchetto va a tutti, a partire dal primo.
+wol.f.macs_missing	Inserisci l'indirizzo MAC della scheda di rete del dispositivo.
+wol.f.macs_bad	Indirizzo MAC non valido: {list}
+wol.f.host	Indirizzo IP o nome host
+wol.f.host_help	Serve a controllare lo stato e a scegliere l'interfaccia. Lascialo vuoto per prenderlo dall'agente o dalla rete.
+wol.f.pc	PC con agente di backup
+wol.f.pc_none	Nessuno
+wol.f.pc_help	Con un agente lo stato arriva da lui e il PC si può sospendere da qui.
+wol.f.users	Utenti che possono accenderlo
+wol.f.users_help	Gli amministratori possono sempre. Con un agente, questi utenti possono anche sospendere il PC.
+wol.f.users_none	Solo gli amministratori possono accenderlo: non ci sono altri utenti.
+wol.f.notes	Note
+wol.f.advanced	Avanzate
+wol.f.iface	Interfaccia
+wol.f.iface_auto	Automatica
+wol.f.iface_help	Automatica: l'interfaccia sulla sottorete del dispositivo, altrimenti tutte.
+wol.f.port	Porta UDP
+wol.f.port_help	9 per la maggior parte dei dispositivi; alcuni vogliono 7 o 0.
+wol.f.timeout	Attesa del dispositivo (secondi)
+wol.f.timeout_help	Da 30 a 900.
+wol.f.ports	Porte TCP da controllare
+wol.f.ports_help	Per un dispositivo che non risponde al ping: una risposta su una di queste vuol dire che è acceso.
+wol.f.ports_bad	Inserisci numeri di porta da 1 a 65535, separati da virgole.
+wol.f.secureon	Password SecureOn
+wol.f.secureon_help	Solo se la scheda la chiede. Viaggia in chiaro: ferma solo un pacchetto casuale.
+wol.f.secureon_bad	Usa 6 byte come un indirizzo MAC (aa:bb:cc:dd:ee:ff) o 4 come un indirizzo IP.
+wol.add_intro	Scegli una scheda di rete che il NAS conosce già, o inseriscila a mano.
+wol.src	Origine
+wol.src.agents	Dagli agenti dei PC
+wol.src.network	Dalla rete
+wol.src.manual	Manuale
+wol.src.manual_text	Inserisci tu l'indirizzo MAC della scheda cablata del dispositivo.
+wol.src.manual_go	Inserisci a mano
+wol.src.no_agents	Nessun agente di PC abbinato ha ancora segnalato le sue schede.
+wol.src.no_network	Il NAS non ha visto altri dispositivi sulle sue reti.
+wol.src.network_text	Dispositivi con cui il NAS ha parlato di recente. Un dispositivo spento può mancare: accendilo una volta.
+wol.src.known	Già aggiunto
+wol.use	Usa
+wol.wired	Cablata
+wol.wifi	Wi-Fi
+wol.col.pc	PC
+wol.col.card	Scheda
+wol.col.wol	Wake-on-LAN
+wol.col.iface	Interfaccia
+wol.pc.title	Wake-on-LAN
+wol.pc.wake	Accendi il PC per i backup pianificati
+wol.pc.wake_help	Quando un backup è dovuto nelle ore consentite e il PC è spento, il NAS lo accende e il backup parte subito.
+wol.pc.after	Dopo un backup per cui è stato acceso
+wol.pc.after_help	Solo se nessuno ha usato il PC nel frattempo.
+wol.after.stay	Resta acceso
+wol.pc.not_linked	Nessun dispositivo Wake-on-LAN è collegato a questo PC.
+wol.pc.add_link	Aggiungilo nella pagina Wake-on-LAN
+wol.power	Spegni o sospendi
+wol.by_other	Un altro utente
+wol.h.timeout	Tempo scaduto
+wol.pc.add_hint	(si apre in una nuova scheda)

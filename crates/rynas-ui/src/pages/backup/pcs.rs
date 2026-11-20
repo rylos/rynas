@@ -1087,6 +1087,7 @@ fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyVie
         live.as_ref().and_then(|d| d.interval_from_ms),
         live.as_ref().map(|d| d.agent_version.as_str()).unwrap_or_default(),
     );
+    let wake = has_agent.then(|| crate::pages::wake::pc::WakeSettings::new(&plan, &p.device));
     // a subvolume left out = its mount point in the agent's excludes and no alert for it on
     // the NAS; excludes that name no known subvolume stay as written
     // (a nested subvolume without a mount: its place inside its parent, `/home/games`)
@@ -1146,6 +1147,9 @@ fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyVie
         let agent_settings = agent_body.clone().filter(|_| is_agent).map(|mut s| {
             s.description = description;
             sched.apply(&mut s.plan);
+            if let Some(w) = wake {
+                w.apply(&mut s.plan);
+            }
             let ignored = f.ignored.get_untracked();
             let mut ex: Vec<String> = other.get_untracked().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
             for (n, m) in mounts.get_value() {
@@ -1224,6 +1228,7 @@ fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyVie
             <Show when=move || agent.get()>
                 <h3 class="mini-title">{tr("pca.f.schedule")}</h3>
                 {sched.view()}
+                {wake.map(|w| w.view())}
             </Show>
         }
     });

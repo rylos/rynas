@@ -48,6 +48,8 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::files::routes())
         // the user's own preferences of the interface (sidebar layout)
         .merge(crate::proxy::own_routes())
+        // Wake-on-LAN overview, wake and sleep: rynasd authorizes per device
+        .merge(crate::proxy::wol_user_routes())
         .merge(admin)
         .layer(middleware::from_fn_with_state(
             state.clone(),

@@ -14,6 +14,7 @@ pub mod scheduler_live;
 pub mod memory;
 pub mod processes;
 pub mod network;
+pub mod wake;
 pub mod replication;
 pub mod security;
 pub mod services;

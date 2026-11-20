@@ -237,6 +237,8 @@ struct Opened {
     removable_settings: tokio::sync::watch::Receiver<rynas_api_types::removable::RemovableSettings>,
     /// Applied `docker` settings, handed over by the domain.
     docker_settings: tokio::sync::watch::Receiver<rynas_api_types::docker::DockerSettings>,
+    /// Applied `wol` devices, handed over by the domain.
+    wol_settings: tokio::sync::watch::Receiver<rynas_api_types::wol::WolConfig>,
     /// The configuration root.
     root: PathBuf,
     /// The certificate service (the local CA is shared with web access).
@@ -388,6 +390,9 @@ fn open_config(
     let (docker_domain, docker_settings) = rynasd::docker::DockerDomain::new(args.dry_system);
     let docker_tx = docker_domain.tx.clone();
     domains.push(Arc::new(docker_domain));
+    let (wol_domain, wol_settings) = rynasd::wol::WolDomain::new();
+    let wol_tx = wol_domain.tx.clone();
+    domains.push(Arc::new(wol_domain));
     // web access (W1): the proxy's certificate comes from the same local CA as :8443
     let tls = tls_service(args);
     let web_access = {
@@ -416,6 +421,7 @@ fn open_config(
         .map_err(std::io::Error::other)?;
     removable_tx.send_replace(rynasd::removable::initial_settings(&config));
     docker_tx.send_replace(rynasd::docker::initial_settings(&config));
+    wol_tx.send_replace(rynasd::wol::initial_settings(&config));
     // homes of the first layout (/srv/rynas/homes one link to <volume>/homes): one link per
     // home, so that each home can be on its own volume (the apply of `homes` does it too)
     if let Err(e) = homes.migrate(&|l| tracing::info!("homes: {l}")) {
@@ -431,6 +437,7 @@ fn open_config(
         modules,
         removable_settings,
         docker_settings,
+        wol_settings,
         root,
         tls,
         web_access,
@@ -1219,6 +1226,21 @@ fn main() -> std::io::Result<()> {
             }
             let _ = ops.pc_agent.set(Arc::downgrade(&agent));
             state.pc_agent = Some(agent);
+        }
+        // Wake-on-LAN: devices, status checks, wakes as tasks, wake for PC backups
+        // (--dry-system: checks the network, only logs the packets)
+        {
+            let wol = rynasd::wol::Wol::new(
+                ops.clone(),
+                notifier.clone(),
+                args.state_dir.clone(),
+                opened.wol_settings.clone(),
+                state.pc_agent.clone(),
+                Arc::new(rynasd::wol::SystemNet { dry: args.dry_system }),
+                rynasd::wol::system_user_exists,
+            );
+            rynasd::wol::spawn(wol.clone());
+            state.wol = Some(wol);
         }
         // the SSH service: the machine, or (--dry-system) a seeded dry root and a stand-in
         // for sshd and systemctl

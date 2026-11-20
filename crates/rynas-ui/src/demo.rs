@@ -300,6 +300,124 @@ pub fn ups_events() -> Vec<notify::Notification> {
     ]
 }
 
+/// Wake-on-LAN: a desktop with an agent that is on, a desktop that is off, one waking and a
+/// laptop on Wi-Fi.
+pub fn wol_overview() -> wol::WolOverview {
+    use pcagent::{AgentNic, SleepMode};
+    use wol::*;
+    let now = js_sys::Date::now() as u64;
+    let min = 60_000;
+    let nic = |name: &str, mac: &str, ip: &str, wireless: bool, on: Option<bool>| AgentNic {
+        name: name.into(),
+        mac: mac.into(),
+        ipv4: vec![ip.into()],
+        wireless,
+        up: true,
+        wol_supported: Some(!wireless),
+        wol_enabled: on,
+        wol_kept: on == Some(true),
+    };
+    let dev = |id: &str, name: &str, kind: WolKind, mac: &str, pc: Option<&str>| WolDevice {
+        id: id.into(),
+        name: name.into(),
+        kind,
+        macs: vec![mac.into()],
+        pc_device: pc.map(Into::into),
+        ..WolDevice::default()
+    };
+    let wake = |ago: u64, by: WolTrigger, end: WolWakeEnd, secs: Option<u32>| WolWake { at_ms: now - ago * min, by, end, secs, ifaces: vec!["eth0".into()], upid: None };
+    let user = || WolTrigger::User { name: "demo".into() };
+    let view = |device: WolDevice, status: WolStatus, ip: &str, since: u64| WolDeviceView {
+        device,
+        status,
+        probe: None,
+        since_ms: Some(now - since * min),
+        ip: Some(ip.into()),
+        send_iface: Some("eth0".into()),
+        waking: None,
+        waking_since_ms: None,
+        history: Vec::new(),
+        agent: None,
+        warnings: Vec::new(),
+        can_manage: true,
+    };
+    let mut studio = view(dev("studio", "studio", WolKind::Desktop, "a8:a1:59:3c:10:22", Some("studio")), WolStatus::Online, "192.168.50.20", 95);
+    studio.probe = Some(WolProbe::Agent);
+    studio.agent = Some(WolAgent {
+        agent_version: "0.8.26".into(),
+        nics: vec![nic("enp3s0", "a8:a1:59:3c:10:22", "192.168.50.20/24", false, Some(true))],
+        sleep: vec![SleepMode::Suspend, SleepMode::Hibernate, SleepMode::Poweroff],
+        busy: false,
+        pending: None,
+        power_commands: true,
+    });
+    studio.history = vec![
+        wake(100, WolTrigger::Backup, WolWakeEnd::Online, Some(23)),
+        wake(26 * 60, user(), WolWakeEnd::Online, Some(31)),
+        wake(3 * 1440, WolTrigger::Backup, WolWakeEnd::Timeout, None),
+    ];
+    let mut office = view(dev("office-pc", "office-pc", WolKind::Desktop, "4c:cc:6a:01:9e:7f", Some("office-pc")), WolStatus::Offline, "192.168.50.31", 14 * 60);
+    office.agent = Some(WolAgent {
+        agent_version: "0.8.26".into(),
+        nics: vec![nic("eno1", "4c:cc:6a:01:9e:7f", "192.168.50.31/24", false, Some(false))],
+        sleep: vec![SleepMode::Suspend, SleepMode::Poweroff],
+        busy: false,
+        pending: None,
+        power_commands: true,
+    });
+    office.warnings = vec![WolWarning::Disabled];
+    office.history = vec![wake(2 * 1440, user(), WolWakeEnd::Timeout, None)];
+    let mut media = view(dev("media-box", "Media box", WolKind::Media, "00:1e:06:45:aa:01", None), WolStatus::Waking, "192.168.50.40", 0);
+    media.since_ms = Some(now - 5 * 60 * min);
+    media.waking_since_ms = Some(now - 12_000);
+    media.waking = Some(String::new());
+    media.probe = None;
+    media.history = vec![wake(7 * 1440, user(), WolWakeEnd::Online, Some(18))];
+    let mut laptop = view(dev("laptop", "Laptop", WolKind::Laptop, "da:4f:21:9b:00:13", None), WolStatus::Offline, "192.168.50.52", 3 * 60);
+    laptop.warnings = vec![WolWarning::Wireless, WolWarning::RandomMac];
+    WolOverview {
+        devices: vec![studio, office, media, laptop],
+        ifaces: vec![
+            WolIface { name: "eth0".into(), ipv4: vec!["192.168.50.10/24".into()], up: true },
+            WolIface { name: "eth1".into(), ipv4: Vec::new(), up: false },
+        ],
+    }
+}
+
+/// Wake-on-LAN: what Add device finds.
+pub fn wol_candidates() -> Vec<wol::WolCandidate> {
+    use pcagent::AgentNic;
+    use wol::*;
+    let agent = |pc: &str, name: &str, mac: &str, wireless: bool, known: Option<&str>| WolCandidate {
+        mac: mac.into(),
+        ip: Some("192.168.50.60".into()),
+        name: Some(pc.into()),
+        iface: Some("eth0".into()),
+        source: WolSource::Agent,
+        pc_device: Some(pc.into()),
+        nic: Some(AgentNic { name: name.into(), mac: mac.into(), wireless, up: true, wol_supported: Some(!wireless), wol_enabled: Some(false), ..AgentNic::default() }),
+        known: known.map(Into::into),
+    };
+    let net = |ip: &str, name: Option<&str>, mac: &str, known: Option<&str>| WolCandidate {
+        mac: mac.into(),
+        ip: Some(ip.into()),
+        name: name.map(Into::into),
+        iface: Some("eth0".into()),
+        source: WolSource::Network,
+        pc_device: None,
+        nic: None,
+        known: known.map(Into::into),
+    };
+    vec![
+        agent("studio", "enp3s0", "a8:a1:59:3c:10:22", false, Some("studio")),
+        agent("workshop", "enp4s0", "b4:2e:99:70:12:5c", false, None),
+        agent("workshop", "wlp2s0", "7c:b2:7d:11:40:09", true, None),
+        net("192.168.50.20", Some("studio"), "a8:a1:59:3c:10:22", Some("studio")),
+        net("192.168.50.71", Some("printer"), "00:26:ab:5e:31:90", None),
+        net("192.168.50.88", None, "f0:2f:74:c1:07:aa", None),
+    ]
+}
+
 pub fn start(live: Live) {
     live.conn.set(Conn::Demo);
     live.set_system(system());

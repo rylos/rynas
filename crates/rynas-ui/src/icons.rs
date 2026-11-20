@@ -109,6 +109,8 @@ pub const SD_CARD: &str = r#"<path d="M7 21h10a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2h-6.
 /// Tabler `player-eject` (Lucide has no eject).
 pub const EJECT: &str = r#"<path d="M5 14h14l-7-10z"/><path d="M5 19h14"/>"#;
 pub const FILE_TEXT: &str =r#"<path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>"#;
+pub const LAPTOP: &str = r#"<path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z"/><path d="M20.054 15.987H3.946"/>"#;
+pub const TV: &str = r#"<path d="m17 2-5 5-5-5"/><rect width="20" height="15" x="2" y="7" rx="2"/>"#;
 
 /// Inline SVG icon. Decorative by default (`aria-hidden`); pass `label` when the icon is the
 /// only content of a control.

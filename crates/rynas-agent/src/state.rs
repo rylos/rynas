@@ -63,6 +63,14 @@ pub struct State {
     /// "also at every start of the PC" runs once per boot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ok_boot: Option<String>,
+    /// The network cards whose magic-packet wake the agent turns on at every start (the
+    /// NAS' `EnableWol`; drivers reset it at boot).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wol_kept: Vec<String>,
+    /// The wake by the NAS (`AgentPlan::woken_ms`) whose "after a wake" action was decided:
+    /// once per wake, also across restarts of the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_wake_done: Option<u64>,
 }
 
 pub fn dir() -> PathBuf {

@@ -1306,9 +1306,9 @@ mod tests {
         // groups
         let (k0, k3) = (b.keys[0], b.keys[3]);
         assert!(b.move_group_to(k3, k0));
-        assert_eq!(flat(&b)[0], ["network", "hardware", "system"]);
+        assert_eq!(flat(&b)[0], ["network", "wake", "hardware", "system"]);
         assert!(b.move_group(k3, 1, &all));
-        assert_eq!(flat(&b)[1], ["network", "hardware", "system"]);
+        assert_eq!(flat(&b)[1], ["network", "wake", "hardware", "system"]);
         assert!(!b.move_group(b.keys[0], -1, &all));
         assert!(b.layout.validate().is_ok());
     }

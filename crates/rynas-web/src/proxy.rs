@@ -413,6 +413,12 @@ pub fn routes() -> Router<AppState> {
         .route("/pcbackup/devices/{device}/download", get(forward))
         .route("/pcbackup/devices/{device}/zip", get(forward))
         .route("/pcbackup/devices/{device}/restore-code", post(forward))
+        // Wake-on-LAN, administrators' part (devices, discovery, enable on a PC); the part
+        // every user may use on the devices that list them is in `wol_user_routes`
+        .route("/wol/devices", post(forward))
+        .route("/wol/devices/{id}", put(forward).delete(forward))
+        .route("/wol/devices/{id}/enable", post(forward))
+        .route("/wol/discover", get(forward))
         .route("/tailscale", get(forward_client))
         .route("/tailscale/install", post(forward_client))
         .route("/tailscale/uninstall", post(forward_client))
@@ -461,6 +467,15 @@ fn passed_headers() -> [HeaderName; 9] {
 /// whatever the role, for themselves (rynasd keys them by the forwarded user).
 pub fn own_routes() -> Router<AppState> {
     Router::new().route("/prefs/sidebar", get(forward_own).put(forward_own).delete(forward_own))
+}
+
+/// Wake-on-LAN for every signed-in user: the overview, wake and sleep. rynasd shows a user
+/// who is not an administrator only the devices that list them, and refuses the others.
+pub fn wol_user_routes() -> Router<AppState> {
+    Router::new()
+        .route("/wol", get(forward))
+        .route("/wol/devices/{id}/wake", post(forward))
+        .route("/wol/devices/{id}/sleep", post(forward))
 }
 
 /// The user's own preferences: forwarded with the session's realm too, so rynasd can key

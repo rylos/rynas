@@ -195,9 +195,13 @@ pub struct WolAgent {
     pub agent_version: String,
     #[serde(default)]
     pub nics: Vec<AgentNic>,
-    /// What it can do on request (empty: an agent older than 0.8.26).
+    /// What it can do on request.
     #[serde(default)]
     pub sleep: Vec<SleepMode>,
+    /// The agent takes power commands (0.8.26 or later and it sent its facts); false: it is
+    /// older ([`WolAgent::sleep`] is then empty too).
+    #[serde(default)]
+    pub power_commands: bool,
     /// A backup is running (sleep is refused).
     #[serde(default)]
     pub busy: bool,
@@ -225,6 +229,9 @@ pub struct WolDeviceView {
     /// The running wake's task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waking: Option<String>,
+    /// When the running wake started (ms); `since_ms` stays the time of the last real status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waking_since_ms: Option<u64>,
     /// Newest first, at most 20.
     #[serde(default)]
     pub history: Vec<WolWake>,

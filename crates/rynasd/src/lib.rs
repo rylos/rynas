@@ -63,4 +63,5 @@ pub mod ups_netserver;
 pub mod ups_setup;
 pub mod ups_update;
 pub mod web_access;
+pub mod wol;
 pub mod zram;

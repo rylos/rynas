@@ -220,6 +220,38 @@ pub struct Dev {
     /// The PC's root filesystem is btrfs (from pairing, then every report).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_btrfs: Option<bool>,
+    /// What the agent last reported of the PC (network cards, sleep modes; agents from
+    /// 0.8.26, [`AGENT_FACTS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<AgentFacts>,
+    /// The NAS woke the PC for a due backup at this time ([`AgentPlan::woken_ms`]); cleared by
+    /// the next run report, ignored after [`WOKEN_FOR_MS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub woken_ms: Option<u64>,
+}
+
+/// How long a "woken by the NAS" mark stays in the plan without a run report.
+pub const WOKEN_FOR_MS: u64 = 2 * 3600 * 1000;
+
+/// The first agent version that reads [`AgentCommand::Sleep`] and [`AgentCommand::EnableWol`]
+/// (older ones fail to read a plan that holds them).
+pub const POWER_AGENT: (u32, u32, u32) = (0, 8, 26);
+
+/// The agent takes power commands: it reported its facts and its version is known and at
+/// least [`POWER_AGENT`] (an unknown version is never trusted here).
+pub fn takes_power_commands(d: &Dev) -> bool {
+    let mut p = d.agent_version.trim().trim_start_matches('v').split(['.', '-', '+']);
+    let mut num = || p.next().and_then(|x| x.parse::<u32>().ok());
+    let known = match (num(), num(), num()) {
+        (Some(a), Some(b), Some(c)) => (a, b, c) >= POWER_AGENT,
+        _ => false,
+    };
+    known && d.facts.is_some()
+}
+
+/// A power command (sleep, enable Wake-on-LAN) that the plan carries.
+fn is_power_command(c: Option<&AgentCommand>) -> bool {
+    matches!(c, Some(AgentCommand::Sleep { .. } | AgentCommand::EnableWol { .. }))
 }
 
 /// A backup group: one repository.
@@ -456,6 +488,9 @@ pub struct PcAgent {
     pub btrfs: std::sync::OnceLock<Arc<crate::pc_backup::PcBackup>>,
     /// The scheduler's history and gate ([`PcAgent::bind_scheduler`]). Set once at start.
     pub scheduler: std::sync::OnceLock<SchedulerLink>,
+    /// Per device: the last agent request (ms), every one, in memory only (the registry
+    /// records a contact at most once a minute).
+    contacts: Mutex<HashMap<String, u64>>,
 }
 
 /// What the PC agents share with the scheduler (S6).
@@ -518,7 +553,27 @@ impl PcAgent {
             changed: tokio::sync::Notify::new(),
             btrfs: std::sync::OnceLock::new(),
             scheduler: std::sync::OnceLock::new(),
+            contacts: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// An agent request of `device` arrived now (memory only, [`Self::last_contact`]).
+    pub fn note_contact(&self, device: &str) {
+        let now = now_ms();
+        let mut c = self.contacts.lock().unwrap_or_else(|p| p.into_inner());
+        match c.get_mut(device) {
+            Some(t) => *t = now,
+            None => {
+                c.insert(device.to_string(), now);
+            }
+        }
+    }
+
+    /// The PC's last contact: any agent request since rynasd started (every long poll, at
+    /// least every [`MAX_WAIT`] s while the agent runs), else the recorded one.
+    pub fn last_contact(&self, device: &str, d: &Dev) -> Option<u64> {
+        let mem = self.contacts.lock().unwrap_or_else(|p| p.into_inner()).get(device).copied();
+        mem.max(d.last_seen_ms)
     }
 
     /// Wires the scheduler (once, at start; S6 of `docs/research/scheduling.md`): the runs
@@ -791,8 +846,10 @@ impl PcAgent {
                 Some(f) => folder_ready(&f.bare_metal),
                 None => ready_of(d, kit),
             },
-            command: d.command.clone(),
-            command_at_ms: d.command_at_ms,
+            // the backup commands only (Run now, Cancel): a power command shows on the
+            // Wake-on-LAN page (`WolAgent::pending`)
+            command: d.command.clone().filter(|c| !is_power_command(Some(c))),
+            command_at_ms: d.command_at_ms.filter(|_| !is_power_command(d.command.as_ref())),
             revoked: d.revoked,
         }
     }
@@ -1179,12 +1236,14 @@ pub fn bearer(h: &HeaderMap) -> Option<String> {
 
 /// The device of an agent request's token, or 401.
 fn agent_device(svc: &PcAgent, h: &HeaderMap) -> Res<String> {
-    bearer(h)
+    let d = bearer(h)
         .and_then(|t| svc.device_of_token(&t))
         .map(|(d, _)| d)
         .ok_or_else(|| {
             Error::new(StatusCode::UNAUTHORIZED, error_codes::UNAUTHENTICATED, "unknown device token".into())
-        })
+        })?;
+    svc.note_contact(&d);
+    Ok(d)
 }
 
 pub fn router(st: PaState) -> Router {
@@ -1223,6 +1282,7 @@ pub fn router(st: PaState) -> Router {
         .route("/v1/pcbackup/agent/trust", get(trust_get))
         .route("/v1/pcbackup/agent/status", post(status_post))
         .route("/v1/pcbackup/agent/report", post(report_post))
+        .route("/v1/pcbackup/agent/facts", post(facts_post))
         .route("/v1/pcbackup/agent/btrfs/snapshots", get(btrfs_snapshots_get))
         .route("/v1/pcbackup/agent/btrfs/receive", post(btrfs_receive_post))
         .route("/v1/pcbackup/agent/restore/login", post(restore_login))
@@ -2078,7 +2138,7 @@ fn plan_at(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u64) -> Agen
         plan,
         command: d.command.clone(),
         method: d.settings.method,
-        woken_ms: None,
+        woken_ms: d.woken_ms.filter(|w| now.saturating_sub(*w) < WOKEN_FOR_MS),
     }
 }
 
@@ -2131,6 +2191,12 @@ async fn plan_get(
         if taking || d.last_seen_ms.is_none_or(|t| seen.saturating_sub(t) > 60_000) {
             svc.touch(|r| {
                 if let Some(x) = r.devices.get_mut(&device) {
+                    // a power command taken at an earlier contact is done (the agent
+                    // remembers the ids it handled; no run report follows it)
+                    if is_power_command(x.command.as_ref()) && x.command_at_ms.is_some_and(|c| x.last_seen_ms.is_some_and(|t| t >= c)) {
+                        x.command = None;
+                        x.command_at_ms = None;
+                    }
                     x.contact(seen);
                 }
             });
@@ -2179,6 +2245,139 @@ async fn report_post(
     let s2 = svc.clone();
     blocking(move || maint::report(&s2, &device, r)).await??;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Most network cards kept of a PC's facts.
+const MAX_NICS: usize = 32;
+
+/// The facts as stored: bounded lists and strings, MACs normalized (cards without a valid
+/// MAC dropped).
+pub fn bound_facts(mut f: AgentFacts) -> AgentFacts {
+    let cut = |s: &mut String, n: usize| {
+        if s.len() > n {
+            let mut c = n;
+            while !s.is_char_boundary(c) {
+                c -= 1;
+            }
+            s.truncate(c);
+        }
+    };
+    cut(&mut f.agent_version, 32);
+    f.nics.retain_mut(|n| match rynas_api_types::wol::normalize_mac(&n.mac) {
+        Some(m) => {
+            n.mac = m;
+            cut(&mut n.name, 32);
+            n.ipv4.truncate(8);
+            n.ipv4.retain(|c| c.len() <= 18);
+            true
+        }
+        None => false,
+    });
+    f.nics.truncate(MAX_NICS);
+    // a mode this NAS does not know is never offered nor sent
+    f.sleep.retain(|m| *m != SleepMode::Unknown);
+    f.sleep.dedup();
+    f.sleep.truncate(3);
+    f
+}
+
+/// `POST /v1/pcbackup/agent/facts` (device token): the PC's facts (agents from 0.8.26).
+async fn facts_post(
+    State(st): State<PaState>,
+    h: HeaderMap,
+    body: Result<Json<AgentFacts>, JsonRejection>,
+) -> Res<StatusCode> {
+    let svc = pa(&st)?;
+    let device = agent_device(&svc, &h)?;
+    let f = bound_facts(json_body(body)?);
+    let s2 = svc.clone();
+    blocking(move || s2.store_facts(&device, f)).await??;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+impl PcAgent {
+    /// Stores an agent's facts (and its version, its root filesystem).
+    pub fn store_facts(&self, device: &str, f: AgentFacts) -> Res<()> {
+        self.edit(|r| {
+            let d = r.devices.get_mut(device).ok_or_else(|| not_found(device))?;
+            if !f.agent_version.is_empty() {
+                d.agent_version = f.agent_version.clone();
+            }
+            if f.root_btrfs.is_some() {
+                d.root_btrfs = f.root_btrfs;
+            }
+            d.facts = Some(f);
+            Ok(())
+        })
+    }
+
+    /// The PC reported progress of a run in the last two minutes (a backup runs).
+    pub fn running(&self, device: &str) -> bool {
+        self.progress
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(device)
+            .is_some_and(|(p, _)| now_ms().saturating_sub(p.updated_ms) < 120_000)
+    }
+
+    /// Queues a power command (`make` gets the command's id) for the agent's next poll:
+    /// 404 unknown PC, 409 `conflict` when revoked or the agent is older than
+    /// [`POWER_AGENT`], 409 `busy` while a backup runs.
+    pub fn power_command(&self, device: &str, make: impl FnOnce(u64) -> AgentCommand) -> Res<()> {
+        let busy = self.running(device);
+        self.edit(|r| {
+            // (a refusal drops the whole edit, the counter too)
+            let seq = r.seq + 1;
+            r.seq = seq;
+            let d = r.devices.get_mut(device).ok_or_else(|| not_found(device))?;
+            if d.revoked {
+                return Err(Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, "the PC is revoked".into()));
+            }
+            if !takes_power_commands(d) {
+                return Err(Error::new(
+                    StatusCode::CONFLICT,
+                    error_codes::CONFLICT,
+                    format!("the agent of {device} is older than 0.8.26: update it on the PC"),
+                ));
+            }
+            let backing_up = busy || matches!(d.command, Some(AgentCommand::BackupNow { .. })) && d.command_at_ms.is_some_and(|c| d.last_seen_ms.is_none_or(|t| t < c));
+            if backing_up {
+                return Err(Error::new(StatusCode::CONFLICT, error_codes::BUSY, format!("a backup of {device} is running")));
+            }
+            d.command = Some(make(seq));
+            d.command_at_ms = Some(now_ms());
+            d.rev += 1;
+            Ok(())
+        })?;
+        self.changed.notify_waiters();
+        Ok(())
+    }
+
+    /// Marks the PC as woken by the NAS for a due backup ([`AgentPlan::woken_ms`]).
+    pub fn set_woken(&self, device: &str, at_ms: u64) -> Res<()> {
+        self.edit(|r| {
+            let d = r.devices.get_mut(device).ok_or_else(|| not_found(device))?;
+            d.woken_ms = Some(at_ms);
+            d.rev += 1;
+            Ok(())
+        })?;
+        self.changed.notify_waiters();
+        Ok(())
+    }
+}
+
+/// The scheduled backup due now inside its allowed window, as the device's agent counts it
+/// (wake for backups): its due time, or `None` (not due, outside the window, paused,
+/// revoked, Pause all).
+pub fn wake_due(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u64) -> Option<u64> {
+    let (s, spec) = followed(d, paused_all, tz, now)?;
+    let due = rynas_schedule::window::agent_due(spec.as_ref(), u64::from(s.every_h.max(1)) * 3_600_000, tz, last_ok(d), 0, 0, None);
+    if due == u64::MAX || due > now {
+        return None;
+    }
+    let start = rynas_schedule::window::start_at(s.window.as_deref(), tz, due)?;
+    let open = s.window.as_deref().is_none_or(|w| rynas_schedule::window::is_open(w, tz, now));
+    (start <= now && open).then_some(due)
 }
 
 /// The device of an agent request of the btrfs method (token, then [`PcMethod::Btrfs`]) and
@@ -2606,6 +2805,68 @@ mod tests {
         assert_eq!(state_of(&d, false, false, 101 * h), PcState::Failed);
         assert_eq!(state_of(&d, false, true, 173 * h), PcState::Failed);
         assert!(!ready_of(&d, None).ready);
+    }
+
+    #[test]
+    fn power_commands_only_for_new_agents() {
+        let facts = Some(AgentFacts { agent_version: "0.8.26".into(), ..Default::default() });
+        let d = |v: &str, f: Option<AgentFacts>| Dev { agent_version: v.into(), facts: f, ..Default::default() };
+        assert!(takes_power_commands(&d("0.8.26", facts.clone())));
+        assert!(takes_power_commands(&d("v0.9.0", facts.clone())));
+        assert!(!takes_power_commands(&d("0.8.25", facts.clone())));
+        // an unknown version is never trusted with a command it may not parse
+        assert!(!takes_power_commands(&d("", facts.clone())));
+        assert!(!takes_power_commands(&d("dev", facts)));
+        // no facts: an agent that never said what it can do
+        assert!(!takes_power_commands(&d("0.8.26", None)));
+        assert!(is_power_command(Some(&AgentCommand::Sleep { id: 1, mode: SleepMode::Suspend })));
+        assert!(!is_power_command(Some(&AgentCommand::BackupNow { id: 1 })));
+    }
+
+    #[test]
+    fn facts_are_bounded() {
+        let f = bound_facts(AgentFacts {
+            agent_version: "x".repeat(100),
+            nics: (0..40)
+                .map(|i| AgentNic { name: format!("eth{i}"), mac: format!("AA:BB:CC:DD:EE:{i:02X}"), ..Default::default() })
+                .chain([AgentNic { name: "bad".into(), mac: "ff:ff:ff:ff:ff:ff".into(), ..Default::default() }])
+                .collect(),
+            sleep: vec![SleepMode::Suspend, SleepMode::Suspend, SleepMode::Unknown, SleepMode::Poweroff],
+            ..Default::default()
+        });
+        assert_eq!(f.agent_version.len(), 32);
+        assert_eq!(f.nics.len(), MAX_NICS);
+        assert_eq!(f.nics[1].mac, "aa:bb:cc:dd:ee:01");
+        assert!(f.nics.iter().all(|n| n.name != "bad"));
+        assert_eq!(f.sleep, [SleepMode::Suspend, SleepMode::Poweroff]);
+    }
+
+    #[test]
+    fn woken_plan_and_due_wake() {
+        let tz = jiff::tz::TimeZone::UTC;
+        let t = 1_800_000_000_000u64;
+        let h = 3_600_000;
+        let mut d = Dev { agent_version: "0.8.26".into(), last_ok_ms: Some(t), last_ok_start_ms: Some(t), ..Default::default() };
+        d.settings.plan.interval_hours = 24;
+        // not due yet, then due
+        assert_eq!(wake_due(&d, false, &tz, t + h), None);
+        assert_eq!(wake_due(&d, false, &tz, t + 25 * h), Some(t + 24 * h));
+        // paused (also by Pause all) or revoked: never
+        assert_eq!(wake_due(&d, true, &tz, t + 25 * h), None);
+        d.revoked = true;
+        assert_eq!(wake_due(&d, false, &tz, t + 25 * h), None);
+        d.revoked = false;
+        // a window closed now (open when the backup fell due): not now
+        let now_dt = jiff::Timestamp::from_millisecond((t + 25 * h) as i64).unwrap().to_zoned(tz.clone()).datetime();
+        let cell = rynas_schedule::window::cell_of(&now_dt);
+        d.settings.plan.window = Some((0..168).map(|c| if c == cell { '0' } else { '1' }).collect());
+        assert_eq!(wake_due(&d, false, &tz, t + 25 * h), None);
+        d.settings.plan.window = Some("1".repeat(168));
+        assert_eq!(wake_due(&d, false, &tz, t + 25 * h), Some(t + 24 * h));
+        // the plan says the NAS woke the PC, for two hours at most
+        d.woken_ms = Some(t + 25 * h);
+        assert_eq!(plan_at(&d, false, &tz, t + 26 * h).woken_ms, Some(t + 25 * h));
+        assert_eq!(plan_at(&d, false, &tz, t + 28 * h).woken_ms, None);
     }
 
     const H: u64 = 3_600_000;

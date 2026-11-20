@@ -30,7 +30,7 @@ pub const SIDEBAR_DEFAULT: &[&[&str]] = &[
     &["dashboard"],
     &["storage", "files", "shares", "snapshots", "backup"],
     &["users", "services", "docker", "apps"],
-    &["network", "hardware", "system"],
+    &["network", "wake", "hardware", "system"],
 ];
 
 /// The icons a pinned page may use (names of the interface's icon set).
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn merge_places_new_entries_by_default() {
-        // a layout saved by an older release: no "snapshots" nor "apps", reordered, and
+        // a layout saved by an older release: no "snapshots", "apps" nor "wake", reordered, and
         // "files" hidden
         let saved = SidebarLayout {
             version: 1,
@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(
             m.groups,
             ids(&[
-                &["network", "hardware", "system"],
+                &["network", "wake", "hardware", "system"],
                 &["dashboard"],
                 &["backup", "storage", "files", "shares", "snapshots"],
                 &["users", "services", "docker", "apps"],

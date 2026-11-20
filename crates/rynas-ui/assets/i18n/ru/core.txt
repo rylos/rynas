@@ -4111,6 +4111,9 @@ nev.apps.catalog_updates.body	Каталог приложений обновлё
 nev.apps.catalog_refused.title	Онлайн-каталог приложений отклонён
 nev.apps.catalog_refused.body	rynas сохраняет имеющийся каталог. Загруженный каталог не прошёл проверку: {reason}
 nev.apps.catalog_ok.title	Онлайн-каталог приложений снова прошёл проверку
+nev.wol.wake_failed.title	{device} не включился
+nev.wol.wake_failed.body	NAS попытался включить его для запланированного резервного копирования и не получил ответа. Проверьте устройство на странице Wake-on-LAN.
+nev.wol.wake_resumed.title	{device} снова включается
 nav.docker	Docker
 w.docker	Docker
 cfg.key.docker	Движок Docker и стеки
@@ -4446,6 +4449,7 @@ dk.w.stopped_text	Docker установлен, но его движок не о�
 yes	Да
 no	Нет
 task.apps.install	Установка приложения
+task.wol.wake	Включение устройства
 task.apps.update	Обновление приложения
 task.apps.rollback	Откат приложения
 task.apps.uninstall	Удаление приложения
@@ -5916,3 +5920,156 @@ plan.after	После
 plan.w.flex_no_recent_scrub	{subject}: за последние дни ({n}) не было проверки без ошибок; ошибка чтения во время перестроек — главный риск, поэтому сначала запустите проверку
 plan.e.scrub_errors	Последняя проверка нашла ошибки, которые не удалось исправить: перестройка распространит их, сначала восстановите повреждённые файлы
 plan.e.lvm_missing	Для гибкого RAID нужен LVM: установите пакет lvm2 (apt install lvm2) и повторите попытку
+
+# Wake-on-LAN
+nav.wake	Wake-on-LAN
+wol.title	Wake-on-LAN
+wol.subtitle	Включение ПК и других устройств по сети и перевод ПК в сон
+wol.add	Добавить устройство
+wol.empty	Устройств пока нет
+wol.empty_text	Wake-on-LAN включает выключенный или спящий ПК пакетом, который NAS отправляет в локальную сеть. Добавьте ПК и устройства, которые хотите включать отсюда, в том числе издалека.
+wol.empty_user	Устройств, которые вы можете включать, пока нет. Администратор может добавить их для вас.
+wol.col.device	Устройство
+wol.col.address	Адрес
+wol.st.online	В сети
+wol.st.offline	Выключено
+wol.st.waking	Включается…
+wol.st.unknown	Неизвестно
+wol.since	уже {time}
+wol.since_when	С {when}
+wol.agent	Агент
+wol.wake	Включить
+wol.wake_failed	Не удалось включить {name}
+wol.already_on	Уже включено
+wol.open_task	Показать задачу этого включения
+wol.waking_s	Включается… {s} с
+wol.sleep.suspend	Спящий режим
+wol.sleep.hibernate	Гибернация
+wol.sleep_sent	Отправлено на {name}: выполнится при следующей связи, в течение минуты
+wol.sleep_busy	Идёт резервное копирование
+wol.sleep_off	ПК не включён
+wol.off_title	Выключить {name}?
+wol.off_text	ПК выключится при следующей связи с NAS. Всё несохранённое на нём будет потеряно.
+wol.end.online	В сети через {time}
+wol.end.already_on	Устройство уже было включено
+wol.end.unconfirmed	Пакет отправлен. Подтвердить включение нечем: у устройства нет адреса или агента для проверки.
+wol.end.send_failed	Не удалось отправить пакет.
+wol.end.timeout	Нет ответа через {time}.
+wol.causes	Частые причины:
+wol.cause.wifi	ПК подключён по Wi-Fi: большинство карт Wi-Fi нельзя включить по сети
+wol.cause.off	Wake-on-LAN выключен в прошивке ПК (BIOS/UEFI) или в его системе
+wol.cause.power	ПК был полностью обесточен, или глубокое энергосбережение отключает сетевую карту
+wol.cause.subnet	ПК находится в другой подсети, чем NAS
+wol.open_panel	Открыть устройство
+wol.warn.wireless	Карта для включения — Wi-Fi: большинство карт Wi-Fi нельзя включить по сети.
+wol.warn.unsupported	Агент сообщает, что проводная карта не поддерживает Wake-on-LAN.
+wol.warn.disabled	Wake-on-LAN выключен на карте ПК.
+wol.warn.no_route	Ни один интерфейс NAS не находится в подсети устройства: маршрутизаторы не пересылают пакет.
+wol.warn.random_mac	MAC-адрес похож на случайный и может меняться: включение может перестать работать.
+wol.probe.agent	агент
+wol.probe.port	TCP-порт
+wol.probe.ping	ping
+wol.probe.neighbor	таблица соседей
+wol.seen_by	Определено через: {how}
+wol.sends_on	Отправка с интерфейса {iface} NAS
+wol.sends_all	Отправка со всех интерфейсов NAS
+wol.gone	Этого устройства больше нет в списке.
+wol.health	Wake-on-LAN на ПК
+wol.health.card	Карта
+wol.health.wired	Проводная ({name})
+wol.health.wifi	Wi-Fi ({name})
+wol.health.no_card	Карты не сообщены
+wol.health.magic	Magic packet
+wol.health.supported	Поддерживается
+wol.health.not_supported	Не поддерживается
+wol.health.enabled	Состояние
+wol.health.on	Вкл.
+wol.health.off	Выкл.
+wol.health.unknown	Неизвестно
+wol.health.kept	Агент включает его при каждом запуске ПК.
+wol.health.agent	Версия агента
+wol.health.old_agent	Этот агент старше 0.8.26: он не может переводить ПК в сон или включать Wake-on-LAN. Обновите его на ПК.
+wol.enable	Включить на этом ПК
+wol.enable_sent	Отправлено: ПК включит Wake-on-LAN при следующей связи
+wol.history	История включений
+wol.no_history	Ещё не включалось
+wol.col.by	Кем
+wol.col.result	Результат
+wol.col.secs	Время
+wol.col.ifaces	Интерфейсы
+wol.by_backup	Плановое резервное копирование
+wol.h.online	В сети
+wol.h.already_on	Уже включено
+wol.h.send_failed	Не отправлено
+wol.h.unconfirmed	Не подтверждено
+wol.remove	Удалить устройство из списка
+wol.remove_title	Удалить {name} из списка?
+wol.remove_text	Устройство исчезнет из списка, а его история включений будет потеряна. Само устройство не затрагивается.
+wol.removed	{name} удалено из списка
+wol.saved	{name} сохранено
+wol.settings_title	Настройки {name}
+wol.kind.desktop	Настольный ПК
+wol.kind.laptop	Ноутбук
+wol.kind.server	Сервер
+wol.kind.media	Медиаплеер или ТВ
+wol.kind.other	Другое
+wol.f.name	Имя
+wol.f.name_missing	Введите имя.
+wol.f.kind	Тип
+wol.f.macs	MAC-адреса
+wol.f.macs_help	Несколько адресов разделяйте запятыми; пакет получает каждый, первый — первым.
+wol.f.macs_missing	Введите MAC-адрес сетевой карты устройства.
+wol.f.macs_bad	Неверный MAC-адрес: {list}
+wol.f.host	IP-адрес или имя хоста
+wol.f.host_help	Нужен для проверки состояния и выбора интерфейса. Оставьте пустым, чтобы брать его у агента или из сети.
+wol.f.pc	ПК с агентом резервного копирования
+wol.f.pc_none	Нет
+wol.f.pc_help	С агентом состояние берётся от него, и ПК можно перевести в сон отсюда.
+wol.f.users	Пользователи, которые могут его включать
+wol.f.users_help	Администраторы могут всегда. С агентом эти пользователи также могут переводить ПК в сон.
+wol.f.users_none	Включать его могут только администраторы: других пользователей нет.
+wol.f.notes	Заметки
+wol.f.advanced	Дополнительно
+wol.f.iface	Интерфейс
+wol.f.iface_auto	Автоматически
+wol.f.iface_help	Автоматически: интерфейс в подсети устройства, иначе все интерфейсы.
+wol.f.port	UDP-порт
+wol.f.port_help	9 для большинства устройств; некоторым нужен 7 или 0.
+wol.f.timeout	Ожидание устройства (секунды)
+wol.f.timeout_help	От 30 до 900.
+wol.f.ports	TCP-порты для проверки
+wol.f.ports_help	Для устройства, не отвечающего на ping: ответ на одном из них означает, что оно включено.
+wol.f.ports_bad	Введите номера портов от 1 до 65535 через запятую.
+wol.f.secureon	Пароль SecureOn
+wol.f.secureon_help	Только если карта его требует. Передаётся открытым текстом: защищает лишь от случайного пакета.
+wol.f.secureon_bad	Используйте 6 байт как MAC-адрес (aa:bb:cc:dd:ee:ff) или 4 как IP-адрес.
+wol.add_intro	Выберите сетевую карту, которую NAS уже знает, или введите её вручную.
+wol.src	Источник
+wol.src.agents	От агентов ПК
+wol.src.network	Из сети
+wol.src.manual	Вручную
+wol.src.manual_text	Введите MAC-адрес проводной карты устройства самостоятельно.
+wol.src.manual_go	Ввести вручную
+wol.src.no_agents	Ни один сопряжённый агент ПК ещё не сообщил свои карты.
+wol.src.no_network	NAS не видел других устройств в своих сетях.
+wol.src.network_text	Устройства, с которыми NAS недавно общался. Выключенного устройства может не быть: включите его один раз.
+wol.src.known	Уже добавлено
+wol.use	Выбрать
+wol.wired	Проводная
+wol.wifi	Wi-Fi
+wol.col.pc	ПК
+wol.col.card	Карта
+wol.col.wol	Wake-on-LAN
+wol.col.iface	Интерфейс
+wol.pc.title	Wake-on-LAN
+wol.pc.wake	Включать ПК для плановых резервных копий
+wol.pc.wake_help	Когда резервная копия должна начаться в разрешённые часы, а ПК выключен, NAS включает его, и копирование начинается сразу.
+wol.pc.after	После резервной копии, ради которой его включили
+wol.pc.after_help	Только если за это время ПК никто не пользовался.
+wol.after.stay	Оставить включённым
+wol.pc.not_linked	К этому ПК не привязано устройство Wake-on-LAN.
+wol.pc.add_link	Добавить его на странице Wake-on-LAN
+wol.power	Питание
+wol.by_other	Другой пользователь
+wol.h.timeout	Время истекло
+wol.pc.add_hint	(откроется в новой вкладке)

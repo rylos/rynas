@@ -1060,6 +1060,7 @@ schema 2 added the `code` and `body_format` columns.
 | `apps.catalog_updates` | `apps`, `serial` | App updates available: {apps} (a new online catalogue, `../phase2/docker-apps.md` §6.12) |
 | `apps.catalog_refused` / `apps.catalog_ok` | `reason`, `code` (refused) | Online app catalogue refused / verified again |
 | `web_access.cert_expires_soon` / `web_access.cert_renewal_overdue` / `web_access.cert_failed` / `web_access.cert_expired` / `web_access.cert_ok` | `name`, `cert` | The certificate for {name} expires soon / is not being renewed / could not be obtained / has expired / is fine again (`../phase2/docker-apps.md` §5.4) |
+| `wol.wake_failed` / `wol.wake_resumed` | `device` (name), `id` | {device} did not wake up (a wake nobody watched: wake for backups; category backup, warning) / {device} wakes up again (`../research/wake-on-lan.md`) |
 | `pcbackup.quiet` | `device`, `hours`, `alert_hours` | Nothing received from {device} for {hours} hours (btrbk folders, info: the NAS cannot tell a PC that is off) |
 | `pcbackup.late` / `pcbackup.resumed` | `device`, `days` (empty under 48 h), `hours`, `alert_hours`, `alert_days` (late) | No backup from {device} for {days} days (or {hours} hours) / Backups from {device} arrive again (`../research/pc-backup.md` §10, §11.8) |
 | `pcbackup.subvolume_late` / `pcbackup.subvolume_resumed` | `device`, `subject` (btrbk name) | {subject} of {device} is not backed up any more / is backed up again (§11.8) |
@@ -1954,3 +1955,64 @@ method `btrbk` {snapshot_dir, subvolumes [{name, path, mount}], boot_copies? [{m
 bytes, files, signature, skipped?, stale?, error?}], agent? (sent by rynas-agent over HTTPS)}
 (written before every btrfs-method run by the agent, or by `rynas-agent manifest` from `btrbk.conf` on
 btrbk PCs; `captured` of each btrfs subvolume = sent). A reader refuses an unknown `format`.
+
+## API v1: Wake-on-LAN
+Module `rynasd::wol` (`send`: magic packet, interface choice, sockets; `probe`: status
+checks), types in `rynas_api_types::wol` (agent side `rynas_api_types::pcagent`), design and
+research in `../research/wake-on-lan.md`. The devices are the config key `wol` (`WolConfig`):
+the routes write it **directly** (`Config::apply_update`, one revision per change, rollback
+and export like every domain; no pending change). Administrators manage devices, discover
+and enable; other users see, wake and put to sleep only the devices that list them in
+`users` (an unknown or hidden device is 404 for them). rynas-web forwards `GET /wol`,
+`…/wake` and `…/sleep` for every signed-in user (rynasd authorizes per device), the rest
+behind `require_admin`. Runtime state (status, last address, history ≤ 20 per device) in
+`<state>/wol/state.json`. No new error code.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/v1/wol` | — | `WolOverview` {devices: [`WolDeviceView` {device `WolDevice`, status online\|offline\|waking\|unknown, probe? agent\|port\|ping\|neighbor, since_ms?, ip?, send_iface? (none: all), waking? (UPID), history [`WolWake` {at_ms, by {kind user, name}\|{kind backup}, end online\|already_on\|timeout\|send_failed\|unconfirmed, secs?, ifaces, upid?}], agent? `WolAgent` {agent_version, nics [`AgentNic`], sleep [suspend\|hibernate\|poweroff] (empty below 0.8.26), busy, pending? (suspend\|hibernate\|poweroff\|enable_wol)}, warnings [wireless\|unsupported\|disabled\|no_route\|random_mac], can_manage}], ifaces [`WolIface` {name, ipv4, up}] (administrators only)}; reading it checks every 5 s for 30 s |
+| POST | `/api/v1/wol/devices` | `WolDevice` {id? (made from the name when empty), name (1–64), kind desktop\|laptop\|server\|media\|other, macs (1–8, normalized, unicast, not the NAS's, not another device's), host? (IPv4 or name), iface?, port (9), secureon? (`aa:bb:cc:dd:ee:ff` or `a.b.c.d`), ports (≤ 16 TCP), wake_timeout_s (30–900, 180), pc_device? (a paired PC, one device per PC), users (existing users), notes (≤ 1000)} | 200 the stored `WolDevice`; 400 `invalid_value` with `field`; 409 `already_exists` for a taken id; 403 `forbidden` |
+| PUT | `/api/v1/wol/devices/{id}` | `WolDevice` (the id of the path wins) | 200 the stored `WolDevice`; 404 |
+| DELETE | `/api/v1/wol/devices/{id}` | — | 204; 404 |
+| POST | `/api/v1/wol/devices/{id}/wake` | — | 200 `WolWakeStarted` {upid, joined (a wake of the device was already running: its task)}. Task `wol.wake`: lines "Sent on eth0 (3×)", "Network up after 14 s, waiting for the agent", "Online after 23 s"; an already-on device ends at once (already_on); no address and no agent: unconfirmed; timeout and send failure fail the task |
+| POST | `/api/v1/wol/devices/{id}/sleep` | `WolSleepRequest` {mode suspend\|hibernate\|poweroff} | 202 (a command in the agent's plan); 409 `conflict` without a paired agent, an agent below 0.8.26 or a mode it did not report; 409 `busy` while a backup runs |
+| POST | `/api/v1/wol/devices/{id}/enable` | — | 202 (`EnableWol` with the PC's wired cards that support magic packets); 409 `conflict` as for sleep or without such a card; administrators |
+| GET | `/api/v1/wol/discover` | — | `[WolCandidate]` {mac, ip?, name? (agent host name or reverse DNS), iface?, source agent\|network, pc_device?, nic?, known? (the device holding the MAC)}: every paired agent's cards, then the neighbor table; never the NAS's own MACs; administrators |
+| POST | `/api/v1/pcbackup/agent/facts` | `AgentFacts` {agent_version, root_btrfs?, nics [`AgentNic` {name, mac, ipv4, wireless, up, wol_supported?, wol_enabled?, wol_kept}] (≤ 32), sleep} (device token) | 204; stored with the PC (`Dev.facts`, also its version and root filesystem); 401 unknown token |
+
+Sending: on the fixed interface, else the up interface whose IPv4 subnet holds the device's
+address (the agent's card first, then `host`, the neighbor table by MAC, the last one seen),
+else every up, broadcast-capable interface but loopback, bond and bridge ports (their master
+is used), `tailscale*`, `docker*`, `br-*`, `veth*` and tunnels: per interface a raw frame
+(EtherType `0x0842`, to `ff:ff:ff:ff:ff:ff`) and a UDP datagram to the subnet broadcast on the
+device's port (`SO_BINDTODEVICE`; the interface address whose subnet holds the device's IP), to every MAC, three times a second apart; again after 30 s
+and 60 s while nothing answers. A wake always sends, also to a device that looks on (it may
+have just gone to sleep), and then ends already_on when its agent's requests or its own
+answer say so. `--dry-system` only logs packets. Address: the neighbor table by the device's
+MAC first, then the agent's card, `host` (resolved, cached 60 s), the last confirmed address
+(forgotten after 7 days). Status: the agent's requests (every one noted in memory; within
+90 s = on, a long poll lasts up to 55 s), any TCP port of `ports` (500 ms), `ping -c1 -W1`,
+a `REACHABLE` neighbor entry; a port or ping answer from an address on a NAS subnet counts
+only when the neighbor entry it leaves holds one of the device's MACs (an old address now
+used by another host is not the device). Every 60 s, every 5 s while a caller who sees a
+device watches, every second during a wake (the wake ends Online on the agent's first
+request after it started, or on the device's own answer for a device without agent). A
+cancelled wake is recorded as timeout and never notified. Users who are not administrators
+get each device without `secureon`, `users` and `notes`, and other users' names in the
+history empty (`{kind user, name ""}`: "another user"). Power commands (`Sleep`,
+`EnableWol`) go only to agents that reported facts with a version ≥ 0.8.26 (unknown sleep
+modes are dropped from the facts and refused); the PC backup page's `command` shows only
+Run now and Cancel; a command taken at an earlier contact leaves the plan.
+
+**Wake for backups** (`PcPlan.wake_for_backup`, a linked device): every minute, a PC whose
+scheduled backup is due now inside its allowed window (as its agent counts it), not paused,
+revoked or running, and off (checked status not online and no agent request for 90 s) is woken
+at most once a calendar day and 30 min after its previous wake for a backup (a failed wake is
+tried again the next day; task by `rynas`, history `{kind backup}`); its plan carries `woken_ms` until the
+next run report or for 2 h. A failed wake for a backup raises `wol.wake_failed` (backup,
+warning); the next good wake of the device, its removal or turning wake for backups off
+resolves it (`wol.wake_resumed`).
+
+**Downgrade**: rynasd before 0.8.26 cannot read a PC registry (`<state>/pc-agent/registry.json`)
+that holds a `Sleep` or `EnableWol` command (an unknown variant): wait until the PCs have taken
+their commands, or remove the `command` of those PCs, before going back.

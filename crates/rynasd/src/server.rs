@@ -91,6 +91,8 @@ pub struct DaemonState {
     pub pc_backup: crate::pc_backup::PbState,
     /// PC backup, file method with the agent ([`crate::pc_agent`]).
     pub pc_agent: crate::pc_agent::PaState,
+    /// Wake-on-LAN and device power ([`crate::wol`]); `None` answers 503.
+    pub wol: crate::wol::WolState,
     /// The SSH service ([`crate::ssh`]).
     pub ssh: crate::ssh::SshHandle,
     /// Backups to another NAS, a disk or the cloud; `None` answers 503 on its endpoints.
@@ -147,6 +149,7 @@ impl DaemonState {
             clock: None,
             pc_backup: None,
             pc_agent: None,
+            wol: None,
             ssh: None,
             restic: None,
             dedup: None,
@@ -242,6 +245,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::clock::router(state.clock))
         .merge(crate::pc_backup::router(state.pc_backup))
         .merge(crate::pc_agent::router(state.pc_agent))
+        .merge(crate::wol::router(state.wol))
         .merge(crate::ssh::router(state.ssh))
         .merge(crate::restic_backup::router(state.restic))
         .merge(crate::dedup::router(state.dedup))

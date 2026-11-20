@@ -2452,3 +2452,36 @@ body:has(.sysp-overlay), body:has(.sysp-overlay) .main { overflow: hidden; }
   .app { height: auto; display: block; }
   .main { overflow: visible; }
 }
+
+/* Wake-on-LAN (pages/wake): the device list, the wake progress under a row, the Sleep menu */
+.wol-name { display: flex; align-items: flex-start; gap: var(--s-2); min-width: 0; }
+.wol-kind { display: inline-flex; flex: none; color: var(--text-subtle); padding-top: var(--s-half); }
+.wol-warn { display: inline-flex; color: var(--warning); }
+.wol-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--s-2); }
+.wol-wake { min-width: 96px; justify-content: center; }
+.wol-wake .btn-spinner { flex: none; }
+.wol-wake-busy { cursor: default; }
+.wol-menu { min-width: 180px; text-align: left; }
+.wol-line-row:hover { background: none; }
+.wol-line-row td { height: auto; padding-top: 0; }
+.wol-progress { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); margin: 0; min-width: 0; }
+.wol-progress .btn-spinner { color: var(--accent); flex: none; }
+.wol-progress .icon-btn { margin-left: auto; }
+.wol-task-line { overflow-wrap: anywhere; min-width: 0; }
+.wol-outcome .notice-text { display: flex; align-items: flex-start; gap: var(--s-2); }
+.wol-outcome .notice-text > :first-child { flex: 1; min-width: 0; }
+.wol-causes { margin: 0; padding-left: var(--s-4); }
+.wol-open { margin-left: 0; padding: 0; }
+.wol-users { margin: 0; padding: 0; border: 0; min-width: 0; }
+.wol-users legend { padding: 0; margin-bottom: var(--s-1); }
+.wol-notes { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-muted); }
+.table td .wol-mac { white-space: nowrap; overflow-wrap: normal; }
+@media (min-width: 768px) {
+  .wol-actions { flex-wrap: nowrap; }
+}
+@media (max-width: 767px) {
+  .wol-line-row td::before { display: none; }
+  .wol-line-row td { display: block; }
+  .wol-table td.actions { justify-content: flex-end; }
+  .wol-table .wol-name { text-align: left; }
+}
