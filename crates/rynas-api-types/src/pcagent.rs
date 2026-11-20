@@ -139,7 +139,89 @@ pub struct PcPlan {
     /// runs). Off by default. Agents older than 0.8.21 ignore it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub at_boot: bool,
+    /// The NAS wakes the PC (its linked Wake-on-LAN device, `crate::wol`) when a scheduled
+    /// backup is due inside the window and the PC is off; the agent then starts it at once.
+    /// Off by default; ignored without a linked device.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wake_for_backup: bool,
+    /// What the agent does after a backup the NAS woke the PC for, when nobody used the PC
+    /// meanwhile. Agents older than 0.8.26 ignore it.
+    #[serde(default, skip_serializing_if = "AfterWake::is_stay")]
+    pub after_wake: AfterWake,
 }
+
+/// After a backup the NAS woke the PC for ([`PcPlan::after_wake`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterWake {
+    /// Leave the PC on.
+    #[default]
+    Stay,
+    Suspend,
+    Poweroff,
+}
+
+impl AfterWake {
+    pub fn is_stay(&self) -> bool {
+        *self == AfterWake::Stay
+    }
+}
+
+/// What an agent can do to its PC's power on request ([`AgentCommand::Sleep`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SleepMode {
+    Suspend,
+    Hibernate,
+    Poweroff,
+}
+
+/// One network card of the PC, as its agent reports it ([`AgentFacts`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentNic {
+    /// Kernel name (`enp3s0`).
+    pub name: String,
+    /// `aa:bb:cc:dd:ee:ff`, lower case.
+    pub mac: String,
+    /// IPv4 addresses with prefix (`192.0.2.20/24`).
+    #[serde(default)]
+    pub ipv4: Vec<String>,
+    /// Wi-Fi card (`/sys/class/net/<if>/wireless` or `phy80211`).
+    #[serde(default)]
+    pub wireless: bool,
+    /// Carrier up.
+    #[serde(default)]
+    pub up: bool,
+    /// `ethtool`: the card supports magic packets (`Supports Wake-on` holds `g`); `None`
+    /// unknown (no ethtool, virtual card).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wol_supported: Option<bool>,
+    /// `ethtool`: `Wake-on` holds `g`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wol_enabled: Option<bool>,
+    /// The agent turns magic-packet wake on for this card at every start
+    /// ([`AgentCommand::EnableWol`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wol_kept: bool,
+}
+
+/// `POST` [`AGENT_FACTS`] (device token): the PC's facts, sent by agents from 0.8.26 at start
+/// and every 6 hours when they changed. An older NAS answers 404: the agent stops sending
+/// until it restarts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentFacts {
+    pub agent_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_btrfs: Option<bool>,
+    /// Physical cards (no loopback, bridges, tunnels, containers).
+    #[serde(default)]
+    pub nics: Vec<AgentNic>,
+    /// What [`AgentCommand::Sleep`] can do here (`systemctl can-suspend` & co.).
+    #[serde(default)]
+    pub sleep: Vec<SleepMode>,
+}
+
+pub const AGENT_FACTS: &str = "/api/v1/pcbackup/agent/facts";
 
 fn default_freeze_max() -> u32 {
     60
@@ -157,6 +239,8 @@ impl Default for PcPlan {
             window: None,
             calendar: None,
             at_boot: false,
+            wake_for_backup: false,
+            after_wake: AfterWake::Stay,
         }
     }
 }
@@ -557,6 +641,12 @@ pub struct PcMaintenance {
 pub enum AgentCommand {
     BackupNow { id: u64 },
     Cancel { id: u64 },
+    /// Suspend, hibernate or shut the PC down (refused by the agent while a backup runs).
+    /// Sent only to agents from 0.8.26: older ones cannot read it.
+    Sleep { id: u64, mode: SleepMode },
+    /// Turn magic-packet wake on for these cards now and at every agent start (`ethtool -s
+    /// <if> wol g`). Agents from 0.8.26 only.
+    EnableWol { id: u64, nics: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -786,6 +876,11 @@ pub struct AgentPlan {
     /// rule) or unknown on the PC (no zone database). Neither: the PC's own zone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tz_posix: Option<String>,
+    /// The NAS woke the PC for a due backup at this time (ms, [`PcPlan::wake_for_backup`]):
+    /// the agent starts the due backup without the start delay and afterwards does
+    /// [`PcPlan::after_wake`] when nobody used the PC. Cleared by the next report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub woken_ms: Option<u64>,
 }
 
 impl AgentPlan {
@@ -2104,6 +2199,7 @@ mod tests {
             trigger: Some(TaskTrigger::Interval { hours: 6, after_boot_min: 15 }),
             tz: Some("Europe/Rome".into()),
             tz_posix: Some("CET-1CEST,M3.5.0,M10.5.0/3".into()),
+            woken_ms: None,
         };
         let text = serde_json::to_string(&new).unwrap();
         let golden = format!(

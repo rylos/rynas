@@ -2078,6 +2078,7 @@ fn plan_at(d: &Dev, paused_all: bool, tz: &jiff::tz::TimeZone, now: u64) -> Agen
         plan,
         command: d.command.clone(),
         method: d.settings.method,
+        woken_ms: None,
     }
 }
 

@@ -36,6 +36,7 @@ pub mod updates;
 pub mod ups;
 pub mod validate;
 pub mod web_access;
+pub mod wol;
 pub mod zram;
 pub use services::*;
 
