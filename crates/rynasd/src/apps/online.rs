@@ -15,6 +15,7 @@
 //! - With no compiled-in key ([`rynas_apps::online::TRUSTED_KEYS`]) or the setting off
 //!   (`DockerSettings::apps_online_catalog`), nothing is fetched or merged.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,6 +91,9 @@ struct State {
     last_success: Option<i64>,
     last_error: Option<String>,
     last_error_code: Option<String>,
+    /// Updates already notified, stack → catalog version: a newer catalog that offers the
+    /// same updates does not notify again.
+    notified: BTreeMap<String, String>,
 }
 
 /// The downloaded catalogue in use.
@@ -295,6 +299,18 @@ impl Online {
         fs::read_link(self.dir.join(CURRENT))
             .ok()
             .map(PathBuf::into_os_string)
+    }
+
+    /// Records the updates on offer (stack → catalog version) and says whether one of them
+    /// was not notified yet.
+    pub fn note_updates(&self, pending: BTreeMap<String, String>) -> bool {
+        let mut st = self.state.lock().unwrap();
+        let fresh = pending.iter().any(|(k, v)| st.notified.get(k) != Some(v));
+        if st.notified != pending {
+            st.notified = pending;
+            self.save(&st);
+        }
+        fresh
     }
 
     fn save(&self, st: &State) {
@@ -688,15 +704,18 @@ impl AppsSvc {
                 ));
                 if let Outcome::Updated { serial, .. } = outcome {
                     let (cat, _) = self.catalog().await;
-                    let mut names: Vec<String> = self
+                    let pending: BTreeMap<String, String> = self
                         .on_disk()
                         .iter()
-                        .filter(|d| Self::update_available(&cat, d))
-                        .map(|d| d.stack.clone())
+                        .filter_map(|d| {
+                            let a = cat.get(&d.meta.app)?;
+                            let p = rynas_apps::plan::update_plan(a, &d.compose, &d.env).ok()?;
+                            (!p.up_to_date && !p.downgrade)
+                                .then(|| (d.stack.clone(), format!("{} {}", p.to_version, p.to_app_version)))
+                        })
                         .collect();
-                    names.sort();
-                    names.dedup();
-                    if !names.is_empty() {
+                    let names: Vec<String> = pending.keys().cloned().collect();
+                    if o.note_updates(pending) {
                         log(&format!("updates for installed apps: {}", names.join(", ")));
                         let mut ev = oneshot(
                             NotifyCategory::Update,
@@ -768,6 +787,23 @@ mod tests {
         }
         assert_eq!(normalize("https://a/b"), "https://a/b/");
         assert_eq!(normalize("https://a/b/"), "https://a/b/");
+    }
+
+    #[test]
+    fn same_updates_notify_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let o = Online::new_for_tests(tmp.path().to_path_buf(), &[]);
+        let m = |v: &[(&str, &str)]| -> BTreeMap<String, String> {
+            v.iter().map(|(a, b)| ((*a).into(), (*b).into())).collect()
+        };
+        assert!(o.note_updates(m(&[("ha", "1.1.0 2026.11.2")])));
+        // a newer catalog with the same update: no second notification, also after a restart
+        let o = Online::new_for_tests(tmp.path().to_path_buf(), &[]);
+        assert!(!o.note_updates(m(&[("ha", "1.1.0 2026.11.2")])));
+        assert!(o.note_updates(m(&[("ha", "1.2.0 2026.11.3")])));
+        assert!(o.note_updates(m(&[("ha", "1.2.0 2026.11.3"), ("nc", "2.0.0 35")])));
+        assert!(!o.note_updates(m(&[("nc", "2.0.0 35")])));
+        assert!(!o.note_updates(m(&[])));
     }
 
     fn copy_dir(from: &Path, to: &Path) {
