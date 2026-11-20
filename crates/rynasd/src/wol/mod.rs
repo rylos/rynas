@@ -379,6 +379,11 @@ pub struct DevState {
     /// A failed wake's notification is open.
     #[serde(default)]
     pub alert: bool,
+    /// When the device itself last answered a port or ping check (written at most every
+    /// 10 minutes): a device that usually answers and stops is off, whatever its agent's last
+    /// contact says ([`probe::decide`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -690,6 +695,7 @@ impl Wol {
             agent_age_ms: agent.as_ref().and_then(|a| self.agent_age(d, a, now)),
             ip_known: ip.is_some(),
             neighbor: neigh.iter().any(|n| n.reachable && d.macs.contains(&n.mac)),
+            answers_usually: self.dev_state(&d.id).answer_ms.is_some_and(|t| now.saturating_sub(t) < probe::ANSWERS_USUALLY_MS),
             ..Default::default()
         };
         if let Some(ip) = ip {
@@ -718,6 +724,10 @@ impl Wol {
                 let (status, probe) = probe::decide(&seen);
                 let e = st.devices.entry(id).or_default();
                 changed |= e.set_status(status, probe, now);
+                if (seen.port || seen.ping) && e.answer_ms.is_none_or(|t| now.saturating_sub(t) > 600_000) {
+                    e.answer_ms = Some(now);
+                    changed = true;
+                }
                 // an address is remembered when it is confirmed: the neighbor table or the
                 // agent said so, or the device answered there (written again hourly)
                 let confirmed = fresh || seen.port || seen.ping;
@@ -1068,7 +1078,12 @@ impl Wol {
                     let (port, ping) = w.net_answer(&d2, ip);
                     port || ping
                 });
-                let fresh = agent.as_ref().and_then(|a| w.agent_age(&d2, a, now)).is_some_and(|age| age <= probe::AGENT_FRESH_MS);
+                // the same rule as the status ([`probe::decide`]): an agent contact before a
+                // device that usually answers went quiet does not make it "already on"
+                let usually = w.dev_state(&d2.id).answer_ms.is_some_and(|t| now.saturating_sub(t) < probe::ANSWERS_USUALLY_MS);
+                let fresh = agent.as_ref().and_then(|a| w.agent_age(&d2, a, now)).is_some_and(|age| {
+                    age <= probe::AGENT_FRESH_MS && !(usually && !net_up && age > probe::AGENT_SILENT_MS)
+                });
                 let ifaces = w.ifaces();
                 let chosen: Vec<NasIface> = send::choose(&ifaces, d2.iface.as_deref(), ip).into_iter().cloned().collect();
                 (ip, net_up || fresh, agent.is_some(), chosen)

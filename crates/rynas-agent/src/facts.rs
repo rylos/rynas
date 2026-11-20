@@ -172,9 +172,13 @@ pub fn collect(exec: &dyn Exec, sys: &Path, ipv4: &[(String, String)], kept: &[S
     let nics = sys_nics(sys)
         .into_iter()
         .map(|n| {
-            let (wol_supported, wol_enabled) = match exec.read("ethtool", &[&n.name]) {
-                Some((_, out)) => parse_ethtool(&out),
-                None => (None, None),
+            // the `ethtool` program when it is there, else the kernel directly
+            let (wol_supported, wol_enabled) = match exec.read("ethtool", &[&n.name]).map(|(_, out)| parse_ethtool(&out)) {
+                Some((Some(s), e)) => (Some(s), e),
+                _ => match crate::wolioctl::get(&n.name) {
+                    Some((s, e)) => (Some(s), Some(e)),
+                    None => (None, None),
+                },
             };
             AgentNic {
                 ipv4: ipv4.iter().filter(|(i, _)| *i == n.name).map(|(_, a)| a.clone()).collect(),

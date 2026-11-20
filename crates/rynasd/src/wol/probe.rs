@@ -85,12 +85,22 @@ pub struct Seen {
     pub ping: bool,
     /// The neighbor table holds a MAC of the device as reachable.
     pub neighbor: bool,
+    /// The device itself answered a port or ping check within [`ANSWERS_USUALLY_MS`].
+    pub answers_usually: bool,
 }
+
+/// A device that answered a port or ping check this recently "usually answers".
+pub const ANSWERS_USUALLY_MS: u64 = 24 * 3_600_000;
+/// An agent contact older than this does not keep a device that usually answers, and no
+/// longer does, Online (it went to sleep or off since).
+pub const AGENT_SILENT_MS: u64 = 20_000;
 
 /// The status from the checks (strongest proof first). The port and ping answers are those
 /// of the device itself ([`answer_is_device`]).
 pub fn decide(s: &Seen) -> (WolStatus, Option<WolProbe>) {
-    if s.agent && s.agent_age_ms.is_some_and(|a| a <= AGENT_FRESH_MS) {
+    // a device that usually answers and stopped: the agent's older contact predates its sleep
+    let went_quiet = s.answers_usually && !s.port && !s.ping && s.agent_age_ms.is_some_and(|a| a > AGENT_SILENT_MS);
+    if s.agent && !went_quiet && s.agent_age_ms.is_some_and(|a| a <= AGENT_FRESH_MS) {
         return (WolStatus::Online, Some(WolProbe::Agent));
     }
     if s.port {
@@ -212,6 +222,19 @@ mod tests {
         assert_eq!(decide(&quiet), (WolStatus::Offline, None));
         assert_eq!(decide(&Seen { ping: true, ..quiet }), (WolStatus::Online, Some(WolProbe::Ping)));
         assert_eq!(decide(&Seen { neighbor: true, ..none }), (WolStatus::Online, Some(WolProbe::Neighbor)));
+    }
+
+    #[test]
+    fn a_device_that_usually_answers_and_stops_is_off() {
+        let base = Seen { agent: true, ip_known: true, answers_usually: true, ..Default::default() };
+        // the agent spoke 40 s ago, the PC usually answers ping and no longer does: asleep
+        assert_eq!(decide(&Seen { agent_age_ms: Some(40_000), ..base }), (WolStatus::Offline, None));
+        // just now: still on (the ping may lag behind)
+        assert_eq!(decide(&Seen { agent_age_ms: Some(5_000), ..base }).0, WolStatus::Online);
+        // it answers: on by the agent as before
+        assert_eq!(decide(&Seen { agent_age_ms: Some(40_000), ping: true, ..base }).1, Some(WolProbe::Agent));
+        // a device that never answers ping (blocked): the agent's contact keeps it on
+        assert_eq!(decide(&Seen { agent_age_ms: Some(40_000), answers_usually: false, ..base }).1, Some(WolProbe::Agent));
     }
 
     #[test]

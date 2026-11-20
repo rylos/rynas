@@ -51,6 +51,7 @@ mod send_stream;
 mod readahead;
 mod state;
 mod trust;
+mod wolioctl;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};

@@ -105,29 +105,38 @@ pub fn sleep_decision(mode: SleepMode, backup_running: bool) -> SleepDecision {
     }
 }
 
-/// `systemctl --version`'s first line (`systemd 256 (256.7-1)`): the version number.
-pub fn parse_systemd_version(out: &str) -> Option<u32> {
-    out.lines().next()?.split_whitespace().nth(1)?.parse().ok()
+/// The first `block` inhibitor lock against this mode in logind's `ListInhibitors` answer
+/// (`busctl --json=short`, entries `[what, who, why, mode, uid, pid]`): `who (why)`. `what`
+/// is a `:` list; suspend and hibernate are stopped by `sleep`, power off by `shutdown`.
+/// `delay` locks only delay it. Not `systemctl --check-inhibitors=yes`: that also refuses
+/// whenever any user is logged in, so the NAS's command would never work on a desktop.
+pub fn blocking_lock(json: &str, mode: SleepMode) -> Option<String> {
+    let want = if mode == SleepMode::Poweroff { "shutdown" } else { "sleep" };
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let list = v.get("data")?.get(0)?.as_array()?;
+    list.iter().find_map(|e| {
+        let what = e.get(0)?.as_str()?;
+        let blocks = e.get(3)?.as_str()? == "block" && what.split(':').any(|w| w == want);
+        blocks.then(|| format!("{} ({})", e.get(1).and_then(|x| x.as_str()).unwrap_or("?"), e.get(2).and_then(|x| x.as_str()).unwrap_or("")))
+    })
 }
 
-/// The `systemctl` arguments for a sleep mode: with `--check-inhibitors=yes` (systemd 248 and
-/// later) so that an inhibitor lock blocks it even for root without a terminal.
-pub fn sleep_args(mode: SleepMode, systemd: Option<u32>) -> Vec<&'static str> {
-    if systemd.is_some_and(|v| v >= 248) { vec!["--check-inhibitors=yes", verb(mode)] } else { vec![verb(mode)] }
-}
-
-/// Suspends, hibernates or shuts the PC down after [`SLEEP_PAUSE`]. Inhibitor locks are
-/// respected (`--check-inhibitors=yes` where systemd has it): an application that blocks
-/// sleep wins, and the error says so.
+/// Suspends, hibernates or shuts the PC down after [`SLEEP_PAUSE`], unless an application
+/// holds a `block` inhibitor lock against it ([`blocking_lock`]): then nothing happens and the
+/// error names the application.
 pub fn sleep_now(exec: &dyn Exec, mode: SleepMode) -> Result<(), String> {
     if mode == SleepMode::Unknown {
         return Err("a sleep mode this agent does not know".into());
     }
-    let systemd = exec.read("systemctl", &["--version"]).and_then(|(_, o)| parse_systemd_version(&o));
-    let args = sleep_args(mode, systemd);
+    let locks = exec
+        .read("busctl", &["--json=short", "call", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "ListInhibitors"])
+        .map(|(_, o)| o)
+        .unwrap_or_default();
+    if let Some(who) = blocking_lock(&locks, mode) {
+        return Err(format!("blocked by {who}"));
+    }
     std::thread::sleep(SLEEP_PAUSE);
-    exec.act("systemctl", &args)
-        .map_err(|e| format!("refused by systemd (an inhibitor lock, e.g. of an application or another backup, may block it): {e}"))
+    exec.act("systemctl", &[verb(mode)]).map_err(|e| format!("refused by systemd: {e}"))
 }
 
 /// A card name safe to hand to `ethtool`: 1–15 characters of `[A-Za-z0-9_.:@-]`, not
@@ -153,13 +162,17 @@ pub fn existing_nics(sys: &Path, nics: &[String]) -> Vec<String> {
     out
 }
 
-/// `ethtool -s <nic> wol g` for each card: the ones that took it.
+/// `ethtool -s <nic> wol g` for each card (the kernel directly when the `ethtool` program
+/// fails or is missing): the ones that took it.
 pub fn enable_wol(exec: &dyn Exec, nics: &[String]) -> Vec<String> {
     let mut ok = Vec::new();
     for n in nics.iter().filter(|n| valid_nic_name(n)) {
         match exec.act("ethtool", &["-s", n, "wol", "g"]) {
             Ok(()) => ok.push(n.clone()),
-            Err(e) => eprintln!("Wake-on-LAN on {n}: {e}"),
+            Err(e) => match crate::wolioctl::enable_magic(n) {
+                Ok(()) => ok.push(n.clone()),
+                Err(e2) => eprintln!("Wake-on-LAN on {n}: {e}; {e2}"),
+            },
         }
     }
     ok
@@ -349,20 +362,27 @@ pub(crate) mod tests {
         assert_eq!(sleep_decision(SleepMode::Suspend, true), SleepDecision::RefuseBackup);
         assert_eq!(sleep_decision(SleepMode::Hibernate, false), SleepDecision::Go(SleepMode::Hibernate));
         assert_eq!(sleep_decision(SleepMode::Unknown, false), SleepDecision::RefuseUnknown);
-        // an old systemd (or none known): the plain command
+        // no locks known: the plain command
         let f = Fake::default();
         sleep_now(&f, SleepMode::Poweroff).unwrap();
         assert_eq!(f.acts.borrow().as_slice(), ["systemctl poweroff"]);
-        // systemd 248 and later: inhibitors checked
+        // delay locks only delay: still suspended; a block lock on sleep stops it
+        let busctl = "busctl --json=short call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ListInhibitors";
+        let delay = r#"{"type":"a(ssssuu)","data":[[["sleep","NetworkManager","turn off networks","delay",0,694],["handle-power-key:handle-lid-switch","Desktop","keys","block",1000,40]]]}"#;
         let mut f = Fake::default();
-        f.outputs.insert("systemctl --version".into(), (true, "systemd 256 (256.7-1-arch)\n+PAM +AUDIT\n".into()));
+        f.outputs.insert(busctl.into(), (true, delay.into()));
         sleep_now(&f, SleepMode::Suspend).unwrap();
-        assert_eq!(f.acts.borrow().as_slice(), ["systemctl --check-inhibitors=yes suspend"]);
-        assert_eq!(parse_systemd_version("systemd 247 (247.3-7)"), Some(247));
-        assert_eq!(sleep_args(SleepMode::Hibernate, Some(247)), ["hibernate"]);
-        // blocked: the error says why
+        assert_eq!(f.acts.borrow().as_slice(), ["systemctl suspend"]);
+        let block = r#"{"type":"a(ssssuu)","data":[[["shutdown:sleep","Updater","installing updates","block",0,99]]]}"#;
+        let mut f = Fake::default();
+        f.outputs.insert(busctl.into(), (true, block.into()));
+        assert_eq!(sleep_now(&f, SleepMode::Poweroff).unwrap_err(), "blocked by Updater (installing updates)");
+        assert!(f.acts.borrow().is_empty());
+        assert_eq!(blocking_lock(block, SleepMode::Hibernate).as_deref(), Some("Updater (installing updates)"));
+        assert_eq!(blocking_lock("not json", SleepMode::Suspend), None);
+        // systemd refuses: the error says so
         let blocked = Fake { fail_acts: true, ..Default::default() };
-        assert!(sleep_now(&blocked, SleepMode::Suspend).unwrap_err().contains("inhibitor"));
+        assert!(sleep_now(&blocked, SleepMode::Suspend).unwrap_err().contains("refused"));
         // never an unknown mode
         let f = Fake::default();
         assert!(sleep_now(&f, SleepMode::Unknown).is_err());

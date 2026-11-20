@@ -491,6 +491,19 @@ pub struct PcAgent {
     /// Per device: the last agent request (ms), every one, in memory only (the registry
     /// records a contact at most once a minute).
     contacts: Mutex<HashMap<String, u64>>,
+    /// Per device: when its agent took a sleep or shut-down command (ms, memory only): the
+    /// contacts until shortly after it do not prove the PC is still on.
+    slept: Mutex<HashMap<String, u64>>,
+}
+
+/// Contacts within this span after a taken sleep command do not count ([`PcAgent::last_contact`]):
+/// the agent waits 2 s before it suspends, and its next poll may start meanwhile.
+const SLEPT_GRACE_MS: u64 = 10_000;
+
+/// A contact counts only when it came after a taken sleep command and its grace span: an
+/// earlier one was made by a PC that has gone to sleep since.
+fn contact_after_sleep(contact: Option<u64>, slept: Option<u64>) -> Option<u64> {
+    contact.filter(|t| slept.is_none_or(|s| *t > s + SLEPT_GRACE_MS))
 }
 
 /// What the PC agents share with the scheduler (S6).
@@ -554,6 +567,7 @@ impl PcAgent {
             btrfs: std::sync::OnceLock::new(),
             scheduler: std::sync::OnceLock::new(),
             contacts: Mutex::new(HashMap::new()),
+            slept: Mutex::new(HashMap::new()),
         })
     }
 
@@ -573,7 +587,13 @@ impl PcAgent {
     /// least every [`MAX_WAIT`] s while the agent runs), else the recorded one.
     pub fn last_contact(&self, device: &str, d: &Dev) -> Option<u64> {
         let mem = self.contacts.lock().unwrap_or_else(|p| p.into_inner()).get(device).copied();
-        mem.max(d.last_seen_ms)
+        let slept = self.slept.lock().unwrap_or_else(|p| p.into_inner()).get(device).copied();
+        contact_after_sleep(mem.max(d.last_seen_ms), slept)
+    }
+
+    /// The agent of `device` took a sleep or shut-down command now.
+    pub fn note_slept(&self, device: &str) {
+        self.slept.lock().unwrap_or_else(|p| p.into_inner()).insert(device.to_string(), now_ms());
     }
 
     /// Wires the scheduler (once, at start; S6 of `docs/research/scheduling.md`): the runs
@@ -2203,6 +2223,9 @@ async fn plan_get(
         }
         let plan = plan_of(&d, svc.paused_all());
         if q.rev != Some(plan.rev) || Instant::now() >= deadline {
+            if matches!(plan.command, Some(AgentCommand::Sleep { .. })) && q.rev != Some(plan.rev) {
+                svc.note_slept(&device);
+            }
             return Ok(Json(plan));
         }
         // a pause of every task that ends by itself wakes nobody: looked at again within 10 s
@@ -3001,6 +3024,17 @@ mod tests {
         let mut d = Dev { last_seen_ms: Some(5000), ..Default::default() };
         d.contact(6000);
         assert_eq!(d.online_since_ms, Some(6000));
+    }
+
+    #[test]
+    fn contacts_before_a_taken_sleep_do_not_count() {
+        assert_eq!(contact_after_sleep(Some(1_000), None), Some(1_000));
+        // the poll that took the command and the one started right after it: asleep since
+        assert_eq!(contact_after_sleep(Some(1_000), Some(1_000)), None);
+        assert_eq!(contact_after_sleep(Some(1_000 + SLEPT_GRACE_MS), Some(1_000)), None);
+        // a request after it: the PC is back (or never slept)
+        assert_eq!(contact_after_sleep(Some(1_001 + SLEPT_GRACE_MS), Some(1_000)), Some(1_001 + SLEPT_GRACE_MS));
+        assert_eq!(contact_after_sleep(None, Some(1_000)), None);
     }
 
     #[test]
