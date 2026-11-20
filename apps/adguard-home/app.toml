@@ -1,8 +1,8 @@
 schema = 1
 id = "adguard-home"
 name = "AdGuard Home"
-version = "1.0.0"
-app_version = "v0.107.80"
+version = "1.0.1"
+app_version = "v1.0.0"
 update_policy = "patch"
 description = "Network-wide DNS server that blocks ads and trackers for every device in the house."
 homepage = "https://adguard.com/adguard-home/overview.html"
