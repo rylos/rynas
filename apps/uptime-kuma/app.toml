@@ -1,8 +1,8 @@
 schema = 1
 id = "uptime-kuma"
 name = "Uptime Kuma"
-version = "1.0.1"
-app_version = "2.5.11"
+version = "1.0.2"
+app_version = "2.5.12"
 update_policy = "minor"
 description = "Monitoring of websites, services and ports, with status pages and notifications."
 homepage = "https://uptime.kuma.pet"
