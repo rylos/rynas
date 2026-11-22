@@ -336,12 +336,19 @@ impl Ssh {
     fn units(&self) -> Units {
         let enabled = |u: &str| self.run(&["systemctl", "is-enabled", u]).stdout.trim().starts_with("enabled");
         let active = |u: &str| self.run(&["systemctl", "is-active", u]).stdout.trim() == "active";
-        Units {
-            service_enabled: enabled(SERVICE),
-            service_active: active(SERVICE),
-            socket_enabled: enabled(SOCKET),
-            socket_active: active(SOCKET),
-        }
+        // four processes at once: one after the other they were most of the SSH page's wait
+        std::thread::scope(|sc| {
+            let se = sc.spawn(|| enabled(SERVICE));
+            let sa = sc.spawn(|| active(SERVICE));
+            let ke = sc.spawn(|| enabled(SOCKET));
+            let socket_active = active(SOCKET);
+            Units {
+                service_enabled: se.join().unwrap_or(false),
+                service_active: sa.join().unwrap_or(false),
+                socket_enabled: ke.join().unwrap_or(false),
+                socket_active,
+            }
+        })
     }
 
     /// Brings the units from `from` to `to`; sshd reloads when it keeps running (new
@@ -588,9 +595,14 @@ impl Ssh {
                 ..SshState::default()
             };
         }
-        let units = self.units();
+        // sshd -T alongside the unit states (each runs processes)
+        let (units, eff) = std::thread::scope(|sc| {
+            let eff = sc.spawn(|| self.effective());
+            let units = self.units();
+            (units, eff.join())
+        });
+        let eff = eff.unwrap_or_else(|_| self.effective());
         let (settings, managed, drift) = self.current(units);
-        let eff = self.effective();
         let layout = self.layout();
         let mut problems = Vec::new();
         let p = |code, subject: Option<String>| SshProblem { code, subject };

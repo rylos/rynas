@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rynas_tasks::{Cmd, CmdError};
 
@@ -285,6 +285,11 @@ pub trait Accounts: Send + Sync {
     fn groups(&self) -> Result<Vec<SysGroup>, String>;
     /// The Samba passdb; `None` when Samba is not installed.
     fn samba_users(&self) -> Result<Option<Vec<SambaUser>>, String>;
+    /// The Samba passdb for display: may come from a cache that a change of the passdb
+    /// file or of an account through [`Accounts::exec`] drops. Never for applying changes.
+    fn samba_users_cached(&self) -> Result<Option<Vec<SambaUser>>, String> {
+        self.samba_users()
+    }
     /// Current shadow hash of a user (to undo a half-done password change).
     fn shadow_hash(&self, name: &str) -> Result<Option<Secret>, String>;
     fn exec(&self, op: &AccountOp) -> Result<(), String>;
@@ -387,13 +392,35 @@ pub fn parse_pdbedit_verbose(text: &str) -> Vec<SambaUser> {
 /// The accounts of the host. Reads below `root` ("/" in production).
 pub struct HostAccounts {
     root: PathBuf,
+    /// `pdbedit -L -v` for [`Accounts::samba_users_cached`].
+    pdb_cache: Mutex<Option<PdbCached>>,
 }
 
+/// When `pdbedit` was read, the passdb file it was read from, its answer.
+type PdbCached = (Instant, Option<FileStamp>, Option<Vec<SambaUser>>);
+
 const CMD_TIMEOUT: Duration = Duration::from_secs(60);
+/// The Samba passdb (tdbsam), whose change drops the cached `pdbedit` answer.
+const PASSDB: &str = "/var/lib/samba/private/passdb.tdb";
+/// How long a cached `pdbedit` answer is used at most, whatever the file says.
+const PDB_TTL: Duration = Duration::from_secs(300);
+
+/// Size, inode and change times of a file.
+type FileStamp = (u64, u64, i64, i64, i64, i64);
+
+fn file_stamp(p: &Path) -> Option<FileStamp> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(p).ok()?;
+    Some((m.len(), m.ino(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()))
+}
 
 impl HostAccounts {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self { root: root.into(), pdb_cache: Mutex::new(None) }
+    }
+
+    fn passdb_stamp(&self) -> Option<FileStamp> {
+        file_stamp(&rynas_config::files::under_root(&self.root, Path::new(PASSDB)))
     }
 
     fn read(&self, abs: &str) -> Result<String, String> {
@@ -443,12 +470,28 @@ impl Accounts for HostAccounts {
         }
     }
 
+    fn samba_users_cached(&self) -> Result<Option<Vec<SambaUser>>, String> {
+        // pdbedit loads Samba's libraries on every run: 0.1 s on a quad-core NAS, up to
+        // a second on a slow two-core one, for every page that lists users
+        let stamp = self.passdb_stamp();
+        if let Some((t, s, v)) = self.pdb_cache.lock().unwrap().as_ref()
+            && t.elapsed() < PDB_TTL
+            && *s == stamp
+        {
+            return Ok(v.clone());
+        }
+        let v = self.samba_users()?;
+        *self.pdb_cache.lock().unwrap() = Some((Instant::now(), stamp, v.clone()));
+        Ok(v)
+    }
+
     fn shadow_hash(&self, name: &str) -> Result<Option<Secret>, String> {
         let t = self.read("/etc/shadow")?;
         Ok(parse_shadow(&t).remove(name).map(|(h, _)| Secret::new(h)))
     }
 
     fn exec(&self, op: &AccountOp) -> Result<(), String> {
+        *self.pdb_cache.lock().unwrap() = None;
         match op {
             AccountOp::GroupAdd { name, gid } => run(match gid {
                 Some(g) => Cmd::new("groupadd").args(["-g", &g.to_string(), name]),

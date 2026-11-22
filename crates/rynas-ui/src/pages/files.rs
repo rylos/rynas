@@ -1,8 +1,9 @@
 //! The file manager (decision D-FM, phase 1): the SynoFile interface ported as a Web Component,
 //! `<rynas-files>`, served from `/files-app/` (trunk copies `files-app/` into the build).
 //!
-//! - The component's JavaScript is loaded only when this page opens (a module `<script>`
-//!   added once), so it adds nothing to the wasm bundle or to the other pages.
+//! - The component's JavaScript is a module `<script>` added once, a few seconds after
+//!   sign-in ([`warm`]) or when this page opens first: nothing in the wasm bundle, and the
+//!   first opening does not wait for its files.
 //! - `/files/<share>/<folder>` opens that folder (attribute `path`); `?window` is the file
 //!   manager in a browser window of its own (the shell's bars hidden, see `Shell`).
 //! - The session's CSRF token goes to the component as the property `csrf`; the session cookie
@@ -93,6 +94,15 @@ fn load_script(state: RwSignal<Load>) {
     if let Some(head) = doc.head() {
         let _ = head.append_child(&script);
     }
+}
+
+/// Some seconds after sign-in, when the first page had its time: the component's script, and
+/// through it its modules and styles (`rynas-files.js`, when the browser is idle), are fetched
+/// ahead, so the first opening of the Files page does not wait for 40 files one level after
+/// another (0.55 s against 0.1 s on a LAN). Costs the browser the parsed modules.
+pub fn warm() {
+    let state = load_state();
+    set_timeout(move || load_script(state), std::time::Duration::from_secs(3));
 }
 
 #[component]

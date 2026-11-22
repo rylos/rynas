@@ -181,6 +181,7 @@ fn Shell() -> impl IntoView {
     let location = use_location();
     let query = use_query_map();
     pages::files::bridge();
+    pages::files::warm();
     let main = NodeRef::<leptos::html::Main>::new();
     // close the drawer after navigating; .main scrolls, not the window, so a new page starts
     // at the top only this way

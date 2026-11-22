@@ -222,7 +222,7 @@ fn user_views(s: &Services, owner: &str) -> Res<Vec<UserView>> {
     let (eff, cur, applied): (UsersConfig, UsersConfig, _) = docs(c, owner, USERS_KEY)?;
     let acc = s.users.accounts();
     let sys = acc.users().map_err(internal)?;
-    let samba = acc.samba_users().map_err(internal)?;
+    let samba = acc.samba_users_cached().map_err(internal)?;
     let today = rynas_services::validate::today_days();
     let managed = |n: &str| {
         applied

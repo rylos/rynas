@@ -16,7 +16,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -272,6 +272,25 @@ pub fn initial_settings(cfg: &rynas_config::Config) -> DockerSettings {
 // the service
 // ---------------------------------------------------------------------------------------------
 
+/// The install facts (packages, compose and buildx versions) and their background refresh,
+/// see [`DockerSvc::facts`].
+#[derive(Default)]
+struct FactsCache {
+    slot: Mutex<Option<(Instant, InstallFacts)>>,
+    refreshing: AtomicBool,
+    /// Bumped by [`DockerSvc::invalidate`]: a read started before it stores nothing.
+    generation: AtomicU64,
+}
+
+impl FactsCache {
+    fn store(&self, generation: u64, f: InstallFacts) {
+        let mut slot = self.slot.lock().unwrap();
+        if self.generation.load(Ordering::Acquire) == generation {
+            *slot = Some((Instant::now(), f));
+        }
+    }
+}
+
 /// What the Docker endpoints work on.
 pub struct DockerSvc {
     pub ops: Arc<Ops>,
@@ -288,7 +307,7 @@ pub struct DockerSvc {
     pub(crate) host_root: PathBuf,
     settings: watch::Receiver<DockerSettings>,
     engine: tokio::sync::Mutex<Option<Engine>>,
-    facts: Mutex<Option<(Instant, InstallFacts)>>,
+    facts: Arc<FactsCache>,
     /// A running install or migration.
     engine_task: Mutex<Option<String>>,
     /// Stacks with an action in progress.
@@ -306,6 +325,8 @@ pub struct DockerSvc {
     live: broadcast::Sender<(&'static str, Arc<str>)>,
     last_stats: Mutex<Option<Arc<str>>>,
     df_cache: tokio::sync::Mutex<Option<(Instant, Arc<DfCache>)>>,
+    /// A refresh of [`DockerSvc::df_cache`] is running in the background.
+    df_refreshing: AtomicBool,
     /// Tests: task commands go to [`DockerSvc::runner`] instead of the system (a fake that
     /// answers by command line), with the dry system off.
     pub exec_via_runner: std::sync::atomic::AtomicBool,
@@ -479,7 +500,7 @@ impl DockerSvc {
             host_root,
             settings,
             engine: tokio::sync::Mutex::new(None),
-            facts: Mutex::new(None),
+            facts: Arc::default(),
             engine_task: Mutex::new(None),
             busy: Mutex::new(HashSet::new()),
             report: Mutex::new(report),
@@ -491,6 +512,7 @@ impl DockerSvc {
             live,
             last_stats: Mutex::new(None),
             df_cache: tokio::sync::Mutex::new(None),
+            df_refreshing: AtomicBool::new(false),
             exec_via_runner: std::sync::atomic::AtomicBool::new(false),
             adopted: Mutex::new(adopted),
             adopted_hashes: Mutex::new(HashMap::new()),
@@ -535,22 +557,34 @@ impl DockerSvc {
 
     /// The install facts (cached for [`FACTS_TTL`]); detection only reads the host.
     pub async fn facts(&self, fresh: bool) -> InstallFacts {
-        if !fresh
-            && let Some((t, f)) = self.facts.lock().unwrap().as_ref()
-            && t.elapsed() < FACTS_TTL
-        {
-            return f.clone();
+        let cached = if fresh { None } else { self.facts.slot.lock().unwrap().clone() };
+        if let Some((t, f)) = cached {
+            // stale: answered at once, read again in the background (the reads run docker
+            // compose and docker buildx: seconds on a slow CPU, on every page that shows Docker)
+            if t.elapsed() >= FACTS_TTL && !self.facts.refreshing.swap(true, Ordering::AcqRel) {
+                let (runner, host, cache) =
+                    (self.runner.clone(), self.host_root.clone(), self.facts.clone());
+                let generation = cache.generation.load(Ordering::Acquire);
+                tokio::task::spawn_blocking(move || {
+                    let f = install_facts(&host, runner.as_ref());
+                    cache.store(generation, f);
+                    cache.refreshing.store(false, Ordering::Release);
+                });
+            }
+            return f;
         }
+        let generation = self.facts.generation.load(Ordering::Acquire);
         let (runner, host) = (self.runner.clone(), self.host_root.clone());
         let f = tokio::task::spawn_blocking(move || install_facts(&host, runner.as_ref()))
             .await
             .unwrap_or_default();
-        *self.facts.lock().unwrap() = Some((Instant::now(), f.clone()));
+        self.facts.store(generation, f.clone());
         f
     }
 
     fn invalidate(&self) {
-        *self.facts.lock().unwrap() = None;
+        self.facts.generation.fetch_add(1, Ordering::AcqRel);
+        *self.facts.slot.lock().unwrap() = None;
     }
 
     /// A connection to the engine when its socket answers.
@@ -1671,23 +1705,36 @@ pub(crate) struct DfCache {
 }
 
 impl DockerSvc {
-    /// `docker system df`, at most once per [`DF_TTL`] (review 2026-11-07, M6): it walks
+    /// `docker system df`, read at most once per [`DF_TTL`] (review 2026-11-07, M6): it walks
     /// every volume's files, takes seconds and spins up sleeping disks. Concurrent callers
-    /// (the volumes list and the disk-usage card of one page load) share one call.
-    pub(crate) async fn df(&self) -> Res<Arc<DfCache>> {
+    /// (the volumes list and the disk-usage card of one page load) share the first call;
+    /// afterwards an older answer is returned at once and read again in the background, so
+    /// a page never waits for it again.
+    pub(crate) async fn df(self: &Arc<Self>) -> Res<Arc<DfCache>> {
         let mut g = self.df_cache.lock().await;
-        if let Some((t, d)) = g.as_ref()
-            && t.elapsed() < DF_TTL
-        {
+        if let Some((t, d)) = g.as_ref() {
+            if t.elapsed() >= DF_TTL && !self.df_refreshing.swap(true, Ordering::AcqRel) {
+                let s = self.clone();
+                tokio::spawn(async move {
+                    if let Ok(d) = s.df_read().await {
+                        *s.df_cache.lock().await = Some((Instant::now(), d));
+                    }
+                    s.df_refreshing.store(false, Ordering::Release);
+                });
+            }
             return Ok(d.clone());
         }
-        let df = self.call(|e| async move { e.df().await }).await?;
-        let d = Arc::new(DfCache {
-            usage: model::disk_usage_of(&df),
-            volumes: model::df_volumes(&df),
-        });
+        let d = self.df_read().await?;
         *g = Some((Instant::now(), d.clone()));
         Ok(d)
+    }
+
+    async fn df_read(&self) -> Res<Arc<DfCache>> {
+        let df = self.call(|e| async move { e.df().await }).await?;
+        Ok(Arc::new(DfCache {
+            usage: model::disk_usage_of(&df),
+            volumes: model::df_volumes(&df),
+        }))
     }
 }
 

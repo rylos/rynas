@@ -977,7 +977,8 @@ impl Applier for UsersDomain {
     ) -> Result<Vec<StateDrift>, String> {
         let users = self.accounts.users()?;
         let groups = self.accounts.groups()?;
-        let samba = self.accounts.samba_users()?;
+        // a check for display: the cached passdb (dropped when the file or an account changes)
+        let samba = self.accounts.samba_users_cached()?;
         let mut out = Vec::new();
         let mut push = |object: String, kind: StateDriftKind, code, name: &str, id: Option<u32>| {
             let args = StateDriftArgs {

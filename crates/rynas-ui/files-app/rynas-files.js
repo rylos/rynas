@@ -1,8 +1,9 @@
 // <rynas-files>: the rynas file manager as a Web Component (decision D-FM:
 // the SynoFile UI ported first, rewritten in Leptos piece by piece later).
 //
-// The Leptos shell loads this module only when the Files page opens, so the
-// file manager costs nothing to the rest of the interface. It renders
+// The Leptos shell loads this module a few seconds after sign-in (or when the
+// Files page opens first), outside its wasm bundle; the app itself starts only
+// when the page opens. It renders
 //   <rynas-files path="share/folder"></rynas-files>
 // and sets the property `csrf` to the session's CSRF token.
 //
@@ -55,16 +56,26 @@ const CHROME = `
 <input type="file" id="upload-folder" webkitdirectory hidden>`;
 
 let started = null;
+let preloaded = false;
 
-/** The shadow root and the app, made once; resolves with main.js's module once the styles are in. */
-function start() {
-  if (started) return started;
-  for (const m of PRELOAD) {
+/** main.js and its imports asked for at once (fetched and compiled), and the styles fetched. */
+function preload() {
+  if (preloaded) return;
+  preloaded = true;
+  for (const m of ["main", ...PRELOAD]) {
     const l = document.createElement("link");
     l.rel = "modulepreload";
     l.href = new URL(`js/${m}.js`, BASE).href;
     document.head.append(l);
   }
+  // immutable: the browser keeps it for start()
+  fetch(new URL("app.css", BASE).href).catch(() => {});
+}
+
+/** The shadow root and the app, made once; resolves with main.js's module once the styles are in. */
+function start() {
+  if (started) return started;
+  preload();
   // @font-face does not work inside a shadow root (Chrome): the icon font goes to the document
   if (window.FontFace && document.fonts) {
     const font = new FontFace("eza-icons", `url(${new URL("fonts/eza-icons.woff2", BASE).href})`, { display: "block" });
@@ -153,3 +164,8 @@ class RynasFiles extends HTMLElement {
 }
 
 if (!customElements.get("rynas-files")) customElements.define("rynas-files", RynasFiles);
+
+// the shell loads this module ahead, some seconds after sign-in (pages/files.rs, warm): the
+// rest follows when the browser is idle, so the Files page opens without waiting for it
+if (window.requestIdleCallback) requestIdleCallback(preload, { timeout: 5000 });
+else setTimeout(preload, 1000);

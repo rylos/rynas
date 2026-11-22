@@ -1339,6 +1339,14 @@ fn main() -> std::io::Result<()> {
             let _ = ops.docker.set(docker.clone());
             rynasd::docker::spawn_watch(docker.clone());
             rynasd::docker::spawn_stats(docker.clone());
+            // the install facts read once at start, so the first page that shows Docker
+            // does not wait for docker compose and docker buildx
+            {
+                let d = docker.clone();
+                tokio::spawn(async move {
+                    d.facts(false).await;
+                });
+            }
             let apps = rynasd::apps::AppsSvc::new(docker.clone(), args.apps_dir.clone());
             let _ = apps.web.set(opened.web_access.clone());
             // the daily image check and the automatic update window (installed apps too) are
