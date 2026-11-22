@@ -671,7 +671,7 @@ pub async fn recovery_kit(svc: &Arc<PcAgent>, group: &str) -> Res<RecoveryKit> {
 
 // ------------------------------------------------------------------ reports
 
-fn trunc(s: &mut String, n: usize) {
+pub(super) fn trunc(s: &mut String, n: usize) {
     if s.len() > n {
         let mut cut = n;
         while !s.is_char_boundary(cut) {
@@ -722,6 +722,12 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
     if let Some(reason) = run.skipped {
         svc.device(device)?;
         record_skip(svc, device, &run, reason);
+        return Ok(());
+    }
+    // reported again (the agent retries a report whose answer it lost): recorded once, so
+    // the versions and the history do not count it twice; a run without an id (an old
+    // agent) is always taken
+    if !run.run_id.is_empty() && svc.device(device)?.history.iter().any(|x| !x.restore && x.run_id == run.run_id) {
         return Ok(());
     }
     let manifest = r.manifest.and_then(|mut m| {
@@ -1332,7 +1338,11 @@ pub fn spawn_nightly(p: &crate::protection::Protection, who: &str) -> Result<Str
                             break;
                         }
                         None => break,
-                        _ => tokio::time::sleep(Duration::from_secs(5)).await,
+                        // (the maintenances started go on: each is a task of its own)
+                        _ => tokio::select! {
+                            _ = ctx.token().cancelled() => return Err("cancelled".into()),
+                            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                        },
                     }
                 }
             }

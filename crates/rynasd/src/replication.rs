@@ -625,6 +625,12 @@ pub async fn transfer(
     }
     let _fs = crate::fslock::FsLocks::global().heavy_paths(&fs_paths, "replication.run").await;
     let r = transfer_inner(ctx, p, job, t).await;
+    // a cancel is neither a success nor a failure (as for the task itself): the recorded
+    // status and the open notification stay as they were
+    if r.is_err() && ctx.is_cancelled() {
+        ctx.log(&format!("replica {}: cancelled", t.id));
+        return r;
+    }
     let prev = read_status(&p.state_dir, &job.name, &t.id);
     let now = rynas_tasks::now_ms();
     let next = rep::next_status(&prev, now, r.as_ref().map_err(String::as_str));

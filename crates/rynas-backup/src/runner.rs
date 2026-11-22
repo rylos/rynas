@@ -246,6 +246,8 @@ pub async fn run_worker(
     let err_task = tokio::spawn(async move {
         let mut buf = Vec::new();
         let _ = (&mut stderr).take(64 << 10).read_to_end(&mut buf).await;
+        // the rest is read and dropped: a worker writing to a full pipe would stop
+        let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
         String::from_utf8_lossy(&buf).into_owned()
     });
     let mut lines = BufReader::new(stdout).lines();

@@ -1982,7 +1982,7 @@ fn bare_metal(
                 b.missing.push(gap(BareMetalCode::LoaderUnknown, None));
             }
             if let (Some(w), Some(s)) = (m.written_at_ms, snap_ms)
-                && s > w + MANIFEST_STALE_DAYS * DAY_MS
+                && s > w.saturating_add(MANIFEST_STALE_DAYS * DAY_MS)
             {
                 b.warnings.push(gap(BareMetalCode::ManifestStale, Some(((s - w) / DAY_MS).to_string())));
             }
@@ -2256,10 +2256,18 @@ impl PcBackup {
         admins: AdminPolicy,
         hostname: String,
     ) -> Arc<Self> {
-        let reg = std::fs::read(Self::reg_path(&state_dir))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let path = Self::reg_path(&state_dir);
+        let reg: Registry = match std::fs::read(&path).map(|b| serde_json::from_slice(&b)) {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                // kept aside: the next write would replace it (the folders and their keys)
+                let aside = path.with_extension(format!("json.unreadable-{}", rynas_tasks::now_ms()));
+                let kept = std::fs::rename(&path, &aside);
+                tracing::error!("pc backup: {} does not parse ({e}): starting without folders; the file is kept as {} ({kept:?})", path.display(), aside.display());
+                Registry::default()
+            }
+            Err(_) => Registry::default(),
+        };
         Arc::new(Self {
             ops,
             host,
@@ -2587,7 +2595,7 @@ impl PcBackup {
                     ev.body = format!("The NAS cannot tell whether {d} is off or its backups stopped (notice after {hours} hours).");
                     field(field(field(code(ev, "pcbackup.quiet"), "device", &d), "hours", since_h), "alert_hours", hours)
                 } else if late {
-                    let since_h = v.last_received_ms.map(|ms| (now - ms) / HOUR_MS).unwrap_or(0);
+                    let since_h = v.last_received_ms.map(|ms| now.saturating_sub(ms) / HOUR_MS).unwrap_or(0);
                     let days = since_h / 24;
                     let mut ev = firing(
                         NotifyCategory::Backup,

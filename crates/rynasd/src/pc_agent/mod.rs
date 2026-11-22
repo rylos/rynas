@@ -538,10 +538,19 @@ impl PcAgent {
         tls: Option<Arc<crate::tls::TlsSvc>>,
         hostname: String,
     ) -> Arc<Self> {
-        let mut reg: Registry = std::fs::read(Self::reg_path(&state_dir))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let path = Self::reg_path(&state_dir);
+        let mut reg: Registry = match std::fs::read(&path).map(|b| serde_json::from_slice(&b)) {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                // kept aside: the next write would replace it, and it holds the groups'
+                // sealed repository passwords
+                let aside = path.with_extension(format!("json.unreadable-{}", now_ms()));
+                let kept = std::fs::rename(&path, &aside);
+                tracing::error!("pc backup: {} does not parse ({e}): starting without PCs; the file is kept as {} ({kept:?})", path.display(), aside.display());
+                Registry::default()
+            }
+            Err(_) => Registry::default(),
+        };
         // a share of memory left at 0 by an older version is the default it always meant (the
         // settings shown can then be saved back as they are)
         reg.settings.maintenance_memory_pct = reg.settings.effective_memory_pct();
@@ -1191,7 +1200,7 @@ pub fn ready_of(d: &Dev, kit: Option<u64>) -> BareMetalReady {
     match d.manifest_ms {
         None => reasons.push(ReadyReason::NoManifest),
         Some(m) => {
-            if d.last_ok_ms.is_some_and(|ok| ok > m + 86_400_000) {
+            if d.last_ok_ms.is_some_and(|ok| ok > m.saturating_add(86_400_000)) {
                 reasons.push(ReadyReason::ManifestStale);
             }
             reasons.extend(d.manifest_reasons.iter().copied());
@@ -2242,13 +2251,10 @@ async fn status_post(
     let svc = pa(&st)?;
     let device = agent_device(&svc, &h)?;
     let mut s = json_body(body)?;
-    s.run_id.truncate(64);
+    // (a cut inside a character would panic)
+    maint::trunc(&mut s.run_id, 64);
     if let Some(m) = &mut s.message {
-        let mut cut = m.len().min(500);
-        while !m.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        m.truncate(cut);
+        maint::trunc(m, 500);
     }
     if let Some(b) = &mut s.btrfs {
         maint::bound_step(b);
@@ -2680,11 +2686,9 @@ async fn restore_report(
         }
         r.log = r.log[cut..].to_string();
     }
-    let mut cut = r.message.len().min(2000);
-    while !r.message.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    r.message.truncate(cut);
+    maint::trunc(&mut r.message, 2000);
+    // kept in the PC's history: a version id or a snapshot name, never longer
+    maint::trunc(&mut r.version, 160);
     let now = now_ms();
     svc.edit(|reg| {
         // a btrbk folder has no PC record: its restore is in the audit log and the log file

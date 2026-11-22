@@ -904,10 +904,9 @@ async fn test(
                 message = format!(
                     "server host key {fp}: compare it with the server's own; saving the job pins it"
                 );
-                s.host_keys
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(format!("{host}:{port}"), (k, Instant::now()));
+                let mut seen = s.host_keys.lock().unwrap_or_else(|p| p.into_inner());
+                seen.retain(|_, (_, at)| at.elapsed() < KEY_TTL);
+                seen.insert(format!("{host}:{port}"), (k, Instant::now()));
             }
             TestResult {
                 outcome,
@@ -982,10 +981,12 @@ async fn ssh_key(State(st): State<RsState>, h: HeaderMap) -> Res<Json<SshKeyCrea
         .rev()
         .take(12)
         .collect();
-    s.keys
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(public.clone(), (private, Instant::now()));
+    {
+        let mut k = s.keys.lock().unwrap_or_else(|p| p.into_inner());
+        // pairs no job took in time go: a private key never waits in memory for good
+        k.retain(|_, (_, at)| at.elapsed() < KEY_TTL);
+        k.insert(public.clone(), (private, Instant::now()));
+    }
     audit(&owner, "SSH key generated");
     Ok(Json(SshKeyCreated {
         public_key: public,
@@ -2193,6 +2194,7 @@ async fn restore(
                 Ok(_) => {
                     let (src, dst) = (staging.join(p.trim_start_matches('/')), PathBuf::from(&p));
                     tokio::task::spawn_blocking(move || {
+                        let (src, dst) = from_missing_parent(src, dst);
                         let mut m = Moved::default();
                         merge_move(&src, &dst, &mut m).map(|_| m)
                     })
@@ -2296,6 +2298,20 @@ fn staging_for(p: &FsPath, n: usize) -> std::io::Result<PathBuf> {
     let dir = base.join(name);
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
     Ok(dir)
+}
+
+/// The pair [`merge_move`] starts from: `src` and `dst` moved up together to the first
+/// folder missing at the destination (the parents of a restored path were deleted too: a
+/// rename into a folder that is not there fails), so the restored parents come back with it.
+fn from_missing_parent(mut src: PathBuf, mut dst: PathBuf) -> (PathBuf, PathBuf) {
+    while let (Some(sp), Some(dp)) = (src.parent(), dst.parent()) {
+        if dp.as_os_str().is_empty() || std::fs::symlink_metadata(dp).is_ok() {
+            break;
+        }
+        let up = (sp.to_path_buf(), dp.to_path_buf());
+        (src, dst) = up;
+    }
+    (src, dst)
 }
 
 /// What [`merge_move`] did.
@@ -2933,6 +2949,18 @@ mod tests {
         let gone = vol.join("docs/gone/deeper");
         let st2 = staging_for(&gone, 1).unwrap();
         assert_eq!(st2.parent().unwrap(), dst);
+        // its parent is gone too: the move starts from the first missing folder
+        let src2 = st2.join(gone.strip_prefix("/").unwrap());
+        std::fs::create_dir_all(&src2).unwrap();
+        std::fs::write(src2.join("c.txt"), "c").unwrap();
+        let (from, to) = from_missing_parent(src2, gone.clone());
+        assert_eq!(to, vol.join("docs/gone"));
+        let mut m = Moved::default();
+        merge_move(&from, &to, &mut m).unwrap();
+        assert_eq!(std::fs::read_to_string(gone.join("c.txt")).unwrap(), "c");
+        // nothing missing: the pair as given
+        let (from, to) = from_missing_parent(st2.join("x"), dst.join("a.txt"));
+        assert_eq!((from, to), (st2.join("x"), dst.join("a.txt")));
     }
 
     #[test]
