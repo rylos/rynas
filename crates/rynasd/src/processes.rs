@@ -459,6 +459,10 @@ impl Processes {
                     };
                     (Some(pct as f32), rates)
                 }
+                // started since the last look: all its time so far was used within this
+                // interval. Without it a process that lives a few seconds (a service in a
+                // restart loop) never shows the processor time the system total has
+                (None, Some(el)) if young => (Some((st.cpu_ticks as f64 / (el * self.hz as f64) * 100.0) as f32), None),
                 _ => (None, None),
             };
             let key = meta.group.clone();
@@ -1122,5 +1126,13 @@ mod tests {
         w("50/stat", &stat(50, "smbd", 1, 0, 0, 900));
         let s3 = p.take(Some(&s2), 2_000_200);
         assert!(by(&s3.list, 50).cpu_pct.is_none());
+
+        // a process started since the last look shows the time it used in the interval
+        std::thread::sleep(Duration::from_millis(100));
+        w("70/stat", &stat(70, "loop", 1, 0, p.hz / 10, 1000 * p.hz - 1));
+        w("70/cgroup", "0::/../loop.service\n");
+        let s4 = p.take(Some(&s3), 2_000_300);
+        let pct = by(&s4.list, 70).cpu_pct.unwrap();
+        assert!(pct > 30.0 && pct <= 105.0, "{pct}");
     }
 }
