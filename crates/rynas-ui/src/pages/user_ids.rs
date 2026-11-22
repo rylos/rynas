@@ -184,6 +184,10 @@ pub fn id_dialog(ask: IdAsk, close: Callback<()>, done: Callback<()>, reopen: Ca
     });
     let req2 = request.clone();
     let check = move || {
+        // Enter in the field submits the form also while the Check button is disabled
+        if checking.get_untracked() || busy.get_untracked() {
+            return;
+        }
         let Some(r) = req2() else {
             error.set(Some(t("ids.b_bad_request").to_string()));
             return;
@@ -194,7 +198,7 @@ pub fn id_dialog(ask: IdAsk, close: Callback<()>, done: Callback<()>, reopen: Ca
             let res = api::post::<_, IdRemapPlan>("/api/v1/ids/plan", Some(&r)).await;
             let _ = checking.try_set(false);
             if let Ok(p) = &res
-                && folders.with_untracked(Vec::is_empty)
+                && folders.try_with_untracked(Vec::is_empty) == Some(true)
             {
                 // first check: the suggested folders become the list (all ticked), without
                 // marking this answer stale
@@ -223,7 +227,7 @@ pub fn id_dialog(ask: IdAsk, close: Callback<()>, done: Callback<()>, reopen: Ca
             match api::post::<_, TaskStarted>("/api/v1/ids/remap", Some(&r)).await {
                 Ok(st) => {
                     // a long walk: the dialog closes, the task panel shows the progress
-                    close.run(());
+                    close.try_run(());
                     let mut resume = None;
                     match crate::tasks::follow(&st.task_id).await {
                         Ok(task) if task.status == TaskStatus::Ok => toast(Tone::Ok, tf("ids.done", &[("name", &name)])),
@@ -239,9 +243,9 @@ pub fn id_dialog(ask: IdAsk, close: Callback<()>, done: Callback<()>, reopen: Ca
                         Err(e) => toast(Tone::Err, e.text()),
                     }
                     crate::config::changed();
-                    done.run(());
+                    done.try_run(());
                     if let Some(a) = resume {
-                        reopen.run(a);
+                        reopen.try_run(a);
                     }
                 }
                 Err(e) => {

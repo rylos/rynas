@@ -206,7 +206,8 @@ impl Trial {
         spawn_local(async move {
             let r = crate::tasks::follow(&id).await;
             self.following.set(false);
-            let skipped = self.started.with_untracked(|s| s.as_ref().is_some_and(|s| s.s.token.is_none()));
+            // the page was left while the test ran: its signals are gone
+            let Some(skipped) = self.started.try_with_untracked(|s| s.as_ref().is_some_and(|s| s.s.token.is_none())) else { return };
             match r {
                 // after Confirm in this tab its own message (with the revision) stays
                 Ok(task) if task.status == TaskStatus::Ok => {
@@ -262,7 +263,7 @@ impl Trial {
             match r {
                 Ok(c) => {
                     self.outcome.set(Some((Tone::Ok, tf("net.confirmed", &[("rev", &c.revision.to_string())]))));
-                    if !self.following.get_untracked() {
+                    if self.following.try_get_untracked() == Some(false) {
                         self.clear();
                     }
                     net.reload();
@@ -297,8 +298,9 @@ impl Trial {
     /// The trial's deadline has passed by the server's clock: no confirmation is accepted now,
     /// whatever the address.
     fn expired(self, net: Net) -> bool {
-        let deadline = net.state.data.with_untracked(|s| s.as_ref().and_then(|s| s.trial.as_ref()).map_or(0, |t| t.deadline_ms));
-        deadline > 0 && js_sys::Date::now() + self.skew.get_untracked() > deadline as f64
+        // also called after a request: the page may be gone by then
+        let deadline = net.state.data.try_with_untracked(|s| s.as_ref().and_then(|s| s.trial.as_ref()).map_or(0, |t| t.deadline_ms)).unwrap_or(0);
+        deadline > 0 && js_sys::Date::now() + self.skew.try_get_untracked().unwrap_or(0.0) > deadline as f64
     }
 
     fn rollback(self, net: Net) {

@@ -659,7 +659,7 @@ fn review(
                                     let v = event_target_checked(&ev);
                                     let n = n.clone();
                                     take_over.update(|t| { t.retain(|x| x != &n); if v { t.push(n); } });
-                                    reload.run(());
+                                    reload.try_run(());
                                 } />
                                 <span class="switch-text"><span class="switch-label">{label}</span></span>
                             </label>

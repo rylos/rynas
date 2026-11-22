@@ -133,7 +133,7 @@ pub fn panel(edit: RwSignal<Option<Option<BackupJobView>>>) -> AnyView {
                             Ok(()) => {
                                 saved_pending();
                                 crate::config::changed();
-                                close.run(());
+                                close.try_run(());
                             }
                             Err(e) => error.set(Some(e.text())),
                         }
@@ -724,6 +724,10 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
     };
 
     let save = Callback::new(move |_| {
+        // Enter in a field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         let job = match f.job() {
             Ok(j) => j,
             Err(k) => {
@@ -769,7 +773,7 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
                     let keys = [crate::config::keys::BACKUP, crate::config::keys::SCHEDULER];
                     if crate::config::apply_now(&keys, error).await {
                         saved_applied();
-                        close.run(());
+                        close.try_run(());
                     }
                 }
                 Err(e) => error.set(Some(e.text())),
@@ -913,7 +917,7 @@ fn check_dialog(name: String, jobs: Remote<Vec<BackupJobView>>, close: Callback<
             match api::start_task(&job_url(&n, "/check"), body).await {
                 Ok(id) => {
                     toast(Tone::Info, tf("bk.check.started", &[("name", &n)]));
-                    close.run(());
+                    close.try_run(());
                     let done = tasks::follow(&id).await;
                     match done {
                         Ok(t2) if t2.status == TaskStatus::Ok => toast(Tone::Ok, tf("bk.check.done", &[("name", &n)])),
@@ -1034,7 +1038,10 @@ fn browser(name: String, snap: SnapshotEntry, picked: RwSignal<Vec<String>>, bac
         entries.set(None);
         spawn_local(async move {
             let r = api::get::<Vec<NodeEntry>>(&url).await.map_err(|e| e.text());
-            entries.set(Some(r));
+            // another folder was opened meanwhile: its own answer is the one to show
+            if path.try_with_untracked(|cur| *cur == p) == Some(true) {
+                entries.set(Some(r));
+            }
         });
     });
     let (n2, id2) = (name.clone(), snap.id.clone());
@@ -1136,7 +1143,7 @@ fn restore_dialog(name: String, snapshot: String, paths: Vec<String>, close: Cal
             match api::start_task(&url, serde_json::to_string(&req).ok()).await {
                 Ok(id) => {
                     toast(Tone::Info, t("bk.restore.started").to_string());
-                    close.run(());
+                    close.try_run(());
                     match tasks::follow(&id).await {
                         Ok(t2) if t2.status == TaskStatus::Ok => toast(Tone::Ok, t("bk.restore.done").to_string()),
                         Ok(t2) => toast(Tone::Err, tasks::task_error(&t2)),

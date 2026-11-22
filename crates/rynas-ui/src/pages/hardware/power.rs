@@ -153,7 +153,7 @@ pub fn panel(_active: Signal<bool>) -> AnyView {
                         match r {
                             Ok(()) => {
                                 staged();
-                                close.run(());
+                                close.try_run(());
                             }
                             Err(e) => error.set(Some(e.text())),
                         }
@@ -445,6 +445,10 @@ fn editor(orig: Option<PowerRule>, rules: Signal<Vec<PowerRule>>, wake_ok: Signa
     };
     let problem = Memo::new(move |_| candidate().err());
     let save = Callback::new(move |_| {
+        // Enter in a field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         let rs = match candidate() {
             Ok(rs) => rs,
             Err(e) => {
@@ -462,7 +466,7 @@ fn editor(orig: Option<PowerRule>, rules: Signal<Vec<PowerRule>>, wake_ok: Signa
                     let keys = [crate::config::keys::POWER, crate::config::keys::SCHEDULER];
                     if crate::config::apply_now(&keys, error).await {
                         saved_applied();
-                        close.run(());
+                        close.try_run(());
                     }
                 }
                 Err(e) => error.set(Some(e.text())),

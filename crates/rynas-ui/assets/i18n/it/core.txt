@@ -4599,7 +4599,7 @@ apps.warn.proxy_inactive	La porta web ascolta solo sul NAS finché l'accesso web
 apps.fe.invalid_value	Valore non valido
 apps.fe.missing_value	Obbligatorio
 apps.fe.unknown_value	Non è una domanda di questa app
-apps.fe.unsafe_value	Contiene un a capo, un apice singolo o un carattere NUL
+apps.fe.unsafe_value	Contiene un a capo, un apice singolo o un carattere NUL, oppure termina con una barra rovesciata
 apps.fe.share_missing	La cartella condivisa non esiste
 apps.fe.bad_path	Non è una cartella su un volume montato
 apps.fe.bad_port	Questa porta non si può usare

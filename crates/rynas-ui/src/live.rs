@@ -133,7 +133,10 @@ pub fn poll_while(every_ms: u32, busy: impl Fn() -> bool + Send + Sync + 'static
             ticking.set(true);
             leptos::task::spawn_local(async move {
                 crate::api::sleep(every_ms).await;
-                let _ = ticking.try_set(false);
+                // the page is gone: nothing to read for it
+                if ticking.try_set(false).is_some() {
+                    return;
+                }
                 if should_poll() {
                     reload();
                 }

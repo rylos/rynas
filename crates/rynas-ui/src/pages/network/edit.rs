@@ -170,7 +170,7 @@ fn editor_with(net: Net, i: NetInterface, seed: Option<InterfaceConfig>, close: 
                 Ok(_) => {
                     toast(Tone::Ok, t("net.staged").to_string());
                     net.reload();
-                    close.run(());
+                    close.try_run(());
                 }
                 Err(e) => error.set(Some(e.text())),
             }
@@ -178,6 +178,10 @@ fn editor_with(net: Net, i: NetInterface, seed: Option<InterfaceConfig>, close: 
     };
     let stage2 = stage.clone();
     let save = Callback::new(move |_| {
+        // Enter in a field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         show.set(true);
         if !problems.with_untracked(Vec::is_empty) {
             error.set(Some(t("form.check").to_string()));
@@ -200,7 +204,7 @@ fn editor_with(net: Net, i: NetInterface, seed: Option<InterfaceConfig>, close: 
                 Ok(()) => {
                     toast(Tone::Ok, t(toast_key).to_string());
                     net.reload();
-                    close.run(());
+                    close.try_run(());
                 }
                 Err(e) => error.set(Some(e.text())),
             }

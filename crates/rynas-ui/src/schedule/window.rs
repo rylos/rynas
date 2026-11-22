@@ -136,12 +136,13 @@ impl NextRuns {
             req.count = Some(RUNS);
             set_timeout(
                 move || {
-                    if n.seq.get_value() != mine {
+                    // (the editor may be closed by now: then `seq` is gone)
+                    if n.seq.try_get_value() != Some(mine) {
                         return;
                     }
                     spawn_local(async move {
                         let r = api::post::<_, SchedulePreview>("/api/v1/scheduler/preview", Some(&req)).await;
-                        if n.seq.get_value() == mine {
+                        if n.seq.try_get_value() == Some(mine) {
                             n.preview.set(r.ok().filter(|p| p.valid));
                         }
                     });

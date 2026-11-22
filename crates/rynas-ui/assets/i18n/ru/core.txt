@@ -4645,7 +4645,7 @@ apps.warn.proxy_inactive	Пока веб-доступ не активен, ве�
 apps.fe.invalid_value	Недопустимое значение
 apps.fe.missing_value	Обязательно
 apps.fe.unknown_value	Такого вопроса у этого приложения нет
-apps.fe.unsafe_value	Содержит перевод строки, одинарную кавычку или символ NUL
+apps.fe.unsafe_value	Содержит перевод строки, одинарную кавычку или символ NUL либо заканчивается обратной косой чертой
 apps.fe.share_missing	Общая папка не существует
 apps.fe.bad_path	Это не папка на смонтированном томе
 apps.fe.bad_port	Этот порт нельзя использовать

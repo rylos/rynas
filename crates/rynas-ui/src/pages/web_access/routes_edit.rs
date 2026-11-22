@@ -256,7 +256,7 @@ pub fn add_drawer(open: RwSignal<bool>) -> AnyView {
     let error = RwSignal::new(None::<String>);
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
-        if !f.check(true) {
+        if busy.get_untracked() || !f.check(true) {
             return;
         }
         let Some(mut cfg) = w.state.data.with_untracked(|s| s.as_ref().map(WaState::current)) else { return };

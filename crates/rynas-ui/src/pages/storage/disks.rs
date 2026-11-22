@@ -532,8 +532,10 @@ fn SettingsTab(
         standby.set(opt_str(o.standby_s));
     };
     let load = move || {
+        // also called after a save: the drawer may be closed by then
+        let Some(u) = url.try_get_value() else { return };
         spawn_local(async move {
-            let r = api::get::<DiskSettingsState>(&url.get_value()).await;
+            let r = api::get::<DiskSettingsState>(&u).await;
             if let Ok(st) = &r {
                 fill(st);
             }
@@ -554,7 +556,7 @@ fn SettingsTab(
                     if crate::config::apply_now(&[crate::config::keys::DISKS], error).await {
                         crate::toast::saved_applied();
                         load();
-                        on_applied.run(());
+                        on_applied.try_run(());
                     } else {
                         load();
                     }
@@ -566,6 +568,10 @@ fn SettingsTab(
     };
     let save = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        // Enter in a field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         let ra_v = ra.get_untracked();
         let read_ahead_kb = if ra_v.trim().is_empty() {
             None
@@ -644,7 +650,8 @@ fn SettingsTab(
                                 <span class="field-label">{tr("sto.scheduler")}</span>
                                 <select class="input" prop:value=move || sched.get() on:change=move |ev| sched.set(event_target_value(&ev))>
                                     <option value="">{tf("sto.default_v", &[("v", &def_sched)])}</option>
-                                    {SCHEDULERS.iter().map(|s| view! { <option value=s.as_str()>{s.as_str()}</option> }).collect_view()}
+                                    // `selected` too: the select's value is set before its options exist
+                                    {SCHEDULERS.iter().map(|s| view! { <option value=s.as_str() selected=sched.with_untracked(|v| v == s.as_str())>{s.as_str()}</option> }).collect_view()}
                                 </select>
                             </label>
                             <label class="field">
@@ -659,7 +666,7 @@ fn SettingsTab(
                                     <option value="">{tr("sto.not_set")}</option>
                                     // an older, shorter delay already set stays selectable
                                     {STANDBY.iter().copied().chain(cur_standby).map(|s| view! {
-                                        <option value=s.to_string()>{if s == 0 { t("sto.never").to_string() } else { i18n::duration(s as u64) }}</option>
+                                        <option value=s.to_string() selected=standby.with_untracked(|v| *v == s.to_string())>{if s == 0 { t("sto.never").to_string() } else { i18n::duration(s as u64) }}</option>
                                     }).collect_view()}
                                 </select>
                                 <span class="muted small">{if hdd { t("sto.standby_hint") } else { t("sto.hdd_only") }}</span>
@@ -668,7 +675,7 @@ fn SettingsTab(
                                 <span class="field-label">{tr("sto.apm")}</span>
                                 <select class="input" disabled=!hdd prop:value=move || apm.get() on:change=move |ev| apm.set(event_target_value(&ev))>
                                     <option value="">{tr("sto.not_set")}</option>
-                                    {APM.iter().map(|(v, k)| view! { <option value=v.to_string()>{tr(k)}</option> }).collect_view()}
+                                    {APM.iter().map(|(v, k)| view! { <option value=v.to_string() selected=apm.with_untracked(|x| *x == v.to_string())>{tr(k)}</option> }).collect_view()}
                                 </select>
                             </label>
                             {form_error(error)}

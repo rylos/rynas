@@ -153,7 +153,7 @@ fn drawer(imp: Imp, id: String) -> AnyView {
             match r {
                 Ok(_) => {
                     imp.list.reload();
-                    imp.changed.run(());
+                    imp.changed.try_run(());
                 }
                 Err(e) => {
                     let _ = check_err.try_set(Some(e.text()));
@@ -174,7 +174,7 @@ fn drawer(imp: Imp, id: String) -> AnyView {
             match r {
                 Ok(_) => {
                     imp.list.reload();
-                    imp.changed.run(());
+                    imp.changed.try_run(());
                     let _ = ask_accept.try_set(false);
                 }
                 Err(e) => {
@@ -196,7 +196,7 @@ fn drawer(imp: Imp, id: String) -> AnyView {
             match r {
                 Ok(()) => {
                     imp.list.reload();
-                    imp.changed.run(());
+                    imp.changed.try_run(());
                     imp.open.set(None);
                 }
                 Err(e) => {
@@ -406,7 +406,7 @@ fn import_dialog(imp: Imp, id: String) -> AnyView {
             match r {
                 Ok(c) => {
                     imp.list.reload();
-                    imp.changed.run(());
+                    imp.changed.try_run(());
                     toast(Tone::Ok, t("wa.import.saved").to_string());
                     imp.form.set(None);
                     imp.open.set(Some(c.id));

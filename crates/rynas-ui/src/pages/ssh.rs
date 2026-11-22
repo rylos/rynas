@@ -526,7 +526,8 @@ fn keys_card(pg: Page, names: Vec<String>) -> AnyView {
     let who = RwSignal::new(first);
     let list = RwSignal::new(None::<Result<SshKeyList, String>>);
     let load = move || {
-        let u = who.get_untracked();
+        // also called when an answer arrives: the card may be gone by then
+        let Some(u) = who.try_get_untracked() else { return };
         spawn_local(async move {
             let r = api::get::<SshKeyList>(&format!("{URL}/keys/{}", api::encode(&u))).await.map_err(|e| e.text());
             // an answer for an account no longer selected is dropped
@@ -594,7 +595,7 @@ fn keys_card(pg: Page, names: Vec<String>) -> AnyView {
                         match r {
                             Ok(()) => {
                                 toast(Tone::Ok, t("ssh.key_removed").to_string());
-                                close.run(());
+                                close.try_run(());
                                 load();
                                 pg.st.reload();
                             }

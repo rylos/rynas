@@ -491,7 +491,8 @@ pub fn week_grid(levels: &'static [GridLevel], value: RwSignal<String>, label_ke
             }
             let timer = set_timeout_with_handle(
                 move || {
-                    if press.with_value(|p| p.as_ref().is_some_and(|p| p.id == id))
+                    // (`try_`: the grid may be gone before the hold time is over)
+                    if press.try_with_value(|p| p.as_ref().is_some_and(|p| p.id == id)) == Some(true)
                         && let Some(p) = press.try_update_value(Option::take).flatten()
                     {
                         if let Some(el) = cell_el(p.cell) {

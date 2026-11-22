@@ -193,8 +193,8 @@ pub fn panel(jobs: Remote<Vec<SnapshotJobView>>, edit: RwSignal<Option<Option<Re
                             Ok(_) => {
                                 if crate::config::apply_now(&KEYS, error).await {
                                     crate::toast::saved_applied();
-                                    close.run(());
-                                    reload.run(());
+                                    close.try_run(());
+                                    reload.try_run(());
                                 }
                             }
                             Err(e) => error.set(Some(e.text())),
@@ -284,17 +284,29 @@ fn target_row(
     let run = move |_| {
         let url = format!("/api/v1/snapshots/replication/{}/{}/run", api::encode(&job), api::encode(&id));
         let key = key.clone();
-        running.set(Some(key));
-        let busy = RwSignal::new(true);
-        let error = RwSignal::new(None::<String>);
-        run_task(url, None, t("repl.run_done").to_string(), busy, error, Callback::new(move |_| {
-            running.set(None);
-            reload.run(());
-        }));
-        Effect::new(move |_| {
-            if !busy.get() {
-                running.set(None);
+        running.set(Some(key.clone()));
+        spawn_local(async move {
+            let started = api::start_task(&url, None).await;
+            let r = match started {
+                Ok(id) => tasks::follow(&id).await.ok(),
+                // not started: said here, the row has no place for it
+                Err(e) => {
+                    toast(Tone::Err, e.text());
+                    None
+                }
+            };
+            // another target started meanwhile keeps its own mark
+            let _ = running.try_update(|cur| {
+                if cur.as_deref() == Some(key.as_str()) {
+                    *cur = None;
+                }
+            });
+            match r {
+                Some(task) if task.status == TaskStatus::Ok => toast(Tone::Ok, t("repl.run_done").to_string()),
+                Some(task) => toast(Tone::Err, tasks::task_error(&task)),
+                None => {}
             }
+            reload.try_run(());
         });
     };
     let applied = v.pending != Some(rynas_api_types::PendingOp::Add);
@@ -468,6 +480,17 @@ fn editor(init: Option<ReplicaView>, jobs: Remote<Vec<SnapshotJobView>>, close: 
         }
     });
 
+    // opened before the jobs were read: the first one, as the select shows it
+    if is_new {
+        Effect::new(move |_| {
+            let first = jobs.data.with(|l| l.iter().flatten().map(|j| j.job.name.clone()).next());
+            if let Some(first) = first
+                && d.with_untracked(|f| f.job.is_empty())
+            {
+                d.update(|f| f.job = first);
+            }
+        });
+    }
     let (id, set_id) = lens(d, |f| f.id.clone(), |f, v| f.id = v.trim().to_string());
     let id_err = Signal::derive(move || {
         let v = id.get();
@@ -606,6 +629,10 @@ fn editor(init: Option<ReplicaView>, jobs: Remote<Vec<SnapshotJobView>>, close: 
     };
 
     let save = Callback::new(move |_| {
+        // Enter in a field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         let f = d.get_untracked();
         let target = match f.target() {
             Ok(t) => t,
@@ -638,7 +665,7 @@ fn editor(init: Option<ReplicaView>, jobs: Remote<Vec<SnapshotJobView>>, close: 
                 Ok(()) => {
                     if crate::config::apply_now(&KEYS, error).await {
                         crate::toast::saved_applied();
-                        close.run(());
+                        close.try_run(());
                     }
                 }
                 Err(e) => error.set(Some(e.text())),
@@ -793,11 +820,15 @@ fn browse_replica(base: String, name: String, close: Callback<()>) -> AnyView {
     let base = StoredValue::new(base);
     let n = StoredValue::new(name.clone());
     Effect::new(move |_| {
-        let url = format!("{}/snapshots/{}/browse?path={}", base.get_value(), api::encode(&n.get_value()), api::encode(&path.get()));
+        let p = path.get();
+        let url = format!("{}/snapshots/{}/browse?path={}", base.get_value(), api::encode(&n.get_value()), api::encode(&p));
         listing.set(None);
         spawn_local(async move {
             let r = api::get::<ReplicaListing>(&url).await;
-            let _ = listing.try_set(Some(r.map_err(|e| e.code().to_string())));
+            // another folder was opened meanwhile: its own answer is the one to show
+            if path.try_with_untracked(|cur| *cur == p) == Some(true) {
+                let _ = listing.try_set(Some(r.map_err(|e| e.code().to_string())));
+            }
         });
     });
     let entries = move || match listing.get() {

@@ -336,6 +336,10 @@ pub async fn follow_run(id: &str, before: Option<u64>) -> Option<TaskRun> {
     for i in 0..1000u32 {
         // fast at first (most runs take seconds), then every 2 s
         api::sleep(if i < 20 { 500 } else { 2000 }).await;
+        // signed out meanwhile: no more requests from the login screen
+        if crate::auth::auth().session.with_untracked(Option::is_none) {
+            return None;
+        }
         match api::get::<TaskView>(&url).await {
             Ok(v) if !v.status.running => {
                 if let Some(r) = v.status.last_run.filter(|r| Some(r.id) != before) {
@@ -659,8 +663,8 @@ pub(crate) fn pause_dialog(task: Option<(String, String)>, done: Callback<()>, c
                 busy.set(false);
                 match r {
                     Ok(_) => {
-                        done.run(());
-                        close.run(());
+                        done.try_run(());
+                        close.try_run(());
                     }
                     Err(e) => error.set(Some(e.text())),
                 }
@@ -789,7 +793,7 @@ fn tasks_panel(tasks: Remote<Vec<TaskView>>, edit: RwSignal<Option<(ScheduledTas
                             Ok(()) => {
                                 saved_pending();
                                 crate::config::changed();
-                                close.run(());
+                                close.try_run(());
                             }
                             Err(e) if e.code() == rynas_api_types::error_codes::CONFLICT => error.set(Some(t("sch.delete_job_task").to_string())),
                             Err(e) => error.set(Some(e.text())),
@@ -1164,6 +1168,10 @@ pub(crate) fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>
     };
 
     let save = Callback::new(move |_| {
+        // Enter in a field submits the form also while the Save button is disabled
+        if busy.get_untracked() {
+            return;
+        }
         let mut task = d.get_untracked();
         if is_new && !valid_task_id(&task.id) {
             error.set(Some(t("sch.v.id").to_string()));
@@ -1203,7 +1211,7 @@ pub(crate) fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>
                 Ok(()) => {
                     if crate::config::apply_now(&[crate::config::keys::SCHEDULER], error).await {
                         saved_applied();
-                        close.run(());
+                        close.try_run(());
                     }
                 }
                 Err(e) => error.set(Some(e.text())),
@@ -1311,8 +1319,10 @@ pub(crate) fn history_drawer(task: ScheduledTask, tasks: Remote<Vec<TaskView>>, 
     let after_live = Callback::new(move |ran: bool| {
         tasks.reload();
         let inv = live_run.get_untracked().map(|r| r.invocation_id);
+        // read now: the drawer may be closed while the rounds below wait
+        let base = base.get_value();
         spawn_local(async move {
-            let url = format!("{}?limit={HISTORY_PAGE}", base.get_value());
+            let url = format!("{base}?limit={HISTORY_PAGE}");
             for attempt in 0..5u32 {
                 if ran {
                     api::sleep(if attempt == 0 { 1200 } else { 1000 }).await;
@@ -1326,7 +1336,7 @@ pub(crate) fn history_drawer(task: ScheduledTask, tasks: Remote<Vec<TaskView>>, 
                 let _ = more.try_set(l.len() >= HISTORY_PAGE);
                 let _ = runs.try_set(Some(l));
                 if let Some(r) = newest {
-                    if let Ok(full) = api::get::<TaskRun>(&format!("{}/{}", base.get_value(), r.id)).await {
+                    if let Ok(full) = api::get::<TaskRun>(&format!("{base}/{}", r.id)).await {
                         let _ = output.try_set(Some(Ok(full)));
                     }
                     let _ = selected.try_set(Some(r.id));
@@ -1463,7 +1473,8 @@ fn open_run(base: String, n: u64, selected: RwSignal<Option<u64>>, output: RwSig
     selected.set(Some(n));
     spawn_local(async move {
         match api::get::<TaskRun>(&format!("{base}/{n}")).await {
-            Ok(r) if selected.get_untracked() == Some(n) => output.set(Some(Ok(r))),
+            // (`try_`: the drawer may be closed by now)
+            Ok(r) if selected.try_get_untracked() == Some(Some(n)) => output.set(Some(Ok(r))),
             Ok(_) => {}
             Err(e) => output.set(Some(Err(e.text()))),
         }

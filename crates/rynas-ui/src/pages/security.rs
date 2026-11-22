@@ -318,7 +318,8 @@ pub fn Security() -> impl IntoView {
 
 fn focus_later(r: NodeRef<html::Input>) {
     request_animation_frame(move || {
-        if let Some(el) = r.get_untracked() {
+        // (called when an answer arrives: the page may be gone by then)
+        if let Some(el) = r.try_get_untracked().flatten() {
             let _ = el.focus();
         }
     });

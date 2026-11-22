@@ -300,7 +300,8 @@ pub fn code_field(label: &'static str, value: Signal<String>, set: Callback<Stri
                 if let Ok(v) = wasm_bindgen_futures::JsFuture::from(p).await
                     && let Some(s) = v.as_string()
                 {
-                    set.run(s);
+                    // the editor may be closed by the time a large file is read
+                    set.try_run(s);
                 }
             });
         };

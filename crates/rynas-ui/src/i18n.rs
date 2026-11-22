@@ -5284,7 +5284,7 @@ dict! { BLOB, LENS;
     "apps.fe.invalid_value" => "Not a valid value";
     "apps.fe.missing_value" => "Required";
     "apps.fe.unknown_value" => "Not a question of this app";
-    "apps.fe.unsafe_value" => "Contains a line break, a single quote or a NUL character";
+    "apps.fe.unsafe_value" => "Contains a line break, a single quote or a NUL character, or ends with a backslash";
     "apps.fe.share_missing" => "The shared folder does not exist";
     "apps.fe.bad_path" => "Not a folder on a mounted volume";
     "apps.fe.bad_port" => "This port cannot be used";

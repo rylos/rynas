@@ -419,6 +419,10 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
     // a new volume moves the engine: show what the apply writes and runs first
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        // Enter in a field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         let body = d.get_untracked();
         if body.volume == applied_vol() {
             save.run(());

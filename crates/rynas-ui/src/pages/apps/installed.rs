@@ -211,7 +211,7 @@ fn update_many(picked: RwSignal<Vec<String>>, close: Callback<()>) -> AnyView {
             } else {
                 toast(Tone::Err, tf("apps.upd.failed", &[("names", &failed.join(", "))]));
             }
-            close.run(());
+            close.try_run(());
         });
     });
     ui::confirm(Confirm { busy, error, ..Confirm::new(t("apps.upd.selected_title").to_string(), tf("apps.upd.many_text", &[("names", &names)]), "apps.update", false, go, close) })
@@ -486,7 +486,7 @@ fn ask_dialog(q: Ask, stack: String, ask: RwSignal<Option<Ask>>, close_drawer: C
                         Ok(()) => {
                             toast(Tone::Ok, t("apps.conv.done").to_string());
                             ask.set(None);
-                            close_drawer.run(());
+                            close_drawer.try_run(());
                             crate::docker::docker().on_changed();
                         }
                         Err(e) => {

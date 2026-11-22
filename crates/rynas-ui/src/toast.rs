@@ -116,7 +116,13 @@ pub fn Toasts() -> impl IntoView {
                             <div class=format!("toast {}", x.tone.class())>
                                 <Icon icon=x.tone.icon() size=16 />
                                 <span class="toast-text">{err_view(x.text)}</span>
-                                <button class="icon-btn sm" aria-label=tr("close") on:click=move |_| l.update(|v| v.retain(|y| y.id != id))>
+                                <button class="icon-btn sm" aria-label=tr("close") on:click=move |ev| {
+                                    // the focused button leaves the page without a `focusout`: the
+                                    // hold would last for good and no later toast would go away
+                                    let over = event_target::<web_sys::Element>(&ev).closest(".toast-stack:hover").ok().flatten().is_some();
+                                    l.update(|v| v.retain(|y| y.id != id));
+                                    held().set(over);
+                                }>
                                     <Icon icon=icons::X size=14 />
                                 </button>
                             </div>

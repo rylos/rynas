@@ -153,7 +153,10 @@ pub async fn follow_or_lost(id: &str, lost_ms: Option<u32>) -> Result<TaskInfo, 
         {
             return Ok(t);
         }
-        if !auth().is_ready() {
+        // (signing in again before the session ends keeps the session: the task is still followed)
+        let a = auth();
+        let renewing = a.reason.get_untracked() == crate::auth::Reason::Renew && a.session.with_untracked(Option::is_some);
+        if !a.is_ready() && !renewing {
             return Err(ApiErr::Http { status: 401, code: rynas_api_types::error_codes::UNAUTHENTICATED.into(), retry_after: None, message: String::new(), field: None });
         }
         let live = s.stream_live.get_untracked();

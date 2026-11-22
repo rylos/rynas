@@ -186,6 +186,12 @@ async fn early_response(method: &str, url: &str) -> Option<Response> {
 }
 
 async fn send(method: &str, url: &str, body: Option<String>) -> Result<Response, ApiErr> {
+    send_within(method, url, body, true).await
+}
+
+/// [`send`]; with `whole` false, [`TIMEOUT_MS`] is only the wait for the answer to start and
+/// its body may take as long as it needs (a download).
+async fn send_within(method: &str, url: &str, body: Option<String>, whole: bool) -> Result<Response, ApiErr> {
     let early = early_response(method, url).await;
     let init = RequestInit::new();
     init.set_method(method);
@@ -206,6 +212,18 @@ async fn send(method: &str, url: &str, body: Option<String>) -> Result<Response,
     init.set_headers(&headers);
     let resp: Response = match early {
         Some(r) => r,
+        None if !whole => {
+            // no abort signal (it would also cut the body while it is read): the request
+            // races a timer that rejects with nothing
+            let fetch = window().fetch_with_str_and_init(url, &init);
+            let late = js_sys::Promise::new(&mut |_, reject| {
+                let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(&reject, TIMEOUT_MS as i32);
+            });
+            JsFuture::from(js_sys::Promise::race(&js_sys::Array::of2(&fetch, &late)))
+                .await
+                .map_err(|e| if e.is_undefined() { ApiErr::Timeout } else { ApiErr::Network })?
+                .unchecked_into()
+        }
         None => {
             // the timeout starts here, after any wait for the early answer
             init.set_signal(Some(&web_sys::AbortSignal::timeout_with_u32(TIMEOUT_MS)));
@@ -358,7 +376,8 @@ pub async fn delete_empty(url: &str) -> Result<(), ApiErr> {
 
 /// GET a binary answer and hand it to the browser as a download named `file`.
 pub async fn download(url: &str, file: &str) -> Result<(), ApiErr> {
-    let resp = send("GET", url, None).await?;
+    // a file of any size (one out of a backup): only the start of the answer is timed
+    let resp = send_within("GET", url, None, false).await?;
     let blob: web_sys::Blob =
         JsFuture::from(resp.blob().map_err(|_| ApiErr::Decode)?).await.map_err(|_| ApiErr::Decode)?.unchecked_into();
     save_blob(file, &blob);

@@ -72,7 +72,7 @@ fn preview_view(p: &AdoptPreview) -> AnyView {
 async fn adopted_done(r: StackAdopted, close: Callback<()>) {
     toast(Tone::Ok, tf("dk.ad.done", &[("name", &r.name)]));
     crate::docker::docker().on_changed();
-    close.run(());
+    close.try_run(());
     if let Some(id) = r.task_id {
         tasks().show(&id);
         done_toast(tasks::follow(&id).await);
@@ -271,7 +271,7 @@ pub(super) fn release_dialog(name: String, cancel: Callback<()>, done: Callback<
                 Ok(()) => {
                     toast(Tone::Ok, t("dk.ad.released").to_string());
                     crate::docker::docker().on_changed();
-                    done.run(());
+                    done.try_run(());
                 }
                 Err(e) => {
                     let _ = error.try_set(Some(e.text()));

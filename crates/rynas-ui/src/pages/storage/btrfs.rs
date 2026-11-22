@@ -310,7 +310,7 @@ pub fn ResetErrorsDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
             error,
             Callback::new(move |_| {
                 super::sto().load();
-                on_close.run(());
+                on_close.try_run(());
             }),
         );
     });
@@ -393,14 +393,15 @@ pub fn RepairDialog(vol: Vol, what: Repair, on_close: Callback<()>) -> impl Into
                         <label class="field">
                             <span class="field-label">{tr("sto.bt.missing_device")}</span>
                             <select class="input" prop:value=move || devid.get().to_string() on:change=move |ev| devid.set(event_target_value(&ev).parse().unwrap_or(0))>
-                                {missing.get_value().into_iter().map(|d| view! { <option value=d.to_string()>{tf("sto.bt.devid", &[("n", &d.to_string())])}</option> }).collect_view()}
+                                // `selected` too: after Back the form is built again, the value is set before the options exist
+                                {missing.get_value().into_iter().map(|d| view! { <option value=d.to_string() selected=devid.get_untracked() == d>{tf("sto.bt.devid", &[("n", &d.to_string())])}</option> }).collect_view()}
                             </select>
                         </label>
                         <label class="field">
                             <span class="field-label">{tr("sto.replace_new")}</span>
                             <select class="input" prop:value=move || new_disk.get() on:change=move |ev| new_disk.set(event_target_value(&ev))>
                                 <option value="">{tr("sto.bt.choose_disk")}</option>
-                                {free.get_value().into_iter().map(|d| view! { <option value=d.name.clone()>{disk_title(&d)}</option> }).collect_view()}
+                                {free.get_value().into_iter().map(|d| { let sel = new_disk.with_untracked(|n| *n == d.name); view! { <option value=d.name.clone() selected=sel>{disk_title(&d)}</option> } }).collect_view()}
                             </select>
                         </label>
                         {move || chosen().map(|d| {
@@ -439,8 +440,10 @@ pub fn DegradedSetting(uuid: String) -> impl IntoView {
     let error = RwSignal::new(None::<String>);
     let fill = move |st: &BtrfsSettingsState| auto.set(st.pending.clone().unwrap_or_else(|| st.applied.clone()).auto_degraded);
     let load = move || {
+        // also called after a save: the page may be gone by then
+        let Some(u) = target.try_get_value() else { return };
         spawn_local(async move {
-            let r = api::get::<BtrfsSettingsState>(&target.get_value()).await;
+            let r = api::get::<BtrfsSettingsState>(&u).await;
             if let Ok(st) = &r {
                 fill(st);
             }

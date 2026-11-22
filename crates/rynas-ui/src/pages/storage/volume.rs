@@ -215,7 +215,8 @@ impl Flow {
                         && serials_ok()
                 };
                 view! {
-                    <button class="btn ghost" type="button" on:click=move |_| stage.set(Stage::Form)>{tr("back")}</button>
+                    // the next plan may erase other disks: what was typed confirmed this one only
+                    <button class="btn ghost" type="button" on:click=move |_| { typed.set(String::new()); serials.set(Vec::new()); stage.set(Stage::Form); }>{tr("back")}</button>
                     <button
                         class=if destructive { "btn danger" } else { "btn primary" }
                         type="button"
@@ -378,6 +379,16 @@ pub fn VolumePage() -> impl IntoView {
     // still say "never" for a second): the scrub card follows it, then everything is read
     // again once (the volume's health, the device error counters)
     let own_scrub = RwSignal::new(None::<String>);
+    // the scrub card's Stop: kept here, the card is built again at every inventory refresh
+    let stop = ScrubStop { stage: RwSignal::new(Stage::Form), busy: RwSignal::new(false), error: RwSignal::new(None) };
+    Effect::new(move |prev: Option<()>| {
+        id.track();
+        // another volume: not the previous one's task or error
+        if prev.is_some() {
+            stop.stage.set(Stage::Form);
+            stop.error.set(None);
+        }
+    });
     let scrubbing = move || {
         vol.with(|v| v.as_ref().and_then(|v| v.fs.as_ref()).and_then(|f| f.scrub.as_ref()).is_some_and(|x| x.status == ScrubState::Running))
             || own_scrub.with(|id| {
@@ -405,7 +416,7 @@ pub fn VolumePage() -> impl IntoView {
                         </div>
                     }
                     .into_any(),
-                    Some(v) => volume_view(v, modal, selected),
+                    Some(v) => volume_view(v, modal, selected, stop),
                 }}
                 {move || stable.get().map(|st| view! {
                     <div class="grid vol-detail">
@@ -450,7 +461,15 @@ enum Open {
     ResetErrors,
 }
 
-fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String>>) -> AnyView {
+/// The state of the scrub card's Stop (task, request in flight, refusal).
+#[derive(Clone, Copy)]
+struct ScrubStop {
+    stage: RwSignal<Stage>,
+    busy: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+}
+
+fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String>>, stop: ScrubStop) -> AnyView {
     let s = super::sto();
     let (tone, key) = health(vol.health);
     let level = vol.level_text();
@@ -515,7 +534,7 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
             {vol.fs.as_ref().filter(|f| super::btrfs::multi_device(f)).map(|_| {
                 super::btrfs::devices_card(&vol, Callback::new(move |r| modal.set(if r == super::btrfs::Repair::Scrub { Open::Scrub } else { Open::Btrfs(r) })), selected)
             })}
-            {(!vol.locked && !waiting && vol.fs.is_some()).then(|| scrub_card(&vol, modal))}
+            {(!vol.locked && !waiting && vol.fs.is_some()).then(|| scrub_card(&vol, modal, stop))}
             {(!vol.locked).then(|| super::btrfs::errors_card(&vol, Callback::new(move |_| modal.set(Open::ResetErrors)), selected))}
             {(!vol.locked && vol.mountpoint.is_some()).then(|| view! { <super::dedup::DedupCard key=vol.id.clone() /> })}
         </div>
@@ -681,15 +700,13 @@ fn raid_card(a: MdArray, selected: RwSignal<Option<String>>) -> AnyView {
     .into_any()
 }
 
-fn scrub_card(v: &Vol, modal: RwSignal<Open>) -> AnyView {
+fn scrub_card(v: &Vol, modal: RwSignal<Open>, stop: ScrubStop) -> AnyView {
     // "never" carries btrfs's totals only: nothing to show but the state
     let sc = v.fs.as_ref().and_then(|f| f.scrub.clone()).filter(|s| s.status != ScrubState::Never);
     let running = sc.as_ref().is_some_and(|s| s.status == ScrubState::Running);
     let id = v.id.clone();
     let managed = v.managed;
-    let stage = RwSignal::new(Stage::Form);
-    let busy = RwSignal::new(false);
-    let error = RwSignal::new(None::<String>);
+    let ScrubStop { stage, busy, error } = stop;
     let stop = move |_| {
         start_task(vol_url(&id, "scrub"), Some(json!({"action": "stop", "md_check": false, "dry_run": false})), false, stage, busy, error);
     };
@@ -1192,7 +1209,7 @@ fn GrowDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
                         <select class="input" prop:value=move || level.get() on:change=move |ev| level.set(event_target_value(&ev))>
                             <option value="">{tf("sto.keep_level", &[("l", current.map(|l| t(level_key(l))).unwrap_or(ui::DASH))])}</option>
                             {LEVELS.iter().filter(|l| Some(**l) != current && **l != RaidLevel::Single).map(|l| view! {
-                                <option value=level_str(*l)>{tr(level_key(*l))}</option>
+                                <option value=level_str(*l) selected=level.with_untracked(|v| v == level_str(*l))>{tr(level_key(*l))}</option>
                             }).collect_view()}
                         </select>
                     </label>
@@ -1298,13 +1315,14 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
                     <label class="field">
                         <span class="field-label">{tr("sto.replace_old")}</span>
                         <select class="input" prop:value=move || old.get() on:change=move |ev| old.set(event_target_value(&ev))>
-                            {options.get_value().into_iter().map(|(v, label)| view! { <option value=v>{label}</option> }).collect_view()}
+                            // `selected` too: after Back the form is built again, the value is set before the options exist
+                            {options.get_value().into_iter().map(|(v, label)| { let sel = old.with_untracked(|o| *o == v); view! { <option value=v selected=sel>{label}</option> } }).collect_view()}
                         </select>
                     </label>
                     <label class="field">
                         <span class="field-label">{tr("sto.replace_new")}</span>
                         <select class="input" prop:value=move || new_disk.get() on:change=move |ev| new_disk.set(event_target_value(&ev))>
-                            {free.get_value().into_iter().map(|d| view! { <option value=d.name.clone()>{disk_title(&d)}</option> }).collect_view()}
+                            {free.get_value().into_iter().map(|d| { let sel = new_disk.with_untracked(|n| *n == d.name); view! { <option value=d.name.clone() selected=sel>{disk_title(&d)}</option> } }).collect_view()}
                         </select>
                     </label>
                     {free.with_value(Vec::is_empty).then(|| view! { <p class="muted small">{tr("sto.no_free")}</p> })}
@@ -1451,6 +1469,10 @@ fn SubvolDialog(base: String, edit: Option<SubvolumeInfo>, on_close: Callback<()
     let base = StoredValue::new(base);
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        // Enter in the field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         let n = name.get_untracked();
         if !valid_sub(&n) {
             error.set(Some(t("sto.sub_invalid").to_string()));
@@ -1562,8 +1584,10 @@ fn StripeCache(id: String) -> impl IntoView {
         choice.set(v.stripe_cache_size.map(|n| n.to_string()).unwrap_or_default());
     };
     let load = move || {
+        // also called after a save: the page may be gone by then
+        let Some(u) = url.try_get_value() else { return };
         spawn_local(async move {
-            let r = api::get::<VolumeSettingsState>(&url.get_value()).await;
+            let r = api::get::<VolumeSettingsState>(&u).await;
             if let Ok(st) = &r {
                 fill(st);
             }
@@ -1612,8 +1636,11 @@ fn StripeCache(id: String) -> impl IntoView {
                             <span class="field-label">{tr("sto.stripe")}</span>
                             <select class="input" prop:value=move || choice.get() on:change=move |ev| choice.set(event_target_value(&ev))>
                                 <option value="">{tr("sto.kernel_default")}</option>
-                                {prop.map(|p| view! { <option value=p.to_string()>{tf("sto.use_proposal", &[("n", &p.to_string())])}</option> })}
-                                {[512u32, 1024, 2048, 4096, 8192].into_iter().filter(|n| Some(*n) != prop).map(|n| view! { <option value=n.to_string()>{n.to_string()}</option> }).collect_view()}
+                                // a value set elsewhere, not in the list: shown as itself
+                                {choice.get_untracked().parse::<u32>().ok().filter(|n| Some(*n) != prop && ![512u32, 1024, 2048, 4096, 8192].contains(n)).map(|n| view! { <option value=n.to_string() selected=true>{n.to_string()}</option> })}
+                                // `selected` too: the select's value is set before its options exist
+                                {prop.map(|p| view! { <option value=p.to_string() selected=choice.with_untracked(|c| *c == p.to_string())>{tf("sto.use_proposal", &[("n", &p.to_string())])}</option> })}
+                                {[512u32, 1024, 2048, 4096, 8192].into_iter().filter(|n| Some(*n) != prop).map(|n| view! { <option value=n.to_string() selected=choice.with_untracked(|c| *c == n.to_string())>{n.to_string()}</option> }).collect_view()}
                             </select>
                         </label>
                         {form_error(error)}

@@ -172,6 +172,10 @@ pub fn CreateVolume() -> impl IntoView {
     };
     // the drives the level was last chosen for: a new selection starts from its recommendation
     let planned_for = StoredValue::new(None::<Vec<String>>);
+    // count the plan requests of the levels and of the review: only the last round's answers
+    // are used
+    let plan_round = StoredValue::new(0u32);
+    let review_round = StoredValue::new(0u32);
     let plan_levels = move || {
         let disks = chosen.get_untracked();
         let n = disks.len();
@@ -183,10 +187,16 @@ pub fn CreateVolume() -> impl IntoView {
             planned_for.set_value(Some(sorted));
         }
         plans.set(list.iter().map(|l| (*l, None)).collect());
+        // an answer for an earlier selection of drives is dropped
+        let asked = plan_round.get_value() + 1;
+        plan_round.set_value(asked);
         for l in list {
             let b = body(l, false);
             spawn_local(async move {
                 let r = api::post::<_, StoragePlan>("/api/v1/storage/plan/volume", Some(&b)).await.map_err(|e| e.text());
+                if plan_round.try_get_value() != Some(asked) {
+                    return;
+                }
                 let _ = plans.try_update(|p| {
                     if let Some(e) = p.iter_mut().find(|(x, _)| *x == l) {
                         e.1 = Some(r);
@@ -203,9 +213,14 @@ pub fn CreateVolume() -> impl IntoView {
         final_plan.set(None);
         typed.set(String::new());
         let b = body(level.get_untracked(), true);
+        // the review shows the plan of the options as they are now, not of an earlier visit
+        let asked = review_round.get_value() + 1;
+        review_round.set_value(asked);
         spawn_local(async move {
             let r = api::post::<_, StoragePlan>("/api/v1/storage/plan/volume", Some(&b)).await.map_err(|e| e.text());
-            let _ = final_plan.try_set(Some(r));
+            if review_round.try_get_value() == Some(asked) {
+                let _ = final_plan.try_set(Some(r));
+            }
         });
     };
 

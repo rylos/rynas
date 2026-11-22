@@ -595,8 +595,21 @@ pub fn dialog(kind: DlgKind, title: Signal<String>, on_close: Callback<()>, body
             on_close.run(());
         }
     };
+    // signed out with the dialog open (a session that expired): a modal dialog stays above the
+    // login screen and keeps it inert, so nobody could sign in again. It leaves the top layer
+    // until the session is back; what was typed in it stays
+    let locked = move || crate::auth::auth().phase.get() == crate::auth::Phase::Locked;
+    Effect::new(move |_| {
+        let locked = locked();
+        let Some(d) = node.get() else { return };
+        if locked && d.open() {
+            d.close();
+        } else if !locked && !d.open() {
+            let _ = d.show_modal();
+        }
+    });
     node.on_load(move |d| {
-        if !d.open() {
+        if !d.open() && crate::auth::auth().phase.get_untracked() != crate::auth::Phase::Locked {
             let _ = d.show_modal();
         }
         let target = d

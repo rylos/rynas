@@ -357,6 +357,9 @@ fn acme_form() -> AnyView {
     let email_err = RwSignal::new(None::<String>);
     let save = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        if busy.get_untracked() {
+            return;
+        }
         let Some(mut cfg) = current() else { return };
         let mut acme = cfg.get("acme").cloned().unwrap_or(Value::Null);
         put(&mut acme, "staging", Value::Bool(staging.get_untracked()));
@@ -371,9 +374,11 @@ fn acme_form() -> AnyView {
         busy.set(true);
         error.set(None);
         email_err.set(None);
+        // what is being saved (the page may be gone when the answer comes)
+        let sent = (email.get_untracked(), staging.get_untracked(), profile.get_untracked());
         spawn_local(async move {
             if save_config(cfg, error).await {
-                init.set_value((email.get_untracked(), staging.get_untracked(), profile.get_untracked()));
+                let _ = init.try_set_value(sent);
             }
             busy.set(false);
             w.state.reload();
@@ -592,7 +597,7 @@ fn cred_dialog(id: String) -> AnyView {
             busy.set(false);
             w.state.reload();
             if ok {
-                close.run(());
+                close.try_run(());
             }
         });
     };
@@ -776,7 +781,7 @@ fn save_with(edit: impl FnOnce(&mut Value) + 'static, busy: RwSignal<bool>, erro
         let _ = busy.try_set(false);
         w.state.reload();
         if ok {
-            done.run(());
+            done.try_run(());
         }
     });
 }
@@ -1127,7 +1132,7 @@ fn domain_form(id: String, saved: Callback<String>) -> (AnyView, RwSignal<bool>,
             let _ = planning.try_set(false);
             match r {
                 Ok(p) => {
-                    let name = draft.with_untracked(|x| x.name.trim().trim_end_matches('.').to_ascii_lowercase());
+                    let Some(name) = draft.try_with_untracked(|x| x.name.trim().trim_end_matches('.').to_ascii_lowercase()) else { return };
                     let _ = plan.try_set(Some(p.dns_changes.into_iter().filter(|c| c.domain == name).collect()));
                 }
                 Err(e) => {
@@ -1140,6 +1145,9 @@ fn domain_form(id: String, saved: Callback<String>) -> (AnyView, RwSignal<bool>,
     };
     let save = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        if busy.get_untracked() {
+            return;
+        }
         let Some((cfg, nid)) = candidate() else { return };
         busy.set(true);
         error.set(None);
@@ -1159,7 +1167,7 @@ fn domain_form(id: String, saved: Callback<String>) -> (AnyView, RwSignal<bool>,
             if ok {
                 crate::toast::saved_applied();
                 let _ = values.try_set(Vec::new());
-                saved.run(nid);
+                saved.try_run(nid);
             }
         });
     };

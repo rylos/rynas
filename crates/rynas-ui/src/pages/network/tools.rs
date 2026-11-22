@@ -108,7 +108,7 @@ fn restore_dialog(net: Net, r: NetRevision, close: Callback<()>) -> AnyView {
             busy.set(false);
             match res {
                 Ok(s) => {
-                    close.run(());
+                    close.try_run(());
                     net.trial.begin(net, s);
                     net.reload();
                 }

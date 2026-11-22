@@ -202,7 +202,7 @@ fn import_dialog(st: Remote<TlsStatus>, close: Callback<()>) -> AnyView {
                 Ok(s) => {
                     st.data.set(Some(s));
                     toast(Tone::Ok, t("tls.reload_note").to_string());
-                    close.run(());
+                    close.try_run(());
                 }
                 Err(e) => match e.field() {
                     Some("certificate") => cert_err.set(Some(e.text())),

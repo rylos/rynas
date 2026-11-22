@@ -193,7 +193,8 @@ fn run_task(tab: Tab, method: &'static str, url: String, ok: String, busy: RwSig
             Ok(task) if task.status == TaskStatus::Ok => {
                 toast(Tone::Ok, ok);
                 tab.data.reload();
-                done.run(());
+                // the page may have been left while the task ran
+                done.try_run(());
             }
             Ok(task) => {
                 let _ = error.try_set(Some(tasks::task_error(&task)));
@@ -1072,7 +1073,7 @@ impl AgentCtl {
             spawn_local(async move {
                 match api::delete_empty(&u).await {
                     Ok(_) => {
-                        if self.created.with_untracked(|c| c.as_ref().is_some_and(|c| c.id == id)) {
+                        if self.created.try_with_untracked(|c| c.as_ref().is_some_and(|c| c.id == id)) == Some(true) {
                             self.created.set(None);
                         }
                         self.overview.reload();
@@ -1258,7 +1259,7 @@ impl AgentCtl {
                         toast(Tone::Ok, tf("pca.revoked", &[("device", &d)]));
                         self.ask_revoke.set(false);
                         self.detail.reload();
-                        self.changed.run(());
+                        self.changed.try_run(());
                     }
                     Ok(task) => self.error.set(Some(tasks::task_error(&task))),
                     Err(e) => self.error.set(Some(e.text())),
@@ -1419,7 +1420,8 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
         let body = PcDeviceSettings {
             description: description.get_untracked().trim().to_string(),
             plan,
-            retention: Retention { last: n(last), hourly: 0, daily: n(daily), weekly: n(weekly), monthly: n(monthly), yearly: n(yearly) },
+            // hourly has no field here: kept as it is set
+            retention: Retention { last: n(last), hourly: r.hourly, daily: n(daily), weekly: n(weekly), monthly: n(monthly), yearly: n(yearly) },
             min_age_days: n(min_age),
             alert_hours: n(alert),
             critical_hours: n(critical),
@@ -1433,8 +1435,8 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
             match r {
                 Ok(_) => {
                     toast(Tone::Ok, t("bk.saved").to_string());
-                    saved.run(());
-                    close.run(());
+                    saved.try_run(());
+                    close.try_run(());
                 }
                 Err(e) => error.set(Some(e.text())),
             }

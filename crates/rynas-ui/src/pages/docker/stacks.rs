@@ -52,7 +52,7 @@ pub(crate) fn launch(url: String, body: Option<String>, busy: RwSignal<bool>, er
         match api::start_task(&url, body).await {
             Ok(id) => {
                 let _ = busy.try_set(false);
-                started.run(());
+                started.try_run(());
                 tasks().show(&id);
                 done_toast(tasks::follow(&id).await);
             }
@@ -722,6 +722,8 @@ fn editor(name: Option<String>, settings: Remote<DockerSettingsState>, close: Ca
             let r = api::post::<_, StackValidation>("/api/v1/docker/stacks/validate", Some(&body)).await;
             let _ = checking.try_set(false);
             match r {
+                // the files were edited meanwhile: this is not their check
+                Ok(_) if compose.try_with_untracked(|c| *c == body.compose) != Some(true) || env.try_with_untracked(|e| *e == body.env) != Some(true) => {}
                 Ok(v) => {
                     let _ = validation.try_set(Some(v));
                 }
@@ -751,7 +753,7 @@ fn editor(name: Option<String>, settings: Remote<DockerSettingsState>, close: Ca
                 Ok(task) => {
                     toast(Tone::Ok, t(if creating { "dk.ed.created" } else { "dk.ed.saved" }).to_string());
                     crate::docker::docker().on_changed();
-                    close.run(());
+                    close.try_run(());
                     if let Some(id) = task {
                         tasks().show(&id);
                         done_toast(tasks::follow(&id).await);

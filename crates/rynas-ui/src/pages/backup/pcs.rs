@@ -461,7 +461,8 @@ fn run(pcs: Pcs, (method, url, body): (&'static str, String, Option<String>), ok
             Ok(task) if task.status == TaskStatus::Ok => {
                 toast(Tone::Ok, ok);
                 pcs.list.reload();
-                done.run(());
+                // the page may have been left while the task ran
+                done.try_run(());
             }
             Ok(task) => {
                 let _ = error.try_set(Some(tasks::task_error(&task)));
@@ -868,9 +869,13 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
         spawn_local(async move {
             let r = api::post::<_, AdoptPreview>("/api/v1/pc-backups/plan/adopt", Some(&body)).await;
             let _ = checking.try_set(false);
+            // the folder was changed meanwhile: this is not its preview
+            if path.try_with_untracked(|p| p.trim() == body.path) != Some(true) {
+                return;
+            }
             match r {
                 Ok(p) => {
-                    if device.get_untracked().is_empty()
+                    if device.try_with_untracked(String::is_empty) == Some(true)
                         && let Some(d) = &p.suggested_device
                     {
                         device.set(d.clone());

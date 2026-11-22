@@ -54,6 +54,8 @@ thread_local! {
     static STO: Cell<Option<Sto>> = const { Cell::new(None) };
     /// Mounted storage pages (see [`pages_open`]).
     static OPEN: Cell<u32> = const { Cell::new(0) };
+    /// A refresh asked while a round ran (with the filesystems or not): done when it ends.
+    static AGAIN: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
 /// The store, created on first use under the app's root owner (it outlives the pages).
@@ -96,6 +98,10 @@ fn fetch(url: &'static str, apply: fn(Sto, &str) -> bool, left: Rc<Cell<u8>>, ro
         if left.get() == 0 {
             s.err.set(round_err.take());
             s.busy.set(false);
+            // asked again while this round ran (after a task, a page opened): read once more
+            if let Some(fs) = AGAIN.with(Cell::take) {
+                s.refresh(fs);
+            }
         }
     });
 }
@@ -119,6 +125,9 @@ impl Sto {
     /// those from the data volumes, so they are not refreshed on every tick).
     pub fn refresh(self, fs: bool) {
         if self.busy.get_untracked() {
+            // the round in flight may carry answers from before what asks for this one (a task
+            // that just ended): one more round follows it
+            AGAIN.with(|c| c.set(Some(c.get().unwrap_or(false) || fs)));
             return;
         }
         self.busy.set(true);

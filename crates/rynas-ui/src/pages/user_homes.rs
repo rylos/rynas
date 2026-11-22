@@ -400,7 +400,7 @@ fn run(url: String, body: Option<String>, ok: String, done: Callback<()>) {
             Err(e) if e.status() == 401 => {}
             Err(e) => toast(Tone::Err, e.text()),
         }
-        done.run(());
+        done.try_run(());
     });
 }
 
@@ -440,14 +440,14 @@ pub fn move_dialog(ask: MoveAsk, state: Remote<HomesState>, close: Callback<()>,
             // the move can take long: the dialog closes, the task panel shows the progress
             match api::post::<_, TaskStarted>("/api/v1/services/homes/move", Some(&b)).await {
                 Ok(st) => {
-                    close.run(());
+                    close.try_run(());
                     let r = crate::tasks::follow(&st.task_id).await;
                     match r {
                         Ok(task) if task.status == TaskStatus::Ok => toast(Tone::Ok, t("homes.moved").to_string()),
                         Ok(task) => toast(Tone::Err, crate::tasks::task_error(&task)),
                         Err(e) => toast(Tone::Err, e.text()),
                     }
-                    done.run(());
+                    done.try_run(());
                 }
                 Err(e) => {
                     let _ = busy.try_set(false);

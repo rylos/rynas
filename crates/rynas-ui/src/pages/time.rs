@@ -192,7 +192,8 @@ fn offset_query(q: &str) -> Option<i32> {
     };
     let (h, m) = match rest.split_once(':') {
         Some((h, m)) => (h, m),
-        None if rest.len() == 4 => rest.split_at(2),
+        // ascii only: `split_at` panics inside a character ("+1é2")
+        None if rest.len() == 4 && rest.is_ascii() => rest.split_at(2),
         None => (rest, "0"),
     };
     let ok = |x: &str, max: usize| !x.is_empty() && x.len() <= max && x.bytes().all(|b| b.is_ascii_digit());
@@ -779,6 +780,8 @@ mod tests {
         assert_eq!(offset_query("utc−3"), Some(-10800));
         assert_eq!(offset_query("+05:30"), Some(19800));
         assert_eq!(offset_query("+0545"), Some(20700));
+        // four bytes, not four digits: no split inside a character
+        assert_eq!(offset_query("+1é2"), None);
         assert_eq!(offset_query("-05:30"), Some(-19800));
         for no in ["", "utc", "rome", "+", "+1:2:3", "+15", "+01:60", "1", "+abc"] {
             assert_eq!(offset_query(no), None, "{no}");

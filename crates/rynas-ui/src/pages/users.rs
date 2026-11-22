@@ -426,6 +426,10 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, homes: Option<HomesState>, 
 
     let valid = move || d.with(|u| (!is_new || valid_account_name(&u.name)) && !u.full_name.contains([':', ',']) && valid_email(&u.email) && (!is_new || id_ok(u.uid)));
     let save = Callback::new(move |_| {
+        // Enter in a field submits the form also while the Save button is disabled
+        if busy.get_untracked() {
+            return;
+        }
         show.set(true);
         server.set(None);
         if !valid() || !exp_err.with_untracked(Option::is_none) {
@@ -454,9 +458,9 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, homes: Option<HomesState>, 
                 Ok(_) => {
                     if crate::config::apply_now(&[crate::config::keys::USERS], error).await {
                         saved_applied();
-                        close.run(());
+                        close.try_run(());
                         if let Some(a) = ask {
-                            on_move.run(a);
+                            on_move.try_run(a);
                         }
                     }
                 }
@@ -664,7 +668,7 @@ fn user_delete_dialog(name: String, close: Callback<()>) -> AnyView {
                 Ok(()) => {
                     saved_pending();
                     crate::config::changed();
-                    close.run(());
+                    close.try_run(());
                 }
                 Err(e) => error.set(Some(e.text())),
             }
@@ -788,7 +792,7 @@ fn groups_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>) ->
                             Ok(()) => {
                                 saved_pending();
                                 crate::config::changed();
-                                close.run(());
+                                close.try_run(());
                             }
                             Err(e) => error.set(Some(e.text())),
                         }
@@ -833,6 +837,10 @@ fn group_editor(g: GroupView, all_users: Vec<String>, on_ids: Callback<IdAsk>, c
     let none = Signal::derive(|| None::<String>);
 
     let save = Callback::new(move |_| {
+        // Enter in a field submits the form also while the Save button is disabled
+        if busy.get_untracked() {
+            return;
+        }
         show.set(true);
         server.set(None);
         if is_new && !d.with_untracked(|g| valid_account_name(&g.name) && id_ok(g.gid)) {
@@ -852,7 +860,7 @@ fn group_editor(g: GroupView, all_users: Vec<String>, on_ids: Callback<IdAsk>, c
                 Ok(_) => {
                     if crate::config::apply_now(&[crate::config::keys::USERS], error).await {
                         saved_applied();
-                        close.run(());
+                        close.try_run(());
                     }
                 }
                 Err(e) => fail(&e, server, error),

@@ -163,7 +163,7 @@ impl W {
                 Ok(p) => {
                     let _ = self.plan.try_set(Some(p));
                     if let Some(cb) = then {
-                        cb.run(());
+                        cb.try_run(());
                     }
                 }
                 Err(e) => {
@@ -212,9 +212,11 @@ impl W {
                     let _ = self.started.try_set(Some(s));
                 }
                 Err(e) => {
-                    let _ = self.error.try_set(Some(e.text()));
-                    // the refusal may name a field: plan again to show it in place
-                    self.replan(None);
+                    // the refusal may name a field: plan again to show it in place (not when
+                    // the wizard was closed meanwhile)
+                    if self.error.try_set(Some(e.text())).is_none() {
+                        self.replan(None);
+                    }
                 }
             }
         });
@@ -367,7 +369,20 @@ fn options(w: W) -> AnyView {
     };
     view! {
         <div class="form">
-            {text_field("dk.ed.name", w.stack.into(), Callback::new(move |v: String| { w.stack.set(v.trim().to_lowercase()); w.plan.set(None); }), stack_err,
+            {text_field("dk.ed.name", w.stack.into(), Callback::new(move |v: String| {
+                let new = v.trim().to_lowercase();
+                // folders already placed on a volume carry the stack's name: they follow it
+                let (from, to) = (format!("/docker/appdata/{}/", w.stack.get_untracked()), format!("/docker/appdata/{new}/"));
+                if from != to && w.folders.with_untracked(|m| m.values().any(|p| p.contains(&from))) {
+                    w.folders.update(|m| {
+                        for p in m.values_mut() {
+                            *p = p.replacen(&from, &to, 1);
+                        }
+                    });
+                }
+                w.stack.set(new);
+                w.plan.set(None);
+            }), stack_err,
                 In { mono: true, help: Some("apps.w.stack_help"), maxlength: 63, ..In::default() })}
         </div>
         {form.view()}

@@ -564,7 +564,7 @@ fn save(w: Wol, f: Form, busy: RwSignal<bool>, error: RwSignal<Option<String>>, 
     let Some(d) = f.build() else { return };
     if demo() {
         toast(Tone::Ok, tf("wol.saved", &[("name", &d.name)]));
-        close.run(());
+        close.try_run(());
         return;
     }
     busy.set(true);
@@ -576,7 +576,7 @@ fn save(w: Wol, f: Form, busy: RwSignal<bool>, error: RwSignal<Option<String>>, 
             Ok(saved) => {
                 toast(Tone::Ok, tf("wol.saved", &[("name", &saved.name)]));
                 w.data.reload();
-                close.run(());
+                close.try_run(());
             }
             Err(e) => {
                 // a field the server refused shows its error there only

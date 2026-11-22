@@ -145,11 +145,20 @@ pub fn NotificationsPage() -> impl IntoView {
     let silence = RwSignal::new(None::<String>);
 
     // first page (or as many as already shown) again on filter changes and on every event
+    // the answer of a read counts only while no newer one has started: with two filters changed
+    // one after the other, the first answer may come last and would show the wrong list
+    let seq = StoredValue::new(0u32);
     let load = move || {
         let n = items.with_untracked(|i| i.as_ref().map(Vec::len).unwrap_or(0)).clamp(PAGE, 500);
         let url = list_url(&sev.get_untracked(), &cat.get_untracked(), &acked.get_untracked(), n, None);
+        seq.update_value(|s| *s += 1);
+        let mine = seq.get_value();
         spawn_local(async move {
-            match api::get::<Vec<Notification>>(&url).await {
+            let r = api::get::<Vec<Notification>>(&url).await;
+            if seq.try_get_value() != Some(mine) {
+                return;
+            }
+            match r {
                 Ok(l) => {
                     more.set(l.len() >= n);
                     items.set(Some(l));
@@ -178,9 +187,15 @@ pub fn NotificationsPage() -> impl IntoView {
         let Some(last) = items.with_untracked(|i| i.as_ref().and_then(|l| l.last().map(|n| n.id))) else { return };
         busy_more.set(true);
         let url = list_url(&sev.get_untracked(), &cat.get_untracked(), &acked.get_untracked(), PAGE, Some(last));
+        let mine = seq.get_value();
         spawn_local(async move {
             let r = api::get::<Vec<Notification>>(&url).await;
             busy_more.set(false);
+            // the list was read again meanwhile (a filter, a new event): this page no longer
+            // follows its last row
+            if seq.try_get_value() != Some(mine) {
+                return;
+            }
             match r {
                 Ok(l) => {
                     more.set(l.len() >= PAGE);
@@ -409,8 +424,8 @@ pub fn silence_dialog(key: String, close: Callback<()>, done: Callback<()>) -> A
                 match r {
                     Ok(_) => {
                         toast(Tone::Ok, t("nt.silenced_ok").to_string());
-                        done.run(());
-                        close.run(());
+                        done.try_run(());
+                        close.try_run(());
                     }
                     Err(e) => error.set(Some(e.text())),
                 }
@@ -804,7 +819,7 @@ fn targets_panel(targets: Remote<Vec<NotifyTarget>>) -> AnyView {
                         match r {
                             Ok(()) => {
                                 targets.reload();
-                                close.run(());
+                                close.try_run(());
                             }
                             Err(e) if e.code() == rynas_api_types::error_codes::CONFLICT => error.set(Some(t("nt.target_in_use").to_string())),
                             Err(e) => error.set(Some(e.text())),
@@ -979,6 +994,10 @@ fn target_editor(init: TargetDraft, targets: Remote<Vec<NotifyTarget>>, close: C
     };
 
     let save = Callback::new(move |_| {
+        // Enter in a field submits the form also while the Save button is disabled
+        if busy.get_untracked() {
+            return;
+        }
         let req = match d.with_untracked(TargetDraft::request) {
             Ok(r) => r,
             Err(k) => {
@@ -998,7 +1017,7 @@ fn target_editor(init: TargetDraft, targets: Remote<Vec<NotifyTarget>>, close: C
                 Ok(tg) => {
                     toast(Tone::Ok, tf("nt.target_saved", &[("name", &tg.name)]));
                     targets.reload();
-                    close.run(());
+                    close.try_run(());
                 }
                 Err(e) => error.set(Some(e.text())),
             }
@@ -1153,7 +1172,7 @@ fn rules_panel(rules: Remote<Vec<NotifyRule>>, targets: Remote<Vec<NotifyTarget>
                         match r {
                             Ok(()) => {
                                 rules.reload();
-                                close.run(());
+                                close.try_run(());
                             }
                             Err(e) => error.set(Some(e.text())),
                         }
@@ -1287,6 +1306,10 @@ fn rule_editor(init: NotifyRule, all_targets: Vec<(u64, String)>, rules: Remote<
     };
 
     let save = Callback::new(move |_| {
+        // Enter in a field submits the form also while the Save button is disabled
+        if busy.get_untracked() {
+            return;
+        }
         let mut r = d.get_untracked();
         r.name = r.name.trim().to_string();
         r.fields.retain(|f| !f.field.trim().is_empty());
@@ -1311,7 +1334,7 @@ fn rule_editor(init: NotifyRule, all_targets: Vec<(u64, String)>, rules: Remote<
                 Ok(r) => {
                     toast(Tone::Ok, tf("nt.rule_saved", &[("name", &r.name)]));
                     rules.reload();
-                    close.run(());
+                    close.try_run(());
                 }
                 Err(e) => error.set(Some(e.text())),
             }

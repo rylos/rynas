@@ -167,7 +167,7 @@ pub fn delete_dialog(target: Target, close: Callback<()>, done: Callback<()>) ->
                                 saved_pending();
                             }
                             crate::config::changed();
-                            close.run(());
+                            close.try_run(());
                         }
                         Err(e) => error.set(Some(e.text())),
                     }
@@ -176,14 +176,15 @@ pub fn delete_dialog(target: Target, close: Callback<()>, done: Callback<()>) ->
                     let url = format!("/api/v1/folders/{}/{}?confirm={}", api::encode(&f.volume), api::encode(&f.name), api::encode(&f.name));
                     match api::delete::<TaskStarted>(&url).await {
                         Ok(st) => {
-                            close.run(());
+                            close.try_run(());
                             let r = crate::tasks::follow(&st.task_id).await;
                             match r {
                                 Ok(task) if task.status == TaskStatus::Ok => toast(Tone::Ok, tf("shares.fdel_done", &[("name", &f.name)])),
                                 Ok(task) => toast(Tone::Err, crate::tasks::task_error(&task)),
                                 Err(e) => toast(Tone::Err, e.text()),
                             }
-                            done.run(());
+                            // the page may be gone by now
+                            done.try_run(());
                         }
                         Err(e) => {
                             busy.set(false);

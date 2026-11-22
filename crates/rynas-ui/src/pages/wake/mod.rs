@@ -170,8 +170,8 @@ impl Wol {
     /// second (retrying after an error) until it ends or the server stops reporting the wake;
     /// the result then comes from the device's history.
     fn follow(self, id: String, upid: String, started_ms: u64) {
-        // already followed: no second loop
-        if self.runs.with_untracked(|r| r.get(&id).is_some_and(|r| r.upid == upid && !r.done)) {
+        // already followed: no second loop (nor one for a page left while the wake was asked)
+        if self.runs.try_with_untracked(|r| r.get(&id).is_some_and(|r| r.upid == upid && !r.done)) != Some(false) {
             return;
         }
         self.runs.update(|r| {
@@ -382,7 +382,7 @@ pub(crate) fn sleep_menu(w: Wol, id: String) -> AnyView {
                     let _ = ask_off.try_set(false);
                     w.data.reload();
                 }
-                Err(e) if ask_off.get_untracked() => {
+                Err(e) if ask_off.try_get_untracked() == Some(true) => {
                     let _ = error.try_set(Some(e.text()));
                 }
                 Err(e) => toast(Tone::Err, e.text()),

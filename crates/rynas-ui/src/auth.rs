@@ -246,7 +246,9 @@ pub fn countdown() -> (RwSignal<u32>, impl Fn(u32) + Copy) {
         fn tick(left: RwSignal<u32>) {
             set_timeout(
                 move || {
-                    let n = left.get_untracked().saturating_sub(1);
+                    // the screen that counts down may be gone (the page was left meanwhile)
+                    let Some(n) = left.try_get_untracked() else { return };
+                    let n = n.saturating_sub(1);
                     left.set(n);
                     if n > 0 {
                         tick(left);

@@ -298,7 +298,7 @@ fn hostname_dialog(current: String, net: Net, renamed: RwSignal<Option<Renamed>>
     };
     let save = move |_| {
         let h = typed.get_untracked();
-        if !can_save.get_untracked() {
+        if !can_save.get_untracked() || busy.get_untracked() {
             return;
         }
         busy.set(true);
@@ -319,7 +319,7 @@ fn hostname_dialog(current: String, net: Net, renamed: RwSignal<Option<Renamed>>
                             // the app bar's host chip and the tab title
                             live.refresh_system();
                         }
-                        close.run(());
+                        close.try_run(());
                     }
                 }
                 Err(e) => {
@@ -452,7 +452,7 @@ fn adopt_dialog(net: Net, close: Callback<()>) -> AnyView {
             match r {
                 Ok(()) => {
                     net.reload();
-                    close.run(());
+                    close.try_run(());
                 }
                 Err(e) => error.set(Some(e.text())),
             }
@@ -557,6 +557,10 @@ fn apply_dialog(net: Net, open: RwSignal<bool>) -> AnyView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let apply = move || {
+        // Enter in a field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         busy.set(true);
         error.set(None);
         let body = NetApplyRequest { timeout_s: Some(timeout.get_untracked()), skip_test: skip.get_untracked(), comment: comment.get_untracked() };

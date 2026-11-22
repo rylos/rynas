@@ -109,7 +109,12 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
         let f = filter.get_untracked();
         let url = if f.is_empty() { "/api/v1/snapshots".to_string() } else { format!("/api/v1/snapshots?job={}", api::encode(&f)) };
         spawn_local(async move {
-            match api::get::<Vec<SnapshotInfo>>(&url).await {
+            let r = api::get::<Vec<SnapshotInfo>>(&url).await;
+            // another job was chosen meanwhile: its own answer is the one to show
+            if filter.try_with_untracked(|cur| *cur == f) != Some(true) {
+                return;
+            }
+            match r {
                 Ok(l) => {
                     items.set(Some(l));
                     err.set(None);
@@ -228,8 +233,8 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
                         busy,
                         error,
                         Callback::new(move |_| {
-                            close.run(());
-                            reload.run(());
+                            close.try_run(());
+                            reload.try_run(());
                         }),
                     );
                 }),
@@ -261,8 +266,8 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
                         busy,
                         error,
                         Callback::new(move |_| {
-                            close.run(());
-                            reload.run(());
+                            close.try_run(());
+                            reload.try_run(());
                         }),
                     );
                 }),
@@ -361,8 +366,9 @@ fn root_rollback_dialog(s: SnapshotInfo, pv: RollbackPreview, root: RwSignal<Opt
                 match r {
                     Ok(task) if task.status == TaskStatus::Ok => {
                         notice.set(Some((Tone::Warn, tf("snap.root_done", &[("id", &id), ("kernel", &kernel)]))));
-                        close.run(());
-                        reload.run(());
+                        // the page may have been left while the task ran
+                        close.try_run(());
+                        reload.try_run(());
                     }
                     Ok(task) => error.set(Some(tasks::task_error(&task))),
                     Err(e) => error.set(Some(e.text())),
@@ -404,10 +410,16 @@ fn browse_drawer(s: SnapshotInfo, close: Callback<()>) -> AnyView {
     let err = RwSignal::new(None::<String>);
     let restore = RwSignal::new(None::<(String, bool)>);
     let load = move || {
-        let url = format!("/api/v1/snapshots/{}/browse?path={}", api::encode(&id.get_value()), api::encode(&path.get_untracked()));
+        let p = path.get_untracked();
+        let url = format!("/api/v1/snapshots/{}/browse?path={}", api::encode(&id.get_value()), api::encode(&p));
         listing.set(None);
         spawn_local(async move {
-            match api::get::<SnapshotListing>(&url).await {
+            let r = api::get::<SnapshotListing>(&url).await;
+            // another folder was opened meanwhile: its own answer is the one to show
+            if path.try_with_untracked(|cur| *cur == p) != Some(true) {
+                return;
+            }
+            match r {
                 Ok(l) => {
                     err.set(None);
                     listing.set(Some(l));
@@ -590,7 +602,7 @@ fn jobs_panel(jobs: Remote<Vec<SnapshotJobView>>, edit: RwSignal<Option<Option<S
                             Ok(()) => {
                                 saved_pending();
                                 crate::config::changed();
-                                close.run(());
+                                close.try_run(());
                             }
                             Err(e) => error.set(Some(e.text())),
                         }
@@ -622,8 +634,11 @@ fn job_row(
     let toggling = RwSignal::new(false);
     let running = RwSignal::new(false);
     let tid = task_id.clone();
+    // what the switch shows: the job's state, or what was just asked
+    let shown = RwSignal::new(v.enabled);
     let toggle = move |on: bool| {
         toggling.set(true);
+        shown.set(on);
         let tid = tid.clone();
         spawn_local(async move {
             let r = api::post::<(), TaskView>(&format!("/api/v1/scheduler/tasks/{}/{}", api::encode(&tid), if on { "enable" } else { "disable" }), None).await;
@@ -635,6 +650,8 @@ fn job_row(
                 }
                 Err(e) => {
                     toast(Tone::Err, e.text());
+                    // nothing changed: the switch goes back (an equal answer rebuilds no row)
+                    let _ = shown.try_set(!on);
                     jobs.reload();
                 }
             }
@@ -681,7 +698,7 @@ fn job_row(
         vec![
             ui::cell("sch.col.enabled", "switch-col", view! {
                 <input type="checkbox" role="switch" class="switch" aria-label=ui::verb_name("sch.col.enabled", &n3)
-                prop:checked=v.enabled disabled=move || toggling.get() || deleting on:change=move |ev| toggle(event_target_checked(&ev)) />
+                prop:checked=move || shown.get() disabled=move || toggling.get() || deleting on:change=move |ev| toggle(event_target_checked(&ev)) />
             }
             .into_any()),
             ui::cell("snap.col.job", "", view! {
@@ -848,6 +865,10 @@ fn job_editor(init: Option<SnapshotJobView>, close: Callback<()>) -> AnyView {
     };
 
     let save = Callback::new(move |_| {
+        // Enter in a field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         let j = build();
         if is_new && !valid_job_name(&j.name) {
             error.set(Some(t("snap.v.name").to_string()));
@@ -879,7 +900,7 @@ fn job_editor(init: Option<SnapshotJobView>, close: Callback<()>) -> AnyView {
                     let keys = [crate::config::keys::SNAPSHOTS, crate::config::keys::SCHEDULER, crate::config::keys::SHARES];
                     if crate::config::apply_now(&keys, error).await {
                         saved_applied();
-                        close.run(());
+                        close.try_run(());
                     }
                 }
                 Err(e) => error.set(Some(e.text())),

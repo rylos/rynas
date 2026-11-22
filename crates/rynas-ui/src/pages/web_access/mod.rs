@@ -586,6 +586,10 @@ fn settings_form() -> AnyView {
         error.set(None);
     };
     let save = Callback::new(move |_: ()| {
+        // Enter in a field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         let Some(mut cfg) = w.state.data.with_untracked(|s| s.as_ref().map(WaState::current)) else { return };
         let mut settings = cfg.get("settings").cloned().unwrap_or(Value::Null);
         put(&mut settings, "mode", Value::String(mode.get_untracked()));
@@ -830,7 +834,7 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
         test();
     }
     let save = move |_| {
-        if !form.check(custom) {
+        if busy.get_untracked() || !form.check(custom) {
             return;
         }
         let Some(mut cfg) = w.state.data.with_untracked(|s| s.as_ref().map(WaState::current)) else { return };
@@ -844,9 +848,11 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
         }
         busy.set(true);
         error.set(None);
+        // what is being saved (the page may be gone when the answer comes)
+        let sent = (access.get_untracked(), enabled.get_untracked(), form.snapshot_untracked());
         spawn_local(async move {
             if save_config(cfg, error).await {
-                init.set_value((access.get_untracked(), enabled.get_untracked(), form.snapshot_untracked()));
+                let _ = init.try_set_value(sent);
             }
             busy.set(false);
             w.state.reload();

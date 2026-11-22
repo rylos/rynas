@@ -604,6 +604,15 @@ fn select(f: &Def, required: bool, get: Signal<Option<Value>>, set: Callback<Val
     let integer = f.ty == Ty::Integer;
     let opts = StoredValue::new(values.clone());
     let cur = move || get.with(|v| v.as_ref().map(|v| text_of(Some(v))).unwrap_or_default());
+    // a required choice without a default: the browser shows the first option as chosen, so it
+    // is the value (it was "required" on a field that looked filled, and choosing the option
+    // shown changes nothing)
+    if required
+        && get.with_untracked(Option::is_none)
+        && let Some(first) = values.first()
+    {
+        set.run(first.clone());
+    }
     let options = values
         .iter()
         .enumerate()

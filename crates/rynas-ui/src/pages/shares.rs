@@ -277,18 +277,12 @@ pub fn Shares() -> impl IntoView {
         del.get()
             .map(|name| share_folders::delete_dialog(Target::Share(name), Callback::new(move |_| del.set(None)), Callback::new(move |_| ())))
     };
-    let folder_deleter = move || {
-        fdel.get().map(|f| {
-            share_folders::delete_dialog(
-                Target::Folder(Box::new(f)),
-                Callback::new(move |_| fdel.set(None)),
-                Callback::new(move |_| {
-                    folders.reload();
-                    shares.reload();
-                }),
-            )
-        })
-    };
+    // made here, not with the dialog: it runs when the deletion ends, after the dialog is gone
+    let folder_deleted = Callback::new(move |_| {
+        folders.reload();
+        shares.reload();
+    });
+    let folder_deleter = move || fdel.get().map(|f| share_folders::delete_dialog(Target::Folder(Box::new(f)), Callback::new(move |_| fdel.set(None)), folder_deleted));
 
     view! {
         <div class="page">
@@ -512,6 +506,10 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
         ((show.get() || !v.is_empty()) && !valid_share_name(&v)).then(|| t("v.share_name").to_string())
     });
     let save = Callback::new(move |_| {
+        // Enter in a field while the request is out (an encrypted folder is not made twice)
+        if busy.get_untracked() {
+            return;
+        }
         show.set(true);
         let crypt_new = is_new && encrypted.get_untracked();
         let problem = d.with_untracked(|s| {
@@ -583,7 +581,7 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
                 // the recovery key dialog closes the editor when everything went well
                 let _ = key.try_set(new_key);
             } else if done {
-                close.run(());
+                close.try_run(());
             }
         });
     });
@@ -642,7 +640,7 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
             key.set(None);
             // a failed share or apply stays on screen with its error
             if error.with_untracked(Option::is_none) {
-                close.run(());
+                close.try_run(());
             }
         }) /> })
     };
@@ -946,7 +944,7 @@ fn permissions_matrix(d: RwSignal<Share>, users: Remote<Vec<UserView>>, groups: 
                 }
             }
         });
-        list.retain(|(n, sub)| needle.is_empty() || n.contains(&needle) || sub.to_lowercase().contains(&needle));
+        list.retain(|(n, sub)| needle.is_empty() || n.to_lowercase().contains(&needle) || sub.to_lowercase().contains(&needle));
         if list.is_empty() {
             return view! { <p class="muted table-none">{tr(if needle.is_empty() { "perm.nobody" } else { "table.no_match" })}</p> }.into_any();
         }
@@ -1053,6 +1051,8 @@ fn effective_view(
     let dirty = move || d.with(|s| Some(&s.permissions) != saved.as_ref());
     let check = move |p: String| {
         if p.is_empty() {
+            // an answer still on its way is for the previous choice: not waited for
+            busy.set(false);
             result.set(None);
             return;
         }
@@ -1060,8 +1060,11 @@ fn effective_view(
         let share = share.clone();
         spawn_local(async move {
             let r = api::get::<EffectivePermission>(&format!("/api/v1/shares/{}/effective?principal={}", api::encode(&share), api::encode(&p))).await;
-            busy.set(false);
-            result.set(Some(r.map_err(|e| e.text())));
+            // another principal was chosen meanwhile: its own answer is the one to show
+            if who.try_with_untracked(|w| *w == p) == Some(true) {
+                busy.set(false);
+                result.set(Some(r.map_err(|e| e.text())));
+            }
         });
     };
     let id = crate::form::fid();

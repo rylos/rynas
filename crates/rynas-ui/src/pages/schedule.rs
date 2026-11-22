@@ -303,8 +303,8 @@ fn maintenance_dialog(cur: Option<String>, jobs: Vec<OverviewJob>, done: Callbac
             match r {
                 Ok(_) => {
                     toast(Tone::Ok, t("sv.mw.saved").to_string());
-                    done.run(());
-                    close.run(());
+                    done.try_run(());
+                    close.try_run(());
                 }
                 Err(e) => {
                     let _ = error.try_set(Some(e.text()));
@@ -669,6 +669,7 @@ fn history_panel(tasks: Remote<Vec<TaskView>>, show: Callback<String>) -> AnyVie
     let task = RwSignal::new(String::new());
     let page = RwSignal::new(None::<RunsPage>);
     let err = RwSignal::new(None::<String>);
+    let seq = StoredValue::new(0u32);
     let load = move |before: Option<u64>| {
         let mut url = format!("/api/v1/scheduler/runs?limit={HISTORY_PAGE}");
         let o = outcome.get_untracked();
@@ -682,11 +683,21 @@ fn history_panel(tasks: Remote<Vec<TaskView>>, show: Callback<String>) -> AnyVie
         if let Some(b) = before {
             url.push_str(&format!("&before={b}"));
         }
+        // a first page starts a new list: answers still on their way for the one before (a
+        // filter changed twice in a row, its next page) are dropped when they come
+        if before.is_none() {
+            seq.update_value(|s| *s += 1);
+        }
+        let mine = seq.get_value();
         spawn_local(async move {
-            match api::get::<RunsPage>(&url).await {
+            let r = api::get::<RunsPage>(&url).await;
+            if seq.try_get_value() != Some(mine) {
+                return;
+            }
+            match r {
                 Ok(mut p) => {
                     if before.is_some()
-                        && let Some(old) = page.get_untracked()
+                        && let Some(old) = page.try_get_untracked().flatten()
                     {
                         let mut runs = old.runs;
                         runs.extend(p.runs);

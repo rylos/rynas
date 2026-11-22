@@ -94,13 +94,14 @@ impl ScheduleEditor {
             e.checking.set(true);
             set_timeout(
                 move || {
-                    if e.seq.get_value() != mine {
+                    // (the editor may be closed by now: then `seq` is gone)
+                    if e.seq.try_get_value() != Some(mine) {
                         return;
                     }
                     spawn_local(async move {
                         let req = SchedulePreviewRequest { expression: Some(expression), syntax, count: Some(PREVIEW_RUNS), ..Default::default() };
                         let r = api::post::<_, SchedulePreview>("/api/v1/scheduler/preview", Some(&req)).await;
-                        if e.seq.get_value() != mine {
+                        if e.seq.try_get_value() != Some(mine) {
                             return;
                         }
                         e.checking.set(false);

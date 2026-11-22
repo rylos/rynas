@@ -159,7 +159,9 @@ pub fn create_fields(f: CryptForm, show: RwSignal<bool>) -> AnyView {
 /// is not lost when a later step (the share, the apply) fails. `Err`: no folder; `Ok(Err)`:
 /// the folder exists but its key could not be fetched (shown again later with the password).
 pub async fn create_folder(volume: &str, name: &str, f: CryptForm) -> Result<Result<String, String>, String> {
-    let body = json!({ "volume": volume, "name": name, "password": f.pw.get_untracked(), "auto_unlock": f.auto.get_untracked() });
+    // read once: the editor (and the form with it) may be gone when the task ends
+    let pw = f.pw.get_untracked();
+    let body = json!({ "volume": volume, "name": name, "password": pw, "auto_unlock": f.auto.get_untracked() });
     let task = crate::tasks::run_task("/api/v1/crypt/folders", Some(body.to_string())).await.map_err(|e| e.text())?;
     if task.status != TaskStatus::Ok {
         return Err(crate::tasks::task_error(&task));
@@ -170,7 +172,7 @@ pub async fn create_folder(volume: &str, name: &str, f: CryptForm) -> Result<Res
     let key = match once {
         Ok(k) => Ok(k.key),
         Err(_) => {
-            let body = json!({ "password": f.pw.get_untracked() });
+            let body = json!({ "password": pw });
             api::post::<_, RecoveryKey>(&format!("{base}/recovery-key"), Some(&body)).await.map(|k| k.key).map_err(|e| e.text())
         }
     };
@@ -249,6 +251,10 @@ fn UnlockDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<S
     });
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        // Enter in the field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         let p = pass.get_untracked();
         if p.is_empty() {
             return;
@@ -263,9 +269,9 @@ fn UnlockDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<S
             match r {
                 Ok(v) => {
                     toast(Tone::Ok, tf("crypt.unlocked_toast", &[("name", &name)]));
-                    on_done.run(Some(v.share));
+                    on_done.try_run(Some(v.share));
                     if v.containers.is_empty() {
-                        on_close.run(());
+                        on_close.try_run(());
                     } else {
                         let _ = stale.try_set(v.containers);
                     }
@@ -292,7 +298,7 @@ fn UnlockDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<S
             let _ = busy.try_set(false);
             if failed.is_empty() {
                 toast(Tone::Ok, t("crypt.restarted").to_string());
-                on_close.run(());
+                on_close.try_run(());
             } else {
                 let _ = error.try_set(Some(failed.join("; ")));
             }
@@ -355,8 +361,8 @@ fn LockDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<Sha
             match r {
                 Ok(v) => {
                     toast(Tone::Ok, tf("crypt.locked_toast", &[("name", &name)]));
-                    on_done.run(Some(v));
-                    on_close.run(());
+                    on_done.try_run(Some(v));
+                    on_close.try_run(());
                 }
                 Err(e) if e.code() == error_codes::CRYPT_BUSY => {
                     let _ = error.try_set(Some(format!("{}{}{}", t("crypt.busy"), api::DETAIL_SEP, e.message())));
@@ -400,6 +406,10 @@ fn PasswordDialog(name: String, on_close: Callback<()>, on_done: Callback<Option
     });
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        // Enter in the field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         show.set(true);
         if cur.with_untracked(String::is_empty) {
             error.set(Some(t("form.check").to_string()));
@@ -424,9 +434,9 @@ fn PasswordDialog(name: String, on_close: Callback<()>, on_done: Callback<Option
                         // show the new state
                         toast(Tone::Warn, format!("{}{}{why}", t("crypt.auto_off"), api::DETAIL_SEP));
                         let v = api::get::<ShareView>(&format!("/api/v1/shares/{}", api::encode(&name))).await.ok();
-                        on_done.run(v);
+                        on_done.try_run(v);
                     }
-                    on_close.run(());
+                    on_close.try_run(());
                 }
                 Err(e) => {
                     let _ = error.try_set(Some(error_text(&e)));
@@ -465,6 +475,10 @@ fn AutoDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<Sha
     });
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        // Enter in the field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         let p = pass.get_untracked();
         if p.is_empty() {
             return;
@@ -477,8 +491,8 @@ fn AutoDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<Sha
             let _ = busy.try_set(false);
             match r {
                 Ok(v) => {
-                    on_done.run(Some(v));
-                    on_close.run(());
+                    on_done.try_run(Some(v));
+                    on_close.try_run(());
                 }
                 Err(e) => {
                     let _ = pass.try_set(String::new());
@@ -519,6 +533,10 @@ fn RevealDialog(name: String, path: String, on_close: Callback<()>) -> impl Into
     });
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        // Enter in the field while the request is out
+        if busy.get_untracked() {
+            return;
+        }
         let p = pass.get_untracked();
         let Some(u) = url.get_value() else { return };
         if p.is_empty() {
@@ -596,7 +614,9 @@ pub fn existing(v: &ShareView) -> Option<AnyView> {
             let r = api::put::<_, ShareView>(&share_url(&name.get_value(), "crypt/auto-unlock"), &json!({ "enabled": false })).await;
             let _ = off_busy.try_set(false);
             match r {
-                Ok(v) => done.run(Some(v)),
+                Ok(v) => {
+                    done.try_run(Some(v));
+                }
                 Err(e) => {
                     let _ = off_err.try_set(Some(e.text()));
                 }

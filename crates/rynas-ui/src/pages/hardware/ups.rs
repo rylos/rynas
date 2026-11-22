@@ -327,8 +327,9 @@ impl Form {
     fn settings(&self) -> Result<UpsSettings, &'static str> {
         let (lo, hi) = SAFEMODE_AFTER_RANGE_S;
         let after = if self.timer {
-            match self.minutes.trim().parse::<u32>() {
-                Ok(m) if m * 60 >= lo && m * 60 <= hi => Some(m * 60),
+            // checked: a huge number must not wrap into the range
+            match self.minutes.trim().parse::<u32>().ok().and_then(|m| m.checked_mul(60)) {
+                Some(s) if (lo..=hi).contains(&s) => Some(s),
                 _ => return Err("ups.v_minutes"),
             }
         } else {
@@ -636,6 +637,8 @@ mod tests {
         let off = Form { timer: false, minutes: "x".into(), ..f.clone() };
         assert_eq!(off.settings().unwrap().safemode_after_s, None);
         assert_eq!(Form { minutes: "0".into(), ..f.clone() }.settings(), Err("ups.v_minutes"));
+        // 71582793 * 60 wraps to 284 in a u32
+        assert_eq!(Form { minutes: "71582793".into(), ..f.clone() }.settings(), Err("ups.v_minutes"));
         assert_eq!(Form { pre_timeout: "5".into(), ..f }.settings(), Err("ups.v_pre"));
     }
 
