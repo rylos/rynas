@@ -63,7 +63,11 @@ pub fn snapshot(vg: &str, lv: &str) -> Result<Snap, SnapError> {
     let name = format!("{lv}{SUFFIX}");
     if thin {
         lvm(&["lvcreate", "-s", "-n", &name, &format!("{vg}/{lv}")]).map_err(SnapError::Failed)?;
-        lvm(&["lvchange", "-ay", "-K", &format!("{vg}/{name}")]).map_err(SnapError::Failed)?;
+        if let Err(e) = lvm(&["lvchange", "-ay", "-K", &format!("{vg}/{name}")]) {
+            // made but not usable: not left behind
+            let _ = lvm(&["lvremove", "-y", &format!("{vg}/{name}")]);
+            return Err(SnapError::Failed(e));
+        }
     } else {
         let Some(want) = cow_room(size, free) else {
             return Err(SnapError::NoSpace);

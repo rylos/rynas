@@ -114,7 +114,7 @@ pub fn install_signals() {
 /// When the next scheduled backup is due (ms), ignoring the pause and the window: by the
 /// plan's calendar (its first time after the last good run) or every so many hours after the
 /// last good run, and also at every start of the PC when the plan says so; at least the delay
-/// after the start; a failed run again after 5, 10, 20… minutes (never later than the
+/// after the start; a failed run again after 10, 20, 40… minutes (never later than the
 /// interval). The rules are `rynas_schedule::window`'s, the same as the NAS's overview.
 pub fn due_ms(st: &State, started_ms: u64) -> u64 {
     due_ms_at(st, started_ms, boot_key().as_deref())
@@ -138,7 +138,7 @@ pub fn due_ms_at(st: &State, started_ms: u64, boot: Option<&str>) -> u64 {
     // from its end: the NAS judges this PC by the same `LastOk`
     let last_ok = st.last_ok_ms.map(|end| window::LastOk::new(st.last_ok_start_ms, end));
     let due = window::agent_due(spec.as_ref(), interval, &zone(&st.plan), last_ok, started_ms, delay, boot_done);
-    // a failed run: again after 5, 10, 20… minutes, never later than the interval
+    // a failed run: again after 10, 20, 40… minutes, never later than the interval
     let retry = match (st.failures, st.last_attempt_ms) {
         (n, Some(at)) if n > 0 => at + ((5 * 60_000u64) << n.min(6)).min(interval),
         _ => 0,
@@ -402,6 +402,21 @@ fn refresh_trust(st: &mut State) -> u64 {
     }
 }
 
+/// The outcome of the last run as the state on disk has it (written by the service's child,
+/// or by a backup run by hand), taken into the service's copy. A new good backup also means
+/// this boot of the PC has had its backup.
+fn take_outcome(st: &mut State, fresh: &State) {
+    if fresh.last_ok_ms.is_some() && fresh.last_ok_ms != st.last_ok_ms {
+        let boot = boot_key();
+        st.last_ok_boot = boot.clone();
+        let _ = State::update(|s| s.last_ok_boot = boot);
+    }
+    st.last_ok_ms = fresh.last_ok_ms;
+    st.last_ok_start_ms = fresh.last_ok_start_ms;
+    st.last_attempt_ms = fresh.last_attempt_ms;
+    st.failures = fresh.failures;
+}
+
 pub fn run_service(mode: Mode) -> Result<(), String> {
     install_signals();
     if !mode.fake {
@@ -546,23 +561,38 @@ pub fn run_service(mode: Mode) -> Result<(), String> {
             end_inhibit(r);
             let took = r.since.elapsed().as_secs();
             // the child wrote the outcome into the state
-            if let Ok(fresh) = State::load() {
-                // a new good backup: this boot of the PC has had its backup
-                if fresh.last_ok_ms.is_some() && fresh.last_ok_ms != st.last_ok_ms {
-                    let boot = boot_key();
-                    st.last_ok_boot = boot.clone();
-                    let _ = State::update(|s| s.last_ok_boot = boot);
-                }
-                st.last_ok_ms = fresh.last_ok_ms;
-                st.last_ok_start_ms = fresh.last_ok_start_ms;
-                st.last_attempt_ms = fresh.last_attempt_ms;
-                st.failures = fresh.failures;
+            let mut fresh = State::load();
+            // it ended without one (stopped by Cancel, killed, or failed before its run):
+            // a failed run, tried again after the retry pause, never at once in a loop
+            if !status.success()
+                && let Ok(f) = &fresh
+                && f.last_ok_ms == st.last_ok_ms
+                && f.failures == st.failures
+            {
+                let at = now_ms();
+                fresh = State::update(|s| {
+                    s.failures += 1;
+                    s.last_attempt_ms = Some(at);
+                });
+            }
+            // what a stopped or killed child left (snapshots, a frozen filesystem): now, not
+            // at the next run
+            if !status.success() && !mode.fake {
+                crate::backup::cleanup_leftovers();
+            }
+            if let Ok(fresh) = fresh {
+                take_outcome(&mut st, &fresh);
             }
             eprintln!("backup finished ({status}) in {took} s");
             running = None;
             after_wake(&mut st, woken_run.take(), exec.as_ref());
         }
         if running.is_none() {
+            // a backup run by hand (`rynas-agent backup` in a terminal) wrote its outcome
+            // too: a good one is not made again
+            if let Ok(fresh) = State::load() {
+                take_outcome(&mut st, &fresh);
+            }
             let now = now_ms();
             match decide(&st, effective_start(&st, started, now), now, &zone(&st.plan)) {
                 Decision::Idle => {}
@@ -855,7 +885,7 @@ mod tests {
         st.plan.trigger = Some(TaskTrigger::Calendar { on_calendar: "2020-01-01 00:00:00".into(), cron: None, persistent: true, randomized_delay_s: 0 });
         assert_eq!(due_ms_at(&st, started, this), started + 400_000 + 24 * 3_600_000);
         st.plan.trigger = Some(TaskTrigger::Interval { hours: 24, after_boot_min: 5 });
-        // a failed boot backup is tried again (5, 10, 20… minutes)
+        // a failed boot backup is tried again (10, 20, 40… minutes)
         st.last_ok_ms = Some(boot - 600_000);
         st.last_ok_boot = Some("boot-a".into());
         st.failures = 1;

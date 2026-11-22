@@ -111,6 +111,12 @@ pub fn valid_uuid(u: &str) -> bool {
     parts.iter().map(|p| p.len()).eq([6, 4, 4, 4, 4, 4, 6]) && parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
+/// A volume group or logical volume name as LVM takes them: `[A-Za-z0-9+_.-]`, not starting
+/// with `-`, not `.` or `..`.
+pub fn valid_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 127 && !n.starts_with('-') && n != "." && n != ".." && n.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'_' | b'.' | b'-'))
+}
+
 fn ceil_div(a: u64, b: u64) -> u64 {
     a.div_ceil(b.max(1))
 }
@@ -193,6 +199,11 @@ pub fn plan(m: &Manifest, layout: &LvmLayout, pv_target: &dyn Fn(&str) -> PvTarg
                 continue;
             }
             LvmVgCheck::Recreate => {}
+        }
+        // LVM's own rule for names: anything else would be refused by vgcreate or lvcreate
+        // (or read as an option) only after the disk is wiped
+        if let Some(n) = std::iter::once(&vg.name).chain(vg.lvs.iter().map(|l| &l.name)).find(|n| !valid_name(n)) {
+            return Err(format!("volume group {}: {n:?} in the manifest is not a name LVM takes", vg.name));
         }
         let places: Vec<(&LvmPv, PvTarget)> = vg.pvs.iter().map(|p| (p, pv_target(&p.device))).collect();
         if let Some((p, _)) = places.iter().find(|(_, t)| *t == PvTarget::NoTarget) {

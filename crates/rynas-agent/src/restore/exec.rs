@@ -814,7 +814,7 @@ fn fix_texts(log: &mut Log, m: &Manifest, plan: &Plan, skipped: &[String]) {
     if let Some(a) = root
         && let FsSource::Partition { disk, number } = &m.filesystems[a.fs].source
         && let Some(d) = plan.disks.iter().find(|d| d.source == *disk)
-        && let Some(e) = d.gpt.entries.get(*number as usize - 1)
+        && let Some(e) = (*number as usize).checked_sub(1).and_then(|i| d.gpt.entries.get(i))
     {
         root_ids.push(crate::gpt::guid_text(&e.guid));
     }

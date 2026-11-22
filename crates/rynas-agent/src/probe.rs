@@ -280,7 +280,8 @@ pub fn identity(b: &Block) -> (String, String, String) {
 /// The serial part of a `/dev/disk/by-id/<bus>-<model>_<serial>` link pointing at `name`.
 fn by_id_serial(name: &str) -> Option<String> {
     for e in std::fs::read_dir("/dev/disk/by-id").ok()?.flatten() {
-        let link = std::fs::read_link(e.path()).ok()?;
+        // an entry that is no link does not end the search
+        let Ok(link) = std::fs::read_link(e.path()) else { continue };
         if link.file_name().is_some_and(|n| n.to_string_lossy() == name) {
             let id = e.file_name().to_string_lossy().into_owned();
             if id.starts_with("wwn-") || id.contains("-part") {

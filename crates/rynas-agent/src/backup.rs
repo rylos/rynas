@@ -238,6 +238,9 @@ fn lvm_of(m: &Mount) -> Option<(String, String)> {
 /// Leftovers of an interrupted run: frozen filesystems, snapshots, LVM snapshots.
 pub fn cleanup_leftovers() {
     freeze::thaw_leftovers();
+    // the snapshots of a run in progress (the service's child, a backup in a terminal) are
+    // not leftovers: that run holds the lock
+    let Ok(_lock) = manifest::lock(Path::new("/"), Duration::ZERO) else { return };
     for m in mounts::backup_mounts(&mounts::read()) {
         if m.fstype == "btrfs" {
             btrfs::cleanup_leftovers(Path::new(&m.path));

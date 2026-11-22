@@ -163,6 +163,10 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
                 g.disk_guid = guid;
             }
         }
+        // numbers and sizes a partition table can hold: the arithmetic below counts on them
+        if let Some(p) = table.partitions.iter().find(|p| p.number == 0 || p.number > 1024 || p.size_lba == 0 || p.start_lba.checked_add(p.size_lba).is_none()) {
+            return Err(format!("disk {}: the manifest's partition {} (start {}, {} sectors) is not one a partition table can hold", d.name, p.number, p.start_lba, p.size_lba));
+        }
         let max_n = table.partitions.iter().map(|p| p.number).max().unwrap_or(0) as usize;
         if max_n > g.entries.len() {
             g.entries.resize(max_n, g.entries[0].clone());
@@ -181,6 +185,10 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
             let mut last = p.start_lba + p.size_lba - 1;
             if Some(p.number) == last_part {
                 last = last_usable;
+            }
+            // refused here, before anything is wiped (writing the table would refuse it after)
+            if p.start_lba < g.first_usable() {
+                return Err(format!("partition {} starts at sector {}, inside the partition table of {} (the first usable sector is {})", p.number, p.start_lba, t.name, g.first_usable()));
             }
             if p.start_lba > last_usable || last > last_usable {
                 return Err(format!(
@@ -218,6 +226,24 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
             target: t.clone(),
             gpt: g,
         });
+    }
+    // every partition the manifest puts something on is in its disk's table: a missing one
+    // would only show after the disk is wiped (its device never appears)
+    let on_part = |s: &FsSource| match s {
+        FsSource::Partition { disk, number } => Some((*disk, *number)),
+        _ => None,
+    };
+    let placed = m.filesystems.iter().filter(|f| f.capture != Some(CaptureMethod::Skipped)).map(|f| &f.source).chain(m.luks.iter().map(|l| &l.source)).chain(m.swap.iter().filter(|s| !s.file).map(|s| &s.source));
+    for (disk, number) in placed.filter_map(on_part) {
+        if let Some(d) = disks.iter().find(|d| d.source == disk)
+            && !(number as usize).checked_sub(1).and_then(|i| d.gpt.entries.get(i)).is_some_and(Entry::is_used)
+        {
+            return Err(format!("the manifest puts data on partition {number} of {}, which its partition table does not have", m.disks.get(disk).map(|x| x.name.as_str()).unwrap_or("?")));
+        }
+    }
+    // a mapping name cryptsetup refuses (or reads as an option) would show only after the wipe
+    if let Some(l) = m.luks.iter().find(|l| l.mapper.starts_with('-') || l.mapper == "." || l.mapper == ".." || l.mapper.chars().any(|c| c == '/' || c == '"' || c.is_whitespace() || c.is_control())) {
+        return Err(format!("LUKS container {}: {:?} in the manifest is not a mapping name", l.device, l.mapper));
     }
     // where a manifest partition lands
     let target_part = |disk: usize, number: u32| -> Option<String> {
@@ -260,8 +286,8 @@ pub fn build(m: &Manifest, targets: &[(usize, TargetDisk)], in_use: &dyn Fn(&str
     let lvm = {
         let part_bytes = |disk: usize, number: u32| -> Option<u64> {
             let d = disks.iter().find(|d| d.source == disk)?;
-            let e = d.gpt.entries.get(number as usize - 1)?;
-            Some((e.last_lba - e.first_lba + 1) * d.gpt.sector)
+            let e = d.gpt.entries.get((number as usize).checked_sub(1)?)?;
+            Some((e.last_lba + 1).saturating_sub(e.first_lba) * d.gpt.sector)
         };
         let orig_bytes = |disk: usize, number: u32| -> u64 {
             m.disks.get(disk).and_then(|d| d.table.as_ref().map(|t| (t, u64::from(d.logical_sector)))).and_then(|(t, s)| t.partitions.iter().find(|p| p.number == number).map(|p| p.size_lba * s)).unwrap_or(0)
@@ -837,6 +863,34 @@ pub(crate) mod tests {
         let p = build(&m, &[(0, target(8 << 30))], &|u| u == guid).unwrap();
         assert_ne!(crate::gpt::guid_text(&p.disks[0].gpt.disk_guid).to_lowercase(), guid);
         assert!(p.notes.iter().any(|n| n.contains("disk GUID")), "{:?}", p.notes);
+    }
+
+    /// What only the writing would refuse is refused by the plan, before anything is wiped.
+    #[test]
+    fn a_manifest_no_table_can_hold_is_refused() {
+        let with = |f: &dyn Fn(&mut Manifest)| {
+            let mut m = sample();
+            f(&mut m);
+            build(&m, &[(0, target(8 << 30))], &|_| false)
+        };
+        fn part(m: &mut Manifest, i: usize) -> &mut Partition {
+            &mut m.disks[0].table.as_mut().unwrap().partitions[i]
+        }
+        assert!(with(&|_| {}).is_ok());
+        assert!(with(&|m| part(m, 0).number = 0).unwrap_err().contains("partition 0"));
+        assert!(with(&|m| part(m, 0).number = 5000).is_err());
+        assert!(with(&|m| part(m, 0).size_lba = 0).is_err());
+        assert!(with(&|m| part(m, 0).start_lba = u64::MAX).is_err());
+        // inside the table itself
+        assert!(with(&|m| part(m, 0).start_lba = 10).unwrap_err().contains("first usable"));
+        // a filesystem on a partition the table does not have
+        assert!(with(&|m| m.filesystems[0].source = FsSource::Partition { disk: 0, number: 7 }).unwrap_err().contains("partition 7"));
+        // a mapping name that is none
+        let luks = |name: &str| Luks { device: "/dev/vda1".into(), source: FsSource::Partition { disk: 0, number: 1 }, mapper: name.into(), version: 2, ..Default::default() };
+        assert!(with(&|m| m.luks = vec![luks("--help")]).unwrap_err().contains("mapping name"));
+        assert!(with(&|m| m.luks = vec![luks("a/b")]).is_err());
+        assert!(super::super::lvm::valid_name("vg0") && super::super::lvm::valid_name("my-vg_1.2+x"));
+        assert!(!super::super::lvm::valid_name("-vg") && !super::super::lvm::valid_name("a b") && !super::super::lvm::valid_name("..") && !super::super::lvm::valid_name(""));
     }
 
     #[test]

@@ -229,6 +229,40 @@ impl Endpoint {
     }
 }
 
+/// The most an answer read whole may hold (pack files of the repository stay well below).
+const MAX_BODY: u64 = 4 << 30;
+
+/// One line of an answer, never more than [`MAX_HEADER`] of it: a line without an end is an
+/// error, not memory that grows for as long as the other side sends.
+fn read_line_capped<R: BufRead>(conn: &mut R, line: &mut String) -> io::Result<usize> {
+    let n = conn.take(MAX_HEADER as u64 + 1).read_line(line)?;
+    if n > MAX_HEADER {
+        return Err(io::Error::other("answer line too long"));
+    }
+    Ok(n)
+}
+
+/// The next `n` bytes of a body, added to `out`. The memory grows with what arrives, not
+/// with the length the answer announces (a wrong one would take it all at once).
+fn read_body_part<R: Read>(conn: &mut R, n: u64, out: &mut Vec<u8>) -> io::Result<()> {
+    if n > MAX_BODY || out.len() as u64 > MAX_BODY - n {
+        return Err(io::Error::other("answer too long"));
+    }
+    out.reserve(n.min(64 << 20) as usize);
+    if conn.take(n).read_to_end(out)? as u64 != n {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the answer was cut off"));
+    }
+    Ok(())
+}
+
+/// The request never got an answer because the connection was already closed (an idle one
+/// the server dropped): the write failed, or the answer ended before its first byte. A wait
+/// that timed out or an answer cut half way say nothing of what the server did.
+fn closed_before_answer(e: &io::Error) -> bool {
+    use io::ErrorKind as K;
+    matches!(e.kind(), K::ConnectionAborted | K::ConnectionReset | K::BrokenPipe | K::NotConnected)
+}
+
 trait Stream: Read + Write + Send {}
 impl<T: Read + Write + Send> Stream for T {}
 
@@ -288,7 +322,7 @@ impl Read for BodyStream {
         }
         if self.chunked && self.left == 0 {
             let mut sz = String::new();
-            if self.conn.read_line(&mut sz)? == 0 {
+            if read_line_capped(&mut self.conn, &mut sz)? == 0 {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the answer was cut off"));
             }
             let n = u64::from_str_radix(sz.trim().split(';').next().unwrap_or(""), 16).map_err(|_| io::Error::other("bad chunk size"))?;
@@ -296,7 +330,7 @@ impl Read for BodyStream {
                 // the trailer, up to its empty line
                 loop {
                     let mut t = String::new();
-                    if self.conn.read_line(&mut t)? == 0 {
+                    if read_line_capped(&mut self.conn, &mut t)? == 0 {
                         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the answer was cut off"));
                     }
                     if t.trim().is_empty() {
@@ -530,7 +564,9 @@ impl Client {
     pub fn request(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &[&[u8]]) -> io::Result<Response> {
         // a reused connection the server closed meanwhile: one retry on a fresh one
         for attempt in 0..2 {
-            let reused = self.idle.lock().ok().and_then(|mut v| v.pop());
+            // the retry on a fresh one: the other idle connections are as old as the one
+            // that just failed
+            let reused = self.idle.lock().ok().and_then(|mut v| if attempt == 0 { v.pop() } else { v.clear(); None });
             let fresh = reused.is_none();
             let mut conn = match reused {
                 Some(c) => c,
@@ -543,10 +579,9 @@ impl Client {
                     }
                     return Ok(resp);
                 }
-                Err(e) if !fresh && attempt == 0 => {
-                    let _ = e;
-                    continue;
-                }
+                // a POST the server may have carried out (a report counts a run) is not sent
+                // twice: again only when the connection was closed before any answer
+                Err(e) if !fresh && attempt == 0 && (method != "POST" || closed_before_answer(&e)) => continue,
                 Err(e) => return Err(e),
             }
         }
@@ -642,7 +677,7 @@ impl Client {
         let mut total = 0;
         let mut read_line = |conn: &mut Conn, line: &mut String| -> io::Result<()> {
             line.clear();
-            let n = conn.read_line(line)?;
+            let n = read_line_capped(conn, line)?;
             total += n;
             if n == 0 {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed"));
@@ -652,7 +687,10 @@ impl Client {
             }
             Ok(())
         };
-        read_line(conn, &mut line)?;
+        // no byte of an answer: the connection was closed (an idle one, by the server)
+        if let Err(e) = read_line(conn, &mut line) {
+            return Err(if e.kind() == io::ErrorKind::UnexpectedEof { io::Error::new(io::ErrorKind::ConnectionAborted, e.to_string()) } else { e });
+        }
         let status: u16 = line
             .split_whitespace()
             .nth(1)
@@ -721,29 +759,26 @@ impl Client {
             if get("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked")) {
                 loop {
                     let mut sz = String::new();
-                    conn.read_line(&mut sz)?;
-                    let n = usize::from_str_radix(sz.trim().split(';').next().unwrap_or("0"), 16)
+                    read_line_capped(conn, &mut sz)?;
+                    let n = u64::from_str_radix(sz.trim().split(';').next().unwrap_or("0"), 16)
                         .map_err(|_| io::Error::other("bad chunk size"))?;
                     if n == 0 {
                         // trailers until the empty line
                         loop {
                             let mut t = String::new();
-                            conn.read_line(&mut t)?;
+                            read_line_capped(conn, &mut t)?;
                             if t.trim().is_empty() {
                                 break;
                             }
                         }
                         break;
                     }
-                    let start = body_out.len();
-                    body_out.resize(start + n, 0);
-                    conn.read_exact(&mut body_out[start..])?;
+                    read_body_part(conn, n, &mut body_out)?;
                     let mut crlf = [0u8; 2];
                     conn.read_exact(&mut crlf)?;
                 }
-            } else if let Some(n) = get("content-length").and_then(|v| v.parse::<usize>().ok()) {
-                body_out.resize(n, 0);
-                conn.read_exact(&mut body_out)?;
+            } else if let Some(n) = get("content-length").and_then(|v| v.parse::<u64>().ok()) {
+                read_body_part(conn, n, &mut body_out)?;
             } else {
                 conn.read_to_end(&mut body_out)?;
                 return Ok((
@@ -872,6 +907,29 @@ mod tests {
         assert_eq!(r.body, b"abcde");
         let r = c.request("GET", "/y", &[], &[]).unwrap();
         assert_eq!((r.status, r.body.as_slice()), (200, b"abcde".as_slice()));
+    }
+
+    /// A length the answer only announces takes no memory; a line without an end is refused.
+    #[test]
+    fn announced_lengths_and_endless_lines() {
+        let mut out = Vec::new();
+        let e = read_body_part(&mut &b"abc"[..], u64::MAX, &mut out).unwrap_err();
+        assert!(e.to_string().contains("too long"));
+        let e = read_body_part(&mut &b"abc"[..], 1 << 30, &mut out).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+        let mut out = b"x".to_vec();
+        read_body_part(&mut &b"abcd"[..], 3, &mut out).unwrap();
+        assert_eq!(out, b"xabc");
+        let long = vec![b'a'; MAX_HEADER + 10];
+        assert!(read_line_capped(&mut long.as_slice(), &mut String::new()).is_err());
+        let mut line = String::new();
+        assert_eq!(read_line_capped(&mut &b"3\r\nabc"[..], &mut line).unwrap(), 3);
+        assert_eq!(line, "3\r\n");
+        // a POST goes again only on a connection closed before any answer
+        assert!(closed_before_answer(&io::Error::new(io::ErrorKind::ConnectionAborted, "connection closed")));
+        assert!(closed_before_answer(&io::Error::from(io::ErrorKind::BrokenPipe)));
+        assert!(!closed_before_answer(&io::Error::new(io::ErrorKind::TimedOut, "no answer from the NAS")));
+        assert!(!closed_before_answer(&io::Error::new(io::ErrorKind::UnexpectedEof, "the answer was cut off")));
     }
 
     /// A chunked upload arrives whole; a body that fails never sends the last chunk.

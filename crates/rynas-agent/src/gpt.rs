@@ -204,6 +204,11 @@ impl Gpt {
         (self.entries.len() * self.entry_size).div_ceil(self.sector as usize) as u64
     }
 
+    /// First sector usable by partitions (after the protective MBR, the header and the array).
+    pub fn first_usable(&self) -> u64 {
+        2 + self.array_sectors()
+    }
+
     /// Last sector usable by partitions on a disk of `disk_size` bytes (0 if the tables do not
     /// even fit).
     pub fn last_usable(&self, disk_size: u64) -> u64 {
