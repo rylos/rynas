@@ -33,13 +33,30 @@ fi
 
 #DEBHELPER#
 
+# Removes rynas's own folders, never what is mounted below them: an interrupted rollback or
+# system volume setup leaves the root filesystem's top level mounted in /run/rynas, and a
+# plain rm -rf would go through it. What is mounted below is unmounted first (deepest
+# first); a mount that stays is skipped by --one-file-system, with its mount point.
+purge_dirs() {
+    for d in "$@"; do
+        [ -e "$d" ] || [ -L "$d" ] || continue
+        if [ -r /proc/self/mountinfo ]; then
+            awk -v d="$d" 'index($5, d "/") == 1 { print $5 }' /proc/self/mountinfo | sort -r |
+                while IFS= read -r m; do
+                    umount "$m" >/dev/null 2>&1 || true
+                done
+        fi
+        rm -rf --one-file-system "$d" 2>/dev/null || true
+    done
+}
+
 if [ "$1" = "purge" ]; then
     # TOTP secrets, recovery codes and any other state; caches (thumbnails, the backup
     # jobs' rustic caches)
-    rm -rf /var/lib/rynas /run/rynas /var/lib/rynas-cert-drop /var/cache/rynas
+    purge_dirs /var/lib/rynas /run/rynas /var/lib/rynas-cert-drop /var/cache/rynas
     # PC backup account (its home holds only the keys file rynas wrote; the received
     # snapshots stay where they are)
-    rm -rf /var/lib/rynas-pcbackup
+    purge_dirs /var/lib/rynas-pcbackup
     if getent passwd rynas-pcbackup >/dev/null; then
         if command -v deluser >/dev/null 2>&1; then
             deluser --system --quiet rynas-pcbackup || true

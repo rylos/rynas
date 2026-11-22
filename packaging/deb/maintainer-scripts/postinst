@@ -33,10 +33,13 @@ if [ "$1" = "configure" ]; then
     chmod 0700 /var/lib/rynas/auth
 
     # Debian's btrbk.service failed every night without /etc/btrbk/btrbk.conf (our drop-in
-    # now skips it): clear the stale failed state
+    # now skips it): clear the stale failed state. With a configuration of its own the run
+    # is the administrator's, and so is its failure: left as it is.
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl reset-failed btrbk.service >/dev/null 2>&1 || true
+        if [ ! -e /etc/btrbk/btrbk.conf ] && [ ! -e /etc/btrbk.conf ]; then
+            systemctl reset-failed btrbk.service >/dev/null 2>&1 || true
+        fi
     fi
 
     if [ -n "${NEW_ADMIN_GROUP:-}" ]; then
