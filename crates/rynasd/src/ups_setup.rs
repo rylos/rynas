@@ -477,6 +477,11 @@ pub fn detect(
         log(&format!("stopping {} during the test", running.join(", ")));
         let stop = cmd("systemctl").arg("stop").args(&running).timeout(UNITS);
         if let Err(e) = runner.run(&stop).and_then(ok) {
+            // some of them may have stopped: none stays down because the test did not run
+            let start = cmd("systemctl").arg("start").args(&running).timeout(UNITS);
+            if let Err(s) = runner.run(&start).and_then(ok) {
+                log(&format!("starting the UPS driver again: {s}"));
+            }
             return Err(format!("stopping the UPS driver: {e}"));
         }
     }

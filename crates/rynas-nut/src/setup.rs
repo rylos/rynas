@@ -69,6 +69,15 @@ pub fn valid_ups_name(s: &str) -> bool {
     valid_driver(s)
 }
 
+/// A section of the admin's `ups.conf` that can be taken over: the admin's names are not
+/// held to rynas's own rule (upper case, dots); `[A-Za-z0-9_.-]`, 1–64 characters.
+pub fn valid_section_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
+}
+
 /// Checks a device; the error is `(field, message)` with the field as in the JSON body.
 pub fn check_device(d: &UpsDevice) -> Result<(), (String, String)> {
     let bad = |f: &str, m: &str| Err((f.to_string(), m.to_string()));
@@ -128,7 +137,7 @@ pub fn check_config(c: &UpsDeviceConfig) -> Result<(), (String, String)> {
             "a NUT name: a-z, 0-9, _ and -, at most 32".into(),
         ));
     }
-    if let Some(t) = c.take_over.iter().find(|t| !valid_ups_name(t)) {
+    if let Some(t) = c.take_over.iter().find(|t| !valid_section_name(t)) {
         return Err(("take_over".into(), format!("not a section name: {t}")));
     }
     check_device(&c.device)
@@ -820,6 +829,12 @@ mod tests {
         assert_eq!(blocking_sections(&secs, &cfg), ["myups"]);
         cfg.take_over = vec!["myups".into()];
         assert!(blocking_sections(&secs, &cfg).is_empty());
+        // the admin's names need not follow rynas's rule for its own section
+        let mut odd = cfg.clone();
+        odd.take_over = vec!["APC.Back-UPS_1".into()];
+        assert!(check_config(&odd).is_ok());
+        odd.take_over = vec!["my ups".into()];
+        assert!(check_config(&odd).is_err());
         let marked = mark_conflicts(&secs, Some(&cfg));
         assert!(marked[0].conflict && !marked[1].conflict);
         // different USB IDs: two UPSes side by side

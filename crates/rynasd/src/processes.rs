@@ -65,6 +65,8 @@ pub const PROTECTED_UNITS: &[&str] = &[
     "systemd-logind.service",
     "systemd-udevd.service",
     "systemd-networkd.service",
+    "networking.service",
+    "NetworkManager.service",
     "dbus.service",
     "dbus-broker.service",
 ];

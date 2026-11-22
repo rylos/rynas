@@ -74,6 +74,8 @@ pub struct Updates {
     generation: AtomicU64,
     cache: std::sync::Mutex<Option<(Stamp, UpdatesStatus)>>,
     refresh: tokio::sync::Mutex<()>,
+    /// Held over "is one running?" and the start of a task: two requests at once start one.
+    starting: std::sync::Mutex<()>,
     kernel: std::sync::Mutex<Option<(Instant, KernelStatus)>>,
     kernel_lock: tokio::sync::Mutex<()>,
     /// A hardware module's boot layer.
@@ -162,6 +164,7 @@ impl Updates {
             generation: AtomicU64::new(0),
             cache: std::sync::Mutex::new(None),
             refresh: tokio::sync::Mutex::new(()),
+            starting: std::sync::Mutex::new(()),
             kernel: std::sync::Mutex::new(None),
             kernel_lock: tokio::sync::Mutex::new(()),
             boot: None,
@@ -372,6 +375,8 @@ impl Updates {
         F: FnOnce(Arc<Updates>, TaskCtx) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
     {
+        // the task is in the list (queued) when its start returns: the next caller sees it
+        let _starting = self.starting.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(id) = self.running_task() {
             return Err(Error::new(
                 StatusCode::CONFLICT,

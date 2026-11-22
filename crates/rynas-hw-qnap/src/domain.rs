@@ -59,7 +59,9 @@ impl Applier for QnapDomain {
 
     fn reload(&self, value: Option<&Value>, _ctx: &ApplyCtx) -> Result<(), String> {
         let s = value.map(settings_of).transpose()?.unwrap_or_default();
-        *self.0.latest.lock().unwrap() = s.clone();
+        // held until the controller has them: its start reads and applies them under it too
+        let mut latest = self.0.latest.lock().unwrap();
+        *latest = s.clone();
         if let Some(ctl) = self.0.ctl.get() {
             ctl.apply(s);
         }

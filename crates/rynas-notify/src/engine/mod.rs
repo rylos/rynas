@@ -1316,7 +1316,8 @@ impl Engine {
                 if !http_url_ok(server) {
                     return bad("ntfy: server must be an http(s) URL");
                 }
-                if !line(topic) || topic.contains('/') || topic.contains('?') {
+                // a single path segment: nothing that starts a query or a fragment, no spaces
+                if !line(topic) || topic.contains(['/', '?', '#']) || topic.chars().any(char::is_whitespace) {
                     return bad("ntfy: invalid topic");
                 }
             }

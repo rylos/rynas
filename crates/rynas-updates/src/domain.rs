@@ -149,8 +149,11 @@ pub fn import_from(root: &Path) -> Option<AutoUpdates> {
     }
     let dir = root.join("etc/apt/apt.conf.d");
     let mut on = false;
-    for e in std::fs::read_dir(dir).ok()?.flatten() {
-        let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
+    // in apt's order (by file name): the last assignment wins
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).collect();
+    files.sort();
+    for p in files {
+        let Ok(text) = std::fs::read_to_string(&p) else { continue };
         for l in text.lines().map(str::trim) {
             if l.starts_with("APT::Periodic::Unattended-Upgrade") {
                 on = l.contains("\"1\"");
@@ -311,5 +314,21 @@ mod tests {
         assert!(cfg.drift().unwrap().entries.is_empty());
         let bad = AutoUpdates { window_min: 1000, ..Default::default() };
         assert!(cfg.stage("admin", AUTO_KEY, Some(serde_json::to_value(&bad).unwrap())).is_err());
+    }
+
+    #[test]
+    fn import_reads_the_files_in_apt_order() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        let conf = root.join("etc/apt/apt.conf.d");
+        std::fs::create_dir_all(&conf).unwrap();
+        std::fs::write(root.join("usr/bin/unattended-upgrade"), "").unwrap();
+        // many files, so the folder's own order is unlikely to be the sorted one
+        for i in 0..40 {
+            std::fs::write(conf.join(format!("{:02}on", 10 + i)), "APT::Periodic::Unattended-Upgrade \"1\";\n").unwrap();
+        }
+        std::fs::write(conf.join("99off"), "APT::Periodic::Unattended-Upgrade \"0\";\n").unwrap();
+        assert_eq!(import_from(root).unwrap().mode, AutoMode::Off, "the last file wins");
     }
 }

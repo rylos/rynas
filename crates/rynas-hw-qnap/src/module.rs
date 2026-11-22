@@ -250,8 +250,12 @@ impl QnapModule {
             Some(state_dir),
             lock,
         ));
-        ctl.apply(self.shared.latest.lock().unwrap().clone());
-        let _ = self.shared.ctl.set(ctl.clone());
+        {
+            // under the lock an apply holds: settings applied meanwhile are not lost in between
+            let latest = self.shared.latest.lock().unwrap();
+            ctl.apply(latest.clone());
+            let _ = self.shared.ctl.set(ctl.clone());
+        }
         if self.dry {
             let (root, m, c) = (self.hw_root.clone(), self.model, ctl.clone());
             let demo = move || {

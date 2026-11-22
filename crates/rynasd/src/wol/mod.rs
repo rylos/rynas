@@ -1188,6 +1188,10 @@ impl Wol {
             e.record(w.clone());
             true
         });
+        // removed during the wake: its state went above, nothing would ever close the alert
+        if self.device(&dev.id).is_err() {
+            return;
+        }
         if failed && unwatched {
             let key = format!("wol:wake-failed:{}", dev.id);
             let mut ev = firing(NotifyCategory::Backup, NotifySeverity::Warning, "wol", key, format!("{} did not wake up", dev.name));

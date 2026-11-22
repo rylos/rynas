@@ -886,9 +886,12 @@ impl Watch {
             self.on_battery_since = Some(now);
             out.push(WatchAction::OnBattery);
         }
-        if !ob && !s.critical() && self.on_battery_since.take().is_some() {
+        if !ob && !s.critical() {
+            // also after a forced shutdown that never was on battery: the next outage stops again
             self.fired = false;
-            out.push(WatchAction::PowerBack);
+            if self.on_battery_since.take().is_some() {
+                out.push(WatchAction::PowerBack);
+            }
         }
         if s.critical() && !self.fired {
             self.fired = true;
@@ -1209,6 +1212,19 @@ mod tests {
             [WatchAction::Stop {
                 reason: "fsd",
                 shutdown: false
+            }]
+        );
+        // it went away without a shutdown: a later outage runs its timer again
+        assert!(w.step(&reading(&["OL"]), after, t0 + min).is_empty());
+        assert_eq!(
+            w.step(&reading(&["OB"]), after, t0 + 2 * min),
+            [WatchAction::OnBattery]
+        );
+        assert_eq!(
+            w.step(&reading(&["OB"]), after, t0 + 7 * min),
+            [WatchAction::Stop {
+                reason: "waittimeup",
+                shutdown: true
             }]
         );
     }
