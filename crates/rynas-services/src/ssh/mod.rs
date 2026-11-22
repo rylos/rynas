@@ -521,6 +521,14 @@ impl Ssh {
         }
     }
 
+    /// [`Ssh::current`] for a caller that has `sshd -T`'s answer already.
+    fn current_with(&self, units: Units, eff: &config::Effective) -> (SshSettings, bool, bool) {
+        match self.managed(units) {
+            Some((s, drift)) => (s, true, drift),
+            None => (config::adopt(eff, units.on()), false, false),
+        }
+    }
+
     fn read_trial(&self) -> Option<Trial> {
         let t = std::fs::read_to_string(self.state.join("trial.json")).ok()?;
         serde_json::from_str(&t).ok()
@@ -602,7 +610,7 @@ impl Ssh {
             (units, eff.join())
         });
         let eff = eff.unwrap_or_else(|_| self.effective());
-        let (settings, managed, drift) = self.current(units);
+        let (settings, managed, drift) = self.current_with(units, &eff);
         let layout = self.layout();
         let mut problems = Vec::new();
         let p = |code, subject: Option<String>| SshProblem { code, subject };
@@ -757,8 +765,8 @@ impl Ssh {
             return Err(SshError::Conflict("openssh-server is not installed".into()));
         }
         let units = self.units();
-        let (cur, managed, _) = self.current(units);
         let eff = self.effective();
+        let (cur, managed, _) = self.current_with(units, &eff);
         // the port: free, unless sshd itself has it
         if !eff.ports.contains(&new.port) && self.ports_in_use().contains(&new.port) {
             return Err(SshError::Invalid("port", format!("port {} is already in use", new.port)));
@@ -974,12 +982,12 @@ impl Ssh {
         let mut cur_eff = cur;
         cur_eff.enabled = units.on() || units.running();
         let mut after: Vec<SshAccount> = accounts.clone();
-        let removes_one = keys::read(&self.path(&a.home), a.uid, a.gid)
-            .is_ok_and(|t| keys::parse_file(&t).0.iter().any(|k| k.fingerprint == fingerprint && !k.weak));
-        if let Some(x) = after.iter_mut().find(|x| x.name == a.name)
-            && removes_one
-        {
-            x.keys = x.keys.saturating_sub(1);
+        // every line of that key goes (`keys::without`): a key listed twice counts twice
+        let removed = keys::read(&self.path(&a.home), a.uid, a.gid)
+            .map(|t| keys::parse_file(&t).0.iter().filter(|k| k.fingerprint == fingerprint && !k.weak).count() as u32)
+            .unwrap_or(0);
+        if let Some(x) = after.iter_mut().find(|x| x.name == a.name) {
+            x.keys = x.keys.saturating_sub(removed);
         }
         if self.admin_in(&accounts, None, &cur_eff) && !self.admin_in(&after, None, &cur_eff) {
             return Err(SshError::Lockout(

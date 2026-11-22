@@ -696,6 +696,40 @@ fn restore_stages_a_new_changeset() {
     ));
 }
 
+
+#[test]
+fn values_from_history_go_through_the_filter() {
+    let e = env();
+    e.cfg.on_history_value(Box::new(|key, mut v| {
+        if key == "test.app" {
+            v["name"] = json!("clean");
+        }
+        v
+    }));
+    for (port, name) in [(1, "once"), (2, "two")] {
+        e.cfg
+            .stage("alice", "test.app", Some(json!({"port": port, "name": name})))
+            .unwrap();
+        apply(&e, "alice", "").unwrap();
+    }
+    let staged_name = |owner: &str| {
+        e.cfg.pending_value(owner, "test.app").unwrap().flatten().map(|v| v["name"].clone())
+    };
+    // a restored revision
+    assert_eq!(e.cfg.restore("bob", 1).unwrap(), 1);
+    assert_eq!(staged_name("bob"), Some(json!("clean")));
+    // a set of values (an imported archive)
+    let values: BTreeMap<String, serde_json::Value> =
+        [("test.app".to_string(), json!({"port": 3, "name": "once"}))].into();
+    assert_eq!(e.cfg.stage_values("carol", &values).unwrap(), 1);
+    assert_eq!(staged_name("carol"), Some(json!("clean")));
+    // the applied value but for what the filter takes away: nothing to stage
+    let same: BTreeMap<String, serde_json::Value> =
+        [("test.app".to_string(), json!({"port": 2, "name": "other"}))].into();
+    assert_eq!(e.cfg.stage_values("dave", &same).unwrap(), 0);
+    assert_eq!(staged_name("dave"), None);
+}
+
 #[test]
 fn retention_by_count_keeps_the_latest() {
     let e = env_with(|o| o.keep_revisions = 2);

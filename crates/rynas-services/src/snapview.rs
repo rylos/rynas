@@ -69,6 +69,10 @@ pub fn wanted(s: &Share) -> Option<(String, String)> {
 
 /// The mount unit (without the rynas header).
 pub fn unit(share: &str, share_path: &str, snapshot_dir: &str) -> String {
+    // systemd expands `%` specifiers in these settings: a literal one is written `%%`
+    let snapshot_dir = snapshot_dir.replace('%', "%%");
+    let share_path = share_path.replace('%', "%%");
+    let (snapshot_dir, share_path) = (snapshot_dir.as_str(), share_path.as_str());
     format!(
         "{MARKER}\n\
          # Snapshots of share {share}, read-only (`shares` configuration key).\n\
@@ -125,6 +129,10 @@ mod tests {
         assert!(u.contains("What=/vol1/.snapshots/photos\n"));
         assert!(u.contains("Where=/vol1/photos/#snapshot\n"));
         assert!(u.contains("Options=bind,ro,nosuid,nodev,noexec"));
+        // a literal '%' is not read as a specifier
+        let u = unit("p", "/vol1/100%", "/vol1/.snapshots/100%");
+        assert!(u.contains("What=/vol1/.snapshots/100%%\n"));
+        assert!(u.contains("Where=/vol1/100%%/#snapshot\n"));
         let t = target(&["a.mount".into()]);
         assert!(t.contains("Wants=a.mount") && t.contains("WantedBy=multi-user.target"));
     }

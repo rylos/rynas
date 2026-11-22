@@ -498,7 +498,9 @@ impl Accounts for HostAccounts {
         let generation = self.pdb_generation.load(Ordering::Acquire);
         let v = self.samba_users()?;
         let mut c = self.pdb_cache.lock().unwrap();
-        if self.pdb_generation.load(Ordering::Acquire) == generation {
+        // "not installed" costs nothing to ask again (no pdbedit to start), and Samba may be
+        // installed before its passdb file exists: only a real answer is kept
+        if self.pdb_generation.load(Ordering::Acquire) == generation && v.is_some() {
             *c = Some((Instant::now(), stamp, v.clone()));
         }
         Ok(v)

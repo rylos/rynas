@@ -179,6 +179,23 @@ pub(crate) fn from_value<T: serde::de::DeserializeOwned + Default>(v: Option<Val
     }
 }
 
+/// A stored value taken from history (a restored revision, an imported archive) without the
+/// one-time requests it carried: the folders deleted with their shares (`remove_folders`) and
+/// the homes deleted with their users (`remove_homes`). They ran when that document was
+/// applied; staged again they would delete the folder of a share, or the home of a user, made
+/// again since under the same name ([`rynas_config::Config::on_history_value`]).
+pub fn history_value(key: &str, mut v: Value) -> Value {
+    let field = match key {
+        SHARES_KEY => "remove_folders",
+        USERS_KEY => "remove_homes",
+        _ => return v,
+    };
+    if let Some(o) = v.as_object_mut() {
+        o.remove(field);
+    }
+    v
+}
+
 /// `(staged or current, current, applied)` of a key.
 pub(crate) fn docs<T: serde::de::DeserializeOwned + Default + Clone>(
     c: &Config,

@@ -331,6 +331,11 @@ impl SharesDomain {
         g.server_string = g.server_string.trim().to_string();
         one_line(&g.server_string, 64)
             .map_err(|e| Invalid::at("server_string", format!("server string {e}")))?;
+        // smb.conf joins a line that ends with a backslash with the next one, which would
+        // swallow the setting written after it
+        if g.server_string.ends_with('\\') {
+            return Err(Invalid::at("server_string", "the server string cannot end with a backslash"));
+        }
         if !["SMB2_10", "SMB3_00", "SMB3_11"].contains(&g.min_protocol.as_str()) {
             return Err(Invalid::at(
                 "min_protocol",
@@ -408,6 +413,13 @@ impl SharesDomain {
             one_line(&s.description, 256).map_err(|e| {
                 Invalid::at("description", format!("share {name}: description {e}"))
             })?;
+            // as the server string: a trailing backslash would continue onto the next line
+            if s.description.ends_with('\\') {
+                return Err(Invalid::at(
+                    "description",
+                    format!("share {name}: the description cannot end with a backslash"),
+                ));
+            }
             // a share that asks for its subvolume: the path is /<volume mount>/<name>; it
             // is created by the apply when it does not exist yet
             let missing = s.path.is_empty() || !self.host.probe(&s.path).exists;
@@ -542,19 +554,25 @@ impl SharesDomain {
                     format!("share {name}: recycle retention is at most 3650 days"),
                 ));
             }
-            if smb.shadow_copy.enabled {
+            {
                 let d = &smb.shadow_copy.snapshot_dir;
-                if d.is_empty() {
+                if smb.shadow_copy.enabled && d.is_empty() {
                     return Err(Invalid::at(
                         "smb.shadow_copy.snapshot_dir",
                         format!("share {name}: previous versions need the snapshot directory"),
                     ));
                 }
-                if !d.starts_with('/')
-                    || d.chars().any(|c| c.is_control() || c == '"' || c == '\\')
-                    || d[1..]
-                        .split('/')
-                        .any(|c| c.is_empty() || c == "." || c == "..")
+                // the snapshot folder's mount unit names it too, without its trailing '/'
+                // (also with previous versions off)
+                let used = smb.shadow_copy.enabled || s.show_snapshots;
+                let d = if smb.shadow_copy.enabled { d.as_str() } else { d.trim_end_matches('/') };
+                if used
+                    && !d.is_empty()
+                    && (!d.starts_with('/')
+                        || d.chars().any(|c| c.is_control() || c == '"' || c == '\\')
+                        || d[1..]
+                            .split('/')
+                            .any(|c| c.is_empty() || c == "." || c == ".."))
                 {
                     return Err(Invalid::at(
                         "smb.shadow_copy.snapshot_dir",
@@ -562,7 +580,8 @@ impl SharesDomain {
                     ));
                 }
                 let p = &smb.shadow_copy.prefix;
-                if !p.is_empty()
+                if smb.shadow_copy.enabled
+                    && !p.is_empty()
                     && !p
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
@@ -821,6 +840,12 @@ impl SharesDomain {
                 .iter()
                 .find(|r| r.share == s.name && r.path == s.path)
             {
+                // a rollback takes back a share the failed apply added: a removal still
+                // listed in the previous document ran when that one was applied, and must
+                // not delete a folder shared again under the same name since
+                Some(r) if ctx.rolling_back() => {
+                    (ctx.log)(&format!("{}: the folder stays (rollback)", r.path));
+                }
                 Some(r) if to.shares.iter().any(|x| folders::is_within(&x.path, &r.path)) => {
                     (ctx.log)(&format!(
                         "{}: another share uses it, the folder stays",

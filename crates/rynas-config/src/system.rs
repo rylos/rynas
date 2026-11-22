@@ -22,6 +22,12 @@ pub trait System: Send + Sync {
     /// Runs a validator or helper command (non-zero exit is an error).
     fn run(&self, cmd: &Cmd) -> Result<CmdOutput, String>;
 
+    /// Runs a command whose exit code is part of its answer (`smartctl`'s bit mask,
+    /// `systemctl is-system-running`): the output whatever the code.
+    fn output(&self, cmd: &Cmd) -> Result<CmdOutput, String> {
+        self.run(cmd)
+    }
+
     /// `systemctl restart <unit>` (when a reload is not enough, e.g. new listening
     /// interfaces).
     fn restart_unit(&self, unit: &str) -> Result<(), String> {
@@ -145,6 +151,11 @@ impl System for HostSystem {
 
     fn run(&self, cmd: &Cmd) -> Result<CmdOutput, String> {
         cmd.run_blocking()
+            .map_err(|e| format!("{}: {e}", cmd.program().to_string_lossy()))
+    }
+
+    fn output(&self, cmd: &Cmd) -> Result<CmdOutput, String> {
+        cmd.output_blocking()
             .map_err(|e| format!("{}: {e}", cmd.program().to_string_lossy()))
     }
 }

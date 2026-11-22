@@ -404,6 +404,12 @@ fn the_last_key_of_a_keys_only_administrator_stays() {
     assert!(matches!(f.ssh.remove_key("admin", ED2_FP), Err(SshError::Lockout(_))));
     f.ssh.add_key("admin", EC384).unwrap();
     f.ssh.remove_key("admin", ED2_FP).unwrap();
+    // the same key on two lines is still the last one: a removal takes both lines
+    let file = f.root.join("home/admin/.ssh/authorized_keys");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("{text}{text}")).unwrap();
+    let fp = f.ssh.keys("admin").unwrap().keys[0].fingerprint.clone();
+    assert!(matches!(f.ssh.remove_key("admin", &fp), Err(SshError::Lockout(_))));
 }
 
 #[test]

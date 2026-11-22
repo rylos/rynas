@@ -70,6 +70,8 @@ impl Ops {
             // no subscriber is fine
             let _ = tx.send(g);
         }));
+        // a restored revision or an imported archive never brings back a deletion that ran
+        config.on_history_value(Box::new(crate::services::history_value));
         Self {
             config,
             tasks,

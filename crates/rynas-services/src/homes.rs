@@ -1296,23 +1296,26 @@ pub fn parse_mountinfo(text: &str) -> Vec<(String, String)> {
                 return None;
             }
             let fs = right.split(' ').next()?;
-            // octal escapes (\040 for a space)
-            let mut out = String::new();
+            // octal escapes (\040 for a space); bytes, so a name that is not ASCII stays whole
             let b = mp.as_bytes();
+            let mut out = Vec::with_capacity(b.len());
             let mut i = 0;
             while i < b.len() {
                 if b[i] == b'\\'
                     && i + 3 < b.len()
-                    && let Ok(v) = u8::from_str_radix(&mp[i + 1..i + 4], 8)
+                    && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
                 {
-                    out.push(v as char);
-                    i += 4;
-                    continue;
+                    let v = b[i + 1..i + 4].iter().fold(0u32, |a, c| a * 8 + u32::from(c - b'0'));
+                    if let Ok(v) = u8::try_from(v) {
+                        out.push(v);
+                        i += 4;
+                        continue;
+                    }
                 }
-                out.push(b[i] as char);
+                out.push(b[i]);
                 i += 1;
             }
-            Some((out, fs.to_string()))
+            Some((String::from_utf8_lossy(&out).into_owned(), fs.to_string()))
         })
         .collect()
 }
@@ -2948,6 +2951,9 @@ mod tests {
              40 22 0:35 /@ /volume\\0401 rw shared:5 - btrfs /dev/md2 rw\n",
         );
         assert_eq!(m[1], ("/volume 1".into(), "btrfs".into()));
+        // a mount point that is not ASCII keeps its name
+        let m = parse_mountinfo("41 22 0:36 / /mnt/dati-\u{e8} rw - ext4 /dev/sdb1 rw\n");
+        assert_eq!(m[0].0, "/mnt/dati-\u{e8}");
         assert!(
             parse_mountinfo("50 22 0:40 /x /opt/bind ro,relatime - ext4 /dev/sda1 rw\n").is_empty(),
             "read-only mounts are left out"

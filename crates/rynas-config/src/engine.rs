@@ -246,7 +246,13 @@ pub struct Config {
     pending_gen: AtomicU64,
     /// Called with the new generation after each bump ([`Config::on_pending_change`]).
     pending_listener: OnceLock<PendingListener>,
+    /// What a value taken from history becomes before it is staged
+    /// ([`Config::on_history_value`]).
+    history_filter: OnceLock<HistoryFilter>,
 }
+
+/// See [`Config::on_history_value`]: key and stored value in, the value to stage out.
+pub type HistoryFilter = Box<dyn Fn(&str, Value) -> Value + Send + Sync>;
 
 /// The values of an apply in progress ([`Config::applying`]) while it lives: cleared when it
 /// goes, however the apply ends (an error, a panic in a domain).
@@ -298,7 +304,23 @@ impl Config {
             applying: Mutex::new(BTreeMap::new()),
             pending_gen: AtomicU64::new(0),
             pending_listener: OnceLock::new(),
+            history_filter: OnceLock::new(),
         })
+    }
+
+    /// Registers the one function every value taken from history goes through before it is
+    /// staged (a revision restored, an imported archive); later calls are ignored. For
+    /// one-time requests kept in a stored document (delete this folder with its share): they
+    /// ran when that document was applied and must never run again because it comes back.
+    pub fn on_history_value(&self, f: HistoryFilter) {
+        let _ = self.history_filter.set(f);
+    }
+
+    fn history_value(&self, key: &str, v: Value) -> Value {
+        match self.history_filter.get() {
+            Some(f) => f(key, v),
+            None => v,
+        }
     }
 
     /// Generation of the pending changesets: it changes whenever some changeset may have
@@ -1394,9 +1416,10 @@ impl Config {
         let snapshot = self.revision_snapshot(id)?;
         let mut staged = 0;
         for key in self.appliers.keys() {
-            let target = snapshot.get(key).cloned();
+            let target = snapshot.get(key).cloned().map(|v| self.history_value(key, v));
             let applied = self.applied(key)?;
-            if target == applied {
+            // (an applied value that differs only by a request that already ran is the same)
+            if target == applied || target == applied.map(|v| self.history_value(key, v)) {
                 continue;
             }
             if self.stage_inner(owner, key, target, Some(id))? {
@@ -1415,10 +1438,12 @@ impl Config {
                 tracing::warn!("import: no domain for {key}, skipped");
                 continue;
             }
-            if self.applied(key)?.as_ref() == Some(v) {
+            let v = self.history_value(key, v.clone());
+            let applied = self.applied(key)?;
+            if applied.as_ref() == Some(&v) || applied.map(|a| self.history_value(key, a)).as_ref() == Some(&v) {
                 continue;
             }
-            if self.stage(owner, key, Some(v.clone()))? {
+            if self.stage(owner, key, Some(v))? {
                 staged += 1;
             }
         }

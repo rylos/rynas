@@ -408,6 +408,18 @@ fn move_one(
         moved_ms: now,
         from_folder: plan.source.clone(),
         to_folder: plan.target.clone(),
+    })
+    // the account already uses the new home: without its record the move can be neither
+    // confirmed nor undone from the page, so where the old home is must not be lost
+    // (the record cannot be written before the switch: a crash in between would leave a
+    // move to confirm whose "old home" is the one still in use)
+    .map_err(|e| {
+        let m = format!(
+            "{name}: home moved to {} ({}), but the move could not be recorded ({e}): the old home is kept as {kept}; delete it by hand once the new one is checked",
+            plan.target, plan.to
+        );
+        tracing::error!("homes: {m}");
+        m
     })?;
     log(&format!(
         "{name}: home moved to {} ({}); the old one is kept as {kept} until the move is confirmed",

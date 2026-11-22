@@ -917,6 +917,23 @@ fn deleted_shares_are_recorded_or_removed_with_their_folder() {
         .map(|v| serde_json::from_value(v).unwrap())
         .unwrap_or_default();
     assert!(staged.remove_folders.iter().all(|r| r.share != "docs"));
+
+    // the folder is shared again under the same name in an apply that fails: its rollback
+    // goes back to the document that still lists the old removal, and must not run it again
+    e.cfg.discard("admin").ok();
+    calls(&e);
+    let mut back = doc.clone();
+    back.shares.push(Share {
+        name: "scans".into(),
+        path: "/srv/vol1/scans".into(),
+        permissions: vec![perm(PrincipalKind::Group, "office", Access::Ro)],
+        ..Default::default()
+    });
+    stage(&e, SHARES_KEY, &back).unwrap();
+    e.host.state().fail_acl.push("/srv/vol1/scans".into());
+    apply(&e).unwrap_err();
+    let c = calls(&e);
+    assert!(!c.iter().any(|x| x.contains("rm -rf") || x.contains("subvolume delete")), "{c:?}");
 }
 
 #[test]
@@ -938,6 +955,22 @@ fn validation_errors() {
     let mut d = shares_doc();
     d.shares[0].path = "/etc".into();
     assert!(bad(d).contains("cannot be shared"));
+    // a trailing backslash would join the next smb.conf line to the comment
+    let mut d = shares_doc();
+    d.shares[0].description = "archive\\".into();
+    assert!(bad(d).contains("backslash"));
+    let mut d = shares_doc();
+    d.smb.server_string = "nas\\".into();
+    assert!(bad(d).contains("backslash"));
+    // the snapshot folder's mount unit names the directory, also without previous versions
+    let mut d = shares_doc();
+    d.shares[1].show_snapshots = true;
+    d.shares[1].smb.shadow_copy.snapshot_dir = "/srv/vol1/.snapshots\nOptions=bind".into();
+    assert!(bad(d).contains("invalid snapshot directory"));
+    let mut d = shares_doc();
+    d.shares[1].show_snapshots = true;
+    d.shares[1].smb.shadow_copy.snapshot_dir = "/srv/vol1/../etc".into();
+    assert!(bad(d).contains("invalid snapshot directory"));
     e.host.state().paths.insert(
         "/srv/remote".into(),
         crate::host::PathInfo {

@@ -1128,17 +1128,20 @@ pub fn set_password(
     if !smb {
         return Ok(());
     }
-    let Some(samba) = accounts.samba_users()? else {
-        log("Samba is not installed: only the Linux password was set");
-        return Ok(());
-    };
-    let r = if samba.iter().any(|s| s.name == name) {
-        exec(AccountOp::SambaSetPassword {
-            name: name.into(),
-            password: password.clone(),
-        })
-    } else {
-        exec(AccountOp::SambaAdd {
+    // a passdb that cannot be read is a failed Samba step too: the shadow hash goes back
+    let r = match accounts.samba_users() {
+        Err(e) => Err(e),
+        Ok(None) => {
+            log("Samba is not installed: only the Linux password was set");
+            return Ok(());
+        }
+        Ok(Some(samba)) if samba.iter().any(|s| s.name == name) => {
+            exec(AccountOp::SambaSetPassword {
+                name: name.into(),
+                password: password.clone(),
+            })
+        }
+        Ok(Some(_)) => exec(AccountOp::SambaAdd {
             name: name.into(),
             password: password.clone(),
         })
@@ -1151,7 +1154,7 @@ pub fn set_password(
             } else {
                 Ok(())
             }
-        })
+        }),
     };
     if let Err(e) = r {
         log(&format!("Samba password failed: {e}"));
