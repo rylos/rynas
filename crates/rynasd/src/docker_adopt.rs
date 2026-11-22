@@ -637,6 +637,14 @@ pub(crate) async fn move_route(
             format!("{} exists", l.stack(&name)),
         ));
     }
+    // the copy would land inside what it copies (a project kept in the volume's root or in
+    // its docker folder): the whole tree, the engine's folders included, would be read first
+    if rynas_docker::stacks::is_below(&l.stack(&name), &a.dir) {
+        return Err(conflict(format!(
+            "{} holds the rynas stacks folder: the stack cannot be moved into it",
+            a.dir
+        )));
+    }
     let running = s
         .containers()
         .await

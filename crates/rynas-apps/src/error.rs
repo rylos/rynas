@@ -62,7 +62,8 @@ pub enum RenderError {
     MissingValue(String),
     /// A value was given for a name the entry does not declare.
     UnknownValue(String),
-    /// A value cannot be written safely into `.env` (newline, single quote, NUL).
+    /// A value cannot be written safely into `.env` (newline, single quote, NUL, a backslash
+    /// at the end).
     UnsafeValue(String),
     /// The compose file references a variable that nothing provides.
     UndefinedVariable(String),
@@ -102,7 +103,7 @@ impl fmt::Display for RenderError {
             Self::InvalidValue { field, reason } => write!(f, "{field}: {reason}"),
             Self::MissingValue(v) => write!(f, "missing value for {v}"),
             Self::UnknownValue(v) => write!(f, "unknown value {v}"),
-            Self::UnsafeValue(v) => write!(f, "value of {v} contains a newline, a single quote or NUL"),
+            Self::UnsafeValue(v) => write!(f, "value of {v} contains a newline, a single quote or NUL, or ends with a backslash"),
             Self::UndefinedVariable(v) => write!(f, "compose references undefined variable {v}"),
             Self::InvalidStackName(v) => write!(f, "invalid stack name `{v}`"),
             Self::NotInstalledApp(m) => write!(f, "not an installed catalogue app: {m}"),

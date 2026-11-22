@@ -201,7 +201,9 @@ pub fn generate_secret(len: u16, enc: Encoding) -> Result<String, RenderError> {
 
 /// Quotes a value for `.env` (compose dotenv: single quotes are literal).
 fn env_value(key: &str, v: &str) -> Result<String, RenderError> {
-    if v.contains(['\n', '\r', '\0', '\'']) {
+    // a backslash before the closing quote: compose reads an escaped quote, and the value
+    // runs on into the next lines
+    if v.contains(['\n', '\r', '\0', '\'']) || v.ends_with('\\') {
         return Err(RenderError::UnsafeValue(key.to_owned()));
     }
     let plain = v.bytes().all(|c| c.is_ascii_alphanumeric() || b"_./:@+=,%-".contains(&c));
@@ -430,4 +432,19 @@ pub fn request_from_env(app: &CatalogApp, stack: &str, env: &BTreeMap<String, St
         req.form.insert(name.clone(), json);
     }
     req
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_values_are_plain_quoted_or_refused() {
+        assert_eq!(env_value("K", "plain-1.2:/x").unwrap(), "plain-1.2:/x");
+        assert_eq!(env_value("K", "a b$c").unwrap(), "'a b$c'");
+        assert_eq!(env_value("K", "in\\side").unwrap(), "'in\\side'");
+        for bad in ["a'b", "a\nb", "ends\\", "ends\\\\"] {
+            assert_eq!(env_value("K", bad), Err(RenderError::UnsafeValue("K".into())), "{bad:?}");
+        }
+    }
 }

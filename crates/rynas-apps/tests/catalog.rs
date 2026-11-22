@@ -339,7 +339,7 @@ fn lint_reports_broken_entries() {
   uptime-kuma:
     image: louislam/uptime-kuma:latest
     container_name: kuma
-    privileged: true
+    privileged: "true"
     ports:
       - "3001:3001"
     volumes:
@@ -347,6 +347,9 @@ fn lint_reports_broken_entries() {
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       X: "${UNDEFINED_VAR:-x}"
+volumes:
+  host:
+    driver_opts: {type: none, o: bind, device: /}
 "#,
     )
     .unwrap();
@@ -360,6 +363,7 @@ fn lint_reports_broken_entries() {
         "not pinned by digest",
         "`container_name` is not allowed",
         "privileged is not declared",
+        "named volume `host` must have no options",
         "must be exactly ${ENV}",
         "volume source `./data`",
         "Docker socket mount is not declared",

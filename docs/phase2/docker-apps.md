@@ -2227,8 +2227,10 @@ Standard compose, used as is. The lint (`cargo test -p rynas-apps`) enforces:
   `host_network`;
 - volume sources only declared folders, shares, named volumes, `${RYNAS_STACKS_DIR}`
   (managers), the Docker socket (declared services), `/etc/localtime` and `/run/dbus` read-only;
-- `privileged`, `cap_add`, `devices` (`hardware.gpu` or `security.devices`) and
-  `network_mode: host` only as declared in `app.toml`.
+  a named volume is declared without options (`driver`, `driver_opts`: they could bind a host
+  path);
+- `privileged` (in any form other than a plain `false`), `cap_add`, `devices` (`hardware.gpu`
+  or `security.devices`) and `network_mode: host` only as declared in `app.toml`.
 
 The same lint runs on the base file and on the base with each overlay merged in.
 

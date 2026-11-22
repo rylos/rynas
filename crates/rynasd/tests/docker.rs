@@ -1142,6 +1142,38 @@ async fn move_with_a_bind_outside_the_folder_is_undone() {
     assert_eq!(s, StatusCode::OK, "still adopted where it was");
 }
 
+/// A project kept in a folder that holds the rynas stacks folder is not copied into itself.
+#[tokio::test]
+async fn move_into_its_own_folder_is_refused() {
+    let e = env_with(false, Arc::new(Outside), Some("vol1"));
+    let app = e.dir.path().join("root/vol1/docker");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("compose.yaml"), "services:\n  web:\n    image: x\n").unwrap();
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/import",
+        Some(json!({"dir": "/vol1/docker"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/docker/move",
+        Some(json!({"confirm": "docker"})),
+    )
+    .await;
+    assert_eq!(
+        (s, err(&b).code.as_str()),
+        (StatusCode::CONFLICT, error_codes::CONFLICT),
+        "{}",
+        String::from_utf8_lossy(&b)
+    );
+    assert!(!e.dir.path().join("root/vol1/docker/stacks").exists());
+    assert!(app.join("compose.yaml").exists());
+}
+
 /// [`Adopting`], and after the copy the records cannot be saved any more (the state folder
 /// of Docker, known once the test env exists, becomes a file).
 struct RecordFails(Adopting, Arc<Mutex<std::path::PathBuf>>);

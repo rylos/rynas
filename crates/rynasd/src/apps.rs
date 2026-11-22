@@ -559,7 +559,12 @@ impl AppsSvc {
                 (l.catalog.clone(), l.issues.clone())
             }
             (loaded, _) => {
-                let (c, i) = loaded.unwrap_or_else(|| load_sources(&self.dir, None));
+                let (c, i) = loaded.unwrap_or_else(|| {
+                    // the cache was dropped meanwhile (idle trim): read again, with the
+                    // downloaded catalogue the stamp stands for
+                    let active = self.online_use().online.and_then(|o| o.active());
+                    load_sources(&self.dir, active.as_ref())
+                });
                 let l = Loaded {
                     stamp,
                     checked: Instant::now(),
@@ -2311,6 +2316,11 @@ async fn uninstall_post(
                 let real = rynas_docker::under(&s3.root, p);
                 // never through a symlink: a link in its place is removed, not followed
                 match std::fs::symlink_metadata(&real) {
+                    // made without a link on the way; one put there since would lead the
+                    // removal elsewhere
+                    Ok(m) if m.is_dir() && rynas_docker::safefs::open_dir(&s3.root, p).is_err() => {
+                        log.log(&format!("kept {p}: a symbolic link on the way to it"));
+                    }
                     Ok(m) if m.is_dir() => {
                         log.log(&format!("removing {p}"));
                         std::fs::remove_dir_all(&real).map_err(|e| format!("rm {p}: {e}"))?;

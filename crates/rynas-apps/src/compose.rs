@@ -250,6 +250,12 @@ pub(crate) fn lint(app: &AppManifest, doc: &Value, label: &str, known: &BTreeSet
             err(format!("named volume `{v}` is not in app.toml named_volumes (data must be bind folders)"));
         }
     }
+    // a driver or driver options turn a named volume into a bind of any host path
+    for (k, v) in doc.get("volumes").and_then(Value::as_mapping).into_iter().flatten() {
+        if !(v.is_null() || v.as_mapping().is_some_and(Mapping::is_empty)) {
+            err(format!("named volume `{}` must have no options (driver, driver_opts, external)", k.as_str().unwrap_or("?")));
+        }
+    }
     let share_access = |src: &str| app.shares.iter().find(|s| format!("${{{}}}", s.env) == src).map(|s| s.access);
     let folder_env = |src: &str| app.folders.iter().any(|f| format!("${{{}}}", f.env) == src);
 
@@ -296,7 +302,8 @@ pub(crate) fn lint(app: &AppManifest, doc: &Value, label: &str, known: &BTreeSet
             Some("unless-stopped" | "always" | "on-failure") => {}
             _ => err(format!("service `{name}`: restart must be unless-stopped, always or on-failure")),
         }
-        if get("privileged").and_then(Value::as_bool) == Some(true) && !app.security.privileged.contains(name) {
+        // anything but a plain `false`: compose also reads "true" and 1 as true
+        if get("privileged").is_some_and(|v| v.as_bool() != Some(false)) && !app.security.privileged.contains(name) {
             err(format!("service `{name}`: privileged is not declared in app.toml security.privileged"));
         }
         let host_net = get("network_mode").and_then(Value::as_str) == Some("host");

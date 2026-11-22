@@ -278,6 +278,34 @@ pub fn enrich(s: &DockerSvc, mut r: UpdateReport) -> UpdateReport {
     r
 }
 
+/// Forgets the automatic results and the held downloads of stacks rynas no longer has
+/// (removed, released). Nothing is forgotten while the stacks folder is not there: an
+/// unmounted volume hides every stack.
+pub(crate) fn prune_gone(s: &DockerSvc) {
+    let Some(l) = s.layout() else {
+        return;
+    };
+    if !rynas_docker::under(&s.root, &l.stacks()).is_dir() {
+        return;
+    }
+    let names: BTreeSet<String> = {
+        let a = s.auto.lock().unwrap();
+        a.results.keys().chain(a.held.keys()).cloned().collect()
+    };
+    let gone: Vec<String> = names
+        .into_iter()
+        .filter(|n| !s.updatable_stack(n))
+        .collect();
+    if !gone.is_empty() {
+        s.auto_change(|a| {
+            for n in &gone {
+                a.results.remove(n);
+                a.held.remove(n);
+            }
+        });
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // the schedule
 // ---------------------------------------------------------------------------------------------
@@ -533,8 +561,11 @@ pub fn spawn_auto_window(
                 "update window until {}",
                 jiff::Timestamp::from_millisecond(end as i64).map(|t| t.to_string()).unwrap_or_default()
             ));
-            run_window(&s2, end).await;
+            run_window(&s2, &ctx, end).await;
             s2.changed();
+            if ctx.is_cancelled() {
+                return Err("cancelled".into());
+            }
             Ok(())
         })
         .map_err(|e| e.to_string())
@@ -575,13 +606,15 @@ pub fn window_end(t: &rynas_api_types::scheduler::ScheduledTask, now_ms: u64) ->
     (end > now_ms).then_some(end)
 }
 
-/// The window: the allowed updates of the stacks that take them, one at a time.
-pub async fn run_window(s: &Arc<DockerSvc>, end_ms: u64) {
+/// The window: the allowed updates of the stacks that take them, one at a time. Cancelling
+/// the window's task (`ctx`) lets the update in hand end and starts no other.
+pub async fn run_window(s: &Arc<DockerSvc>, ctx: &TaskCtx, end_ms: u64) {
     let stale = rynas_tasks::now_ms().saturating_sub(s.report.lock().unwrap().checked_at_ms) > STALE_REPORT;
     if stale && !scheduled_check(s).await {
         tracing::warn!("docker: automatic updates skipped: the update check failed");
         return;
     }
+    prune_gone(s);
     let report = enrich(s, s.report.lock().unwrap().clone());
     let todo: Vec<StackUpdate> = report
         .stacks
@@ -589,6 +622,10 @@ pub async fn run_window(s: &Arc<DockerSvc>, end_ms: u64) {
         .filter(|u| u.enabled && matches!(u.verdict, UpdateVerdict::Auto | UpdateVerdict::AfterPull))
         .collect();
     for u in todo {
+        if ctx.is_cancelled() {
+            tracing::info!("docker: the update window was cancelled before {}", u.stack);
+            break;
+        }
         if rynas_tasks::now_ms() >= end_ms {
             tracing::info!("docker: the update window ended before {}", u.stack);
             break;

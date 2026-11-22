@@ -158,12 +158,21 @@ impl Engine {
             .await?)
     }
 
+    /// The client of stop and restart: the engine answers only once the container has
+    /// stopped, up to the grace time later (a process that ignores SIGTERM), so these calls
+    /// get that long on top of the usual timeout.
+    fn patient(&self) -> Docker {
+        self.docker
+            .clone()
+            .with_timeout(std::time::Duration::from_secs(TIMEOUT_S + STOP_GRACE_S as u64))
+    }
+
     pub async fn stop(&self, id: &str) -> Result<(), DockerError> {
         let o = qp::StopContainerOptions {
             t: Some(STOP_GRACE_S),
             ..Default::default()
         };
-        Ok(self.docker.stop_container(id, Some(o)).await?)
+        Ok(self.patient().stop_container(id, Some(o)).await?)
     }
 
     pub async fn restart(&self, id: &str) -> Result<(), DockerError> {
@@ -171,7 +180,7 @@ impl Engine {
             t: Some(STOP_GRACE_S),
             ..Default::default()
         };
-        Ok(self.docker.restart_container(id, Some(o)).await?)
+        Ok(self.patient().restart_container(id, Some(o)).await?)
     }
 
     /// Does an image (id or reference) exist locally?

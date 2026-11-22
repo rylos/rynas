@@ -600,7 +600,8 @@ pub enum FieldErrorKind {
     MissingValue,
     /// Not a field, share, folder or port of the entry.
     UnknownValue,
-    /// Contains a newline, a single quote or NUL (cannot be written to `.env`).
+    /// Contains a newline, a single quote or NUL, or ends with a backslash (cannot be
+    /// written to `.env`).
     UnsafeValue,
     /// The chosen shared folder does not exist.
     ShareMissing,

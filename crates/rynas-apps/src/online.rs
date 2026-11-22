@@ -435,13 +435,51 @@ pub fn extract(archive: &[u8], dest: &Path) -> Result<Extracted, OnlineError> {
     Ok(st)
 }
 
-/// `O_NOFOLLOW` (the archive never creates links, this only makes sure).
+/// `O_NOFOLLOW` (the archive never creates links, this only makes sure; `create_new` alone
+/// already refuses a link). The flag's value depends on the architecture; 0 where it is not
+/// listed here.
 fn libc_nofollow() -> i32 {
-    #[cfg(target_os = "linux")]
+    // asm-generic/fcntl.h
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "riscv64",
+            target_arch = "s390x",
+            target_arch = "loongarch64"
+        )
+    ))]
     {
         0o400000
     }
-    #[cfg(not(target_os = "linux"))]
+    // their own fcntl.h: O_DIRECTORY and O_NOFOLLOW come before O_DIRECT and O_LARGEFILE
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "powerpc",
+            target_arch = "powerpc64"
+        )
+    ))]
+    {
+        0o100000
+    }
+    #[cfg(not(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "riscv64",
+            target_arch = "s390x",
+            target_arch = "loongarch64",
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "powerpc",
+            target_arch = "powerpc64"
+        )
+    )))]
     {
         0
     }

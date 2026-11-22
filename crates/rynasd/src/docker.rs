@@ -892,6 +892,30 @@ pub(crate) fn mark_busy(s: &Arc<DockerSvc>, name: &str) -> Res<OwnedBusy> {
     Ok(OwnedBusy(s.clone(), name.to_string()))
 }
 
+/// Takes the one slot of an install or a migration (`""` until the task has its id). The
+/// slot is freed when the returned guard is dropped: when the task ends, and also when it
+/// never runs (cancelled while queued) or panics.
+fn reserve_engine_task(s: &Arc<DockerSvc>) -> Res<OnDrop<Box<dyn FnOnce() + Send>>> {
+    let mut slot = s.engine_task.lock().unwrap();
+    if slot.is_some() {
+        return Err(busy("an install or migration is running"));
+    }
+    *slot = Some(String::new());
+    let s2 = s.clone();
+    let free: Box<dyn FnOnce() + Send> = Box::new(move || {
+        *s2.engine_task.lock().unwrap() = None;
+    });
+    Ok(OnDrop(Some(free)))
+}
+
+/// Gives the reserved slot its task id (unless the task is over already).
+fn name_engine_task(s: &DockerSvc, id: &str) {
+    let mut slot = s.engine_task.lock().unwrap();
+    if slot.as_deref() == Some("") {
+        *slot = Some(id.to_string());
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // status and settings
 // ---------------------------------------------------------------------------------------------
@@ -966,7 +990,8 @@ impl DockerSvc {
             buildx_version: f.buildx_version.clone(),
             install_block: f.install_block,
             install_incomplete: f.incomplete.clone(),
-            task_id: self.engine_task.lock().unwrap().clone(),
+            // "": reserved, the task has no id yet
+            task_id: self.engine_task.lock().unwrap().clone().filter(|t| !t.is_empty()),
             read_at_ms: now_ms(),
             ..Default::default()
         };
@@ -1220,10 +1245,7 @@ async fn install_route(
         }
         None => {}
     }
-    let mut slot = s.engine_task.lock().unwrap();
-    if slot.is_some() {
-        return Err(busy("an install or migration is running"));
-    }
+    let reserved = reserve_engine_task(&s)?;
     audit(&who, "install", req.volume.as_deref().unwrap_or("-"));
     let (s2, who2) = (s.clone(), who.clone());
     let id = s
@@ -1231,13 +1253,13 @@ async fn install_route(
         .tasks
         .spawn("docker.install", &who, move |ctx| async move {
             let r = install_task(&s2, &ctx, &who2, f, req).await;
-            *s2.engine_task.lock().unwrap() = None;
+            drop(reserved);
             s2.invalidate();
             s2.drop_engine().await;
             s2.changed();
             r
         })?;
-    *slot = Some(id.clone());
+    name_engine_task(&s, &id);
     Ok(accepted(id))
 }
 
@@ -1447,10 +1469,7 @@ async fn migrate_route(
     if s.settings().volume.as_deref() == Some(req.volume.as_str()) {
         return Err(conflict(format!("the engine is already on {}", req.volume)).field("volume"));
     }
-    let mut slot = s.engine_task.lock().unwrap();
-    if slot.is_some() {
-        return Err(busy("an install or migration is running"));
-    }
+    let reserved = reserve_engine_task(&s)?;
     audit(&who, "migrate", &req.volume);
     let (s2, who2) = (s.clone(), who.clone());
     let id = s
@@ -1458,12 +1477,12 @@ async fn migrate_route(
         .tasks
         .spawn("docker.migrate", &who, move |ctx| async move {
             let r = migrate_task(&s2, &ctx, &who2, &req.volume).await;
-            *s2.engine_task.lock().unwrap() = None;
+            drop(reserved);
             s2.drop_engine().await;
             s2.changed();
             r
         })?;
-    *slot = Some(id.clone());
+    name_engine_task(&s, &id);
     Ok(accepted(id))
 }
 
@@ -1956,9 +1975,14 @@ impl DockerSvc {
                 ..Default::default()
             });
         }
-        let scratch = self
-            .state_dir
-            .join(format!("validate-{}-{}", std::process::id(), now_ms()));
+        // two validations of the same millisecond never share (and remove) one folder
+        static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+        let scratch = self.state_dir.join(format!(
+            "validate-{}-{}-{}",
+            std::process::id(),
+            now_ms(),
+            SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&scratch).map_err(Error::internal)?;
         let _ = std::fs::set_permissions(&scratch, std::os::unix::fs::PermissionsExt::from_mode(0o700));
         let cf = scratch.join("compose.yaml");
@@ -2071,10 +2095,11 @@ fn refused_compose_keys(compose: &str) -> Option<String> {
     compose
         .lines()
         .any(|l| {
-            let k = l.trim_end();
-            ["include:", "\"include\":", "'include':"]
-                .iter()
-                .any(|p| k.starts_with(p))
+            // YAML allows blanks between a key and its colon
+            ["include", "\"include\"", "'include'"].iter().any(|p| {
+                l.strip_prefix(p)
+                    .is_some_and(|rest| rest.trim_start().starts_with(':'))
+            })
         })
         .then(|| "include: is not supported in a rynas stack (put the services in this file)".into())
 }
@@ -2503,6 +2528,15 @@ pub(crate) async fn pre_snapshot(
         return Ok(None);
     }
     let images = current_images(s, name).await;
+    // nothing runs: nothing to stop, and `compose start` afterwards would start a stack its
+    // owner stopped (and fails on one without containers); an engine that does not answer
+    // leaves the request as it was
+    let stop_first = stop_first
+        && s.containers().await.map_or(true, |cs| {
+            cs.iter().any(|x| {
+                x.c.stack.as_deref() == Some(name) && x.c.state == ContainerState::Running
+            })
+        });
     if stop_first {
         compose(s, ctx, name, l, ComposeAction::Stop).await?;
     }
@@ -2546,6 +2580,14 @@ pub(crate) async fn do_rollback(
 ) -> Result<(), String> {
     let snap = snapshots::get(&s.root, l, name, id)
         .ok_or_else(|| format!("no snapshot {id} of {name}"))?;
+    // before anything stops: the restore swaps subvolumes (snapshots left behind by an
+    // earlier stack of this name do not make this folder one)
+    if !s.dry && !snapshots::supported(&s.root, l, name) {
+        return Err(format!(
+            "{} is not a btrfs subvolume: it cannot be restored from a snapshot",
+            l.stack(name)
+        ));
+    }
     let now = current_images(s, name).await;
     compose(s, ctx, name, l, ComposeAction::Down).await?;
     if s.dry {
@@ -2577,10 +2619,34 @@ pub(crate) async fn do_rollback(
             }
         }
     }
+    // the folder is restored: an image that cannot be put back never leaves the stack down
+    // (the stack is started with what is there, and the trouble is the task's error)
+    let mut images_err: Option<String> = None;
     for c in snapshots::retag_cmds(&snap.images, &|id| present.contains(id)) {
-        s.run(ctx, &c).await?;
+        match s.run(ctx, &c).await {
+            Ok(o) if o.success() => {}
+            Ok(o) => ctx.log(&format!(
+                "warning: {}: {}",
+                c.display(),
+                compose_error(&o.stderr)
+            )),
+            Err(e) => {
+                ctx.log(&format!("warning: {e}"));
+                if images_err.is_none() {
+                    images_err = Some(e);
+                }
+            }
+        }
     }
-    compose(s, ctx, name, l, ComposeAction::Up).await
+    let up = compose(s, ctx, name, l, ComposeAction::Up).await;
+    match (up, images_err) {
+        (Ok(()), None) => Ok(()),
+        (Ok(()), Some(e)) => Err(format!(
+            "the folder is the snapshot's again and the stack started, but an image of the snapshot was not put back: {e}"
+        )),
+        (Err(e), None) => Err(e),
+        (Err(e), Some(e2)) => Err(format!("{e} (an image of the snapshot was not put back: {e2})")),
+    }
 }
 
 async fn stack_task(
@@ -3534,5 +3600,25 @@ mod tests {
             copy_cmd("/var/lib/docker", "/vol1/docker/engine").display(),
             "cp -a --reflink=auto /var/lib/docker/. /vol1/docker/engine/"
         );
+    }
+
+    #[test]
+    fn include_is_refused_however_it_is_written() {
+        for bad in [
+            "include:\n  - other.yaml\n",
+            "services: {}\ninclude : [x.yaml]\n",
+            "\"include\": [x.yaml]\n",
+            "'include' :\n  - x.yaml\n",
+        ] {
+            assert!(refused_compose_keys(bad).is_some(), "{bad}");
+        }
+        for ok in [
+            "services:\n  web:\n    image: x\n",
+            "services:\n  include:\n    image: x\n",
+            "includes: 1\n",
+            "# include: x\n",
+        ] {
+            assert!(refused_compose_keys(ok).is_none(), "{ok}");
+        }
     }
 }
