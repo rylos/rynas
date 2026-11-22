@@ -22,7 +22,7 @@ export function pickIcon(at, path) {
   current?.close();
   const name = baseName(path) || path;
   const has = rules();
-  let scope = !has.paths[path] && has.names[name] ? "names" : "paths";
+  let scope = !has.paths[path] && Object.hasOwn(has.names, name) ? "names" : "paths";
   let query = "";
   const colorNames = { "": t("files.iconpick.default"), red: t("files.iconpick.red"), yellow: t("files.iconpick.yellow"), green: t("files.iconpick.green"), cyan: t("files.iconpick.cyan"), purple: t("files.iconpick.pink"), white: t("files.iconpick.white"), gray: t("files.iconpick.gray") };
 
@@ -40,7 +40,11 @@ export function pickIcon(at, path) {
   mount(el);
 
   const key = () => (scope === "paths" ? path : name);
-  const rule = () => rules()[scope][key()] || null;
+  // its own entry only: a folder called "constructor" has no rule of Object's
+  const rule = () => {
+    const table = rules()[scope];
+    return (Object.hasOwn(table, key()) && table[key()]) || null;
+  };
   const shown = () => folderIcon({ kind: "d", path, name });
 
   function paint() {
@@ -58,7 +62,7 @@ export function pickIcon(at, path) {
 
   function set(patch) {
     const r = rules();
-    const now = r[scope][key()] || { g: shown()?.g || autoFolderGlyph(name), c: shown()?.c || "" };
+    const now = rule() || { g: shown()?.g || autoFolderGlyph(name), c: shown()?.c || "" };
     r[scope][key()] = { ...now, ...patch };
     // a rule for the name shows on this folder too: its own icon would hide it
     if (scope === "names") delete r.paths[path];
@@ -96,14 +100,18 @@ export function pickIcon(at, path) {
     if (e.key === "Escape") close();
     e.stopPropagation();
   };
+  let closed = false;
   function close() {
+    if (closed) return;
+    closed = true;
     document.removeEventListener("mousedown", onDown, true);
     el.remove();
     current = null;
   }
   el.addEventListener("keydown", onKey);
   el.querySelector(".ip-close").onclick = close;
-  setTimeout(() => document.addEventListener("mousedown", onDown, true));
+  // closed already (another picker asked for at once): no listener left behind
+  setTimeout(() => closed || document.addEventListener("mousedown", onDown, true));
   current = { close };
 }
 

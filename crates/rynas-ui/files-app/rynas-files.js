@@ -18,7 +18,7 @@ import { shellTheme } from "./js/prefs.js";
 const BASE = new URL(".", import.meta.url);
 
 // what main.js imports at start, asked for at once instead of one level after another
-const PRELOAD = ["api", "prefs", "i18n", "format", "icons", "ui", "transfers", "settings", "iconpick", "tabs", "sidebar", "appdata", "actions", "dnd", "menus", "keys", "select", "undo", "rename", "dupes", "sync", "health", "eza", "pane", "perms", "conns", "archive", "uploads", "preview", "space", "fuzzy", "heic", "zoom", "lang/en"];
+const PRELOAD = ["api", "prefs", "i18n", "format", "icons", "ui", "transfers", "settings", "iconpick", "tabs", "sidebar", "appdata", "backups", "actions", "dnd", "menus", "keys", "select", "undo", "rename", "dupes", "sync", "health", "eza", "pane", "perms", "conns", "archive", "uploads", "preview", "space", "fuzzy", "heic", "zoom", "lang/en"];
 
 const CHROME = `
 <div class="app" id="app">
@@ -56,26 +56,29 @@ const CHROME = `
 <input type="file" id="upload-folder" webkitdirectory hidden>`;
 
 let started = null;
-let preloaded = false;
+// the <link rel=modulepreload> elements of this attempt, null before the first one
+let preloads = null;
+// the styles, asked for once: adopted, or a <link> in the shadow root (never rejects)
+let styled = null;
 
 /** main.js and its imports asked for at once (fetched and compiled), and the styles fetched. */
 function preload() {
-  if (preloaded) return;
-  preloaded = true;
+  if (preloads) return;
+  preloads = [];
   for (const m of ["main", ...PRELOAD]) {
     const l = document.createElement("link");
     l.rel = "modulepreload";
     l.href = new URL(`js/${m}.js`, BASE).href;
     document.head.append(l);
+    preloads.push(l);
   }
   // immutable: the browser keeps it for start()
   fetch(new URL("app.css", BASE).href).catch(() => {});
 }
 
-/** The shadow root and the app, made once; resolves with main.js's module once the styles are in. */
-function start() {
-  if (started) return started;
-  preload();
+/** The shadow root and the chrome, made once. */
+function build() {
+  if (host.el) return;
   // @font-face does not work inside a shadow root (Chrome): the icon font goes to the document
   if (window.FontFace && document.fonts) {
     const font = new FontFace("eza-icons", `url(${new URL("fonts/eza-icons.woff2", BASE).href})`, { display: "block" });
@@ -85,7 +88,6 @@ function start() {
   const el = document.createElement("div");
   el.className = "rynas-files-host";
   const root = el.attachShadow({ mode: "open" });
-  const href = new URL("app.css", BASE).href;
   const box = document.createElement("div");
   box.className = "sf";
   box.dataset.theme = shellTheme();
@@ -94,11 +96,20 @@ function start() {
   box.hidden = true;
   root.append(box);
   Object.assign(host, { el, root, box });
+}
+
+/** The shadow root and the app, made once; resolves with main.js's module once the styles are in. */
+function start() {
+  if (started) return started;
+  preload();
+  build();
+  const { root, box } = host;
+  const href = new URL("app.css", BASE).href;
   // A constructed stylesheet stays applied when the page is left and opened again (the host
   // element is moved out of and back into the document). A <link> in the shadow root is
   // loaded again on every reconnection and the chrome showed unstyled meanwhile.
   // app.css has no relative url(), so the sheet's base URL does not matter.
-  const styles =
+  styled ??= (
     "adoptedStyleSheets" in Document.prototype && "replace" in CSSStyleSheet.prototype
       ? fetch(href)
           .then((r) => (r.ok ? r.text() : Promise.reject(new Error(r.status))))
@@ -106,22 +117,36 @@ function start() {
           .then((sheet) => {
             root.adoptedStyleSheets = [sheet];
           })
-      : Promise.reject(new Error("no constructable stylesheets"));
-  started = styles
-    .catch(
-      () =>
-        new Promise((resolve) => {
-          const css = document.createElement("link");
-          css.rel = "stylesheet";
-          css.href = href;
-          css.onload = css.onerror = resolve;
-          root.prepend(css);
-        }),
-    )
-    .then(() => {
-      box.hidden = false;
-      return import("./js/main.js");
-    });
+      : Promise.reject(new Error("no constructable stylesheets"))
+  ).catch(
+    () =>
+      new Promise((resolve) => {
+        const css = document.createElement("link");
+        css.rel = "stylesheet";
+        css.href = href;
+        css.onload = resolve;
+        // not there either: asked for again by the next start
+        css.onerror = () => {
+          css.remove();
+          styled = null;
+          resolve();
+        };
+        root.prepend(css);
+      }),
+  );
+  const mine = styled.then(() => {
+    box.hidden = false;
+    return import("./js/main.js");
+  });
+  started = mine;
+  // the app did not load (the NAS did not answer): the next opening of the page tries again,
+  // preloads included
+  mine.catch(() => {
+    if (started !== mine) return;
+    started = null;
+    preloads?.forEach((l) => l.remove());
+    preloads = null;
+  });
   return started;
 }
 
@@ -137,11 +162,12 @@ class RynasFiles extends HTMLElement {
     }
     const ready = start();
     this.append(host.el);
-    ready.then(() => this.open());
+    // a failed start is tried again at the next connect (start)
+    ready.then(() => this.open(), () => {});
   }
 
   attributeChangedCallback() {
-    if (this.isConnected && started) started.then(() => this.open());
+    if (this.isConnected && started) started.then(() => this.open(), () => {});
   }
 
   /** The session's CSRF token (the shell's `prop:csrf`). */
@@ -159,7 +185,7 @@ class RynasFiles extends HTMLElement {
   open() {
     const path = this.getAttribute("path");
     if (!path) return;
-    started.then((m) => m.app.openFromShell(path));
+    started?.then((m) => m.app.openFromShell(path), () => {});
   }
 }
 

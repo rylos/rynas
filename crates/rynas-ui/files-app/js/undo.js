@@ -3,6 +3,7 @@
 // folder's recycle bin instead.
 
 import { api } from "./api.js";
+import { prefs } from "./prefs.js";
 import { t, count } from "./i18n.js";
 import { int, esc, baseName, parentOf, joinPath } from "./format.js";
 import { toast, errorToast, confirmBox } from "./ui.js";
@@ -118,7 +119,10 @@ export function recordTransfer(id, op, sources, dest, fresh) {
           if (!byParent.has(parent)) byParent.set(parent, []);
           byParent.get(parent).push(p);
         }
-        for (const [parent, list] of byParent) await job({ op: "move", sources: list, dest: parent });
+        // never over what appeared at the origin since, whatever the usual answer to a name
+        // taken: "overwrite" and "newer" ask here
+        const conflict = prefs.conflict === "overwrite" || prefs.conflict === "newer" ? "ask" : prefs.conflict;
+        for (const [parent, list] of byParent) await job({ op: "move", sources: list, dest: parent, conflict });
         return;
       }
       // a copy: its new items go to the recycle bin, after asking

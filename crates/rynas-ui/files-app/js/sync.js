@@ -86,6 +86,8 @@ export function syncFolders(app, paneA, paneB) {
   setMode(mode);
   q(".s-swap").onclick = () => {
     [a, b] = [b, a];
+    // a comparison still running is of the sides as they were: its answer must not be shown
+    controller?.abort();
     ends();
     diffs = [];
     plan = [];

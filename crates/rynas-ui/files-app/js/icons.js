@@ -14,6 +14,9 @@ const TEXT_EXT = new Set([
   "php", "rb", "lua", "pl", "vb", "bat", "ps1", "env", "properties", "service", "desktop", "gitignore", "lock", "diff", "patch",
 ]);
 
+// a table's own entry: a file called "constructor" or "toString" finds nothing, not Object's
+const own = (table, key) => (Object.hasOwn(table, key) ? table[key] : undefined);
+
 const ARCHIVE = /\.(zip|7z|rar|tar|tgz|tbz2?|txz|tzstd?|gz|bz2|xz|zstd?|iso|cab|arj|lzh|lha|cpio|rpm|deb|wim|jar|z)$/i;
 
 export function isArchive(entry) {
@@ -49,14 +52,14 @@ export function setFolderIcons(rules) {
 /** The icon given to a folder by hand, by its path first, then its name. */
 export function folderIcon(entry) {
   if (entry.kind !== "d" && !entry.link_dir) return null;
-  return (entry.path && custom.paths[entry.path]) || custom.names[entry.name] || null;
+  return (entry.path && own(custom.paths, entry.path)) || own(custom.names, entry.name) || null;
 }
 
 // shared folders of USB drives as volumes migrated from other systems name them: usbshare1, usbshare1-2 (a partition)…
 const USB_GLYPH = EZA.choices.find(([, w]) => w.startsWith("usb chiavetta"))[0];
 
 /** A folder's icon from its name alone, as eza gives it. */
-export const autoFolderGlyph = (name) => EZA.dirs[name] || (/^usbshare\d+(-\d+)?$/.test(name) ? USB_GLYPH : EZA.icons.folder);
+export const autoFolderGlyph = (name) => own(EZA.dirs, name) || (/^usbshare\d+(-\d+)?$/.test(name) ? USB_GLYPH : EZA.icons.folder);
 
 /** The icons a folder can be given, with the words that find them. */
 export const ICON_CHOICES = EZA.choices;
@@ -79,16 +82,17 @@ export const isSystemFolder = (name) => SYSTEM_DIRS.has(name) || name.startsWith
 const EXT_ALIAS = { tzst: "zst", tzstd: "zst", zstd: "zst" };
 const ezaExt = (name) => {
   const e = ext(name);
-  return EXT_ALIAS[e] || e;
+  return own(EXT_ALIAS, e) || e;
 };
 
 export function glyph(entry) {
   if (entry.kind === "d" || entry.link_dir) {
     return folderIcon(entry)?.g || (entry.full !== undefined && BIN[entry.full]) || autoFolderGlyph(entry.name);
   }
-  if (EZA.names[entry.name]) return EZA.names[entry.name];
+  const named = own(EZA.names, entry.name);
+  if (named) return named;
   const e = ezaExt(entry.name);
-  if (e) return EZA.exts[e] || EZA.icons.file;
+  if (e) return own(EZA.exts, e) || EZA.icons.file;
   return EZA.icons.file_unknow || EZA.icons.file;
 }
 
@@ -100,7 +104,7 @@ export function colorClass(entry) {
   if (entry.mode & 0o111) return "ez-exec";
   const name = entry.name;
   if (name.toLowerCase().startsWith("readme")) return "ez-build";
-  const t = EZA.nameTypes[name] || EZA.extTypes[ezaExt(name)];
+  const t = own(EZA.nameTypes, name) || own(EZA.extTypes, ezaExt(name));
   if (t) return "ez-" + t;
   if (name.endsWith("~") || (name.startsWith("#") && name.endsWith("#"))) return "ez-temp";
   return "";
@@ -136,8 +140,8 @@ export function kindLabel(entry) {
   if (entry.kind === "l") return t(entry.link_dir ? "files.icons.link_folder" : "files.icons.symbolic_link");
   if (entry.kind === "o") return t("files.icons.special_file");
   const e = ext(entry.name);
-  const type = EZA.nameTypes[entry.name] || EZA.extTypes[EXT_ALIAS[e] || e];
-  const base = t((type && KINDS[type]) || (entry.mode & 0o111 ? "files.icons.executable" : "files.common.file"));
+  const type = own(EZA.nameTypes, entry.name) || own(EZA.extTypes, ezaExt(entry.name));
+  const base = t((type && own(KINDS, type)) || (entry.mode & 0o111 ? "files.icons.executable" : "files.common.file"));
   return e ? `${base} ${e.toUpperCase()}` : base;
 }
 

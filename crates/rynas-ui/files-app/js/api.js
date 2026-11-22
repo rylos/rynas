@@ -84,9 +84,11 @@ export function url(route, params = {}) {
 }
 
 export async function call(route, opts = {}) {
-  const { params, body, method, raw, signal } = opts;
+  const { params, body, method, raw, signal, keepalive } = opts;
   const verb = method || (body !== undefined ? "POST" : "GET");
   const options = { method: verb, credentials: "same-origin", headers: headers(verb), signal };
+  // sent even while the page goes away (the browser allows 64 KiB of such bodies)
+  if (keepalive) options.keepalive = true;
   if (body !== undefined) {
     if (raw) {
       options.body = body;
@@ -161,7 +163,16 @@ export async function stream(route, params, onLine, signal, body) {
       if (line) onLine(JSON.parse(line));
     }
   }
-  if (rest.trim()) onLine(JSON.parse(rest));
+  if (rest.trim()) {
+    let last;
+    try {
+      last = JSON.parse(rest);
+    } catch {
+      // the connection ended in the middle of a line: the caller misses its result and says so
+      return;
+    }
+    onLine(last);
+  }
 }
 
 export const api = {
@@ -186,7 +197,7 @@ export const api = {
   editSave: (path, text, stamp, force) => call("edit/save", { params: { path, stamp, force: force ? 1 : undefined }, body: text, raw: true }),
   exists: (path, names) => call("exists", { params: { path }, body: names }),
   prefs: () => call("prefs"),
-  savePrefs: (p) => call("prefs", { body: p }),
+  savePrefs: (p, keepalive) => call("prefs", { body: p, keepalive }),
   jobs: (since) => call("jobs", { params: { since } }),
   newJob: (job) => call("jobs/new", { body: job }),
   control: (id, action, extra = {}) => call("jobs/control", { body: { id, action, ...extra } }),
