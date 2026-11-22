@@ -97,6 +97,17 @@ impl AuthService {
         &self.sessions
     }
 
+    /// Whether failed logins locked the account `user` itself (a login refused by the rate
+    /// limit may also come from a locked client address alone).
+    pub fn user_locked(&self, user: &str) -> bool {
+        self.limiter.user_locked(user)
+    }
+
+    /// Whether failed logins locked the client address `ip`.
+    pub fn ip_locked(&self, ip: IpAddr) -> bool {
+        self.limiter.ip_locked(ip)
+    }
+
     fn backend(&self, realm: &str) -> Option<&Backend> {
         self.backends
             .iter()
@@ -139,8 +150,11 @@ impl AuthService {
     ) -> Result<(UserInfo, bool), LoginError> {
         let started = Instant::now();
         let user = req.username.as_str();
-        self.limiter
-            .check(ip, user)
+        // counted in until this returns: logins sent at the same time cannot all pass the
+        // check before the first of them has failed
+        let _attempt = self
+            .limiter
+            .begin(ip, user)
             .map_err(LoginError::RateLimited)?;
         if !valid_username(user) || req.password.is_empty() || req.password.len() > 4096 {
             return Err(self

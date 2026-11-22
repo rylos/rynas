@@ -71,21 +71,26 @@ impl WebNotifier {
     /// triggers such as every refused login of a locked account).
     pub fn emit_once(&self, ev: NewEvent, window: Duration) {
         let key = ev.key.clone().unwrap_or_else(|| ev.title.clone());
-        {
-            let mut m = self.recent.lock().unwrap();
-            let now = Instant::now();
-            if m.get(&key).is_some_and(|t| now.duration_since(*t) < window) {
-                return;
-            }
-            if m.len() >= MAX_RECENT {
-                m.retain(|_, t| now.duration_since(*t) < window);
-                if m.len() >= MAX_RECENT {
-                    m.clear();
-                }
-            }
-            m.insert(key, now);
+        if self.first_within(key, window) {
+            self.emit(ev);
         }
-        self.emit(ev);
+    }
+
+    /// Whether `key` was not seen within `window`; when so it is remembered from now.
+    pub fn first_within(&self, key: String, window: Duration) -> bool {
+        let mut m = self.recent.lock().unwrap();
+        let now = Instant::now();
+        if m.get(&key).is_some_and(|t| now.duration_since(*t) < window) {
+            return false;
+        }
+        if m.len() >= MAX_RECENT {
+            m.retain(|_, t| now.duration_since(*t) < window);
+            if m.len() >= MAX_RECENT {
+                m.clear();
+            }
+        }
+        m.insert(key, now);
+        true
     }
 }
 
@@ -147,4 +152,20 @@ pub fn spawn_hardware_watch(st: AppState) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_within_remembers_a_key_for_its_window() {
+        let n = WebNotifier::new(Arc::new(RynasdClient::new("/nonexistent")));
+        let minute = Duration::from_secs(60);
+        assert!(n.first_within("a".into(), minute));
+        assert!(!n.first_within("a".into(), minute));
+        assert!(n.first_within("b".into(), minute));
+        // a window that is over: the key counts as new again
+        assert!(n.first_within("a".into(), Duration::ZERO));
+    }
 }

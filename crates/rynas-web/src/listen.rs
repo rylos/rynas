@@ -25,9 +25,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::Request;
+use axum::extract::connect_info::ConnectInfo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
+use tokio::sync::{oneshot, watch};
+use tokio::task::{JoinHandle, JoinSet};
+use tower::ServiceExt;
 
 use crate::conn::ConnAddrs;
 
@@ -118,6 +122,68 @@ async fn bind_retry(addr: SocketAddr) -> std::io::Result<TcpListener> {
     Err(last.expect("at least one attempt"))
 }
 
+/// How long a connection may wait for a request head. hyper counts it on an idle keep-alive
+/// connection too, and the reverse proxy in front of this port keeps its connections for two
+/// minutes: a shorter wait here would close one just as the proxy sends a request on it.
+const HEAD_WAIT: Duration = Duration::from_secs(150);
+
+/// Serves `app` over plain HTTP/1.1 on `listener` until `stop` (sent or dropped): then the
+/// socket closes at once and open connections finish their requests. One task per
+/// connection, as on the HTTPS port ([`crate::tls::serve`]), with hyper's timer: a client
+/// that does not send a request head within [`HEAD_WAIT`] is disconnected, so connections
+/// left open without a request do not pile up.
+async fn serve(listener: TcpListener, app: Router, mut stop: oneshot::Receiver<()>) {
+    let (closing, _) = watch::channel(false);
+    let mut conns = JoinSet::new();
+    loop {
+        let (tcp, remote) = tokio::select! {
+            _ = &mut stop => break,
+            // finished connections leave the set as they end
+            Some(_) = conns.join_next() => continue,
+            r = listener.accept() => match r {
+                Ok(c) => c,
+                Err(e) => {
+                    // out of descriptors and the like: do not spin
+                    tracing::warn!("http: accept: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            },
+        };
+        let addrs = ConnAddrs {
+            remote: crate::tls::canonical(remote),
+            local: tcp.local_addr().ok().map(crate::tls::canonical),
+        };
+        let app = app.clone();
+        let mut closing = closing.subscribe();
+        conns.spawn(async move {
+            let svc = hyper::service::service_fn(move |mut req: Request<hyper::body::Incoming>| {
+                req.extensions_mut().insert(ConnectInfo(addrs));
+                app.clone().oneshot(req)
+            });
+            let conn = hyper::server::conn::http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(HEAD_WAIT)
+                .serve_connection(TokioIo::new(tcp), svc)
+                .with_upgrades();
+            let mut conn = std::pin::pin!(conn);
+            let r = tokio::select! {
+                r = conn.as_mut() => r,
+                _ = closing.changed() => {
+                    conn.as_mut().graceful_shutdown();
+                    conn.await
+                }
+            };
+            if let Err(e) = r {
+                tracing::debug!("http: connection with {}: {e}", addrs.remote);
+            }
+        });
+    }
+    drop(listener);
+    let _ = closing.send(true);
+    while conns.join_next().await.is_some() {}
+}
+
 impl Plain {
     fn desired(&self) -> SocketAddr {
         match self.mode {
@@ -128,21 +194,7 @@ impl Plain {
 
     fn start(&self, listener: TcpListener, want: SocketAddr) -> Running {
         let (stop, rx) = oneshot::channel::<()>();
-        let svc = self
-            .app
-            .clone()
-            .into_make_service_with_connect_info::<ConnAddrs>();
-        let task = tokio::spawn(async move {
-            // after `stop` the socket closes at once; open connections finish their requests
-            let r = axum::serve(listener, svc)
-                .with_graceful_shutdown(async {
-                    let _ = rx.await;
-                })
-                .await;
-            if let Err(e) = r {
-                tracing::warn!("http: {e}");
-            }
-        });
+        let task = tokio::spawn(serve(listener, self.app.clone(), rx));
         Running { want, stop, task }
     }
 

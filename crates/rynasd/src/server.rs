@@ -277,17 +277,22 @@ async fn authenticate(
     if !valid_username(&req.username) {
         return Err(invalid());
     }
-    if let Err(d) = st.limiter.check(LOCAL, &req.username) {
-        return Ok((
-            StatusCode::TOO_MANY_REQUESTS,
-            [("retry-after", d.as_secs().max(1).to_string())],
-            Json(ApiError::new(
-                error_codes::RATE_LIMITED,
-                "too many failed attempts",
-            )),
-        )
-            .into_response());
-    }
+    // counted in until this answer: logins sent together cannot all pass the check before
+    // the first of them has failed
+    let _attempt = match st.limiter.begin(LOCAL, &req.username) {
+        Ok(a) => a,
+        Err(d) => {
+            return Ok((
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", d.as_secs().max(1).to_string())],
+                Json(ApiError::new(
+                    error_codes::RATE_LIMITED,
+                    "too many failed attempts",
+                )),
+            )
+                .into_response());
+        }
+    };
     match st.auth.authenticate(&req.username, &req.password).await {
         Ok(id) => {
             st.limiter.record_success(LOCAL, &req.username);

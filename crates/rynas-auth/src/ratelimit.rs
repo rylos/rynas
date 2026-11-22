@@ -52,6 +52,8 @@ struct Entry {
     failures: u32,
     last_failure_ms: u64,
     locked_until_ms: u64,
+    /// Attempts being checked now, their outcome not known yet ([`LoginLimiter::begin`]).
+    in_flight: u32,
 }
 
 struct Table<K> {
@@ -85,11 +87,12 @@ impl<K: Hash + Eq + Clone> Table<K> {
         let mut map = self.lock();
         if map.len() >= cfg.max_entries && !map.contains_key(key) {
             let forget = cfg.forget_after.as_millis() as u64;
-            map.retain(|_, e| now < e.last_failure_ms + forget);
+            map.retain(|_, e| e.in_flight > 0 || now < e.last_failure_ms + forget);
             if map.len() >= cfg.max_entries {
                 // still full: drop the stalest entry (O(n), only under attack)
                 if let Some(k) = map
                     .iter()
+                    .filter(|(_, e)| e.in_flight == 0)
                     .min_by_key(|(_, e)| e.last_failure_ms)
                     .map(|(k, _)| k.clone())
                 {
@@ -99,7 +102,10 @@ impl<K: Hash + Eq + Clone> Table<K> {
         }
         let e = map.entry(key.clone()).or_default();
         if now >= e.last_failure_ms + cfg.forget_after.as_millis() as u64 {
-            *e = Entry::default();
+            *e = Entry {
+                in_flight: e.in_flight,
+                ..Entry::default()
+            };
         }
         e.failures = e.failures.saturating_add(1);
         e.last_failure_ms = now;
@@ -116,7 +122,48 @@ impl<K: Hash + Eq + Clone> Table<K> {
     }
 
     fn reset(&self, key: &K) {
-        self.lock().remove(key);
+        let mut map = self.lock();
+        let in_flight = map.get(key).map_or(0, |e| e.in_flight);
+        if in_flight == 0 {
+            map.remove(key);
+        } else {
+            map.insert(
+                key.clone(),
+                Entry {
+                    in_flight,
+                    ..Entry::default()
+                },
+            );
+        }
+    }
+
+    /// Counts an attempt in, unless as many are being checked already as could still fail,
+    /// one after the other, before the key locks (one, once it has been locked).
+    fn enter(&self, key: &K, now: u64, cfg: &RateLimitConfig) -> bool {
+        let mut map = self.lock();
+        let e = map.entry(key.clone()).or_default();
+        let failures = if now >= e.last_failure_ms + cfg.forget_after.as_millis() as u64 {
+            0
+        } else {
+            e.failures
+        };
+        let room = self.free.saturating_sub(failures).saturating_add(1);
+        if e.in_flight >= room {
+            return false;
+        }
+        e.in_flight += 1;
+        true
+    }
+
+    /// Counts an attempt out; a key without failures leaves the table with its last one.
+    fn leave(&self, key: &K) {
+        let mut map = self.lock();
+        let Some(e) = map.get_mut(key) else { return };
+        e.in_flight = e.in_flight.saturating_sub(1);
+        let empty = e.in_flight == 0 && e.failures == 0;
+        if empty {
+            map.remove(key);
+        }
     }
 }
 
@@ -127,8 +174,25 @@ pub struct LoginLimiter {
     ips: Table<IpAddr>,
 }
 
+/// `retry_after` of an attempt refused only because others are being checked.
+pub const BUSY_RETRY: Duration = Duration::from_secs(1);
+
+/// An attempt being checked ([`LoginLimiter::begin`]); counted out when dropped.
+pub struct Attempt<'a> {
+    limiter: &'a LoginLimiter,
+    ip: IpAddr,
+    user: String,
+}
+
+impl Drop for Attempt<'_> {
+    fn drop(&mut self) {
+        self.limiter.ips.leave(&self.ip);
+        self.limiter.users.leave(&self.user);
+    }
+}
+
 /// IPv6 addresses are grouped by /64 (IPv4-mapped ones are unwrapped).
-fn ip_key(ip: IpAddr) -> IpAddr {
+pub fn ip_key(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(_) => ip,
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
@@ -141,8 +205,11 @@ fn ip_key(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// Lower case, and no longer than a valid name: the table keeps what a client sent as the
+/// name, whatever its length.
 fn user_key(user: &str) -> String {
-    user.to_lowercase()
+    let end = user.char_indices().nth(64).map_or(user.len(), |(i, _)| i);
+    user[..end].to_lowercase()
 }
 
 impl LoginLimiter {
@@ -164,6 +231,43 @@ impl LoginLimiter {
             Some(ms) => Err(Duration::from_millis(ms)),
             None => Ok(()),
         }
+    }
+
+    /// [`LoginLimiter::check`], then the attempt is counted in until the returned value is
+    /// dropped: attempts sent at the same time cannot all pass the check before the first of
+    /// them has failed. `Err(retry_after)` when the IP or the user is locked, or has as many
+    /// attempts being checked as it could still fail before locking ([`BUSY_RETRY`]).
+    pub fn begin(&self, ip: IpAddr, user: &str) -> Result<Attempt<'_>, Duration> {
+        self.check(ip, user)?;
+        let now = self.clock.now_ms();
+        let (ip, user) = (ip_key(ip), user_key(user));
+        if !self.ips.enter(&ip, now, &self.cfg) {
+            return Err(BUSY_RETRY);
+        }
+        if !self.users.enter(&user, now, &self.cfg) {
+            self.ips.leave(&ip);
+            return Err(BUSY_RETRY);
+        }
+        Ok(Attempt {
+            limiter: self,
+            ip,
+            user,
+        })
+    }
+
+    /// Whether the user name itself is locked now (a refused attempt may also come from a
+    /// locked client address alone).
+    pub fn user_locked(&self, user: &str) -> bool {
+        let now = self.clock.now_ms();
+        self.users
+            .retry_after(&user_key(user), now, &self.cfg)
+            .is_some()
+    }
+
+    /// Whether the client's address (its /64 for IPv6) is locked now.
+    pub fn ip_locked(&self, ip: IpAddr) -> bool {
+        let now = self.clock.now_ms();
+        self.ips.retry_after(&ip_key(ip), now, &self.cfg).is_some()
     }
 
     pub fn record_failure(&self, ip: IpAddr, user: &str) {
@@ -274,5 +378,70 @@ mod tests {
             l.record_failure(IP, &format!("spray{i}"));
         }
         assert!(l.users.lock().len() <= 4);
+    }
+
+    #[test]
+    fn attempts_in_flight_count_before_they_fail() {
+        let clock = Arc::new(ManualClock::new(1_000_000));
+        let l = limiter(clock.clone());
+        // as many at once as could fail one after the other before the lock: 3 free + 1
+        let held: Vec<Attempt<'_>> = (0..4).map(|_| l.begin(IP, "bob").unwrap()).collect();
+        assert_eq!(l.begin(IP, "Bob").err(), Some(BUSY_RETRY));
+        // other names from the same address have room, up to the address's own (5 free + 1)
+        let alice = l.begin(IP, "alice").unwrap();
+        let carol = l.begin(IP, "carol").unwrap();
+        assert!(l.begin(IP, "dave").is_err());
+        drop(alice);
+        assert!(l.begin(IP, "dave").is_ok());
+        // an attempt that did not fail leaves nothing behind
+        assert!(!l.users.lock().contains_key("alice"));
+        assert!(!l.users.lock().contains_key("dave"));
+        // they all fail: the name is locked; after the lock, one attempt at a time
+        for _ in &held {
+            l.record_failure(IP, "bob");
+        }
+        drop(held);
+        drop(carol);
+        assert!(l.user_locked("bob"));
+        assert!(l.begin(IP, "bob").is_err());
+        clock.advance_ms(1_000);
+        let one = l.begin(IP, "bob").unwrap();
+        assert!(l.begin(IP, "bob").is_err());
+        // a success forgets the failures, not the attempt still being checked
+        l.record_success(IP, "bob");
+        assert!(l.users.lock().contains_key("bob"));
+        drop(one);
+        assert!(!l.users.lock().contains_key("bob"));
+    }
+
+    #[test]
+    fn a_long_name_is_not_kept_whole() {
+        let clock = Arc::new(ManualClock::new(0));
+        let l = limiter(clock);
+        let long = "é".repeat(100_000);
+        l.record_failure(IP, &long);
+        assert!(l.users.lock().keys().all(|k| k.chars().count() <= 64));
+        // a valid name is its own key
+        assert_eq!(user_key("Bob"), "bob");
+        assert_eq!(user_key(&"a".repeat(64)), "a".repeat(64));
+    }
+
+    #[test]
+    fn user_locked_tells_the_account_from_the_address() {
+        let clock = Arc::new(ManualClock::new(1_000_000));
+        let l = limiter(clock);
+        // six names from one address: the address is locked, none of the names
+        for i in 0..6 {
+            l.record_failure(IP, &format!("u{i}"));
+        }
+        assert!(l.check(IP, "u0").is_err());
+        assert!(!l.user_locked("u0"));
+        assert!(l.ip_locked(IP));
+        assert!(!l.ip_locked("198.51.100.7".parse().unwrap()));
+        // four failures of one name from several addresses: the name is locked
+        for i in 0..4 {
+            l.record_failure(format!("198.51.100.{i}").parse().unwrap(), "bob");
+        }
+        assert!(l.user_locked("BOB"));
     }
 }

@@ -267,11 +267,20 @@ pub(crate) fn login_failed(st: &AppState, req: &LoginRequest, ip: IpAddr, e: Log
         )
         .into_response(),
         LoginError::RateLimited(d) => {
-            // once per account and lockout window, not for every refused attempt
-            st.notifier.emit_once(
-                rynas_notify::checks::auth_lockout(&req.username, &ip.to_string(), d.as_secs()),
-                d.max(LOCKOUT_NOTICE),
-            );
+            // once per account and lockout window, not for every refused attempt; when only
+            // the client's address is locked, once per address: a locked client that goes on
+            // with other names must not send a notice for each of them. Nothing for a login
+            // refused only because others are being checked (no lock)
+            let window = d.max(LOCKOUT_NOTICE);
+            let from = format!("auth:lockout:from:{}", rynas_auth::ratelimit::ip_key(ip));
+            if st.auth.user_locked(&req.username)
+                || (st.auth.ip_locked(ip) && st.notifier.first_within(from, window))
+            {
+                st.notifier.emit_once(
+                    rynas_notify::checks::auth_lockout(&req.username, &ip.to_string(), d.as_secs()),
+                    window,
+                );
+            }
             rate_limited(d)
         }
         LoginError::Unavailable(e) => {
