@@ -1,8 +1,8 @@
 schema = 1
 id = "nginx-proxy-manager"
 name = "Nginx Proxy Manager"
-version = "1.0.1"
-app_version = "2.17.0"
+version = "1.0.2"
+app_version = "2.17.1"
 update_policy = "minor"
 description = "Reverse proxy with a web interface and Let's Encrypt certificates, instead of the built-in web access."
 homepage = "https://nginxproxymanager.com"
