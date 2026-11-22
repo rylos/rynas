@@ -16,7 +16,8 @@
 //! - `staged.json`: changes staged per user;
 //! - `last-rollback.json`, `outbox.json`: the last rollback report and events waiting to be
 //!   handed to the notification engine;
-//! - `lock`: `flock` taken by every writer (rynasd, rynasctl).
+//! - `lock`: `flock` taken by every writer (rynasd, rynasctl); `outbox.lock`: the one of
+//!   `outbox.json` alone.
 //!
 //! Retention: the last 50 revisions, plus the last known good one and the one of a trial.
 
@@ -240,12 +241,16 @@ impl Store {
 
     /// Takes the store lock (blocks while another writer holds it).
     pub fn lock(&self) -> std::io::Result<Lock> {
+        self.flock("lock")
+    }
+
+    fn flock(&self, name: &str) -> std::io::Result<Lock> {
         self.ensure()?;
         let f = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(self.dir.join("lock"))?;
+            .open(self.dir.join(name))?;
         // SAFETY: flock on a descriptor we own
         let r = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
         if r != 0 {
@@ -406,6 +411,10 @@ impl Store {
 
     /// Queues an event for the notification engine (rynasd collects them).
     pub fn push_event(&self, e: NewEvent) -> std::io::Result<()> {
+        // events are queued with and without the store lock held (it is not reentrant), by
+        // rynasd and by rynasctl: the outbox has a lock of its own, so one queued while
+        // another is queued or while they are collected is not lost
+        let _outbox = self.flock("outbox.lock")?;
         let mut v: Vec<NewEvent> = self.read_json("outbox.json")?.unwrap_or_default();
         v.push(e);
         let skip = v.len().saturating_sub(OUTBOX_MAX);
@@ -415,6 +424,7 @@ impl Store {
 
     /// Takes the queued events.
     pub fn take_events(&self) -> std::io::Result<Vec<NewEvent>> {
+        let _outbox = self.flock("outbox.lock")?;
         let v: Vec<NewEvent> = self.read_json("outbox.json")?.unwrap_or_default();
         if !v.is_empty() {
             self.remove("outbox.json")?;

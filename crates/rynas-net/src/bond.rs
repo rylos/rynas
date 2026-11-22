@@ -335,6 +335,10 @@ pub fn check(
     let mut any_carrier = false;
     let mut max_mtu: Option<u32> = None;
     for m in &members {
+        // the name reaches a file name and `Name=` of the member's file (a glob there)
+        if !networkd::valid_iface(m) {
+            return Err(err("bond.members", format!("{name}: no port {m}")));
+        }
         let f = facts(m).ok_or_else(|| err("bond.members", format!("{name}: no port {m}")))?;
         if !f.physical {
             return Err(err(
@@ -441,7 +445,14 @@ pub fn check(
                     format!("{name}: {m} is not a unicast MAC address"),
                 ));
             }
-            Some(m.to_ascii_lowercase())
+            // written the way networkd reads it (`parse_mac` also takes `a:b:…` and `+0a`)
+            Some(
+                bytes
+                    .iter()
+                    .map(|x| format!("{x:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(":"),
+            )
         }
         None => default_mac(&out, facts),
     };
@@ -814,6 +825,9 @@ mod tests {
             "bond.lacp_rate"
         );
         assert_eq!(field(BondConfig { mac: Some("01:00:5e:00:00:01".into()), ..ab(&["enp3s0"]) }, None), "bond.mac");
+        // a MAC is written in one form, whatever form was given
+        let m = check("bond0", &BondConfig { mac: Some("2:A:b:0:+c:1".into()), ..ab(&["enp3s0"]) }, None, &facts, &none, false).unwrap();
+        assert_eq!(m.mac.as_deref(), Some("02:0a:0b:00:0c:01"));
         assert_eq!(field(BondConfig { miimon_ms: 0, ..ab(&["enp3s0"]) }, None), "bond.miimon_ms");
         assert_eq!(field(BondConfig { min_links: Some(3), ..ab(&["enp3s0"]) }, None), "bond.min_links");
         assert_eq!(check("bond100", &ab(&["enp3s0"]), None, &facts, &none, false).unwrap_err().field, "name");

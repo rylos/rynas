@@ -216,7 +216,7 @@ pub fn lease_identity(lease: &str) -> Option<(DhcpIdentity, Option<Ipv4Addr>)> {
     for l in lease.lines() {
         if let Some(v) = l.strip_prefix("CLIENTID=") {
             let v = v.trim();
-            if v.len() % 2 != 0 {
+            if v.len() % 2 != 0 || !v.is_ascii() {
                 return None;
             }
             let bytes: Vec<u8> = (0..v.len())

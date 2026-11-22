@@ -1223,7 +1223,9 @@ impl Engine {
                 urls.push(format!("{scheme}://{}:{port}/", a.address));
             }
         }
-        urls.dedup();
+        // the same address may come from two of the lists above, not next to each other
+        let mut seen = BTreeSet::new();
+        urls.retain(|u| seen.insert(u.clone()));
         urls
     }
 
@@ -2358,13 +2360,16 @@ impl Engine {
                 )));
             }
         }
-        self.disarm_timer();
         let target = self
             .store
             .revision(m.revision)?
             .ok_or_else(|| NetError::Io(format!("revision {} is missing", m.revision)))?;
         self.commit(&target)?;
         self.store.clear_marker()?;
+        // only now: a confirmation that failed above leaves the timer to roll the change
+        // back. A timer that fires meanwhile waits for the store lock held here and then
+        // finds no trial.
+        self.disarm_timer();
         self.emit(event(
             NotifySeverity::Info,
             "confirmed",
