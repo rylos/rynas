@@ -53,7 +53,7 @@ use crate::services::{docs, stage};
 pub const DOCKER_KEY: &str = "docker";
 /// How long the install facts (packages, compose version) are reused.
 const FACTS_TTL: Duration = Duration::from_secs(30);
-/// Older than this, the install facts and `df` are read again before answering (nobody
+/// Older than this, the install facts are read again before answering (nobody
 /// looked for a while: Docker may have been installed or removed outside rynas meanwhile).
 const STALE_MAX: Duration = Duration::from_secs(600);
 
@@ -1728,9 +1728,9 @@ impl DockerSvc {
     /// a page never waits for it again.
     pub(crate) async fn df(self: &Arc<Self>) -> Res<Arc<DfCache>> {
         let mut g = self.df_cache.lock().await;
-        if let Some((t, d)) = g.as_ref()
-            && t.elapsed() < STALE_MAX
-        {
+        // any age: only shown (sizes), and a failed background read drops it (engine gone);
+        // waiting for it again after a while cost a Docker page 7 s on a two-core NAS
+        if let Some((t, d)) = g.as_ref() {
             if t.elapsed() >= DF_TTL && !self.df_refreshing.swap(true, Ordering::AcqRel) {
                 let s = self.clone();
                 tokio::spawn(async move {
