@@ -71,7 +71,8 @@ fn ms_of(t: Timestamp) -> u64 {
 
 /// The start of the local hour after the one `ms` is in.
 fn next_hour(tz: &TimeZone, ms: u64) -> u64 {
-    let Some(t) = ts(ms) else { return ms + 3_600_000 };
+    // (saturating: a wrapped hour would send the caller's walk back to the epoch)
+    let Some(t) = ts(ms) else { return ms.saturating_add(3_600_000) };
     let local = t.to_zoned(tz.clone()).datetime();
     let next = local
         .with()
@@ -85,7 +86,7 @@ fn next_hour(tz: &TimeZone, ms: u64) -> u64 {
         .map(|z| ms_of(z.timestamp()));
     match next {
         Some(n) if n > ms => n,
-        _ => ms + 3_600_000,
+        _ => ms.saturating_add(3_600_000),
     }
 }
 
@@ -207,7 +208,7 @@ pub fn build(
     now: u64,
     disks_of: &dyn Fn(&str) -> Vec<String>,
 ) -> SchedulerOverview {
-    let to = to.min(from + MAX_RANGE_MS).max(from);
+    let to = to.min(from.saturating_add(MAX_RANGE_MS)).max(from);
     let with_day = to - from > 86_400_000;
     let mut runs: Vec<OverviewRun> = Vec::new();
     let mut windows: Vec<OverviewWindow> = Vec::new();
@@ -533,6 +534,13 @@ fn conflicts(
 mod tests {
     use super::*;
     use rynas_api_types::scheduler::{OverviewOwner, RunPolicy, SmartTestKind};
+
+    #[test]
+    fn blocks_of_a_range_at_the_end_of_time_end() {
+        let all = "1".repeat(168);
+        let (from, to) = (u64::MAX - 10, u64::MAX - 5);
+        assert_eq!(blocks(&all, &TimeZone::UTC, from, to), vec![(from, to)]);
+    }
 
     fn ms(s: &str, tz: &TimeZone) -> u64 {
         let dt: DateTime = s.parse().unwrap();

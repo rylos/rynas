@@ -290,10 +290,12 @@ impl SystemdProbe for HostProbe {
         if invocation_id.is_empty() || !invocation_id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("invalid invocation id".into());
         }
-        // `-o cat`: messages only; `-n`: bounded, the runner keeps 1 MiB at most
+        // `-o cat`: messages only; `-n`: bounded, the runner keeps 1 MiB at most: the end of
+        // the output (where the error is), not its start
         let o = run(Cmd::new("journalctl")
             .args(["--no-pager", "-o", "cat", "-n", "4000"])
-            .arg(format!("_SYSTEMD_INVOCATION_ID={invocation_id}")))?;
+            .arg(format!("_SYSTEMD_INVOCATION_ID={invocation_id}"))
+            .capture_tail())?;
         if !o.success() {
             return Err(format!("journalctl: {}", o.stderr.trim()));
         }

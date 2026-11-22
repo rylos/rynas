@@ -36,6 +36,8 @@ pub struct Cmd {
     /// `RuntimeMaxSec` of the transient unit the command runs in ([`Outside::cmd`]): systemd
     /// stops the unit then, and the client exits with a plain failure code.
     runtime_max: Option<Duration>,
+    /// Over the capture cap, the end of each stream is kept instead of its start.
+    tail: bool,
 }
 
 /// Bytes for a child's standard input (passwords, keys): overwritten with zeros when dropped,
@@ -133,7 +135,15 @@ impl Cmd {
             stdin: None,
             timeout: DEFAULT_TIMEOUT,
             runtime_max: None,
+            tail: false,
         }
+    }
+
+    /// Keeps the end of the captured output when it is over the cap, not its start (a log
+    /// whose last lines are the ones that matter).
+    pub fn capture_tail(mut self) -> Self {
+        self.tail = true;
+        self
     }
 
     /// A failure after the unit's `RuntimeMaxSec` is systemd stopping it: a timeout, not
@@ -257,7 +267,7 @@ impl Cmd {
         let cancel = cancel.unwrap_or(&never);
 
         let readers =
-            async { tokio::join!(read_lines(out, "", line), read_lines(err, "stderr: ", line)) };
+            async { tokio::join!(read_lines(out, "", line, self.tail), read_lines(err, "stderr: ", line, self.tail)) };
         let (status, (stdout, stderr)) = tokio::join!(
             async {
                 let waited = tokio::select! {
@@ -341,8 +351,9 @@ impl Cmd {
         let mut err = child.stderr.take().expect("piped stderr");
         // both pipes are drained on small helper threads (reading one here would block the
         // timeout check); this thread waits for the exit
-        let t_out = small_thread(move || capture(&mut out));
-        let t_err = small_thread(move || capture(&mut err));
+        let tail = self.tail;
+        let t_out = small_thread(move || capture(&mut out, tail));
+        let t_err = small_thread(move || capture(&mut err, tail));
         let deadline = Instant::now() + self.timeout;
         // short commands end in a few ms: poll often at first, then back off
         let mut nap = Duration::from_millis(1);
@@ -571,7 +582,10 @@ fn small_thread<T: Send + 'static>(
         .expect("spawning a pipe reader")
 }
 
-fn capture(r: &mut impl Read) -> String {
+fn capture(r: &mut impl Read, tail: bool) -> String {
+    if tail {
+        return capture_end(r);
+    }
     let mut buf = Vec::new();
     let _ = r.take(CAPTURE_CAP as u64).read_to_end(&mut buf);
     // drain the rest so the child never blocks on a full pipe
@@ -579,10 +593,40 @@ fn capture(r: &mut impl Read) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+/// The last [`CAPTURE_CAP`] bytes of a stream, read to its end; cut at a line start when
+/// something was dropped.
+fn capture_end(r: &mut impl Read) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    // on the heap: pipe readers have a tiny stack
+    let mut chunk = vec![0u8; 16 << 10];
+    let mut dropped = false;
+    loop {
+        match r.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+        if buf.len() > 2 * CAPTURE_CAP {
+            buf.drain(..buf.len() - CAPTURE_CAP);
+            dropped = true;
+        }
+    }
+    if buf.len() > CAPTURE_CAP {
+        buf.drain(..buf.len() - CAPTURE_CAP);
+        dropped = true;
+    }
+    if dropped && let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+        buf.drain(..=nl);
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 async fn read_lines(
     r: impl AsyncRead + Unpin,
     prefix: &str,
     sink: Option<&(dyn Fn(&str) + Sync)>,
+    tail: bool,
 ) -> String {
     let mut reader = BufReader::new(r);
     let mut captured = String::new();
@@ -593,10 +637,14 @@ async fn read_lines(
         if let Some(s) = sink {
             s(&format!("{prefix}{l}{mark}"));
         }
-        if captured.len() < CAPTURE_CAP {
+        if tail || captured.len() < CAPTURE_CAP {
             captured.push_str(l);
             captured.push_str(mark);
             captured.push('\n');
+        }
+        // the end is what is kept: the start goes, now and then (not at every line)
+        if tail && captured.len() > 2 * CAPTURE_CAP {
+            keep_end(captured);
         }
     };
     // a line is cut at MAX_LINE while it is read: a program that never prints a newline
@@ -627,7 +675,22 @@ async fn read_lines(
     if !line.is_empty() || cut {
         emit(&line, cut, &mut captured);
     }
+    if tail && captured.len() > CAPTURE_CAP {
+        keep_end(&mut captured);
+    }
     captured
+}
+
+/// Cuts `s` to its last [`CAPTURE_CAP`] bytes, from a line start.
+fn keep_end(s: &mut String) {
+    let mut at = s.len().saturating_sub(CAPTURE_CAP);
+    while !s.is_char_boundary(at) {
+        at += 1;
+    }
+    if at > 0 {
+        at = s[at..].find('\n').map_or(s.len(), |nl| at + nl + 1);
+    }
+    s.drain(..at);
 }
 
 /// Longest output line kept (the rest of the line is dropped while reading).
@@ -888,6 +951,18 @@ mod tests {
             .collect();
         keys.sort();
         assert_eq!(keys, ["LC_ALL", "PATH"]);
+    }
+
+    #[test]
+    fn the_end_of_a_long_output_is_kept() {
+        let text: String = (0..200_000).map(|i| format!("line {i}\n")).collect();
+        assert!(text.len() > 2 * super::CAPTURE_CAP);
+        let got = super::capture(&mut text.as_bytes(), true);
+        assert!(got.len() <= super::CAPTURE_CAP && got.starts_with("line ") && got.ends_with("line 199999\n"));
+        assert!(super::capture(&mut text.as_bytes(), false).starts_with("line 0\n"));
+        let mut s = text.clone();
+        super::keep_end(&mut s);
+        assert!(s.len() <= super::CAPTURE_CAP && s.starts_with("line ") && s.ends_with("line 199999\n"));
     }
 
     #[test]

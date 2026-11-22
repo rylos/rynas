@@ -920,13 +920,21 @@ impl WorkerSsh {
         let u = rynas_files::identity::lookup(user)?;
         let mut cmd = rynas_files::jobs::manager::worker_command(&self.worker, &u, false, &[], None)?;
         cmd.arg("call").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit());
-        let mut child = cmd.spawn()?;
         let mut line = serde_json::to_vec(&request).map_err(std::io::Error::other)?;
         line.push(b'\n');
-        child.stdin.take().ok_or_else(|| std::io::Error::other("no stdin"))?.write_all(&line)?;
-        let mut answer = String::new();
-        std::io::BufReader::new(child.stdout.take().ok_or_else(|| std::io::Error::other("no stdout"))?).read_line(&mut answer)?;
+        let mut child = cmd.spawn()?;
+        let talked = (|| -> std::io::Result<String> {
+            child.stdin.take().ok_or_else(|| std::io::Error::other("no stdin"))?.write_all(&line)?;
+            let mut answer = String::new();
+            std::io::BufReader::new(child.stdout.take().ok_or_else(|| std::io::Error::other("no stdout"))?).read_line(&mut answer)?;
+            Ok(answer)
+        })();
+        // reaped on every way out (a worker that could not be talked to is stopped first)
+        if talked.is_err() {
+            let _ = child.kill();
+        }
         let _ = child.wait();
+        let answer = talked?;
         let v: Value = serde_json::from_str(&answer).map_err(std::io::Error::other)?;
         match v.get("error").and_then(Value::as_str) {
             Some(e) => Err(std::io::Error::other(e.to_string())),

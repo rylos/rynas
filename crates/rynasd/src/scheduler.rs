@@ -918,7 +918,8 @@ async fn finished(
     let tid = id.clone();
     let recorded = blocking(&p, move |p| {
         crate::gate::import_spool(p);
-        let start = p.probe.start_ms(&service_name(&tid));
+        // (a gated system task runs in the system's unit, not in one of rynas's)
+        let start = p.probe.start_ms(&rynas_scheduler::units::service_of(&tid));
         record_end(p, &tid, &f, start, rynas_tasks::now_ms())
     })
     .await?;

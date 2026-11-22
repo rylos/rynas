@@ -419,6 +419,8 @@ fn open_config(
     }));
     let config = Config::open(ConfigOptions::new(&args.state_dir, &root), system, domains)
         .map_err(std::io::Error::other)?;
+    // (here too: the import command stages an archive without the daemon's `Ops`)
+    config.on_history_value(Box::new(rynasd::services::history_value));
     removable_tx.send_replace(rynasd::removable::initial_settings(&config));
     docker_tx.send_replace(rynasd::docker::initial_settings(&config));
     wol_tx.send_replace(rynasd::wol::initial_settings(&config));
@@ -768,6 +770,10 @@ fn tune_malloc() {
     }
 }
 
+/// Blocking threads beyond one per running task (`--max-tasks`), for everything that is not
+/// a task: request handlers, PAM, the scheduling gate, the watch loops.
+const BLOCKING_RESERVE: usize = 4;
+
 fn main() -> std::io::Result<()> {
     tune_malloc();
     let activated = systemd_listener();
@@ -791,7 +797,10 @@ fn main() -> std::io::Result<()> {
     // Storage calls also start their own short-lived threads (one per disk for SMART).
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .max_blocking_threads(4)
+        // every running task may hold one for its whole run (an apply, a folder deletion, a
+        // home move): the reserve keeps logins, the gate's answers and the handlers going.
+        // Threads start on demand and idle ones exit after 10 s
+        .max_blocking_threads(args.max_tasks.max(1) + BLOCKING_RESERVE)
         .thread_keep_alive(std::time::Duration::from_secs(10))
         .thread_stack_size(1 << 20)
         .build()?;

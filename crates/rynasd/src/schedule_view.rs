@@ -211,7 +211,7 @@ pub fn migrate_window(cfg: &rynas_config::Config, log: &dyn Fn(&str)) -> Result<
 async fn overview(State(st): State<ProtState>, Query(q): Query<Range>) -> Res<Json<SchedulerOverview>> {
     let p = prot(&st)?;
     let from = q.from.unwrap_or_else(now_ms);
-    let to = q.to.unwrap_or(from + 7 * 86_400_000);
+    let to = q.to.unwrap_or(from.saturating_add(7 * 86_400_000));
     if to < from {
         return Err(invalid("the end of the range is before its start"));
     }

@@ -158,7 +158,7 @@ const DISK_TEST_DEFAULT_MIN: u64 = 120;
 /// Asks the drive about its self-test (`smartctl -c -l selftest`).
 fn self_test(p: &Protection, disk: &str) -> crate::claims::SelfTest {
     let dev = format!("/dev/{disk}");
-    match p.ops.config.system().run(&Cmd::new("smartctl").args(["-c", "-l", "selftest", &dev]).env_clear()) {
+    match p.ops.config.system().output(&Cmd::new("smartctl").args(["-c", "-l", "selftest", &dev]).env_clear()) {
         // smartctl's exit code is a bit mask of disk states: read the output whatever it is
         Ok(o) => crate::claims::parse_self_test(&o.stdout),
         Err(e) => {
@@ -1625,7 +1625,8 @@ pub fn shutting_down(p: &Protection) -> bool {
     p.ops
         .config
         .system()
-        .run(&Cmd::new("systemctl").arg("is-system-running"))
+        // exit code 1 for every state but `running`: the state is in the output
+        .output(&Cmd::new("systemctl").arg("is-system-running"))
         .is_ok_and(|o| o.stdout.trim() == "stopping")
 }
 

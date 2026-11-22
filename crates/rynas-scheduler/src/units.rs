@@ -102,11 +102,13 @@ pub fn interpreter(script: &str) -> Result<(String, Option<String>), String> {
     Ok((prog.into(), arg))
 }
 
-/// Text safe for a unit file value: one line, `%` escaped (specifiers).
+/// Text safe for a unit file value: one line, `%` escaped (specifiers), no backslash at the
+/// end (it would join the next line of the unit to this one).
 fn unit_text(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>()
+        .trim_end_matches('\\')
         .replace('%', "%%")
 }
 
@@ -330,5 +332,6 @@ mod tests {
     #[test]
     fn text_is_escaped() {
         assert_eq!(unit_text("50% done\nExecStart=x"), "50%% done ExecStart=x");
+        assert_eq!(unit_text("copy to D:\\"), "copy to D:");
     }
 }

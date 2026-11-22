@@ -38,7 +38,7 @@ Delegate=memory pids
 MemoryHigh=288M
 MemoryMax=640M
 Environment=GLIBC_TUNABLES=glibc.malloc.mmap_threshold=262144:glibc.malloc.trim_threshold=1048576:glibc.malloc.arena_max=2
-# TasksMax covers both leaves: 4 blocking threads + one per disk during a SMART read (each
+# TasksMax covers both leaves: 8 blocking threads (one per task, 4 in reserve) + one per disk during a SMART read (each
 # command adds its output readers) + 4 concurrent tasks with their children, and the
 # workers with their threads.
 TasksMax=256

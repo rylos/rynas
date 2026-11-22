@@ -757,16 +757,23 @@ pub fn queue_deadline_ms(t: &ScheduledTask, since_ms: u64, tz: &TimeZone) -> u64
         && let Ok(spec) = CalendarSpec::parse_with(&expr, |z| TimeZone::get(z).is_ok())
     {
         let w = u64::from(p.window_min) * 60_000;
-        // the latest scheduled time within one window before the first wait
+        // the latest scheduled time within one window before the first wait: looked for from
+        // close by first, further back only while none is found, so a calendar of every
+        // second or minute is not walked over the whole window at every question
+        let back = w + u64::from(p.jitter_s) * 1000 + ON_TIME_MS;
+        let next_ms = |at: u64| ts(at).and_then(|a| spec.next_after(tz, a)).map(|n| n.as_millisecond().max(0) as u64);
         let mut slot = None;
-        let mut at = since_ms.saturating_sub(w + u64::from(p.jitter_s) * 1000 + ON_TIME_MS);
-        while let Some(next) = ts(at).and_then(|a| spec.next_after(tz, a)) {
-            let n = next.as_millisecond().max(0) as u64;
-            if n > since_ms {
+        let mut reach = 60_000u64.min(back);
+        loop {
+            let mut at = since_ms.saturating_sub(reach);
+            while let Some(n) = next_ms(at).filter(|n| *n <= since_ms) {
+                slot = Some(n);
+                at = n;
+            }
+            if slot.is_some() || reach >= back {
                 break;
             }
-            slot = Some(n);
-            at = n;
+            reach = reach.saturating_mul(8).min(back);
         }
         if let Some(s) = slot {
             return s + w;
