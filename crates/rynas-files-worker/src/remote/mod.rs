@@ -37,6 +37,11 @@ pub struct Entry {
     pub size: u64,
     pub mtime: i64,
     pub mode: u32,
+    /// reached through a link (a symbolic link, a junction) and listed as what it leads to:
+    /// a job never goes into such a folder (it may lead back above itself, and its items
+    /// are another folder's)
+    #[serde(skip)]
+    pub link: bool,
 }
 
 impl Entry {
@@ -112,11 +117,25 @@ pub trait Fs: Send {
     /// free and total bytes where `path` is
     fn space(&self, path: &[String]) -> Option<(u64, u64)>;
     fn set_mtime(&self, path: &[String], mtime: i64);
+    /// Whether the item itself is a link (a symbolic link, a junction) rather than what it
+    /// leads to: listings show a link to a folder as a folder, and a deletion or a move must
+    /// not empty the folder it leads to.
+    fn is_link(&self, path: &[String]) -> bool {
+        let _ = path;
+        false
+    }
     /// whether a path names the server itself (SMB: the list of shares)
     fn is_top(&self, path: &[String]) -> bool {
         let _ = path;
         false
     }
+}
+
+/// Whether a name a server lists is one a path can be made of: a single plain component.
+/// A server is not trusted with more: `../x` or `/etc/x`, joined to the folder a copy lands
+/// in, would lead out of it (and out of the archive a download is zipped into).
+pub fn plain_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\0'])
 }
 
 /// Suffix of the hidden name an existing file waits under while a copy takes its place, on a
@@ -272,7 +291,7 @@ mod tests {
             Ok(Vec::new())
         }
         fn stat(&self, p: &[String]) -> io::Result<Entry> {
-            if self.files.lock().unwrap().contains_key(&p[0]) { Ok(Entry { name: p[0].clone(), kind: 'f', size: 1, mtime: 0, mode: 0 }) } else { Err(errno(libc::ENOENT)) }
+            if self.files.lock().unwrap().contains_key(&p[0]) { Ok(Entry { name: p[0].clone(), kind: 'f', size: 1, mtime: 0, mode: 0, link: false }) } else { Err(errno(libc::ENOENT)) }
         }
         fn reader(&self, _: &[String]) -> io::Result<Box<dyn Reader>> {
             Err(errno(libc::ENOSYS))
@@ -339,6 +358,16 @@ mod tests {
         assert!(keep.get(), "the old file is not back: the part stays");
         assert!(state(&f).iter().any(|(k, v)| k == ".a.txt.rynas-aside" && *v == "old"));
         assert!(state(&f).iter().any(|(k, v)| k == "p" && *v == "new"));
+    }
+
+    #[test]
+    fn a_servers_names_are_single_components() {
+        for good in ["a.txt", "a b", ".hidden", "a\\b", "..."] {
+            assert!(plain_name(good), "{good:?}");
+        }
+        for bad in ["", ".", "..", "../x", "a/b", "/etc/passwd", "a\0b"] {
+            assert!(!plain_name(bad), "{bad:?}");
+        }
     }
 
     #[test]

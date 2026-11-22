@@ -419,6 +419,12 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
             return Err(ApiError::invalid("sources", t!("synchronization is between folders of the NAS")));
         }
     }
+    // one side reads all the sources: the NAS, or one server (a path of another side would
+    // be read as a path of the first one's)
+    let side = |p: &String| crate::conns::split(p).map(|r| r.ok().map(|(id, _)| id));
+    if body.sources.iter().any(|p| side(p) != side(&body.sources[0])) {
+        return Err(ApiError::invalid("sources", t!("the items of one job are all on the NAS or all on one server")));
+    }
     if matches!(body.op, Op::Compress | Op::Extract) && body.sources.iter().chain(&body.dest).any(|p| crate::conns::split(p).is_some()) {
         return Err(ApiError::invalid("sources", t!("archives: copy the files to the NAS first")));
     }
@@ -849,6 +855,9 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
         "download" => {
             if let Some(list) = req.param("paths") {
                 let paths: Vec<String> = serde_json::from_str(list).map_err(|_| ApiError::bad_request("paths"))?;
+                if paths.is_empty() {
+                    return Err(ApiError::bad_request("paths"));
+                }
                 refuse_whole_backup(shares, &paths)?;
                 if let [one] = paths.as_slice() {
                     // one file: a link to it inside the share is followed

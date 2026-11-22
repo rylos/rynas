@@ -89,6 +89,9 @@ impl Edit {
         c.path = self.path.trim().replace('\\', "/").trim_matches('/').to_string();
         if !self.password.is_empty() {
             c.password = self.password;
+        } else if !same_server {
+            // the saved password was the other server's: never sent to this one
+            c.password.clear();
         }
         if self.forget_key || !same_server {
             c.host_key.clear();

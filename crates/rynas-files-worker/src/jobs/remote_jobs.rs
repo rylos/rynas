@@ -26,6 +26,8 @@ struct Meta {
     file: bool,
     size: u64,
     mtime: i64,
+    /// a server's folder reached through a link (`remote::Entry::link`): never gone into
+    link: bool,
 }
 
 impl Meta {
@@ -115,12 +117,21 @@ fn parts(path: &Path) -> Vec<String> {
     remote::split_path(path).map(|(_, p)| p).unwrap_or_default()
 }
 
+/// Whether a job stays out of a server's folder because it is a link to one. Inside a tree,
+/// when the listing says so (`Meta::link`: it may lead back above itself). Where going into
+/// it removes things (`removing`: a move, a deletion) the server is asked too (one request a
+/// folder), for the item picked itself as well: an SMB listing does not tell a junction, and
+/// what it leads to is another folder's. A link picked itself to be copied is followed.
+fn linked(end: &End, path: &Path, meta: Meta, top: bool, removing: bool) -> bool {
+    meta.dir && ((!top && meta.link) || (removing && end.is_link(path)))
+}
+
 fn local_meta(m: &fs::Metadata) -> Meta {
-    Meta { dir: m.is_dir(), file: m.is_file(), size: if m.is_file() { m.len() } else { 0 }, mtime: m.mtime() }
+    Meta { dir: m.is_dir(), file: m.is_file(), size: if m.is_file() { m.len() } else { 0 }, mtime: m.mtime(), link: false }
 }
 
 fn remote_meta(e: &remote::Entry) -> Meta {
-    Meta { dir: e.kind == 'd', file: e.kind == 'f', size: e.size, mtime: e.mtime }
+    Meta { dir: e.kind == 'd', file: e.kind == 'f', size: e.size, mtime: e.mtime, link: e.link }
 }
 
 impl End {
@@ -170,6 +181,15 @@ impl End {
         }
     }
 
+    /// Whether a folder of a server is a link to one ([`Fs::is_link`]): its items are the
+    /// other folder's, never removed through it. Local listings never follow a link.
+    fn is_link(&self, p: &Path) -> bool {
+        match self {
+            End::Local => false,
+            End::Remote(_) => self.call(|fs, _| Ok(fs.is_link(&parts(p)))).unwrap_or(false),
+        }
+    }
+
     fn is_remote(&self) -> bool {
         matches!(self, End::Remote(_))
     }
@@ -216,6 +236,8 @@ impl End {
                 local_guard(p, false)?;
                 let file = OpenOptions::new().write(true).create_new(true).mode(0o666).open(p)?;
                 rynas_files::confine::check_made(&file, p)?;
+                // this live job's: the clean-up of another job into the same folder leaves it
+                super::hold(&file);
                 Box::new(LocalWriter { file, behind: WriteBehind::new() })
             }
             End::Remote(_) => self.call(|fs, _| fs.writer(&parts(p), None))?,
@@ -441,7 +463,9 @@ impl Engine {
         };
         let sources = self.spec.sources.clone();
         let moving = self.spec.op == Op::Move;
-        let Some(src) = self.connect(&sources[0]) else { return Ok(()) };
+        // every source was refused or is gone (each said so already): nothing to copy
+        let Some(first) = sources.first() else { return Ok(()) };
+        let Some(src) = self.connect(first) else { return Ok(()) };
         let Some(dst) = self.connect(&dest) else { return Ok(()) };
         let ends = Ends { src, dst };
         // what a cancel removes from the server when the engine cannot (`watch_cancel`)
@@ -534,8 +558,12 @@ impl Engine {
             if seen.is_multiple_of(64) {
                 self.checkpoint()?;
             }
+            let top = meta.is_none();
             let Some(meta) = meta.or_else(|| ends.src.stat(&path).ok()) else { continue };
-            if meta.dir {
+            if linked(&ends.src, &path, meta, top, self.spec.op == Op::Move) {
+                // not gone into: one item, refused when its turn comes (`r_item`)
+                self.p.files_total += 1;
+            } else if meta.dir {
                 self.p.dirs += 1;
                 if let Ok(items) = ends.src.list(&path) {
                     stack.extend(items.into_iter().map(|(n, m)| (path.join(n), Some(m))));
@@ -570,6 +598,15 @@ impl Engine {
         self.p.current_done = 0;
         let existing = ends.dst.stat(&target).ok();
         if meta.dir {
+            // a link to a folder inside the tree may lead back above itself (a copy without
+            // end), and a move removes what it copied: through a link that would empty the
+            // folder the link leads to. A link picked itself is copied as the folder it shows
+            if linked(&ends.src, src, meta, top, moving) {
+                self.error_msg(src, t!("a link to a folder is not followed: copy or move the folder it leads to"));
+                self.p.skipped += 1;
+                self.p.files_done += 1;
+                return Ok(());
+            }
             return self.r_dir(ends, src, meta, &target, existing, moving);
         }
         if !meta.file {
@@ -630,7 +667,11 @@ impl Engine {
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
             for (n, m) in ends.src.list(&dir).unwrap_or_default() {
-                if m.dir {
+                if m.dir && m.link {
+                    // counted as one item by the scan, never gone into
+                    self.p.skipped += 1;
+                    self.p.files_done += 1;
+                } else if m.dir {
                     stack.push(dir.join(n));
                 } else {
                     self.r_skip(m);
@@ -727,6 +768,10 @@ impl Engine {
         let dir = target.parent().unwrap_or(Path::new("/"));
         let part = dir.join(part_name(target.file_name().unwrap_or_default()));
         let mut input = ends.src.reader(src)?;
+        // the temporary file another live job holds is that job's, never taken away
+        if !ends.dst.is_remote() && super::in_use(&part, part.file_name().unwrap_or_default()) {
+            return Err(io::Error::from_raw_os_error(libc::EBUSY));
+        }
         let _ = ends.dst.remove(&part, false);
         // a cancel that cannot wait for the copy to notice removes it (`watch_cancel`): a
         // local file directly, a remote one over a connection of the watchdog's own (known
@@ -982,7 +1027,8 @@ impl Engine {
 
     fn r_delete(&mut self) -> Step<()> {
         let sources = self.spec.sources.clone();
-        let Some(end) = self.connect(&sources[0]) else { return Ok(()) };
+        let Some(first) = sources.first() else { return Ok(()) };
+        let Some(end) = self.connect(first) else { return Ok(()) };
         self.p.phase = "delete".into();
         self.p.method = "delete".into();
         self.p.scanning = true;
@@ -997,9 +1043,12 @@ impl Engine {
                 self.p.files_total = total;
                 self.checkpoint()?;
             }
+            let top = meta.is_none();
             let Some(meta) = meta.or_else(|| end.stat(&path).ok()) else { continue };
-            todo.push((path.clone(), meta.dir, false));
-            if meta.dir {
+            // a link to a folder goes as the link it is: what it leads to is not this job's
+            let folder = meta.dir && !linked(&end, &path, meta, top, true);
+            todo.push((path.clone(), folder, false));
+            if folder {
                 match end.list(&path) {
                     Ok(items) => stack.extend(items.into_iter().map(|(n, m)| (path.join(n), Some(m)))),
                     Err(e) => self.error(&path, &e),
@@ -1075,7 +1124,7 @@ impl Engine {
                         Ok(()) => removed += 1,
                         Err(e) => eprintln!("rynas-files-worker: clean-up: cannot remove {} on the server: {}", self.display(&dir.join(&name)), describe(&e)),
                     }
-                } else if deep && m.dir {
+                } else if deep && m.dir && !m.link {
                     stack.push((dir.join(&name), true));
                 }
             }
@@ -1249,9 +1298,9 @@ mod tests {
         fn stat(&self, path: &[String]) -> io::Result<remote::Entry> {
             let name = path.last().cloned().unwrap_or_default();
             if self.disk.lock().unwrap().contains_key(path) || name == "big.iso" {
-                return Ok(remote::Entry { name, kind: 'f', size: self.data.len() as u64, mtime: 0, mode: 0o644 });
+                return Ok(remote::Entry { name, kind: 'f', size: self.data.len() as u64, mtime: 0, mode: 0o644, link: false });
             }
-            if name.contains('.') { Err(remote::errno(libc::ENOENT)) } else { Ok(remote::Entry { name, kind: 'd', size: 0, mtime: 0, mode: 0o755 }) }
+            if name.contains('.') { Err(remote::errno(libc::ENOENT)) } else { Ok(remote::Entry { name, kind: 'd', size: 0, mtime: 0, mode: 0o755, link: false }) }
         }
         fn reader(&self, _: &[String]) -> io::Result<Box<dyn remote::Reader>> {
             // a size the test did not set: the file's real one
@@ -1352,7 +1401,7 @@ mod tests {
     }
 
     fn meta(size: usize) -> Meta {
-        Meta { dir: false, file: true, size: size as u64, mtime: 0 }
+        Meta { dir: false, file: true, size: size as u64, mtime: 0, link: false }
     }
 
     #[test]
@@ -1671,7 +1720,7 @@ mod tests {
         let disk: Disk = Arc::default();
         disk.lock().unwrap().insert(on_share(".big.iso.rynas-aside"), b"old".to_vec());
         disk.lock().unwrap().insert(on_share(".big.iso.rynas-part"), b"new".to_vec());
-        let entry = |n: &str| remote::Entry { name: n.into(), kind: 'f', size: 3, mtime: 0, mode: 0o644 };
+        let entry = |n: &str| remote::Entry { name: n.into(), kind: 'f', size: 3, mtime: 0, mode: 0o644, link: false };
         let listing = Arc::new(Mutex::new(vec![entry(".big.iso.rynas-aside"), entry(".big.iso.rynas-part")]));
         let conn = RemoteEnd {
             connect: Arc::new(|| Err(remote::errno(libc::ECONNREFUSED))),

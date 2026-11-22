@@ -466,6 +466,14 @@ impl Manager {
     /// `jobs/new`: queues a job for `user` (the spec already resolved by
     /// [`crate::api::job_spec`]) and starts it when there is room. `{ "id": n }`.
     pub fn submit(&self, user: User, admin: bool, mut spec: Spec, info: Info) -> Result<Value, ApiError> {
+        // the table's cap holds when none of its jobs is finished too: no more are queued
+        {
+            let mut list = self.inner.jobs.lock().unwrap();
+            prune(&mut list);
+            if list.len() >= MAX_JOBS {
+                return Err(ApiError::new(409, t!("too many transfers are waiting: let some of them finish first")).code(error_codes::BUSY));
+            }
+        }
         // the clean-up of a job a restart cut short removes every temporary file in its
         // destination: a new job writing there now would lose its own
         if let Some(dest) = &info.dest {
@@ -667,6 +675,15 @@ impl Manager {
                 return Err(ApiError::new(409, t!("the temporary files are still being cleaned up: try again shortly")).code(error_codes::BUSY));
             }
             "retry" if job.view.state.finished() => {
+                // refused while another job's clean-up works in its destination (as `submit`
+                // would), before the job leaves the list: it stays there for another Retry
+                let dest = job.view.info.dest.clone();
+                if let Some(dest) = &dest
+                    && list.iter().any(|j| j.cleaning && j.view.info.dest.as_deref().is_some_and(|d| overlaps(d, dest)))
+                {
+                    return Err(ApiError::new(409, t!("the temporary files are still being cleaned up: try again shortly")).code(error_codes::BUSY));
+                }
+                let job = &list[index];
                 // the same job again, with the archive's password
                 let mut spec = job.spec.clone();
                 if c.password.is_some() {
@@ -805,7 +822,7 @@ impl Manager {
                         let mut clean = job.spec.clone();
                         clean.cleanup_of = Some(clean.cleanup_of.unwrap_or(clean.op));
                         clean.op = Op::Cleanup;
-                        cleanup = Some((id, job.user.clone(), clean));
+                        cleanup = Some((id, job.user.clone(), job.admin, clean));
                     }
                     job.set_state(State::Cancelled, &journal);
                 } else {
@@ -829,7 +846,7 @@ impl Manager {
                         let mut clean = job.spec.clone();
                         clean.cleanup_of = Some(clean.cleanup_of.unwrap_or(clean.op));
                         clean.op = Op::Cleanup;
-                        cleanup = Some((id, job.user.clone(), clean));
+                        cleanup = Some((id, job.user.clone(), job.admin, clean));
                     }
                     job.set_state(State::Failed, &journal);
                 }
@@ -853,7 +870,7 @@ impl Manager {
     // as interrupted, with Retry.
 
     /// The journalled jobs, shown as interrupted; those with a destination to clean.
-    fn load_journal(&self) -> Vec<(u64, User, Spec)> {
+    fn load_journal(&self) -> Vec<(u64, User, bool, Spec)> {
         let mut entries: Vec<JournalEntry> = std::fs::read_dir(self.journal())
             .map(|d| {
                 d.flatten()
@@ -873,7 +890,7 @@ impl Manager {
                 let mut clean = e.spec.clone();
                 clean.cleanup_of = Some(clean.cleanup_of.unwrap_or(clean.op));
                 clean.op = Op::Cleanup;
-                cleanups.push((e.id, e.user.clone(), clean));
+                cleanups.push((e.id, e.user.clone(), e.admin, clean));
             } else {
                 let _ = std::fs::remove_file(journal_path(&journal, e.id));
             }
@@ -882,13 +899,16 @@ impl Manager {
         cleanups
     }
 
-    fn clean_up(&self, cleanups: Vec<(u64, User, Spec)>) {
-        for (id, user, mut clean) in cleanups {
+    fn clean_up(&self, cleanups: Vec<(u64, User, bool, Spec)>) {
+        for (id, user, admin, mut clean) in cleanups {
+            // with the powers of the job it cleans after (an administrator's temporary files
+            // lie where only those powers write), guarded with the PCs' folders of now
+            clean.pc_roots = admin.then(|| self.inner.cfg.hooks.pc_roots());
             // remote destinations: the connections as saved, secrets included
             if !clean.remotes.is_empty() {
                 clean.remotes = crate::conns::with_secrets(&user.name, &clean.remotes);
             }
-            match start_worker(&self.inner.cfg.worker, &user, false, &clean) {
+            match start_worker(&self.inner.cfg.worker, &user, admin, &clean) {
                 Ok(mut child) => {
                     drop(child.stdin.take());
                     // the events are not wanted, but the pipe must not fill up
@@ -949,9 +969,16 @@ fn start_worker(exe: &Path, user: &User, admin: bool, spec: &Spec) -> io::Result
     let mut cmd = worker_command(exe, user, admin, &spec.app_roots, share_roots)?;
     cmd.arg("job").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     let mut child = cmd.spawn()?;
-    let mut line = serde_json::to_vec(spec).map_err(io::Error::other)?;
-    line.push(b'\n');
-    child.stdin.as_mut().ok_or_else(|| io::Error::other("no stdin"))?.write_all(&line)?;
+    let sent = serde_json::to_vec(spec).map_err(io::Error::other).and_then(|mut line| {
+        line.push(b'\n');
+        child.stdin.as_mut().ok_or_else(|| io::Error::other("no stdin"))?.write_all(&line)
+    });
+    if let Err(e) = sent {
+        // a worker that never got its job: ended and reaped, not left as a zombie
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e);
+    }
     Ok(child)
 }
 

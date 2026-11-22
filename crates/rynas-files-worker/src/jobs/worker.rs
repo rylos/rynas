@@ -490,6 +490,10 @@ impl Engine {
         let Some(dest) = self.spec.dest.clone() else { return };
         let clean = |dir: &Path, deep: bool, stack: &mut Vec<PathBuf>, seen: &mut usize| {
             let Ok(items) = confine::read_dir(dir) else { return };
+            // an administrator's clean-up has the job's powers: never in a PC's backup folder
+            if confine::refuse_pc_write(dir, false).is_err() {
+                return;
+            }
             for item in items.flatten() {
                 *seen += 1;
                 let name = item.file_name();
@@ -1098,6 +1102,11 @@ impl Engine {
         let dir = target.parent().unwrap_or(Path::new("/"));
         let part = dir.join(part_name(target.file_name().unwrap_or_default()));
         let input = confine::open(src)?;
+        // a leftover goes; the temporary file another live job holds (the same name copied
+        // into the same folder at once) is that job's, never taken away
+        if in_use(&part, part.file_name().unwrap_or_default()) {
+            return Err(io::Error::from_raw_os_error(libc::EBUSY));
+        }
         let _ = fs::remove_file(&part);
         let output = OpenOptions::new().write(true).create_new(true).mode(0o666).open(&part)?;
         confine::check_made(&output, &part)?;
@@ -1697,7 +1706,12 @@ impl Engine {
             }
             {
                 let s = seen.lock().unwrap();
-                self.p.bytes_done = if tar { fed.load(Ordering::Relaxed).min(size) * self.p.bytes_total.max(1) / size.max(1) } else { self.p.bytes_total * s.percent / 100 };
+                // in 128 bits: the product of two sizes passes 64 from a 4 GiB archive on
+                self.p.bytes_done = if tar {
+                    (u128::from(fed.load(Ordering::Relaxed).min(size)) * u128::from(self.p.bytes_total.max(1)) / u128::from(size.max(1))) as u64
+                } else {
+                    (u128::from(self.p.bytes_total) * u128::from(s.percent) / 100) as u64
+                };
                 self.p.files_done = s.files;
                 self.p.current = s.last.clone();
             }
@@ -2375,10 +2389,18 @@ fn merge(from: &Path, to: &Path, policy: Policy) -> io::Result<()> {
     if old.is_dir() && new.is_dir() {
         // an existing folder merged into may be a mount of somewhere else
         confine::refuse_pc_write(to, false)?;
+        // one item that fails does not keep the others out: the first error is the answer
+        let mut failed = None;
         for item in confine::read_dir(from)?.flatten() {
-            merge(&item.path(), &to.join(item.file_name()), policy)?;
+            if let Err(e) = merge(&item.path(), &to.join(item.file_name()), policy) {
+                failed.get_or_insert(e);
+            }
         }
-        return Ok(());
+        return failed.map_or(Ok(()), Err);
+    }
+    // a file where a folder is (or the other way round) is never replaced: said, not dropped
+    if policy == Policy::Overwrite && old.is_dir() != new.is_dir() {
+        return Err(io::Error::other(if old.is_dir() { t!("a folder with the same name is in its place") } else { t!("a file with the same name is in its place") }));
     }
     let replace = !old.is_dir()
         && !new.is_dir()

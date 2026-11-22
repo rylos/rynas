@@ -137,6 +137,8 @@ fn ffmpeg(file: &Path, width: u32, video: bool) -> Option<Vec<u8>> {
     input.push(crate::confine::child_input(&mut cmd, &opened).as_os_str());
     // one thread: a grid asks for many thumbnails at once on a 4-core NAS
     cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-threads", "1"]);
+    // the file alone: one that is really a playlist opens nothing on the network
+    cmd.args(["-protocol_whitelist", "file,crypto,data"]);
     if video {
         // past a black first frame
         cmd.args(["-ss", "2"]);

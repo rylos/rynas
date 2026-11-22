@@ -236,7 +236,10 @@ pub fn usage(out: &mut impl Write, conns: &[Conn], paths: &[String]) -> Result<(
         match fs.list(&dir) {
             Ok(items) => {
                 for e in items {
-                    if e.is_dir() {
+                    if e.is_dir() && e.link {
+                        // a link to a folder: not gone into (it may lead back above)
+                        dirs += 1;
+                    } else if e.is_dir() {
                         stack.push(child(&dir, &e.name));
                     } else {
                         files += 1;
@@ -336,6 +339,10 @@ fn zip(out: &mut impl Write, fs: &dyn Fs, roots: &[Vec<String>]) -> Result<(), A
             let rel = path[base..].join("/");
             if e.is_dir() {
                 zip.add_dir(&rel, e.mtime, 0o40755)?;
+                // a link to a folder inside the tree is not gone into: it may lead back above
+                if e.link {
+                    continue;
+                }
                 let Ok(mut items) = fs.list(&path) else { continue };
                 items.sort_by(|a, b| b.name.cmp(&a.name));
                 stack.extend(items.into_iter().map(|i| (child(&path, &i.name), i)));
