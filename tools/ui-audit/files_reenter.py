@@ -82,7 +82,7 @@ async def main():
     try:
         p = await cdp.connect()
         await run_all.login(p)
-        # sidebar clicks, as Marco does
+        # sidebar clicks, as a user does
         await click_nav(p, "/files")
         await expect_files(p, "click 1 /files")
         for other in ["/storage", "/", "/users", "/storage"]:

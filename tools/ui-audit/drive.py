@@ -49,7 +49,7 @@ PLACES = """(()=>{const v={label:'volume1',path:'/volume1',avail_bytes:5.7e12,si
 window.__rules.push([/\\/api\\/v1\\/storage\\/places$/,j=>{j.unshift(v);return j}]);
 window.__rules.push([/\\/api\\/v1\\/docker\\/settings$/,j=>{j.volumes.unshift(v);return j}]);})();"""
 TRIAL = """window.__rules.push([/\\/api\\/v1\\/network\\/state/,j=>{const now=j.read_at_ms||Date.now();
- j.trial={kind:'adopt_at_boot',revision:7,lkg_revision:6,started_ms:now-2*86400000,deadline_ms:%s,timeout_s:180,interfaces:%s,management_touched:true,author:'marco'};return j}]);"""
+ j.trial={kind:'adopt_at_boot',revision:7,lkg_revision:6,started_ms:now-2*86400000,deadline_ms:%s,timeout_s:180,interfaces:%s,management_touched:true,author:'admin'};return j}]);"""
 
 
 class D:
