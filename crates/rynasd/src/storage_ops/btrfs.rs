@@ -172,9 +172,14 @@ async fn replace(State(st): State<StoState>, h: HeaderMap, UrlPath(uuid): UrlPat
     let mnt = fs.mountpoint.clone();
     let ops = s.clone();
     let guard = guard_path(&s);
+    let checked = inv.clone();
+    let new_disk = req.new_disk.clone();
     let id = spawn(&s, "storage.btrfs-replace", &user, held, move |m| async move {
         // deduplication of the volume gives way (D-DEDUP)
         let _fs = heavy_on(mnt.as_deref(), "storage.btrfs-replace").await;
+        // the disk may be another one under the same kernel name since the request
+        let now = ops.inventory(true).await.map_err(|e| e.2)?;
+        super::same_disks(&checked, &now, std::slice::from_ref(&new_disk))?;
         br::run_plan(&m, &p).await?;
         if let Ok(inv) = ops.inventory(true).await {
             forget_if_whole(guard, &uuid, &inv);

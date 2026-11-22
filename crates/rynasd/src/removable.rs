@@ -126,13 +126,16 @@ impl Applier for RemovableDomain {
 /// A request to the scanner thread.
 struct ScanReq {
     force: bool,
-    reply: once::Sender<Vec<RemovableDrive>>,
+    /// The reading with its number (1, 2, … in the order the thread took them).
+    reply: once::Sender<(u64, Vec<RemovableDrive>)>,
 }
 
 #[derive(Default)]
 struct Inner {
     /// The last reading.
     drives: Vec<RemovableDrive>,
+    /// Its number: an older reading that comes late is not processed.
+    seq: u64,
     /// Actions in progress: device name → action.
     pending: HashMap<String, RemovableAction>,
     /// Drives being removed safely (their disappearance is not an unsafe unplug).
@@ -235,9 +238,11 @@ impl RemovableSvc {
             .stack_size(256 << 10)
             .spawn(move || {
                 let mut scanner = Scanner::new(Tree::new(root)).with_system_usb_ids(system_usb_ids);
+                let mut seq = 0u64;
                 while let Ok(r) = scan_rx.recv() {
                     let drives = scanner.tick(r.force);
-                    let _ = r.reply.send(drives);
+                    seq += 1;
+                    let _ = r.reply.send((seq, drives));
                 }
             })
             .expect("removable scanner thread");
@@ -271,8 +276,8 @@ impl RemovableSvc {
         self.inner.lock().unwrap().last_json.clone()
     }
 
-    /// A reading of the scanner thread.
-    async fn read(&self, force: bool) -> Res<Vec<RemovableDrive>> {
+    /// A reading of the scanner thread, with its number.
+    async fn read(&self, force: bool) -> Res<(u64, Vec<RemovableDrive>)> {
         let (reply, rx) = once::channel();
         self.scan.try_send(ScanReq { force, reply }).map_err(|_| {
             Error::new(
@@ -293,10 +298,10 @@ impl RemovableSvc {
 
     /// A fresh reading, processed (notifications, shares, state event); the drives.
     pub async fn refresh(self: &Arc<Self>, force: bool) -> Res<Vec<RemovableDrive>> {
-        let drives = self.read(force).await?;
+        let (seq, drives) = self.read(force).await?;
         // the SMB include and smbcontrol are blocking work
         let (s, d) = (self.clone(), drives.clone());
-        tokio::task::spawn_blocking(move || s.process(d))
+        tokio::task::spawn_blocking(move || s.process(seq, d))
             .await
             .map_err(Error::internal)?;
         Ok(drives)
@@ -341,11 +346,17 @@ impl RemovableSvc {
     }
 
     /// Takes a reading: unsafe unplugs, auto-mount of arrivals, SMB shares, state event.
-    fn process(self: &Arc<Self>, drives: Vec<RemovableDrive>) {
+    fn process(self: &Arc<Self>, seq: u64, drives: Vec<RemovableDrive>) {
         let settings = self.settings();
         let mut arrivals = Vec::new();
         let job = {
             let mut inner = self.inner.lock().unwrap();
+            // two refreshes at once may get here out of order: an older reading would bring
+            // back a drive that is gone (a mount tried on it, then a false unplug warning)
+            if seq <= inner.seq {
+                return;
+            }
+            inner.seq = seq;
             let first = std::mem::replace(&mut inner.first, false);
             let present: HashSet<String> = drives.iter().map(|d| d.name.clone()).collect();
             for d in &drives {
@@ -522,10 +533,6 @@ impl RemovableSvc {
         self.publish(&mut inner);
     }
 
-    fn busy_with(&self, dev: &str) -> bool {
-        self.inner.lock().unwrap().pending.contains_key(dev)
-    }
-
     fn ctx_parts(&self) -> (u32, bool) {
         let s = self.settings();
         (
@@ -649,6 +656,35 @@ fn already(dev: &str) -> Error {
     )
 }
 
+/// An action marked as in progress on a device, until dropped: also when its task is
+/// cancelled while still queued (the job is then dropped without ever running).
+struct Pending {
+    svc: Arc<RemovableSvc>,
+    dev: String,
+}
+
+impl Pending {
+    /// Marks `a` as in progress on `dev`, in one step with the check that nothing else is.
+    fn claim(svc: &Arc<RemovableSvc>, dev: &str, a: RemovableAction) -> Res<Self> {
+        let mut inner = svc.inner.lock().unwrap();
+        if inner.pending.contains_key(dev) {
+            return Err(already(dev));
+        }
+        inner.pending.insert(dev.to_string(), a);
+        svc.publish(&mut inner);
+        Ok(Self {
+            svc: svc.clone(),
+            dev: dev.to_string(),
+        })
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        self.svc.set_pending(&self.dev, None);
+    }
+}
+
 /// Runs `f` (blocking) with a task context for the action; the drives are read again first.
 async fn run_action<T: Send + 'static>(
     s: Arc<RemovableSvc>,
@@ -677,10 +713,7 @@ async fn run_action<T: Send + 'static>(
 
 /// Starts a mount task (also auto-mount).
 pub fn start_mount(s: &Arc<RemovableSvc>, who: &str, volume: &str, read_only: bool) -> Res<String> {
-    if s.busy_with(volume) {
-        return Err(already(volume));
-    }
-    s.set_pending(volume, Some(RemovableAction::Mount));
+    let pending = Pending::claim(s, volume, RemovableAction::Mount)?;
     let s2 = s.clone();
     let vol = volume.to_string();
     let r = s
@@ -704,17 +737,11 @@ pub fn start_mount(s: &Arc<RemovableSvc>, who: &str, volume: &str, read_only: bo
                 Ok(())
             })
             .await;
-            s3.set_pending(&vol, None);
+            drop(pending);
             let _ = s3.refresh(true).await;
             r
         });
-    match r {
-        Ok(id) => Ok(id),
-        Err(e) => {
-            s.set_pending(volume, None);
-            Err(e.into())
-        }
-    }
+    Ok(r?)
 }
 
 async fn fresh(s: &Arc<RemovableSvc>) -> Res<Vec<RemovableDrive>> {
@@ -781,10 +808,7 @@ async fn unmount(
     if !h.is_empty() {
         return Err(RemovableError::Busy(format!("{name} ({mp})"), h).into());
     }
-    if s.busy_with(&name) {
-        return Err(already(&name));
-    }
-    s.set_pending(&name, Some(RemovableAction::Unmount));
+    let pending = Pending::claim(&s, &name, RemovableAction::Unmount)?;
     let (s2, vol) = (s.clone(), name.clone());
     let id = s
         .ops
@@ -795,11 +819,10 @@ async fn unmount(
                 svc.svc.unmount(drives, &v, c)
             })
             .await;
-            s2.set_pending(&vol, None);
+            drop(pending);
             let _ = s2.refresh(true).await;
             r
-        })
-        .inspect_err(|_| s.set_pending(&name, None))?;
+        })?;
     Ok(accepted(id))
 }
 
@@ -817,10 +840,7 @@ async fn unlock(
     }
     let drives = fresh(&s).await?;
     s.svc.check_unlock(&drives, &name)?;
-    if s.busy_with(&name) {
-        return Err(already(&name));
-    }
-    s.set_pending(&name, Some(RemovableAction::Unlock));
+    let pending = Pending::claim(&s, &name, RemovableAction::Unlock)?;
     let (s2, vol) = (s.clone(), name.clone());
     let then_mount = req.mount;
     let pass = req.passphrase;
@@ -833,7 +853,6 @@ async fn unlock(
                 svc.svc.unlock(drives, &v, &pass, c)
             })
             .await;
-            s2.set_pending(&vol, None);
             r?;
             if then_mount {
                 // the cleartext device is in the next reading
@@ -854,14 +873,14 @@ async fn unlock(
                     Ok(())
                 })
                 .await;
-                s2.set_pending(&vol, None);
+                drop(pending);
                 let _ = s2.refresh(true).await;
                 return r;
             }
+            drop(pending);
             let _ = s2.refresh(true).await;
             Ok(())
-        })
-        .inspect_err(|_| s.set_pending(&name, None))?;
+        })?;
     Ok(accepted(id))
 }
 
@@ -878,10 +897,7 @@ async fn lock(State(st): State<RmState>, hd: HeaderMap, Path(name): Path<String>
             return Err(RemovableError::Busy(format!("{name} ({mp})"), h).into());
         }
     }
-    if s.busy_with(&name) {
-        return Err(already(&name));
-    }
-    s.set_pending(&name, Some(RemovableAction::Lock));
+    let pending = Pending::claim(&s, &name, RemovableAction::Lock)?;
     let (s2, vol) = (s.clone(), name.clone());
     let id = s
         .ops
@@ -892,11 +908,10 @@ async fn lock(State(st): State<RmState>, hd: HeaderMap, Path(name): Path<String>
                 svc.svc.lock(drives, &v, c)
             })
             .await;
-            s2.set_pending(&vol, None);
+            drop(pending);
             let _ = s2.refresh(true).await;
             r
-        })
-        .inspect_err(|_| s.set_pending(&name, None))?;
+        })?;
     Ok(accepted(id))
 }
 
@@ -920,14 +935,15 @@ async fn holders(
 }
 
 /// Safe removal of one drive, inside a task: marks it released (power-off makes it vanish
-/// before a reading sees it unmounted), notifies when done.
+/// before a reading sees it unmounted), notifies when done. `pending`: the drive's mark, taken
+/// by the request.
 async fn remove_one(
     s: &Arc<RemovableSvc>,
     ctx: rynas_tasks::TaskCtx,
     drive: &str,
+    pending: Pending,
 ) -> Result<(), String> {
     s.inner.lock().unwrap().released.insert(drive.to_string());
-    s.set_pending(drive, Some(RemovableAction::Remove));
     let d = drive.to_string();
     let r = run_action(s.clone(), ctx, move |svc, drives, c| {
         let title = find_drive(drives, &d)
@@ -936,7 +952,7 @@ async fn remove_one(
         svc.svc.safely_remove(drives, &d, c).map(|m| (title, m))
     })
     .await;
-    s.set_pending(drive, None);
+    drop(pending);
     match &r {
         Ok((title, how)) => {
             if s.settings().notify_safe_removal {
@@ -957,14 +973,12 @@ pub async fn start_remove(s: &Arc<RemovableSvc>, who: &str, drive: &str) -> Res<
     check_name(drive)?;
     let drives = fresh(s).await?;
     s.svc.check_remove(&drives, drive)?;
-    if s.busy_with(drive) {
-        return Err(already(drive));
-    }
+    let pending = Pending::claim(s, drive, RemovableAction::Remove)?;
     let (s2, d) = (s.clone(), drive.to_string());
     Ok(s.ops
         .tasks
         .spawn("removable.remove", who, move |ctx| async move {
-            remove_one(&s2, ctx, &d).await
+            remove_one(&s2, ctx, &d, pending).await
         })?)
 }
 
@@ -991,14 +1005,18 @@ async fn remove_all(State(st): State<RmState>, hd: HeaderMap) -> Res<Response> {
     for d in &drives {
         s.svc.check_remove(&drives, &d.name)?;
     }
-    let names: Vec<String> = drives.iter().map(|d| d.name.clone()).collect();
+    // every drive with its mark: refused while an action works on one of them
+    let names: Vec<(String, Pending)> = drives
+        .iter()
+        .map(|d| Pending::claim(&s, &d.name, RemovableAction::Remove).map(|m| (d.name.clone(), m)))
+        .collect::<Res<_>>()?;
     let s2 = s.clone();
     let id = s
         .ops
         .tasks
         .spawn("removable.remove-all", &who, move |ctx| async move {
             let mut done: HashSet<String> = HashSet::new();
-            for n in names {
+            for (n, mark) in names {
                 // a sibling slot already went with its card reader
                 if done.contains(&n) {
                     continue;
@@ -1008,7 +1026,7 @@ async fn remove_all(State(st): State<RmState>, hd: HeaderMap) -> Res<Response> {
                     continue;
                 }
                 ctx.log(&format!("--- {n}"));
-                remove_one(&s2, ctx.clone(), &n).await?;
+                remove_one(&s2, ctx.clone(), &n, mark).await?;
                 done.insert(n);
             }
             Ok(())
@@ -1020,11 +1038,15 @@ async fn remove_all(State(st): State<RmState>, hd: HeaderMap) -> Res<Response> {
 async fn mount_all(State(st): State<RmState>, hd: HeaderMap) -> Res<Response> {
     let (s, who) = (rsvc(&st)?, user(&hd)?);
     let drives = fresh(&s).await?;
-    let vols: Vec<String> = drives
+    // each volume with its mark, taken unless another action works on it
+    let vols: Vec<(String, Pending)> = drives
         .iter()
         .flat_map(|d| d.volumes.iter())
-        .filter(|v| !v.luks && v.supported && v.mount_point.is_none() && !s.busy_with(&v.name))
-        .map(|v| v.name.clone())
+        .filter(|v| !v.luks && v.supported && v.mount_point.is_none())
+        .filter_map(|v| {
+            let mark = Pending::claim(&s, &v.name, RemovableAction::Mount).ok()?;
+            Some((v.name.clone(), mark))
+        })
         .collect();
     if vols.is_empty() {
         return Err(Error::new(
@@ -1033,22 +1055,19 @@ async fn mount_all(State(st): State<RmState>, hd: HeaderMap) -> Res<Response> {
             "nothing to mount".into(),
         ));
     }
-    for v in &vols {
-        s.set_pending(v, Some(RemovableAction::Mount));
-    }
     let s2 = s.clone();
     let id = s
         .ops
         .tasks
         .spawn("removable.mount-all", &who, move |ctx| async move {
             let mut failed = Vec::new();
-            for v in vols {
+            for (v, mark) in vols {
                 let name = v.clone();
                 let r = run_action(s2.clone(), ctx.clone(), move |svc, drives, c| {
                     svc.svc.mount(drives, &name, false, c)
                 })
                 .await;
-                s2.set_pending(&v, None);
+                drop(mark);
                 match r {
                     Ok(m) if m.ntfs_dirty => {
                         let drives = s2.refresh(true).await.unwrap_or_default();
@@ -1074,10 +1093,6 @@ async fn mount_all(State(st): State<RmState>, hd: HeaderMap) -> Res<Response> {
             } else {
                 Err(format!("not mounted: {}", failed.join(", ")))
             }
-        })
-        .inspect_err(|_| {
-            let mut inner = s.inner.lock().unwrap();
-            inner.pending.retain(|_, a| *a != RemovableAction::Mount);
         })?;
     Ok(accepted(id))
 }

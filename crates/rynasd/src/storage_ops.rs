@@ -1387,8 +1387,11 @@ async fn volume_unlock(
 ) -> Res<Response> {
     let (s, user) = (sto(&st)?, user(&h)?);
     let req = json_body(body)?;
-    if req.passphrase.is_empty() || req.passphrase.len() > 512 {
+    if req.passphrase.is_empty() {
         return Err(Error::invalid("passphrase", "the passphrase is empty"));
+    }
+    if req.passphrase.len() > 512 {
+        return Err(Error::invalid("passphrase", "the passphrase is longer than 512 characters"));
     }
     let (_, v) = volume(&s, &name, true).await?;
     let lv = luks_volume(&v)?;
@@ -1833,7 +1836,8 @@ async fn subvolume_delete(
 ) -> Res<Response> {
     let (s, user) = (sto(&st)?, user(&h)?);
     let (_, path) = existing_sub(&s, &name, &sub).await?;
-    // a share on it (applied, or staged by anyone) keeps it
+    // an applied share on it keeps it (a share only staged does not: its apply makes the
+    // subvolume again)
     let c = s.config().clone();
     let p = path.clone();
     let used_by: Option<String> = tokio::task::spawn_blocking(move || {

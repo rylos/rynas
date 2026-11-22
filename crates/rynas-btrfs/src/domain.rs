@@ -203,6 +203,13 @@ fn parse(v: &Value) -> Result<SnapshotsConfig, String> {
     serde_json::from_value(v.clone()).map_err(|e| format!("invalid snapshots document: {e}"))
 }
 
+/// A path that can stand unquoted in the apt hook, which apt hands to `sh -c`: no character
+/// the shell reads (`;`, `&`, `|`, backquotes, parentheses, redirections, globs).
+fn hook_safe(p: &str) -> bool {
+    p.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"/_@+.,:=-".contains(&b))
+}
+
 /// The apt hook line: never fails apt (`|| true`), works without rynasd.
 pub fn apt_hook(c: &SnapshotsConfig) -> String {
     let s = &c.system;
@@ -255,7 +262,12 @@ impl Applier for SnapshotsDomain {
         c.jobs = jobs;
         let s = &mut c.system;
         if s.enabled {
-            if !clean_abs(&s.subvolume) || !clean_abs(&s.snapshot_dir) || s.snapshot_dir == "/" {
+            if !clean_abs(&s.subvolume)
+                || !clean_abs(&s.snapshot_dir)
+                || s.snapshot_dir == "/"
+                || !hook_safe(&s.subvolume)
+                || !hook_safe(&s.snapshot_dir)
+            {
                 return Err(
                     "system restore points: invalid subvolume or snapshot directory".into(),
                 );

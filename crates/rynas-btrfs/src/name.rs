@@ -101,6 +101,10 @@ fn parse_offset(text: &str) -> Option<i32> {
 
 /// Parses a btrbk timestamp strictly.
 pub fn parse_timestamp(ts: &str) -> Option<Stamp> {
+    // the parts are cut at byte offsets: a name with other characters is no timestamp
+    if !ts.is_ascii() {
+        return None;
+    }
     // legacy `YYYYMMDD_HHMMSS`: here the underscore is not a `_N` suffix
     if ts.len() == 15 && ts.as_bytes()[8] == b'_' {
         let (y, mo, d) = date(&ts[..8])?;
@@ -261,6 +265,10 @@ mod tests {
 
     #[test]
     fn splits_names() {
+        // byte lengths of a timestamp, with a character across a cut
+        for odd in ["x.aaaéaaa", "x.aaaéaaa_123456", "x.20261105Taé1", "x.20261105T120000+aé1"] {
+            assert_eq!(split_snapshot_name(odd), None, "{odd}");
+        }
         assert_eq!(
             split_snapshot_name("@home.20260803T0000"),
             Some(("@home", "20260803T0000"))

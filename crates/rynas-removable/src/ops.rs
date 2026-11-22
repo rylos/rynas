@@ -160,10 +160,16 @@ impl Removable {
 
     /// Processes holding the filesystem mounted at `mount_point`.
     pub fn holders(&self, mount_point: &str) -> Vec<VolumeHolder> {
-        match holders::mount_dev(&self.tree.path(mount_point)) {
-            Some(dev) => holders::holders(&self.tree.path("/proc"), dev),
-            None => Vec::new(),
+        let dir = self.tree.path(mount_point);
+        let Some(dev) = holders::mount_dev(&dir) else {
+            return Vec::new();
+        };
+        // nothing mounted there any more (the drive went away): the directory is on its
+        // parent's filesystem, whose processes do not hold the volume
+        if dir.parent().and_then(holders::mount_dev) == Some(dev) {
+            return Vec::new();
         }
+        holders::holders(&self.tree.path("/proc"), dev)
     }
 
     /// Checks that `volume` can be mounted now; the device and filesystem to mount.

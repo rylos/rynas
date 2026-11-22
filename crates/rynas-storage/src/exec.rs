@@ -306,7 +306,6 @@ pub(crate) async fn still_leftover<M: Machine>(m: &M, argv: &[String], disk: &st
     if d.is_null() {
         return Err(format!("{dev}: lsblk printed no disk: not erased"));
     }
-    let prefix = format!("rynas-{label}-t");
     let empty = Vec::new();
     for p in d["children"].as_array().unwrap_or(&empty) {
         let kname = p["kname"].as_str().unwrap_or("");
@@ -317,7 +316,7 @@ pub(crate) async fn still_leftover<M: Machine>(m: &M, argv: &[String], disk: &st
         if !(all || names.contains(&kname) || numbers.contains(&partn)) {
             continue;
         }
-        let ours = p["partlabel"].as_str().is_some_and(|l| l.starts_with(&prefix));
+        let ours = p["partlabel"].as_str().is_some_and(|l| crate::flex::plan::is_slice_label(l, label));
         let busy = !p["mountpoint"].is_null() || p["children"].as_array().is_some_and(|c| !c.is_empty());
         if !ours || busy {
             return Err(format!(

@@ -913,15 +913,20 @@ impl Storage {
                     self.run_ok(prog, &args, T_LVM)
                 };
                 let (pv, vg, lv) = (run("pvs"), run("vgs"), run("lvs"));
-                if pv.is_none() || vg.is_none() || lv.is_none() {
+                let whole = pv.is_some() && vg.is_some() && lv.is_some();
+                if !whole {
                     stale.extend(pvs.iter().map(|d| d.kname.clone()));
                 }
                 let r = crate::lvm::parse(pv.as_deref(), vg.as_deref(), lv.as_deref());
-                self.cache
-                    .lock()
-                    .unwrap()
-                    .lvm
-                    .insert(key, (now, r.clone()));
+                // a report with a part missing is not kept: served again from the cache it
+                // would no longer be marked stale
+                if whole {
+                    self.cache
+                        .lock()
+                        .unwrap()
+                        .lvm
+                        .insert(key, (now, r.clone()));
+                }
                 Some(r)
             };
             if let Some(r) = r {

@@ -645,7 +645,9 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
     }
     if let Some(n) = &info.nvme {
         let cw = n.critical_warning;
-        if cw & 0b0000_0001 != 0 || n.available_spare_pct <= n.available_spare_threshold_pct {
+        // below the threshold, as the drive's own warning bit: a drive that reports 0% with
+        // a 0% threshold (emulated ones) has no spare figure, not a spare used up
+        if cw & 0b0000_0001 != 0 || n.available_spare_pct < n.available_spare_threshold_pct {
             r.push(reason(
                 Critical,
                 "nvme_spare_low",

@@ -531,9 +531,16 @@ pub fn rollback(snapshot: &Path, live: &Path, now_s: i64) -> Result<RolledBack, 
         )));
     }
     if let Err(e) = ioctl::rename_noreplace(&parent, &fresh, name) {
-        // put the current one back
-        let _ = ioctl::rename_noreplace(&parent, &kept, name);
-        return Err(SnapError::Failed(format!("moving the copy in place: {e}")));
+        // put the current one back; the copy that was not used goes
+        return Err(match ioctl::rename_noreplace(&parent, &kept, name) {
+            Ok(()) => {
+                let _ = ioctl::destroy_subvolume(&parent, &fresh);
+                SnapError::Failed(format!("moving the copy in place: {e}"))
+            }
+            Err(back) => SnapError::Failed(format!(
+                "moving the copy in place: {e}; the current {name} is now {kept} and could not be renamed back: {back}"
+            )),
+        });
     }
     // SAFETY: valid descriptor
     unsafe {

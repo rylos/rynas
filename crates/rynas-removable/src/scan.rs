@@ -102,7 +102,10 @@ pub fn decode_udev(s: &str) -> String {
         if b[i] == b'\\'
             && i + 3 < b.len()
             && b[i + 1] == b'x'
-            && let Ok(v) = u8::from_str_radix(&s[i + 2..i + 4], 16)
+            // on the bytes: a slice of `s` there may cut a multi-byte character
+            && let Some(v) = std::str::from_utf8(&b[i + 2..i + 4])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
         {
             out.push(v);
             i += 4;
@@ -822,6 +825,7 @@ mod tests {
     fn escapes() {
         assert_eq!(decode_udev(r"My\x20Stick"), "My Stick");
         assert_eq!(decode_udev(r"a\xzz"), r"a\xzz");
+        assert_eq!(decode_udev(r"a\xzé"), r"a\xzé");
         assert_eq!(decode_mount(r"/media/My\040Stick"), "/media/My Stick");
     }
 

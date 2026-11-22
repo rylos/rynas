@@ -116,7 +116,8 @@ pub fn clean_name(s: &str) -> String {
     let mut out: String = s
         .chars()
         .map(|c| {
-            if c == '/' || c == '\\' || c == '"' || c == '\'' || c.is_control() {
+            // '%': the path goes into the SMB include, where Samba expands %-variables
+            if c == '/' || c == '\\' || c == '"' || c == '\'' || c == '%' || c.is_control() {
                 '_'
             } else {
                 c
@@ -313,6 +314,8 @@ mod tests {
     fn names() {
         assert_eq!(clean_name(" My/Stick\"s "), "My_Stick_s");
         assert_eq!(clean_name(".hidden"), "_hidden");
+        assert_eq!(clean_name(".."), "_.");
+        assert_eq!(clean_name("%m 100%"), "_m 100_");
         assert_eq!(clean_name(&"x".repeat(80)).len(), 64);
         assert_eq!(base_name("", Some("1234-ABCD"), "sdc1"), "1234-ABCD");
         assert_eq!(base_name("", None, "sdc1"), "sdc1");

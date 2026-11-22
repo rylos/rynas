@@ -1711,3 +1711,14 @@ fn a_working_disk_of_a_degraded_tier_is_not_replaced() {
     assert!(p.errors.iter().any(|e| e.contains("replace the missing disk first")), "{:?}", p.errors);
     assert!(plan_replace_at(&inventory_of(&start, None), &replace_req(MISSING, "sde"), NOW).valid);
 }
+
+/// The slices of a volume are told from the partitions of a volume whose name starts the
+/// same way.
+#[test]
+fn slice_labels_of_one_volume_only() {
+    assert!(is_slice_label(&tier_partlabel("data", 1), "data"));
+    assert!(is_slice_label("rynas-data-t12", "data"));
+    for other in ["rynas-data-tank", "rynas-data-tank-t1", "rynas-data-t", "rynas-data-t1x", "rynas-data", "data-t1"] {
+        assert!(!is_slice_label(other, "data"), "{other}");
+    }
+}

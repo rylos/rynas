@@ -89,6 +89,16 @@ pub fn tier_partlabel(label: &str, index: u32) -> String {
     format!("rynas-{label}-t{index}")
 }
 
+/// `partlabel` is the label of a tier slice of volume `label` (`rynas-<label>-t<N>`): not
+/// that of a volume whose name only starts the same way (`rynas-<label>-tank`).
+pub fn is_slice_label(partlabel: &str, label: &str) -> bool {
+    partlabel
+        .strip_prefix("rynas-")
+        .and_then(|r| r.strip_prefix(label))
+        .and_then(|r| r.strip_prefix("-t"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn md_level_arg(l: RaidLevel) -> &'static str {
     match l {
         RaidLevel::Raid5 => "5",
@@ -434,10 +444,9 @@ impl View {
 
         // the disks: those of the tiers, and any disk with a slice of this volume
         let mut names: Vec<String> = v.tiers.iter().flat_map(|t| t.member_disks()).collect();
-        let plabel = format!("rynas-{label}-t");
         for d in g.disks() {
             let has = d.children.iter().filter_map(|c| g.get(c)).any(|p| {
-                p.partlabel.as_deref().is_some_and(|l| l.starts_with(&plabel))
+                p.partlabel.as_deref().is_some_and(|l| is_slice_label(l, label))
             });
             if has {
                 names.push(d.kname.clone());
@@ -2535,11 +2544,10 @@ impl Change {
 /// `member`, one with an md array on it.
 pub fn holds_slice(inv: &Inventory, label: &str, disk: &str, member: bool) -> bool {
     let g = &inv.graph;
-    let plabel = format!("rynas-{label}-t");
     g.get(disk).is_some_and(|d| {
         d.children.iter().filter_map(|c| g.get(c)).any(|p| {
             p.kind == "part"
-                && p.partlabel.as_deref().is_some_and(|l| l.starts_with(&plabel))
+                && p.partlabel.as_deref().is_some_and(|l| is_slice_label(l, label))
                 && (!member || p.children.iter().filter_map(|c| g.get(c)).any(|x| x.is_md()))
         })
     })

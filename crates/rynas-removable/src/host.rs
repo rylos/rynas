@@ -451,6 +451,9 @@ mod sys {
         let r2 = scsi(&f, &stop, 30_000);
         match (r1, r2) {
             (Ok(()), Ok(())) => Ok(()),
+            // the medium is out: a bridge without SYNCHRONIZE CACHE does not fail the eject
+            // (the device was flushed before)
+            (Err(_), Ok(())) if eject => Ok(()),
             (Err(e), _) => Err(format!("SYNCHRONIZE CACHE on {dev}: {e}")),
             (_, Err(e)) => Err(format!("START STOP UNIT on {dev}: {e}")),
         }

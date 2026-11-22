@@ -159,6 +159,13 @@ fn validation_fills_defaults_and_refuses_bad_jobs() {
     sys.system.enabled = true;
     sys.system.keep = 0;
     assert!(matches!(stage(&e, &sys), Err(ConfigError::Invalid(_))));
+    // the apt hook is a shell command line: nothing the shell reads in its paths
+    for dir in ["/.snapshots/x;reboot", "/.snapshots/`id`", "/.snapshots/a|b", "/.snapshots/a&b"] {
+        let mut sys = SnapshotsConfig::default();
+        sys.system.enabled = true;
+        sys.system.snapshot_dir = dir.into();
+        assert!(matches!(stage(&e, &sys), Err(ConfigError::Invalid(_))), "{dir}");
+    }
 }
 
 #[test]
