@@ -187,7 +187,8 @@ pub fn read_answer<R: Read>(mut r: BufReader<R>) -> io::Result<Answer> {
             if size == 0 {
                 break;
             }
-            if body.len() + size > MAX_BODY {
+            // `size` comes from the peer: no sum that could wrap
+            if size > MAX_BODY - body.len() {
                 return Err(bad("answer too large"));
             }
             let start = body.len();
@@ -221,5 +222,11 @@ mod tests {
         let a = read_answer(BufReader::new(&raw[..])).unwrap();
         assert_eq!(a.status, 400);
         assert_eq!(error_text(&a.body), "nope");
+    }
+
+    #[test]
+    fn a_chunk_size_that_would_wrap_is_refused() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\nffffffffffffffff\r\n";
+        assert!(read_answer(BufReader::new(&raw[..])).is_err());
     }
 }

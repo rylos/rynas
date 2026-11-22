@@ -420,6 +420,11 @@ fn avahi_lines_for_route_names_only() {
         avahi_block(&cfg, &facts()),
         "192.0.2.10 immich-nas.local\n192.0.2.10 portainer-nas.local\n"
     );
+    // own-domain names are records at the DNS provider, never mDNS ones
+    assert_eq!(
+        avahi_block(&sample_w2(), &facts()),
+        avahi_block(&cfg, &facts())
+    );
     let mut off = cfg.clone();
     off.settings.local_names = false;
     assert_eq!(avahi_block(&off, &facts()), "");
@@ -1126,6 +1131,20 @@ fn drift_and_host_changes_are_followed() {
         e.caddy.state.lock().unwrap().loads.last().unwrap().1,
         "new certificate: forced"
     );
+    // another address in the same subnet: the proxy configuration stays as it is, and the
+    // change is not found again at every check
+    e.facts.lock().unwrap().primary_v4 = Some("192.0.2.30".parse().unwrap());
+    let loads = e.caddy.loads();
+    let seen = std::sync::Mutex::new(0);
+    let count = |l: &str| {
+        if l.contains("networks changed") {
+            *seen.lock().unwrap() += 1;
+        }
+    };
+    e.svc.sync(&count).unwrap();
+    e.svc.sync(&count).unwrap();
+    assert_eq!(*seen.lock().unwrap(), 1);
+    assert_eq!(e.caddy.loads(), loads);
 }
 
 const OLD_BLOCK: &str = "# BEGIN rynas web-access — managed by rynas, do not edit (sha256:00)\n192.0.2.10 immich-nas.local\n# END rynas web-access\n";

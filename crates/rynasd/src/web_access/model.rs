@@ -371,14 +371,19 @@ pub fn parse_size(s: &str) -> Option<u64> {
         .parse::<u64>()
         .ok()?
         .checked_mul(mul)
-        .filter(|n| *n > 0)
+        // the engine reads the limit as a signed 64-bit number
+        .filter(|n| *n > 0 && *n <= i64::MAX as u64)
 }
 
 /// `<digits>s|m|h`.
 pub fn duration_ok(s: &str) -> bool {
     match s.strip_suffix(['s', 'm', 'h']) {
         Some(d) => {
-            !d.is_empty() && d.len() <= 6 && d.bytes().all(|b| b.is_ascii_digit()) && d != "0"
+            // not zero, however it is written (`00s`): to the engine that is no timeout
+            !d.is_empty()
+                && d.len() <= 6
+                && d.bytes().all(|b| b.is_ascii_digit())
+                && d.bytes().any(|b| b != b'0')
         }
         None => false,
     }
@@ -1046,7 +1051,11 @@ mod tests {
         assert_eq!(parse_size("0"), None);
         assert_eq!(parse_size("G"), None);
         assert_eq!(parse_size("5T"), None);
+        assert_eq!(parse_size("9223372036854775807"), Some(i64::MAX as u64));
+        assert_eq!(parse_size("9223372036854775808"), None);
+        assert_eq!(parse_size("8589934592G"), None);
         assert!(duration_ok("600s") && duration_ok("10m") && duration_ok("1h"));
         assert!(!duration_ok("0s") && !duration_ok("10") && !duration_ok("1d"));
+        assert!(!duration_ok("00s") && !duration_ok("000m") && duration_ok("010s"));
     }
 }

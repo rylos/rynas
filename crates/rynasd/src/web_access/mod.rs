@@ -681,7 +681,8 @@ impl WebAccessSvc {
 
     /// Host ports apps may not publish: the proxy's, unless external mode. `(port, udp)`.
     pub fn reserved_ports(&self) -> Vec<(u16, bool)> {
-        let s = self.applied().settings;
+        let applied = self.applied();
+        let s = &applied.settings;
         if s.mode == ProxyMode::External {
             return Vec::new();
         }
@@ -690,7 +691,7 @@ impl WebAccessSvc {
             v.push((s.https_port, true));
         }
         // the routes' extra ports (§5.6)
-        for p in model::extra_ports(&self.applied()) {
+        for p in model::extra_ports(&applied) {
             v.push((p, false));
             if s.h3 {
                 v.push((p, true));
@@ -995,7 +996,12 @@ impl WebAccessSvc {
             return Err(m);
         }
         if !cert_changed && self.admin.config().is_ok_and(|cur| cur == json) {
-            self.note(|e| e.in_sync = Some(true));
+            // the facts count as seen without a load too: a change that leaves the render
+            // as it is (another address in the same subnet) must not write it again forever
+            self.note(|e| {
+                e.in_sync = Some(true);
+                e.facts = Some(facts.fingerprint());
+            });
             self.write_last_good(&json)
                 .map_err(|e| format!("{LAST_GOOD}: {e}"))?;
             self.publish_ui(&resolved.ui);
@@ -1342,8 +1348,9 @@ impl WebAccessSvc {
                 enabled: x.route.enabled,
                 problems: {
                     let mut p = x.problems.clone();
+                    // only the local name goes through Avahi
                     p.extend(
-                        x.names
+                        x.local
                             .iter()
                             .filter_map(|n| names.problem(n))
                             .map(String::from),
@@ -1670,11 +1677,17 @@ impl WebAccessSvc {
             .iter()
             .find(|x| x.route.stack.as_deref() == Some(stack))
             .and_then(|x| {
+                // an address only on extra ports answers on its first one
+                let port = if x.route.main_port {
+                    cfg.settings.https_port
+                } else {
+                    x.route.ports.first().copied()?
+                };
                 // a trusted own-domain name before the local one
                 x.domain_names
                     .first()
                     .or(x.names.first())
-                    .map(|n| url_of(n, cfg.settings.https_port, &x.route.path))
+                    .map(|n| url_of(n, port, &x.route.path))
             })
     }
 
@@ -2383,13 +2396,14 @@ impl WebAccessSvc {
         let expected = domains::expected_addrs(&d, &facts);
         let exp_text = join(&expected);
         // the name a client would ask: a route's, or a probe under the wildcard
+        let below = format!(".{}", d.name);
         let probe_name = resolve(&cfg, &facts)
             .routes
             .iter()
             .find_map(|r| {
                 r.domain_names
                     .iter()
-                    .find(|n| n.ends_with(&d.name))
+                    .find(|n| n.ends_with(&below))
                     .cloned()
             })
             .unwrap_or_else(|| {

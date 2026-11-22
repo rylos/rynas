@@ -173,6 +173,9 @@ pub fn query(
     sock.connect(server).map_err(|e| format!("{server}: {e}"))?;
     let mut buf = [0u8; 1500];
     let mut stray = 0;
+    // the read timeout starts again with every packet: a server that keeps sending
+    // unreadable ones must not hold the caller past `timeout`
+    let deadline = std::time::Instant::now() + timeout;
     for attempt in 0..2 {
         sock.send(&q).map_err(|e| format!("{server}: {e}"))?;
         loop {
@@ -180,7 +183,14 @@ pub fn query(
                 Ok(n) => match parse_response(id, t, &buf[..n]) {
                     Ok(a) => return Ok(a),
                     // a stray or late packet: keep waiting for ours
-                    Err(_) => stray += 1,
+                    Err(_) => {
+                        stray += 1;
+                        if std::time::Instant::now() >= deadline {
+                            return Err(format!(
+                                "{server}: no answer ({stray} unreadable packets)"
+                            ));
+                        }
+                    }
                 },
                 Err(e) if attempt == 1 => {
                     return Err(format!(

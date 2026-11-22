@@ -75,7 +75,8 @@ pub fn records(cfg: &WebAccessConfig, facts: &HostFacts) -> BTreeMap<String, IpA
     super::resolve(cfg, facts)
         .routes
         .into_iter()
-        .flat_map(|r| r.names)
+        // own-domain names are DNS records at the provider, never mDNS ones
+        .filter_map(|r| r.local)
         .map(|n| (n, IpAddr::V4(addr)))
         .collect()
 }

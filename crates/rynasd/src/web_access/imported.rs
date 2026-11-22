@@ -422,8 +422,9 @@ fn sig_of(f: &std::fs::File) -> io::Result<FileSig> {
     Ok((
         m.ino(),
         m.size(),
-        m.mtime() * 1_000_000_000 + m.mtime_nsec(),
-        m.ctime() * 1_000_000_000 + m.ctime_nsec(),
+        // a signature, not a time: a writer may set any mtime, so no checked arithmetic
+        m.mtime().wrapping_mul(1_000_000_000).wrapping_add(m.mtime_nsec()),
+        m.ctime().wrapping_mul(1_000_000_000).wrapping_add(m.ctime_nsec()),
     ))
 }
 
