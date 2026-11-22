@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rynas_tasks::{Cmd, CmdError};
@@ -394,6 +395,20 @@ pub struct HostAccounts {
     root: PathBuf,
     /// `pdbedit -L -v` for [`Accounts::samba_users_cached`].
     pdb_cache: Mutex<Option<PdbCached>>,
+    /// Bumped after every [`Accounts::exec`]: a `pdbedit` read that started before stores
+    /// nothing.
+    pdb_generation: AtomicU64,
+}
+
+/// Held by [`Accounts::exec`]: when the change is over (done or failed), drops the cached
+/// `pdbedit` answer and any read started before.
+struct PdbChanged<'a>(&'a HostAccounts);
+
+impl Drop for PdbChanged<'_> {
+    fn drop(&mut self) {
+        self.0.pdb_generation.fetch_add(1, Ordering::AcqRel);
+        *self.0.pdb_cache.lock().unwrap() = None;
+    }
 }
 
 /// When `pdbedit` was read, the passdb file it was read from, its answer.
@@ -416,7 +431,7 @@ fn file_stamp(p: &Path) -> Option<FileStamp> {
 
 impl HostAccounts {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into(), pdb_cache: Mutex::new(None) }
+        Self { root: root.into(), pdb_cache: Mutex::new(None), pdb_generation: AtomicU64::new(0) }
     }
 
     fn passdb_stamp(&self) -> Option<FileStamp> {
@@ -480,8 +495,12 @@ impl Accounts for HostAccounts {
         {
             return Ok(v.clone());
         }
+        let generation = self.pdb_generation.load(Ordering::Acquire);
         let v = self.samba_users()?;
-        *self.pdb_cache.lock().unwrap() = Some((Instant::now(), stamp, v.clone()));
+        let mut c = self.pdb_cache.lock().unwrap();
+        if self.pdb_generation.load(Ordering::Acquire) == generation {
+            *c = Some((Instant::now(), stamp, v.clone()));
+        }
         Ok(v)
     }
 
@@ -491,7 +510,7 @@ impl Accounts for HostAccounts {
     }
 
     fn exec(&self, op: &AccountOp) -> Result<(), String> {
-        *self.pdb_cache.lock().unwrap() = None;
+        let _changed = PdbChanged(self);
         match op {
             AccountOp::GroupAdd { name, gid } => run(match gid {
                 Some(g) => Cmd::new("groupadd").args(["-g", &g.to_string(), name]),

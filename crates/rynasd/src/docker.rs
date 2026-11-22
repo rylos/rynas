@@ -53,6 +53,20 @@ use crate::services::{docs, stage};
 pub const DOCKER_KEY: &str = "docker";
 /// How long the install facts (packages, compose version) are reused.
 const FACTS_TTL: Duration = Duration::from_secs(30);
+/// Older than this, the install facts and `df` are read again before answering (nobody
+/// looked for a while: Docker may have been installed or removed outside rynas meanwhile).
+const STALE_MAX: Duration = Duration::from_secs(600);
+
+/// Runs its function when dropped, also when the task holding it panics.
+struct OnDrop<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
 /// Period of the stats sampler while somebody listens.
 pub const STATS_TICK: Duration = Duration::from_secs(5);
 /// Period of the event watcher's sweep (crash loops over, data-root fill level).
@@ -558,7 +572,9 @@ impl DockerSvc {
     /// The install facts (cached for [`FACTS_TTL`]); detection only reads the host.
     pub async fn facts(&self, fresh: bool) -> InstallFacts {
         let cached = if fresh { None } else { self.facts.slot.lock().unwrap().clone() };
-        if let Some((t, f)) = cached {
+        if let Some((t, f)) = cached
+            && t.elapsed() < STALE_MAX
+        {
             // stale: answered at once, read again in the background (the reads run docker
             // compose and docker buildx: seconds on a slow CPU, on every page that shows Docker)
             if t.elapsed() >= FACTS_TTL && !self.facts.refreshing.swap(true, Ordering::AcqRel) {
@@ -566,9 +582,9 @@ impl DockerSvc {
                     (self.runner.clone(), self.host_root.clone(), self.facts.clone());
                 let generation = cache.generation.load(Ordering::Acquire);
                 tokio::task::spawn_blocking(move || {
-                    let f = install_facts(&host, runner.as_ref());
-                    cache.store(generation, f);
-                    cache.refreshing.store(false, Ordering::Release);
+                    let c = cache.clone();
+                    let _unflag = OnDrop(Some(move || c.refreshing.store(false, Ordering::Release)));
+                    cache.store(generation, install_facts(&host, runner.as_ref()));
                 });
             }
             return f;
@@ -1712,14 +1728,19 @@ impl DockerSvc {
     /// a page never waits for it again.
     pub(crate) async fn df(self: &Arc<Self>) -> Res<Arc<DfCache>> {
         let mut g = self.df_cache.lock().await;
-        if let Some((t, d)) = g.as_ref() {
+        if let Some((t, d)) = g.as_ref()
+            && t.elapsed() < STALE_MAX
+        {
             if t.elapsed() >= DF_TTL && !self.df_refreshing.swap(true, Ordering::AcqRel) {
                 let s = self.clone();
                 tokio::spawn(async move {
-                    if let Ok(d) = s.df_read().await {
-                        *s.df_cache.lock().await = Some((Instant::now(), d));
+                    let s2 = s.clone();
+                    let _unflag = OnDrop(Some(move || s2.df_refreshing.store(false, Ordering::Release)));
+                    match s.df_read().await {
+                        Ok(d) => *s.df_cache.lock().await = Some((Instant::now(), d)),
+                        // the engine stopped: the next call asks it again and reports it
+                        Err(_) => *s.df_cache.lock().await = None,
                     }
-                    s.df_refreshing.store(false, Ordering::Release);
                 });
             }
             return Ok(d.clone());
