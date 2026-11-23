@@ -1394,6 +1394,9 @@ pub fn spawn_run(who: &str, job: &str) -> Res<String> {
                 cur.last_ok_ms = cur.last_end_ms;
                 cur.last_error = None;
             }
+            // a cancel is neither a success nor a failure (as for the task itself): the
+            // last result stays as it was
+            Err(_) if ctx.is_cancelled() => ctx.log("backup cancelled"),
             Err(e) => {
                 let e = rynas_api_types::backup::redact_secrets(e, &sec.values());
                 cur.last_error = Some(e.chars().take(500).collect());

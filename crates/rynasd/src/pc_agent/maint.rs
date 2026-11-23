@@ -945,6 +945,12 @@ pub fn start(svc: &Arc<PcAgent>, group: &str, who: &str, scheduled: bool) -> Res
     let id = svc.ops.tasks.spawn("pcbackup.maintenance", who, move |ctx| async move {
         let _guard = guard;
         let r = maintain(&s2, &g2, &ctx, scheduled).await;
+        // a cancel is neither a success nor a failure (as for the task itself): the last
+        // result stays as it was
+        if r.is_err() && ctx.is_cancelled() {
+            ctx.log("maintenance cancelled");
+            return r;
+        }
         let now = now_ms();
         let _ = s2.edit(|reg| {
             if let Some(g) = reg.groups.get_mut(&g2) {
@@ -1332,7 +1338,8 @@ pub fn spawn_nightly(p: &crate::protection::Protection, who: &str) -> Result<Str
                 loop {
                     match s.ops.tasks.get(id) {
                         Some(t) if t.status.is_finished() => {
-                            if t.status != rynas_api_types::TaskStatus::Ok {
+                            // one cancelled by hand did not fail
+                            if t.status == rynas_api_types::TaskStatus::Error {
                                 failed.push(g.clone());
                             }
                             break;
