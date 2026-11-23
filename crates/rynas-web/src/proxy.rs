@@ -333,6 +333,7 @@ pub fn routes() -> Router<AppState> {
         .route("/docker/stacks/{name}/snapshots/{id}", delete(forward))
         .route("/docker/stacks/{name}/{action}", post(forward))
         .route("/docker/images", get(forward))
+        .route("/docker/images/prune", post(forward))
         .route("/docker/volumes", get(forward))
         .route("/docker/networks", get(forward))
         .route("/docker/df", get(forward))

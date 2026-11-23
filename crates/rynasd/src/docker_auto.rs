@@ -686,6 +686,13 @@ pub fn start_auto(s: &Arc<DockerSvc>, u: &StackUpdate, who: &str) -> Result<Stri
                 stack_update(&s2, &ctx, &u2).await
             };
             ctx.log(&format!("result: {outcome:?}{}", detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default()));
+            // the previous images go once no container, stack or kept rollback point needs
+            // them (the snapshot taken before this update keeps the old ones)
+            if outcome == AutoOutcome::Updated
+                && let Err(e) = crate::docker::prune_images(&s2, &ctx).await
+            {
+                ctx.log(&format!("unused images not removed: {e}"));
+            }
             s2.notifier.emit(auto_event(outcome, &stack, detail.as_deref(), u2.change.as_deref()));
             s2.record_auto(AutoResult {
                 stack,

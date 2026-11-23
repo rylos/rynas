@@ -1,12 +1,16 @@
 //! Docker › Images & volumes: read-only lists with their sizes.
 
 use leptos::prelude::*;
-use rynas_api_types::docker::{ImageSummary, VolumeSummary};
+use leptos::task::spawn_local;
+use rynas_api_types::docker::{ImagePrunePlan, ImagePruneRequest, ImageSummary, VolumeSummary};
 
-use super::{empty, image_ref, remote};
-use crate::i18n::{self, t, tf};
-use crate::icons;
-use crate::ui::{self, WidgetHead};
+use super::{done_toast, empty, image_ref, remote};
+use crate::api;
+use crate::form::{SaveBar, save_bar_with};
+use crate::i18n::{self, t, tf, tr};
+use crate::icons::{self, Icon};
+use crate::tasks;
+use crate::ui::{self, DlgKind, Remote, WidgetHead};
 
 /// `sha256:0123456789ab…` → `0123456789ab`.
 fn short_id(id: &str) -> String {
@@ -47,8 +51,66 @@ fn volume_row(v: &VolumeSummary) -> AnyView {
     ])
 }
 
+/// "Remove unused": what goes (the daemon's preview), then the removal as a task.
+fn prune_dialog(images: Remote<Vec<ImageSummary>>, close: Callback<()>) -> AnyView {
+    const URL: &str = "/api/v1/docker/images/prune";
+    let plan = RwSignal::new(None::<Result<ImagePrunePlan, String>>);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    spawn_local(async move {
+        let r = api::post::<_, ImagePrunePlan>(URL, Some(&ImagePruneRequest { dry_run: true })).await;
+        let _ = plan.try_set(Some(r.map_err(|e| e.text())));
+    });
+    let count = move || plan.with(|p| p.as_ref().and_then(|p| p.as_ref().ok()).map_or(0, |p| p.images.len()));
+    let go = move |_| {
+        busy.set(true);
+        spawn_local(async move {
+            let body = serde_json::to_string(&ImagePruneRequest { dry_run: false }).ok();
+            let r = tasks::run_task(URL, body).await;
+            let _ = busy.try_set(false);
+            done_toast(r);
+            images.reload();
+            close.run(());
+        });
+    };
+    let body = move || match plan.get() {
+        None => ui::loading(Signal::stored(None), Callback::new(|_| ()), 3),
+        Some(Err(e)) => ui::note(ui::Tone::Err, icons::CIRCLE_X, ui::text(e)),
+        Some(Ok(p)) if p.images.is_empty() => ui::empty_line("dk.i.prune_none"),
+        Some(Ok(p)) => {
+            let rows = p
+                .images
+                .iter()
+                .map(|i| {
+                    let name = i.tags.first().or(i.digests.first()).cloned().unwrap_or_else(|| short_id(&i.id));
+                    view! { <li class="kv"><span class="mono">{name}</span><span class="num">{i18n::bytes(i.size_bytes)}</span></li> }
+                })
+                .collect_view();
+            view! {
+                <p class="small">{tf("dk.i.prune_total", &[("n", &p.images.len().to_string()), ("size", &i18n::bytes(p.bytes))])}</p>
+                <ul class="plain-list prune-list">{rows}</ul>
+            }
+            .into_any()
+        }
+    };
+    let body = view! {
+        <p class="small muted">{t("dk.i.prune_text")}</p>
+        {body}
+    }
+    .into_any();
+    let foot = save_bar_with(SaveBar {
+        can_save: Signal::derive(move || count() > 0),
+        icon: Some(icons::TRASH_2),
+        danger: Signal::stored(true),
+        error: Some(error),
+        ..SaveBar::new(busy, "dk.i.prune_go", close, Callback::new(go))
+    });
+    ui::dialog(DlgKind::Normal, Signal::stored(t("dk.i.prune_title").to_string()), close, body, Some(foot))
+}
+
 pub fn panel() -> AnyView {
     let images = remote::<Vec<ImageSummary>>("/api/v1/docker/images", 3);
+    let pruning = RwSignal::new(false);
     let volumes = remote::<Vec<VolumeSummary>>("/api/v1/docker/volumes", 3);
     let total = move |sizes: Vec<u64>| tf("dk.i.total", &[("n", &sizes.len().to_string()), ("size", &i18n::bytes(sizes.iter().sum()))]);
     let image_rows = move || {
@@ -68,9 +130,14 @@ pub fn panel() -> AnyView {
             <section class="card widget w-12">
                 <WidgetHead icon=icons::LAYERS title="dk.i.title">
                     <span class="w-meta">{move || images.data.with(|l| l.as_ref().map(|l| total(l.iter().map(|i| i.size_bytes).collect())))}</span>
+                    <button type="button" class="btn ghost sm" on:click=move |_| pruning.set(true)
+                        disabled=move || images.data.with(|l| !l.as_ref().is_some_and(|l| l.iter().any(|i| i.containers <= 0)))>
+                        <Icon icon=icons::TRASH_2 size=14 /><span class="btn-label">{tr("dk.i.prune")}</span>
+                    </button>
                 </WidgetHead>
                 {move || images.view(5, image_rows)}
             </section>
+            {move || pruning.get().then(|| prune_dialog(images, Callback::new(move |_| pruning.set(false))))}
             <section class="card widget w-12">
                 <WidgetHead icon=icons::HARD_DRIVE title="dk.v.title">
                     <span class="w-meta">{move || volumes.data.with(|l| l.as_ref().map(|l| total(l.iter().filter_map(|v| v.size_bytes).collect())))}</span>

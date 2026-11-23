@@ -163,6 +163,7 @@ Paths are relative to `/api/v1`.
 | POST | `/docker/stacks/{name}/snapshots` | — | 201 `StackSnapshot` (reason `manual`); 409 `conflict` when the folder is not a btrfs subvolume |
 | DELETE | `/docker/stacks/{name}/snapshots/{id}` | — | 204; 404 |
 | GET | `/docker/images` | — | `Vec<ImageSummary>` {id, tags, digests, size_bytes, created_s, containers, dangling} |
+| POST | `/docker/images/prune` | `ImagePruneRequest` {dry_run} | dry run: `ImagePrunePlan` {images, bytes}; else 202 (`docker.image-prune`). Removes the images no container (stopped ones too), no rynas stack's compose model (`compose config`, a stack taken down) and no kept stack snapshot (a rollback needs its images) uses, never forced; also run after each successful stack or app update (automatic or by hand) |
 | GET | `/docker/volumes` | — | `Vec<VolumeSummary>` {name, driver, mountpoint, stack?, size_bytes?, in_use?}. Sizes come from the cached `docker system df` (below) |
 | GET | `/docker/networks` | — | `Vec<NetworkSummary>` {id, name, driver, scope, subnets, internal, stack?} |
 | GET | `/docker/df` | — | `DockerDiskUsage` {images_bytes, images_reclaimable_bytes, containers_bytes, volumes_bytes, build_cache_bytes}. `docker system df` walks every volume (seconds, wakes sleeping disks): rynasd runs it at most once per 60 s, shared by concurrent requests, and keeps only the totals and volume sizes |

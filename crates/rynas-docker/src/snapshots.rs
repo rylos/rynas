@@ -167,6 +167,26 @@ pub fn prune(
         .collect()
 }
 
+/// The image ids every stack snapshot recorded (rollback points need them on the host),
+/// stacks removed since included.
+pub fn all_images(root: &Path, layout: &Layout) -> std::collections::BTreeSet<String> {
+    let dir = snap_dir(root, layout, "x");
+    let Some(parent) = dir.parent() else {
+        return Default::default();
+    };
+    std::fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|n| check_name(n).is_ok())
+        .flat_map(|n| list(root, layout, &n))
+        .flat_map(|s| s.images.into_iter().map(|i| i.image_id))
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
 /// The metadata of one snapshot.
 pub fn get(root: &Path, layout: &Layout, stack: &str, id: &str) -> Option<StackSnapshot> {
     list(root, layout, stack).into_iter().find(|s| s.id == id)

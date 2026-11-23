@@ -4080,6 +4080,7 @@ task.docker.stack.update	Обновление стека
 task.docker.stack.rollback	Откат стека
 task.docker.stack.remove	Удаление стека
 task.docker.update-check	Проверка обновлений образов
+task.docker.image-prune	Удаление неиспользуемых образов
 task.docker.auto-window	Окно автоматических обновлений
 task.docker.auto-update	Автоматическое обновление стека
 nev.docker.unhealthy.title	Контейнер {container} неисправен
@@ -4437,6 +4438,12 @@ dk.i.none	Нет образов
 dk.i.untagged	Без тега
 dk.i.used_by	Используется: {n}
 dk.i.unused	Не используется
+dk.i.prune	Удалить неиспользуемые
+dk.i.prune_title	Удалить неиспользуемые образы
+dk.i.prune_text	Образы, которые не использует ни один контейнер (даже остановленный), ни один стек и ни одна сохранённая точка восстановления. После каждого обновления стека это происходит само, когда старая версия больше не нужна.
+dk.i.prune_none	Нечего удалять: каждый образ используется или нужен для точки восстановления.
+dk.i.prune_total	К удалению: {n} · {size}
+dk.i.prune_go	Удалить
 dk.i.dangling	Висячий
 dk.v.title	Тома
 dk.v.none	Нет именованных томов

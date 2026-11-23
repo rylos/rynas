@@ -868,6 +868,24 @@ pub struct ImageSummary {
     pub dangling: bool,
 }
 
+/// `POST /api/v1/docker/images/prune`: removes the local images nothing needs (no container,
+/// running or stopped, no stack's compose model, no stack snapshot kept for a rollback).
+/// `dry_run` answers [`ImagePrunePlan`]; otherwise a task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ImagePruneRequest {
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// What [`ImagePruneRequest`] would remove now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ImagePrunePlan {
+    pub images: Vec<ImageSummary>,
+    /// Their total size.
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct VolumeSummary {
     pub name: String,

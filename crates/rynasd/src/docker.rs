@@ -1712,6 +1712,112 @@ async fn images(State(st): State<DkState>) -> Res<Json<Vec<ImageSummary>>> {
     Ok(Json(v))
 }
 
+/// A command run outside a task (the image cleanup's preview): the test runner, nothing on a
+/// dry system, else the system.
+async fn run_quiet(s: &DockerSvc, cmd: &Cmd) -> Result<Option<CmdOutput>, String> {
+    if s.exec_via_runner.load(Ordering::Relaxed) {
+        let (r, c) = (s.runner.clone(), cmd.clone());
+        return tokio::task::spawn_blocking(move || r.run(&c)).await.map_err(|e| e.to_string())?.map(Some);
+    }
+    if s.dry {
+        return Ok(None);
+    }
+    cmd.run(None, None).await.map(Some).map_err(|e| format!("{}: {e}", cmd.display()))
+}
+
+/// The images every stack rynas runs names in its compose model (`docker compose config`):
+/// a stack taken down has no containers but needs its images to start again. A stack whose
+/// model cannot be read stops the cleanup (its images are unknown).
+async fn stack_image_refs(s: &Arc<DockerSvc>, cs: Vec<Seen>) -> Res<Vec<String>> {
+    let Some(l) = s.layout() else { return Ok(Vec::new()) };
+    let (stacks, _) = s.summaries_blocking(cs).await?;
+    let mut refs = Vec::new();
+    for st in stacks.iter().filter(|x| x.manager == StackManager::Rynas) {
+        let Ok((cmd_of, _)) = stack_cmd_of(s, &st.name, &l) else { continue };
+        let Some(out) = run_quiet(s, &cmd_of(ComposeAction::Config)).await.map_err(Error::internal)? else { continue };
+        if !out.success() {
+            return Err(conflict(format!(
+                "the compose files of stack {} cannot be read ({}): no image is removed",
+                st.name,
+                compose_error(&out.stderr)
+            )));
+        }
+        let svcs = parse_config(&out.stdout).map_err(|e| conflict(format!("stack {}: {e}: no image is removed", st.name)))?;
+        refs.extend(svcs.into_iter().filter_map(|x| x.image));
+    }
+    Ok(refs)
+}
+
+/// The images [`updates::removable_images`] finds now.
+async fn removable_now(s: &Arc<DockerSvc>) -> Res<Vec<ImageSummary>> {
+    let images = s.call(|e| async move { e.images().await }).await?;
+    let cs = s.containers().await?;
+    let used: BTreeSet<String> = cs.iter().map(|x| x.c.image_id.clone()).collect();
+    let kept = match s.layout() {
+        Some(l) => {
+            let root = s.root.clone();
+            tokio::task::spawn_blocking(move || snapshots::all_images(&root, &l)).await.map_err(Error::internal)?
+        }
+        None => BTreeSet::new(),
+    };
+    let refs = stack_image_refs(s, cs).await?;
+    let mut v = updates::removable_images(&images, &used, &kept, &refs);
+    v.sort_by_key(|i| std::cmp::Reverse(i.size_bytes));
+    Ok(v)
+}
+
+/// Removes the images nothing needs ([`removable_now`]); the bytes freed. An image the engine
+/// refuses to remove (taken into use meanwhile, several names) is logged and kept.
+pub(crate) async fn prune_images(s: &Arc<DockerSvc>, ctx: &TaskCtx) -> Result<u64, String> {
+    let v = removable_now(s).await.map_err(|e| e.2)?;
+    if v.is_empty() {
+        ctx.log("no unused image to remove");
+        return Ok(0);
+    }
+    let mut freed = 0u64;
+    for (n, i) in v.iter().enumerate() {
+        if ctx.is_cancelled() {
+            break;
+        }
+        let name = i.tags.first().or(i.digests.first()).cloned().unwrap_or_else(|| i.id.clone());
+        let id = i.id.clone();
+        match s.call(move |e| async move { e.remove_image(&id).await }).await {
+            Ok(()) => {
+                freed += i.size_bytes;
+                ctx.log(&format!("removed {name} ({} MiB)", i.size_bytes >> 20));
+            }
+            Err(e) => ctx.log(&format!("{name}: kept ({})", e.2)),
+        }
+        ctx.progress(((n + 1) * 100 / v.len()) as u8);
+    }
+    ctx.log(&format!("{} MiB freed", freed >> 20));
+    s.changed();
+    Ok(freed)
+}
+
+async fn images_prune(
+    State(st): State<DkState>,
+    hd: HeaderMap,
+    body: Result<Json<ImagePruneRequest>, JsonRejection>,
+) -> Res<Response> {
+    let (s, who) = (dsvc(&st)?, user(&hd)?);
+    s.ops.admins.require_admin(&who, "Docker images")?;
+    let Json(req) = body?;
+    if req.dry_run {
+        let images = removable_now(&s).await?;
+        let bytes = images.iter().map(|i| i.size_bytes).sum();
+        return Ok(Json(ImagePrunePlan { images, bytes }).into_response());
+    }
+    s.engine().await?;
+    audit(&who, "image-prune", "-");
+    let s2 = s.clone();
+    let id = s
+        .ops
+        .tasks
+        .spawn("docker.image-prune", &who, move |ctx| async move { prune_images(&s2, &ctx).await.map(|_| ()) })?;
+    Ok(accepted(id))
+}
+
 async fn volumes(State(st): State<DkState>) -> Res<Json<Vec<VolumeSummary>>> {
     let s = dsvc(&st)?;
     // sizes from the cached `df` (a failure only leaves them out)
@@ -2341,9 +2447,19 @@ impl StackOp {
 pub(crate) fn start_compose(s: &Arc<DockerSvc>, who: &str, name: &str, l: Layout, op: StackOp) -> Res<String> {
     let guard = mark_busy(s, name)?;
     let (s2, n2) = (s.clone(), name.to_string());
+    let update = matches!(op, StackOp::Update { .. });
     let id = s.ops.tasks.spawn(&op.task(), who, move |ctx| async move {
         let _guard = guard;
-        stack_task(&s2, &ctx, &n2, &l, op).await
+        stack_task(&s2, &ctx, &n2, &l, op).await?;
+        // after an update the previous images go once nothing needs them (the snapshot
+        // taken before it keeps the old ones for a rollback)
+        if update {
+            drop(_guard);
+            if let Err(e) = prune_images(&s2, &ctx).await {
+                ctx.log(&format!("unused images not removed: {e}"));
+            }
+        }
+        Ok(())
     })?;
     Ok(id)
 }
@@ -3502,6 +3618,7 @@ fn docker_routes(st: DkState) -> Router {
         )
         .route("/v1/docker/stacks/{name}/{action}", post(stack_action))
         .route("/v1/docker/images", get(images))
+        .route("/v1/docker/images/prune", post(images_prune))
         .route("/v1/docker/volumes", get(volumes))
         .route("/v1/docker/networks", get(networks))
         .route("/v1/docker/df", get(disk_usage))

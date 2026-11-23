@@ -2462,6 +2462,8 @@ body:has(.sysp-overlay), body:has(.sysp-overlay) .main { overflow: hidden; }
 .wol-wake .btn-spinner { flex: none; }
 .wol-wake-busy { cursor: default; }
 .wol-menu { min-width: 180px; text-align: left; }
+.prune-list .kv > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.prune-list .kv > span:last-child { white-space: nowrap; }
 .wol-line-row:hover { background: none; }
 .wol-line-row td { height: auto; padding-top: 0; }
 .wol-progress { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); margin: 0; min-width: 0; }

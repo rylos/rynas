@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rynas_api_types::docker::ImageUpdate;
+use rynas_api_types::docker::{ImageSummary, ImageUpdate};
 
 /// `(repository, tag)` of a reference; digests (`@sha256:…`) give `None` as the tag. The
 /// repository is normalized (`nginx` → `docker.io/library/nginx`).
@@ -123,6 +123,34 @@ pub fn compare(u: InUse, remote: Result<String, String>) -> ImageUpdate {
     }
 }
 
+/// A reference in a form that compares: `<repo>:<tag>` (the tag `latest` when none) or
+/// `<repo>@<digest>`, the repository normalized (`nginx` → `docker.io/library/nginx:latest`).
+pub fn ref_key(image: &str) -> String {
+    match split_ref(image) {
+        (repo, Some(tag)) => format!("{repo}:{tag}"),
+        (repo, None) => format!("{repo}@{}", image.split_once('@').map_or("", |(_, d)| d)),
+    }
+}
+
+/// The local images nothing needs: no container (running or stopped) runs them (`used`:
+/// image ids), no stack snapshot (a rollback point) recorded them (`kept`: image ids), no
+/// stack's compose model names them (`refs`: a stack taken down has no containers), and the
+/// engine does not count them as used.
+pub fn removable_images(
+    images: &[ImageSummary],
+    used: &BTreeSet<String>,
+    kept: &BTreeSet<String>,
+    refs: &[String],
+) -> Vec<ImageSummary> {
+    let wanted: BTreeSet<String> = refs.iter().map(|r| ref_key(r)).collect();
+    images
+        .iter()
+        .filter(|i| i.containers <= 0 && !used.contains(&i.id) && !kept.contains(&i.id))
+        .filter(|i| !i.tags.iter().chain(i.digests.iter()).any(|r| wanted.contains(&ref_key(r))))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +205,36 @@ mod tests {
         assert!(!r.update_available);
         let r = compare(u[0].clone(), Err("unauthorized".into()));
         assert!(!r.update_available && r.error.is_some());
+    }
+
+    #[test]
+    fn removable_images_keep_what_is_needed() {
+        let img = |id: &str, tags: &[&str], digests: &[&str], containers: i64| ImageSummary {
+            id: id.into(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            digests: digests.iter().map(|s| s.to_string()).collect(),
+            size_bytes: 1,
+            created_s: 0,
+            containers,
+            dangling: tags.is_empty(),
+        };
+        let images = vec![
+            img("a", &["nginx:1.27"], &[], 0),                       // named by a stack that is down
+            img("b", &[], &["bpatrik/pigallery2@sha256:old"], 0),    // an old version: removable
+            img("c", &[], &["ghcr.io/x/ha@sha256:prev"], 0),         // a rollback point holds it
+            img("d", &["redis:7"], &[], 0),                          // a stopped container runs it
+            img("e", &["jellyfin/jellyfin:latest"], &[], 1),         // the engine counts it used
+            img("f", &["busybox:latest"], &[], 0),                   // nothing needs it
+            img("g", &[], &["docker.io/library/app@sha256:pin"], 0), // a stack pins this digest
+            img("h", &["docker.io/library/caddy:latest"], &[], 0),   // named as `caddy`
+        ];
+        let used: BTreeSet<String> = ["d".to_string()].into();
+        let kept: BTreeSet<String> = ["c".to_string()].into();
+        let refs = vec!["docker.io/library/nginx:1.27".to_string(), "app@sha256:pin".into(), "caddy".into()];
+        let ids: Vec<String> = removable_images(&images, &used, &kept, &refs).into_iter().map(|i| i.id).collect();
+        assert_eq!(ids, ["b", "f"]);
+        assert_eq!(ref_key("nginx"), "docker.io/library/nginx:latest");
+        assert_eq!(ref_key("nginx:1.2@sha256:x"), "docker.io/library/nginx@sha256:x");
+        assert_eq!(ref_key("localhost:5000/a/b:2"), "localhost:5000/a/b:2");
     }
 }

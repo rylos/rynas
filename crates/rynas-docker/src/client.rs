@@ -188,6 +188,18 @@ impl Engine {
         self.docker.inspect_image(image).await.is_ok()
     }
 
+    /// Removes a local image by id (never forced: one a container uses, or with several
+    /// names, stays and the engine says why).
+    pub async fn remove_image(&self, id: &str) -> Result<(), DockerError> {
+        let o = qp::RemoveImageOptions {
+            force: false,
+            noprune: false,
+            ..Default::default()
+        };
+        self.docker.remove_image(id, Some(o), None).await?;
+        Ok(())
+    }
+
     /// A label of a local image (`org.opencontainers.image.version`…).
     pub async fn image_label(&self, image: &str, label: &str) -> Result<Option<String>, DockerError> {
         let i = self.docker.inspect_image(image).await?;

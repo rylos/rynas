@@ -2067,7 +2067,14 @@ async fn update_post(
         .tasks
         .spawn("apps.update", &who, move |ctx| async move {
             let _guard = guard;
-            update_task(&s2, &ctx, job).await.map(|_| ())
+            update_task(&s2, &ctx, job).await?;
+            // the previous images go once nothing needs them (the snapshot taken before the
+            // update keeps the old ones for a rollback)
+            drop(_guard);
+            if let Err(e) = crate::docker::prune_images(&s2, &ctx).await {
+                ctx.log(&format!("unused images not removed: {e}"));
+            }
+            Ok(())
         })?;
     Ok(accepted(id))
 }

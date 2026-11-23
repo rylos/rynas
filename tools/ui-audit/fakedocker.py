@@ -1,7 +1,7 @@
 """Fake Docker Engine API on a Unix socket, for the UI audits (rynasd --docker-socket).
 
 Serves the read endpoints bollard calls (/_ping, /version, /info, /containers/json,
-/containers/{id}/json, /containers/{id}/logs, /images/json, /images/{name}/json,
+/containers/{id}/json, /containers/{id}/logs, /images/json, /images/{name}/json, DELETE /images/{id},
 /distribution/{name}/json, /volumes, /networks, /system/df, /events) with a few stacks:
 
 - `media` (managed by rynas: working dir /volume1/docker/stacks/media), two services;
@@ -108,9 +108,15 @@ def images_json():
         used = sum(1 for c in C if c["image"] == tag)
         out.append({"Id": iid, "ParentId": "", "RepoTags": [tag], "RepoDigests": [f"{repo}@{digest}"], "Created": NOW - 86400 * 20,
                     "Size": size, "SharedSize": -1, "Labels": {}, "Containers": used})
-    out.append({"Id": "sha256:" + "a9" * 32, "ParentId": "", "RepoTags": [], "RepoDigests": [], "Created": NOW - 86400 * 60,
-                "Size": 230_000_000, "SharedSize": -1, "Labels": {}, "Containers": 0})
+    if OLD_IMAGE not in REMOVED:
+        out.append({"Id": OLD_IMAGE, "ParentId": "", "RepoTags": [], "RepoDigests": [], "Created": NOW - 86400 * 60,
+                    "Size": 230_000_000, "SharedSize": -1, "Labels": {}, "Containers": 0})
     return out
+
+
+# the old untagged image: removable (DELETE /images/{id}); removed ones stay gone
+OLD_IMAGE = "sha256:" + "a9" * 32
+REMOVED = set()
 
 
 VOLUMES = [
@@ -281,6 +287,15 @@ async def handle(r, w):
                     return
                 else:
                     await send(w, 204)
+            elif method == "DELETE" and (m := re.fullmatch(r"/images/([^/]+)", path)):
+                name = m.group(1).replace("%3A", ":")
+                if name == OLD_IMAGE and name not in REMOVED:
+                    REMOVED.add(name)
+                    await send(w, 200, [{"Deleted": name}])
+                elif any(name in (t, v[0]) for t, v in IMAGES.items()):
+                    await send(w, 409, {"message": f"conflict: unable to delete {name} (in use)"})
+                else:
+                    await send(w, 404, {"message": f"No such image: {name}"})
             elif m := re.fullmatch(r"/images/(.+)/json", path):
                 name = m.group(1).replace("%2F", "/").replace("%3A", ":")
                 hit = next(((t, v) for t, v in IMAGES.items() if name in (t, v[0])), None)

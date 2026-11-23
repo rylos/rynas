@@ -4034,6 +4034,7 @@ task.docker.stack.update	Aggiornamento dello stack
 task.docker.stack.rollback	Ritorno alla versione precedente dello stack
 task.docker.stack.remove	Rimozione dello stack
 task.docker.update-check	Controllo aggiornamenti delle immagini
+task.docker.image-prune	Rimozione immagini non usate
 task.docker.auto-window	Finestra degli aggiornamenti automatici
 task.docker.auto-update	Aggiornamento automatico dello stack
 nev.docker.unhealthy.title	Il container {container} non è in salute
@@ -4391,6 +4392,12 @@ dk.i.none	Nessuna immagine
 dk.i.untagged	Senza tag
 dk.i.used_by	Usata da {n}
 dk.i.unused	Non usata
+dk.i.prune	Rimuovi non usate
+dk.i.prune_title	Rimuovi immagini non usate
+dk.i.prune_text	Immagini che nessun container (anche fermo), nessuno stack e nessun punto di ripristino tenuto usa. Dopo ogni aggiornamento di uno stack succede da solo, quando la versione vecchia non serve più.
+dk.i.prune_none	Nessuna immagine da rimuovere: ognuna è in uso o tenuta per un punto di ripristino.
+dk.i.prune_total	Da rimuovere: {n} · {size}
+dk.i.prune_go	Rimuovi
 dk.i.dangling	Orfana
 dk.v.title	Volumi
 dk.v.none	Nessun volume con nome
