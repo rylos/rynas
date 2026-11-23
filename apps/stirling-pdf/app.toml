@@ -1,8 +1,8 @@
 schema = 1
 id = "stirling-pdf"
 name = "Stirling-PDF"
-version = "1.0.0"
-app_version = "3.3.0"
+version = "1.0.1"
+app_version = "3.4.0"
 update_policy = "minor"
 description = "PDF toolbox in the browser: merge, split, convert, compress, OCR, sign and redact."
 homepage = "https://www.stirlingpdf.com"
