@@ -30,6 +30,13 @@ pub trait HardwareProvider: Send + Sync {
     ) -> Vec<ThermalLimit> {
         Vec::new()
     }
+
+    /// The model's name ("QNAP HS-251") once the provider is sure of the machine, for firmware
+    /// that leaves its DMI strings unfilled; `None`: not known (yet). Cheap: no reading of
+    /// fans or disks.
+    fn model_name(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A temperature and the threshold at which the hardware controller shuts the machine down.

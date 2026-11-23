@@ -76,6 +76,10 @@ impl QnapProvider {
 }
 
 impl HardwareProvider for QnapProvider {
+    fn model_name(&self) -> Option<String> {
+        self.is_confirmed().then(|| self.model.display.to_string())
+    }
+
     fn status(&self) -> Result<Option<HardwareStatus>, String> {
         if !self.is_confirmed() {
             return Ok(None);
@@ -152,7 +156,9 @@ mod tests {
         // the first boot: rynas-web starts before the drivers are loaded
         let p = QnapProvider::detect(d.path()).unwrap();
         assert_eq!(p.status(), Ok(None));
+        assert_eq!(p.model_name(), None);
         fake_hs251(d.path(), Some("f71869a"));
+        assert_eq!(p.model_name().as_deref(), Some("QNAP HS-251"));
         let s = p.status().unwrap().unwrap();
         assert_eq!(s.provider.as_deref(), Some("qnap"));
         assert_eq!(s.bays.len(), 2);

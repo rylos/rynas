@@ -79,8 +79,20 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
         .map_err(|e| Error::internal(e.to_string()))
 }
 
-async fn system() -> ApiResult<SystemInfo> {
-    Ok(Json(blocking(crate::system::system_info).await?))
+async fn system(State(st): State<AppState>) -> ApiResult<SystemInfo> {
+    let hw = st.hw.clone();
+    Ok(Json(
+        blocking(move || {
+            let mut info = crate::system::system_info();
+            // firmware that leaves its DMI strings unfilled: the model the hardware module
+            // recognised
+            if info.model.is_empty() {
+                info.model = hw.model_name().unwrap_or_default();
+            }
+            info
+        })
+        .await?,
+    ))
 }
 
 async fn history(
