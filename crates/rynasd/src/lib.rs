@@ -29,6 +29,7 @@ pub mod gate;
 pub mod groups;
 pub mod hardware;
 pub mod jobs;
+pub mod kernel_updates;
 pub mod modules;
 pub mod network;
 pub mod notifications;

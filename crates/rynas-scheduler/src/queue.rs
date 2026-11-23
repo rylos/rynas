@@ -69,7 +69,7 @@ pub fn priority_of(a: &TaskAction) -> u8 {
         TaskAction::Snapshot { .. } => priority::SNAPSHOT,
         TaskAction::Backup { .. } | TaskAction::Replicate { .. } => priority::TRANSFER,
         TaskAction::PcMaintenance => priority::PC_MAINTENANCE,
-        TaskAction::SystemUpgrade | TaskAction::DockerAutoUpdate => priority::PACKAGES,
+        TaskAction::SystemUpgrade | TaskAction::DockerAutoUpdate | TaskAction::KernelUpdate => priority::PACKAGES,
         TaskAction::Scrub { .. } => priority::SCRUB,
         TaskAction::SmartTest { .. } | TaskAction::MdCheck { .. } => priority::DISK_TEST,
         TaskAction::Dedup { .. } => priority::DEDUP,

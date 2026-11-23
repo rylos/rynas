@@ -259,6 +259,14 @@ impl Module for SynologyModule {
             .map(|b| Arc::new(b) as Arc<dyn BootLayer>)
     }
 
+    fn kernel_channel(&self) -> Option<Arc<dyn rynas_module::KernelChannel>> {
+        if !self.synodeb && !self.dry {
+            return None;
+        }
+        crate::kernels::SynodebKernels::find(&self.root, self.dry)
+            .map(|k| Arc::new(k) as Arc<dyn rynas_module::KernelChannel>)
+    }
+
     fn rescue_feedback(&self) -> Option<Arc<dyn Feedback>> {
         self.hardware.as_ref().map(|_| {
             Arc::new(Beeps {

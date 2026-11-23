@@ -6067,3 +6067,68 @@ wol.power	Spegni o sospendi
 wol.by_other	Un altro utente
 wol.h.timeout	Tempo scaduto
 wol.pc.add_hint	(si apre in una nuova scheda)
+upd.kernel_held	Trattenuti per scelta
+upd.kernel_held_help	Il kernel si installa da Aggiornamenti del kernel.
+kch.title	Aggiornamenti del kernel
+kch.refresh	Cerca di nuovo nuovi kernel
+kch.uptodate	È installato il kernel più recente della serie
+kch.behind.one	{n} kernel più recente
+kch.behind.other	{n} kernel più recenti
+kch.auto_due	Verrà installato nella finestra degli aggiornamenti dal {date}.
+kch.feed_error	Non è stato possibile leggere l'elenco dei kernel pubblicati: date, modifiche e CVE potrebbero mancare.
+kch.installed	Kernel installato
+kch.series	Serie
+kch.held	Pacchetti trattenuti
+kch.last_install	Ultimo kernel installato qui
+kch.cves_total	Corretti aggiornando
+kch.cves.one	{n} CVE corretta
+kch.cves.other	{n} CVE corrette
+kch.cves_unknown	CVE non note
+kch.cves_title	CVE
+kch.no_cves	Nessuna indicata
+kch.install	Installa kernel
+kch.switch	Passa a {series}
+kch.switch_action	Cambia serie
+kch.released	uscito il {date}
+kch.first_seen	visto il {date}
+kch.installable	Installabile
+kch.not_available	Non più nel repository
+kch.upstream_only	Solo aggiornamento upstream
+kch.changelog	ChangeLog
+kch.changes	Modifiche
+kch.s.longterm	Long-term
+kch.s.stable	Stabile
+kch.s.default	Distribuzione
+kch.mode	Quando installare i nuovi kernel
+kch.mode_system	Insieme agli altri aggiornamenti
+kch.mode_manual	A mano
+kch.mode_notify	A mano, con notifica
+kch.mode_auto	Automaticamente
+kch.help_system	Un kernel più recente si installa come ogni altro pacchetto, con Installa tutto o con gli aggiornamenti automatici.
+kch.help_manual	Il kernel è trattenuto: cambia solo quando premi Installa kernel. Può restare lo stesso per mesi.
+kch.help_notify	Il kernel è trattenuto, e una notifica avvisa quando ne esce uno più recente.
+kch.help_auto	Il kernel è trattenuto, e rynas ne installa da solo uno più recente nella finestra degli aggiornamenti, quando è abbastanza vecchio.
+kch.interval	Al massimo ogni (giorni)
+kch.interval_help_notify	Al massimo una notifica ogni tanti giorni.
+kch.interval_help_auto	Al massimo un'installazione ogni tanti giorni.
+kch.min_age	Età minima (giorni)
+kch.min_age_help	Un kernel si installa quando è pubblicato da tanti giorni: una release difettosa di solito viene sostituita entro quel tempo.
+kch.reboot	Riavvia dopo l'installazione
+kch.reboot_help	All'ora di riavvio degli aggiornamenti automatici.
+kch.window_note	Si installa nella finestra degli aggiornamenti automatici, mai durante la manutenzione o un backup.
+kch.confirm_title	Installare il kernel {k}?
+kch.confirm_text	Il kernel si installa ora e parte al prossimo riavvio. Il kernel precedente resta installato come riserva.
+kch.series_title	Passare alla serie {series}?
+kch.series_text	Il kernel della serie si installa ora e parte al prossimo riavvio. Il kernel attuale resta installato come riserva.
+kch.series_text_back	Il kernel della serie si installa ora e i pacchetti della serie più recente vengono rimossi; il kernel più vecchio parte al prossimo riavvio. Il kernel attuale resta come riserva.
+task.updates.kernel	Installazione di un kernel
+task.updates.kernel-series	Cambio della serie del kernel
+sch.act.kernel_update	Installazione automatica del kernel
+nev.updates.kernel_available.title	Kernel {kernel} disponibile
+nev.updates.kernel_available.body	Kernel più recenti di quello installato: {behind}. CVE corrette: {cves}.
+nev.updates.kernel_available.body_2	Kernel più recenti di quello installato: {behind}.
+nev.updates.kernel_installed.title	Kernel {kernel} installato, riavvio alle {at}
+nev.updates.kernel_installed.title_2	Kernel {kernel} installato
+nev.updates.kernel_failed.title	Kernel {kernel} non installato
+nev.updates.kernel_failed.body	{error}
+cfg.key.updates.kernel	Aggiornamenti del kernel

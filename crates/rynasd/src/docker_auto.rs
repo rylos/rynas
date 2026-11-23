@@ -379,7 +379,7 @@ const MAINTENANCE_KINDS: &[&str] = &[
     "ids.remap", "homes.move", "power.", "config.apply", "crypt.",
 ];
 
-fn is_maintenance(kind: &str) -> bool {
+pub(crate) fn is_maintenance(kind: &str) -> bool {
     MAINTENANCE_KINDS.iter().any(|k| kind.starts_with(k))
 }
 

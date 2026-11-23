@@ -49,6 +49,10 @@ pub struct UpdatesStatus {
     /// Packages apt keeps back (held or not installable now).
     #[serde(default)]
     pub held: Vec<String>,
+    /// Kernel metapackages rynas holds by the kernel policy (`updates.kernel`): kept back by
+    /// choice, installed from the kernel card.
+    #[serde(default)]
+    pub kernel_held: Vec<String>,
     /// What `apt-get autoremove` would remove (never run automatically).
     #[serde(default)]
     pub autoremovable: Vec<String>,
@@ -252,4 +256,261 @@ pub struct KernelStatus {
     pub read_at_ms: Option<u64>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// How new kernels are installed (`updates.kernel`, [`KernelPolicy::mode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KernelMode {
+    /// With the other updates, as apt does (nothing is held).
+    #[default]
+    System,
+    /// Never by itself: held, installed with "Install kernel".
+    Manual,
+    /// As manual, plus a notification when a newer kernel is out (at most every
+    /// [`KernelPolicy::interval_days`]).
+    Notify,
+    /// Installed by rynas inside the update window once it is [`KernelPolicy::min_age_days`]
+    /// old, at most every [`KernelPolicy::interval_days`].
+    Auto,
+}
+
+/// The `updates.kernel` configuration key. Its default depends on the machine
+/// ([`KernelPolicy::default_for`]): kernels follow the other updates on a plain Debian; a
+/// machine whose hardware module ships its own kernels (written to a boot flash at every
+/// install) keeps them until the user installs one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KernelPolicy {
+    #[serde(default)]
+    pub mode: KernelMode,
+    /// Notify and auto: at most one notification / installation every so many days (1-365).
+    #[serde(default = "default_kernel_interval")]
+    pub interval_days: u16,
+    /// Auto: a kernel is installed once it is this many days old (0-365).
+    #[serde(default = "default_kernel_age")]
+    pub min_age_days: u16,
+    /// Auto: restart at the reboot time of the automatic updates after installing.
+    #[serde(default = "default_true")]
+    pub reboot: bool,
+}
+
+fn default_kernel_interval() -> u16 {
+    30
+}
+fn default_kernel_age() -> u16 {
+    14
+}
+fn default_true() -> bool {
+    true
+}
+
+impl Default for KernelPolicy {
+    fn default() -> Self {
+        Self {
+            mode: KernelMode::System,
+            interval_days: default_kernel_interval(),
+            min_age_days: default_kernel_age(),
+            reboot: true,
+        }
+    }
+}
+
+impl KernelPolicy {
+    /// The value before the user chose one: manual where a hardware module ships its own
+    /// kernels, else with the other updates.
+    pub fn default_for(module_kernels: bool) -> Self {
+        Self {
+            mode: if module_kernels { KernelMode::Manual } else { KernelMode::System },
+            ..Self::default()
+        }
+    }
+
+    /// The kernel metapackages are held.
+    pub fn holds(&self) -> bool {
+        self.mode != KernelMode::System
+    }
+}
+
+/// `GET/PUT /updates/kernel/policy`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct KernelPolicyState {
+    pub applied: KernelPolicy,
+    #[serde(default)]
+    pub pending: Option<KernelPolicy>,
+}
+
+/// One kernel of a kernel feed ([`KernelFeed`], format 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FeedKernel {
+    /// `uname -r` of the kernel.
+    pub release: String,
+    pub series: String,
+    #[serde(default)]
+    pub upstream: Option<String>,
+    #[serde(default)]
+    pub package: Option<String>,
+    /// Debian version of its packages.
+    pub version: String,
+    /// When it was published (UTC, RFC 3339).
+    #[serde(default)]
+    pub published: Option<String>,
+    /// Still in the package repository.
+    #[serde(default)]
+    pub available: bool,
+    /// Upstream change log.
+    #[serde(default)]
+    pub changelog: Option<String>,
+    #[serde(default)]
+    pub previous: Option<String>,
+    /// The publisher's own changes since the previous kernel of the series (empty: an
+    /// upstream update only).
+    #[serde(default)]
+    pub changes: Vec<String>,
+    /// CVEs fixed since the previous kernel of the series (`None`: not known).
+    #[serde(default)]
+    pub cves: Option<Vec<String>>,
+}
+
+/// A series of a kernel feed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FeedSeries {
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub metapackage: Option<String>,
+}
+
+/// A kernel publisher's list of its kernels (format 1): newest first, the whole history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct KernelFeed {
+    pub format: u32,
+    #[serde(default)]
+    pub generated: Option<String>,
+    #[serde(default)]
+    pub series: std::collections::BTreeMap<String, FeedSeries>,
+    #[serde(default)]
+    pub kernels: Vec<FeedKernel>,
+    #[serde(default)]
+    pub cve_titles: std::collections::BTreeMap<String, String>,
+}
+
+/// A kernel newer than the installed one, in the series in use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct KernelOffer {
+    /// `uname -r` (from the image metapackage's dependency or the feed).
+    pub release: String,
+    /// Debian version of the series' image metapackage.
+    pub version: String,
+    /// Installable now (the package repository has it).
+    pub available: bool,
+    /// Publication time (ms), from the feed; else when rynas first saw it.
+    #[serde(default)]
+    pub published_ms: Option<u64>,
+    /// `published_ms` comes from the publisher's feed (else: first seen by rynas).
+    #[serde(default)]
+    pub published_known: bool,
+    #[serde(default)]
+    pub upstream: Option<String>,
+    #[serde(default)]
+    pub changelog: Option<String>,
+    #[serde(default)]
+    pub changes: Vec<String>,
+    #[serde(default)]
+    pub cves: Option<Vec<String>>,
+}
+
+/// A kernel series this machine can follow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct KernelSeriesState {
+    /// Stable id (`default` on a plain Debian).
+    pub id: String,
+    /// Upstream branch, from the feed (`6.18`).
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Image metapackage.
+    pub image: String,
+    /// Its image metapackage is installed.
+    pub installed: bool,
+    /// The series the machine boots.
+    pub current: bool,
+}
+
+/// `GET /updates/kernel/channel[?refresh=1]`: the kernels the machine can install.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct KernelChannelState {
+    /// A kernel metapackage is installed (else nothing below applies).
+    pub supported: bool,
+    /// A hardware module ships the kernels of this machine.
+    #[serde(default)]
+    pub module: bool,
+    /// The series (more than one: the user can switch).
+    #[serde(default)]
+    pub series: Vec<KernelSeriesState>,
+    /// Installed kernel metapackages.
+    #[serde(default)]
+    pub metapackages: Vec<String>,
+    /// Those held now.
+    #[serde(default)]
+    pub held: Vec<String>,
+    /// The series' image metapackage version installed.
+    #[serde(default)]
+    pub installed_version: Option<String>,
+    /// The kernel it installs (`uname -r`).
+    #[serde(default)]
+    pub installed_release: Option<String>,
+    /// Newer kernels of the series, newest first (the first is the one "Install kernel"
+    /// installs; the feed's older ones only count how far behind the machine is).
+    #[serde(default)]
+    pub newer: Vec<KernelOffer>,
+    /// Titles of the CVEs named in `newer`.
+    #[serde(default)]
+    pub cve_titles: std::collections::BTreeMap<String, String>,
+    /// The feed could not be read (the list then comes from apt only).
+    #[serde(default)]
+    pub feed_error: Option<String>,
+    #[serde(default)]
+    pub feed_read_ms: Option<u64>,
+    #[serde(default)]
+    pub last_install_ms: Option<u64>,
+    #[serde(default)]
+    pub last_notified_ms: Option<u64>,
+    /// Auto: the earliest time the newest kernel may be installed (age and interval), when
+    /// one is waiting.
+    #[serde(default)]
+    pub auto_due_ms: Option<u64>,
+    /// The policy in force.
+    #[serde(default)]
+    pub policy: KernelPolicy,
+}
+
+impl KernelChannelState {
+    /// The kernel "Install kernel" installs.
+    pub fn candidate(&self) -> Option<&KernelOffer> {
+        self.newer.iter().find(|k| k.available)
+    }
+
+    /// Union of the CVEs fixed by the newer kernels (`None` when one of them is not known).
+    pub fn cves(&self) -> Option<Vec<String>> {
+        let mut all = std::collections::BTreeSet::new();
+        for k in &self.newer {
+            all.extend(k.cves.as_ref()?.iter().cloned());
+        }
+        Some(all.into_iter().collect())
+    }
+}
+
+/// `POST /updates/kernel/install` → 202 `TaskStarted` (task `updates.kernel`): the version
+/// the page showed (refused when another one would be installed now).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct KernelInstallRequest {
+    pub version: String,
+}
+
+/// `POST /updates/kernel/series` → 202 `TaskStarted` (task `updates.kernel-series`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct KernelSeriesRequest {
+    pub series: String,
 }

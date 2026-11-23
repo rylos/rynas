@@ -76,10 +76,18 @@ pub struct Updates {
     refresh: tokio::sync::Mutex<()>,
     /// Held over "is one running?" and the start of a task: two requests at once start one.
     starting: std::sync::Mutex<()>,
-    kernel: std::sync::Mutex<Option<(Instant, KernelStatus)>>,
+    pub(crate) kernel: std::sync::Mutex<Option<(Instant, KernelStatus)>>,
     kernel_lock: tokio::sync::Mutex<()>,
     /// A hardware module's boot layer.
     boot: Option<Arc<dyn rynas_module::BootLayer>>,
+    /// A hardware module's kernel channel ([`crate::kernel_updates`]).
+    pub(crate) channel: Option<Arc<dyn rynas_module::KernelChannel>>,
+    /// rynasd's state directory (the kernel state file).
+    pub(crate) state_dir: PathBuf,
+    /// The kernel feed last read.
+    pub(crate) feed: tokio::sync::Mutex<Option<crate::kernel_updates::FeedCache>>,
+    /// Held by the kernel state file's read-modify-write.
+    pub(crate) kstate_lock: std::sync::Mutex<()>,
     /// A hardware module runs a system layer (UPS or boot): it manages its apt sources
     /// itself, so the Debian backports switch is not offered ([`crate::backports`]).
     system_layer: bool,
@@ -168,8 +176,24 @@ impl Updates {
             kernel: std::sync::Mutex::new(None),
             kernel_lock: tokio::sync::Mutex::new(()),
             boot: None,
+            channel: None,
+            state_dir: PathBuf::from("/var/lib/rynas"),
+            feed: tokio::sync::Mutex::new(None),
+            kstate_lock: std::sync::Mutex::new(()),
             system_layer: false,
         }
+    }
+
+    /// A hardware module's kernel channel.
+    pub fn with_kernel_channel(mut self, c: Option<Arc<dyn rynas_module::KernelChannel>>) -> Self {
+        self.channel = c;
+        self
+    }
+
+    /// rynasd's state directory.
+    pub fn with_state_dir(mut self, dir: PathBuf) -> Self {
+        self.state_dir = dir;
+        self
     }
 
     /// A hardware module's system layer is present (no backports switch then).
@@ -188,7 +212,7 @@ impl Updates {
         self
     }
 
-    fn apt_present(&self) -> bool {
+    pub(crate) fn apt_present(&self) -> bool {
         self.dry || Path::new(APT_GET).exists()
     }
 
@@ -210,7 +234,7 @@ impl Updates {
     }
 
     /// Runs a simulation (or answers the fixture on a dry system).
-    async fn simulate(&self, args: &[&str], fixture: &'static str) -> Result<String, String> {
+    pub(crate) async fn simulate(&self, args: &[&str], fixture: &'static str) -> Result<String, String> {
         if self.dry {
             return Ok(fixture.to_string());
         }
@@ -260,7 +284,7 @@ impl Updates {
     }
 
     /// A running or queued `updates.*` task other than `me`.
-    fn running_other(&self, me: &str) -> Option<String> {
+    pub(crate) fn running_other(&self, me: &str) -> Option<String> {
         self.ops
             .tasks
             .list(100)
@@ -323,10 +347,11 @@ impl Updates {
         }
         s.running_task = self.running_task();
         s.unattended_installed = unattended_installed(&self.config_root);
+        s.kernel_held = self.kernel_held();
         s
     }
 
-    fn task_done(&self) {
+    pub(crate) fn task_done(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -505,6 +530,7 @@ pub fn router(st: UpdState) -> Router {
         .route("/v1/updates/auto", get(auto_get).put(auto_put))
         .route("/v1/updates/kernel", get(kernel_get))
         .with_state(st.clone())
+        .merge(crate::kernel_updates::router(st.clone()))
         .merge(crate::backports::router(st))
 }
 
@@ -699,6 +725,8 @@ async fn auto_put(
     let Json(req) = body?;
     let r = tokio::task::spawn_blocking(move || {
         stage(&u.ops.config, &owner, AUTO_KEY, &req)?;
+        // the automatic kernel installation runs in the same window
+        crate::system_tasks::stage_kernel(&u.ops.config, &owner, AUTO_KEY)?;
         auto_state(&u, &owner)
     })
     .await
@@ -747,6 +775,8 @@ pub fn spawn_scheduled_check(who: &str) -> Res<String> {
         };
         let s = me.status(false).await;
         me.notify(&s);
+        // a newer kernel, in the kernel policy's notify mode
+        me.kernel_notify().await;
         r
     })?)
 }

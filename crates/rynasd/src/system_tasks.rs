@@ -18,6 +18,7 @@ use rynas_api_types::dedup::{DEDUP_KEY, DedupConfig};
 use rynas_api_types::docker::DockerSettings;
 use rynas_api_types::scheduler::system::{self, keep_options};
 use rynas_api_types::scheduler::{ScheduledTask, SchedulerConfig, TaskAction};
+use rynas_api_types::updates::{AutoUpdates, KernelPolicy};
 use rynas_config::Config;
 use rynas_scheduler::SCHEDULER_KEY;
 use rynas_scheduler::domain::normalize_task;
@@ -36,6 +37,8 @@ pub struct Wanted {
     pub dedup: Option<DedupConfig>,
     /// The updates check and the PC folders' retention.
     pub always: bool,
+    /// The automatic system updates' window and the kernel policy (`None`: not touched).
+    pub kernel: Option<(AutoUpdates, KernelPolicy)>,
 }
 
 /// The tasks to store, each with whether its feature decides when it is on.
@@ -44,6 +47,9 @@ pub fn tasks(w: &Wanted) -> Vec<(ScheduledTask, bool)> {
     if w.always {
         out.push((system::updates_check(), false));
         out.push((system::pc_retention(), false));
+    }
+    if let Some((a, k)) = &w.kernel {
+        out.push((system::kernel_update(a, k), true));
     }
     if let Some(d) = &w.docker {
         out.push((system::docker_image_check(), false));
@@ -121,11 +127,55 @@ fn system_action(id: &str) -> TaskAction {
         system::UPDATES_CHECK => TaskAction::UpdatesCheck,
         system::DOCKER_IMAGE_CHECK => TaskAction::DockerImageCheck,
         system::DOCKER_AUTO_UPDATE => TaskAction::DockerAutoUpdate,
+        system::KERNEL_UPDATE => TaskAction::KernelUpdate,
         system::APPS_CATALOG => TaskAction::AppsCatalog,
         system::PC_MAINTENANCE => TaskAction::PcMaintenance,
         system::PC_RETENTION => TaskAction::PcRetention,
         _ => TaskAction::SystemUpgrade,
     }
+}
+
+/// The window of the automatic system updates and the kernel policy: applied, or as `owner`
+/// staged them (`None` when this rynasd has no updates keys).
+pub fn kernel_wanted(cfg: &Config, owner: Option<&str>) -> Result<Option<(AutoUpdates, KernelPolicy)>, String> {
+    let keys = cfg.keys();
+    if !keys.iter().any(|k| k == rynas_updates::AUTO_KEY) || !keys.iter().any(|k| k == rynas_updates::KERNEL_KEY) {
+        return Ok(None);
+    }
+    let value = |key: &str| -> Result<Option<serde_json::Value>, String> {
+        if let Some(o) = owner
+            && let Some(p) = cfg.pending_value(o, key).map_err(|e| e.to_string())?
+        {
+            return Ok(p);
+        }
+        cfg.current(key).map_err(|e| e.to_string())
+    };
+    let a: AutoUpdates = match value(rynas_updates::AUTO_KEY)? {
+        Some(v) => serde_json::from_value(v).map_err(|e| e.to_string())?,
+        None => AutoUpdates::default(),
+    };
+    let k: KernelPolicy = match value(rynas_updates::KERNEL_KEY)? {
+        Some(v) => serde_json::from_value(v).map_err(|e| e.to_string())?,
+        None => KernelPolicy::default(),
+    };
+    Ok(Some((a, k)))
+}
+
+/// `updates.auto` or `updates.kernel` staged by `owner`: the kernel task is staged with them
+/// (they go live together).
+pub fn stage_kernel(cfg: &Config, owner: &str, key: &str) -> Res<()> {
+    if !cfg.keys().iter().any(|k| k == SCHEDULER_KEY) {
+        return Ok(());
+    }
+    let Some(kernel) = kernel_wanted(cfg, Some(owner)).map_err(crate::ops::Error::internal)? else {
+        return Ok(());
+    };
+    let (mut sched, _, _): (SchedulerConfig, SchedulerConfig, _) = docs(cfg, owner, SCHEDULER_KEY)?;
+    if merge(&mut sched, tasks(&Wanted { kernel: Some(kernel), ..Default::default() }), &|l| tracing::debug!("scheduler: {l}")) {
+        stage(cfg, owner, SCHEDULER_KEY, &sched)?;
+        cfg.stage_group(owner, &[key, SCHEDULER_KEY], false)?;
+    }
+    Ok(())
 }
 
 /// At the start of rynasd: the tasks of the jobs, applied when they differ from the stored
@@ -137,7 +187,8 @@ pub fn ensure(cfg: &Config, pc_hour: Option<u8>, log: &dyn Fn(&str)) -> Result<O
         None => DockerSettings::default(),
     };
     let dedup: Option<DedupConfig> = applied(DEDUP_KEY)?.and_then(|v| serde_json::from_value(v).ok());
-    let wanted = tasks(&Wanted { docker: Some(docker), pc_hour, dedup, always: true });
+    let kernel = kernel_wanted(cfg, None)?;
+    let wanted = tasks(&Wanted { docker: Some(docker), pc_hour, dedup, always: true, kernel });
     cfg.apply_update("rynas", SCHEDULER_KEY, "scheduled tasks of rynas's own jobs", log, |cur| {
         let mut doc: SchedulerConfig = match cur {
             Some(v) => serde_json::from_value(v).map_err(|e| e.to_string())?,

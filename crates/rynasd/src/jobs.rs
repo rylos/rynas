@@ -65,6 +65,7 @@ pub async fn spawn(p: &Arc<Protection>, t: &ScheduledTask, user: &str) -> Res<St
         TaskAction::Dedup { volume } => crate::dedup::spawn_scheduled(volume, user).await,
         // the jobs rynasd ran in its own loops before S3
         TaskAction::UpdatesCheck => crate::updates::spawn_scheduled_check(user),
+        TaskAction::KernelUpdate => crate::kernel_updates::spawn_auto(user),
         TaskAction::DockerImageCheck => {
             crate::docker_auto::spawn_image_check(p, t, user).map_err(Error::internal)
         }

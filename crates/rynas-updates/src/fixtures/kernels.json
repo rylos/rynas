@@ -1,0 +1,180 @@
+{
+ "format": 1,
+ "generated": "2026-11-23T15:20:42Z",
+ "series": {
+  "longterm": {
+   "branch": "6.18",
+   "metapackage": "linux-image-synodeb-longterm"
+  },
+  "stable": {
+   "branch": "7.3",
+   "metapackage": "linux-image-synodeb-stable"
+  }
+ },
+ "kernels": [
+  {
+   "release": "7.3.5-13-synodeb",
+   "series": "stable",
+   "upstream": "7.3.5",
+   "package": "linux-image-7.3.5-13-synodeb",
+   "version": "7.3.5-13",
+   "published": "2026-11-23T00:22:42Z",
+   "available": true,
+   "changelog": "https://cdn.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.3.5",
+   "previous": "7.3.4-12-synodeb",
+   "changes": [
+    "kernel: drop the 88SM9705 SEMB quirk patch, upstream since 6.18.64 and 7.3.5"
+   ],
+   "cves": [
+    "CVE-2026-99312",
+    "CVE-2026-99314",
+    "CVE-2026-99315",
+    "CVE-2026-99316"
+   ]
+  },
+  {
+   "release": "6.18.64-12-synodeb",
+   "series": "longterm",
+   "upstream": "6.18.64",
+   "package": "linux-image-6.18.64-12-synodeb",
+   "version": "6.18.64-12",
+   "published": "2026-11-22T23:52:37Z",
+   "available": true,
+   "changelog": "https://cdn.kernel.org/pub/linux/kernel/v6.x/ChangeLog-6.18.64",
+   "previous": "6.18.63-11-synodeb",
+   "changes": [
+    "kernel: drop the 88SM9705 SEMB quirk patch, upstream since 6.18.64 and 7.3.5"
+   ],
+   "cves": [
+    "CVE-2026-89788",
+    "CVE-2026-99272",
+    "CVE-2026-99275",
+    "CVE-2026-99312"
+   ]
+  },
+  {
+   "release": "7.3.4-12-synodeb",
+   "series": "stable",
+   "upstream": "7.3.4",
+   "package": "linux-image-7.3.4-12-synodeb",
+   "version": "7.3.4-12",
+   "published": "2026-11-13T15:31:59Z",
+   "available": true,
+   "changelog": "https://cdn.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.3.4",
+   "previous": "7.3.4-11-synodeb",
+   "changes": [
+    "Add the DS423+ (geminilake, community tier) (#14)"
+   ],
+   "cves": []
+  },
+  {
+   "release": "6.18.63-11-synodeb",
+   "series": "longterm",
+   "upstream": "6.18.63",
+   "package": "linux-image-6.18.63-11-synodeb",
+   "version": "6.18.63-11",
+   "published": "2026-11-13T14:49:44Z",
+   "available": true,
+   "changelog": "https://cdn.kernel.org/pub/linux/kernel/v6.x/ChangeLog-6.18.63",
+   "previous": "6.18.63-10-synodeb",
+   "changes": [
+    "Add the DS423+ (geminilake, community tier) (#14)"
+   ],
+   "cves": []
+  },
+  {
+   "release": "7.3.4-11-synodeb",
+   "series": "stable",
+   "upstream": "7.3.4",
+   "package": "linux-image-7.3.4-11-synodeb",
+   "version": "7.3.4-11",
+   "published": "2026-11-12T21:13:23Z",
+   "available": false,
+   "changelog": "https://cdn.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.3.4",
+   "previous": "7.3.3-10-synodeb",
+   "changes": [
+    "kernel patches: refresh for 6.18.63 and 7.3.4 (0006 on 6.18: notifier after the nbcon flush that 6.18.62 backported, as on 7.3)"
+   ],
+   "cves": [
+    "CVE-2026-99286",
+    "CVE-2026-99287",
+    "CVE-2026-99288",
+    "CVE-2026-99297"
+   ]
+  },
+  {
+   "release": "6.18.63-10-synodeb",
+   "series": "longterm",
+   "upstream": "6.18.63",
+   "package": "linux-image-6.18.63-10-synodeb",
+   "version": "6.18.63-10",
+   "published": "2026-11-12T20:44:04Z",
+   "available": false,
+   "changelog": "https://cdn.kernel.org/pub/linux/kernel/v6.x/ChangeLog-6.18.63",
+   "previous": "6.18.60-9-synodeb",
+   "changes": [
+    "kernel patches: refresh for 6.18.63 and 7.3.4 (0006 on 6.18: notifier after the nbcon flush that 6.18.62 backported, as on 7.3)"
+   ],
+   "cves": [
+    "CVE-2026-80668",
+    "CVE-2026-89755",
+    "CVE-2026-97538",
+    "CVE-2026-98176"
+   ]
+  },
+  {
+   "release": "7.3.3-10-synodeb",
+   "series": "stable",
+   "upstream": "7.3.3",
+   "package": "linux-image-7.3.3-10-synodeb",
+   "version": "7.3.3-10",
+   "published": "2026-11-07T12:26:59Z",
+   "available": false,
+   "changelog": "https://cdn.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.3.3",
+   "previous": "7.3.1-9-synodeb",
+   "changes": [],
+   "cves": [
+    "CVE-2026-99228",
+    "CVE-2026-99229",
+    "CVE-2026-99230",
+    "CVE-2026-99231"
+   ]
+  },
+  {
+   "release": "7.3.1-9-synodeb",
+   "series": "stable",
+   "upstream": "7.3.1",
+   "package": "linux-image-7.3.1-9-synodeb",
+   "version": "7.3.1-9",
+   "published": "2026-11-05T16:33:46Z",
+   "available": false,
+   "changelog": "https://cdn.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.3.1",
+   "previous": "7.3.1-8-synodeb",
+   "changes": [
+    "Intel iGPU (DS920+): i915, GuC/HuC firmware, render group"
+   ],
+   "cves": []
+  }
+ ],
+ "cve_titles": {
+  "CVE-2026-80668": "netfilter: nf_conntrack_expect: use conntrack GC to reap expectations",
+  "CVE-2026-89755": "mm/migrate_device: clear stale mapping after freeing swapcache",
+  "CVE-2026-89788": "ksmbd: fix tree connection use-after-free in smb2_tree_connect()",
+  "CVE-2026-97538": "hwmon: (asus_rog_ryujin) Validate HID report lengths",
+  "CVE-2026-98176": "drm/amdkfd: Avoid integer underflow with ffs in EOP ring size calc",
+  "CVE-2026-99228": "io_uring/io-wq: don't lose the signal that ends work",
+  "CVE-2026-99229": "io_uring/wait: don't spin on a stuck overflow list",
+  "CVE-2026-99230": "io_uring/cmd: don't leave list poison in ->hash_node",
+  "CVE-2026-99231": "io_uring/waitid: own the request before clearing ->head",
+  "CVE-2026-99272": "smb: client: validate the data area in SMB2_read()",
+  "CVE-2026-99275": "smb: client: reject short SESSION_SETUP responses",
+  "CVE-2026-99286": "xen-netback: Fix XenBus connection failure cleanup",
+  "CVE-2026-99287": "xen-netback: Zero out sring pointers on unmap",
+  "CVE-2026-99288": "inet: reject unhashed sockets during established lookups",
+  "CVE-2026-99297": "media: em28xx: fix double free in em28xx_alloc_urbs",
+  "CVE-2026-99312": "KVM: x86: Unconditionally reset MMU context when emulating INIT",
+  "CVE-2026-99314": "ALSA: us122l: Add missing NULL check in usb_stream_hwdep_mmap()",
+  "CVE-2026-99315": "ALSA: us122l: Fix NULL dereference at hwdep open and release",
+  "CVE-2026-99316": "ALSA: usx2y: Initialize idle URBs before submitting streams"
+ }
+}

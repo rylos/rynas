@@ -55,7 +55,7 @@ pub fn claims_of(p: &Protection, t: &ScheduledTask) -> Vec<Claim> {
             d.dedup();
             d.into_iter().map(Claim::Disk).collect()
         }
-        TaskAction::SystemUpgrade | TaskAction::DockerAutoUpdate => vec![Claim::Packages],
+        TaskAction::SystemUpgrade | TaskAction::DockerAutoUpdate | TaskAction::KernelUpdate => vec![Claim::Packages],
         TaskAction::PowerShutdown { .. } => vec![Claim::Power],
         _ => Vec::new(),
     }
@@ -541,15 +541,21 @@ pub(crate) fn table_in(
     }
 }
 
-/// What keeps Docker's automatic updates from starting now: other package work, maintenance,
-/// heavy storage work (scheduled or by hand), an md operation, a shutdown. Their own run is
-/// left out.
 pub fn docker_busy(t: &Table) -> Option<String> {
-    const OWN: &[&str] = &["docker.auto-update", "apps.auto-update", "docker.auto-window"];
+    busy_except(
+        t,
+        rynas_api_types::scheduler::system::DOCKER_AUTO_UPDATE,
+        &["docker.auto-update", "apps.auto-update", "docker.auto-window"],
+    )
+}
+
+/// What keeps an automatic job (Docker updates, the kernel installation) from starting: the
+/// same as [`docker_busy`], leaving out the job's own scheduler task and task kinds.
+pub fn busy_except(t: &Table, own_task: &str, own_kinds: &[&str]) -> Option<String> {
     for (h, s) in t.holders.iter().zip(&t.sources) {
         if h.gives == Gives::Dedup
-            || h.task.as_deref() == Some(rynas_api_types::scheduler::system::DOCKER_AUTO_UPDATE)
-            || h.kind.as_deref().is_some_and(|k| OWN.contains(&k))
+            || h.task.as_deref() == Some(own_task)
+            || h.kind.as_deref().is_some_and(|k| own_kinds.contains(&k))
         {
             continue;
         }

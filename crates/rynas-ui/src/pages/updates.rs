@@ -16,8 +16,8 @@ use leptos::task::spawn_local;
 use rynas_api_types::updates::*;
 
 use crate::api;
-use crate::form::{form_error, lens, lens_bool, segmented, spinner, stale_notice, switch, Draft};
-use crate::i18n::{self, t, tf, tr};
+use crate::form::{form_error, lens, lens_bool, number_field, segmented, spinner, stale_notice, switch, Draft};
+use crate::i18n::{self, t, tf, tn, tr};
 use crate::icons::{self, Icon};
 use crate::schedule::window::{hhmm, parse_hhmm, time_field};
 use crate::schedule::window::Spread;
@@ -30,6 +30,8 @@ const URL: &str = "/api/v1/updates";
 const AUTO: &str = "/api/v1/updates/auto";
 const KERNEL: &str = "/api/v1/updates/kernel";
 const BACKPORTS: &str = "/api/v1/updates/backports";
+const CHANNEL: &str = "/api/v1/updates/kernel/channel";
+const POLICY: &str = "/api/v1/updates/kernel/policy";
 const MODES: &[(&str, &str)] = &[("off", "upd.mode_off"), ("security", "upd.mode_security"), ("all", "upd.mode_all")];
 
 /// What the confirmation dialog asks.
@@ -38,6 +40,10 @@ enum Ask {
     /// Install these packages (empty: all, a full upgrade) — removals listed.
     Install { packages: Vec<String>, removals: Vec<String> },
     Autoremove(Vec<String>),
+    /// Install the newer kernel of the series (the version shown).
+    Kernel { version: String, release: String },
+    /// Switch to another kernel series (`older`: its metapackages replace the newer ones).
+    Series { id: String, name: String, older: bool },
 }
 
 /// A task followed in the dialog: title and id.
@@ -49,8 +55,16 @@ pub fn Updates() -> impl IntoView {
     let auto = Remote::<AutoUpdatesState>::with_config(AUTO);
     let kernel = Remote::<KernelStatus>::new(KERNEL);
     let backports = Remote::<BackportsState>::new(BACKPORTS);
+    let channel = Remote::<KernelChannelState>::new(CHANNEL);
+    let kpolicy = Remote::<KernelPolicyState>::with_config(POLICY);
     #[cfg(feature = "demo")]
-    demo::fill(st, auto, kernel);
+    demo::fill(st, auto, kernel, channel, kpolicy);
+    // a task ended: the list, the kernels and the boot state are read again
+    let done = Callback::new(move |_| {
+        st.reload();
+        channel.reload();
+        kernel.reload();
+    });
     let selected = RwSignal::new(Vec::<String>::new());
     let run = RwSignal::new(None::<(String, String)>);
     let ask = RwSignal::new(None::<Ask>);
@@ -87,9 +101,10 @@ pub fn Updates() -> impl IntoView {
                 {auto_card(auto)}
                 {backports_card(backports, run, busy)}
                 {kernel_card(kernel)}
+                {kernel_channel_card(channel, kpolicy, ask, busy)}
             </div>
             {move || ask.get().map(|a| ask_dialog(a, ask, start))}
-            {move || run.get().map(|(title, id)| run_dialog(title, id, run, st))}
+            {move || run.get().map(|(title, id)| run_dialog(title, id, run, done))}
         </div>
     }
 }
@@ -144,7 +159,12 @@ fn summary_card(st: Remote<UpdatesStatus>, selected: RwSignal<Vec<String>>, ask:
         let removals = (!s.removals.is_empty()).then(|| {
             ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tf("upd.removals_note", &[("p", &s.removals.join(", "))])} }.into_any())
         });
-        let held = (!s.held.is_empty()).then(|| ui::kv("upd.held", text(s.held.join(", "))));
+        // the kernel metapackages the kernel policy holds are kept back by choice
+        let other_held: Vec<String> = s.held.iter().filter(|h| !s.kernel_held.contains(h)).cloned().collect();
+        let held = (!other_held.is_empty()).then(|| ui::kv("upd.held", text(other_held.join(", "))));
+        let kernel_held = (!s.kernel_held.is_empty()).then(|| {
+            ui::kv("upd.kernel_held", view! { <span class="mono">{s.kernel_held.join(", ")}</span><span class="muted small">" "{t("upd.kernel_held_help")}</span> }.into_any())
+        });
         let sec_names: Vec<String> = s.packages.iter().filter(|p| p.security).map(|p| p.name.clone()).collect();
         let all_removals = s.removals.clone();
         let auto_rm = s.autoremovable.clone();
@@ -159,6 +179,7 @@ fn summary_card(st: Remote<UpdatesStatus>, selected: RwSignal<Vec<String>>, ask:
                 {ui::kv("upd.lists_updated", text(ms_text(s.lists_updated_ms)))}
                 {ui::kv("upd.read_at", text(i18n::datetime(s.read_at_ms)))}
                 {held}
+                {kernel_held}
             </dl>
             <div class="card-actions">
                 <button class="btn primary" disabled=move || busy.get() || n == 0
@@ -323,6 +344,32 @@ fn ask_dialog(a: Ask, ask: RwSignal<Option<Ask>>, start: impl Fn(String, Option<
             let body = serde_json::to_string(&AutoremoveRequest { packages }).unwrap_or_default();
             (t("upd.autoremove_title").to_string(), t("upd.autoremove_text").to_string(), "upd.remove", true, extra, format!("{URL}/autoremove"), body, t("task.updates.autoremove").to_string())
         }
+        Ask::Kernel { version, release } => {
+            let body = serde_json::to_string(&KernelInstallRequest { version }).unwrap_or_default();
+            (
+                tf("kch.confirm_title", &[("k", &release)]),
+                t("kch.confirm_text").to_string(),
+                "kch.install",
+                false,
+                view! {}.into_any(),
+                "/api/v1/updates/kernel/install".to_string(),
+                body,
+                t("task.updates.kernel").to_string(),
+            )
+        }
+        Ask::Series { id, name, older } => {
+            let body = serde_json::to_string(&KernelSeriesRequest { series: id }).unwrap_or_default();
+            (
+                tf("kch.series_title", &[("series", &name)]),
+                t(if older { "kch.series_text_back" } else { "kch.series_text" }).to_string(),
+                "kch.switch_action",
+                older,
+                view! {}.into_any(),
+                "/api/v1/updates/kernel/series".to_string(),
+                body,
+                t("task.updates.kernel-series").to_string(),
+            )
+        }
     };
     confirm(Confirm {
         title,
@@ -341,9 +388,9 @@ fn ask_dialog(a: Ask, ask: RwSignal<Option<Ask>>, start: impl Fn(String, Option<
     })
 }
 
-fn run_dialog(title: String, id: String, run: RwSignal<Run>, st: Remote<UpdatesStatus>) -> AnyView {
+fn run_dialog(title: String, id: String, run: RwSignal<Run>, on_done: Callback<()>) -> AnyView {
     let close = Callback::new(move |_| run.set(None));
-    let body = view! { <TaskRun id=id on_done=Callback::new(move |_| st.reload()) /> }.into_any();
+    let body = view! { <TaskRun id=id on_done=Callback::new(move |_| on_done.run(())) /> }.into_any();
     ui::dialog(DlgKind::Wide, Signal::stored(title), close, body, Some(ui::close_foot(close)))
 }
 
@@ -595,6 +642,274 @@ fn kernel_card(kernel: Remote<KernelStatus>) -> AnyView {
     .into_any()
 }
 
+// ------------------------------------------------------------------ kernel updates
+
+const KMODES: &[(&str, &str)] = &[
+    ("system", "kch.mode_system"),
+    ("manual", "kch.mode_manual"),
+    ("notify", "kch.mode_notify"),
+    ("auto", "kch.mode_auto"),
+];
+
+fn kmode_key(m: KernelMode) -> String {
+    match m {
+        KernelMode::System => "system",
+        KernelMode::Manual => "manual",
+        KernelMode::Notify => "notify",
+        KernelMode::Auto => "auto",
+    }
+    .into()
+}
+
+/// A series' name: the known ids translated, with the upstream branch.
+fn series_name(s: &KernelSeriesState) -> String {
+    let name = match s.id.as_str() {
+        "longterm" => t("kch.s.longterm").to_string(),
+        "stable" => t("kch.s.stable").to_string(),
+        "default" => t("kch.s.default").to_string(),
+        other => other.to_string(),
+    };
+    match &s.branch {
+        Some(b) => format!("{name} ({b})"),
+        None => name,
+    }
+}
+
+fn cve_list(ids: &[String], titles: &std::collections::BTreeMap<String, String>) -> AnyView {
+    view! {
+        <ul class="upd-list">
+            {ids.iter().map(|c| {
+                let url = format!("https://www.cve.org/CVERecord?id={}", api::encode(c));
+                let title = titles.get(c).cloned();
+                view! {
+                    <li>
+                        <a class="mono" href=url target="_blank" rel="noopener noreferrer">{c.clone()}</a>
+                        {title.map(|t_| view! { <span class="muted small" lang="en">" "{t_}</span> })}
+                    </li>
+                }
+            }).collect_view()}
+        </ul>
+    }
+    .into_any()
+}
+
+/// One newer kernel: date, change log, the publisher's changes, CVEs.
+fn kernel_offer(k: &KernelOffer, titles: &std::collections::BTreeMap<String, String>, first: bool) -> AnyView {
+    let date = k.published_ms.map(|ms| {
+        if k.published_known { tf("kch.released", &[("date", &i18n::date(ms))]) } else { tf("kch.first_seen", &[("date", &i18n::date(ms))]) }
+    });
+    let chip = if k.available {
+        status(Tone::Info, t("kch.installable").to_string())
+    } else {
+        status(Tone::Unknown, t("kch.not_available").to_string())
+    };
+    let cves = match &k.cves {
+        Some(c) if c.is_empty() => Some(text(t("kch.no_cves").to_string())),
+        Some(c) => Some(ui::fold_with(text(tn("kch.cves", c.len() as u64, &[])), false, cve_list(c, titles))),
+        None => None,
+    };
+    let changes = if k.changes.is_empty() {
+        text(t("kch.upstream_only").to_string())
+    } else {
+        view! { <ul class="upd-list">{k.changes.iter().map(|c| view! { <li lang="en">{c.clone()}</li> }).collect_view()}</ul> }.into_any()
+    };
+    let has_feed = k.changelog.is_some() || !k.changes.is_empty() || k.cves.is_some() || k.published_known;
+    let title = view! { <span class="mono">{k.release.clone()}</span>" "{chip}{date.map(|d| view! { <span class="muted small">" "{d}</span> })} }.into_any();
+    let body = view! {
+        <dl class="kvs">
+            {k.changelog.clone().map(|u| ui::kv("kch.changelog", view! { <a href=u target="_blank" rel="noopener noreferrer">{k.upstream.clone().unwrap_or_else(|| k.release.clone())}</a> }.into_any()))}
+            {has_feed.then(|| ui::kv("kch.changes", changes))}
+            {cves.map(|c| ui::kv("kch.cves_title", c))}
+        </dl>
+    }
+    .into_any();
+    ui::fold_with(title, first, body)
+}
+
+fn kernel_channel_card(channel: Remote<KernelChannelState>, policy: Remote<KernelPolicyState>, ask: RwSignal<Option<Ask>>, busy: Signal<bool>) -> AnyView {
+    let refreshing = RwSignal::new(false);
+    let refresh = move |_| {
+        refreshing.set(true);
+        spawn_local(async move {
+            let r = api::get::<KernelChannelState>(&format!("{CHANNEL}?refresh=1")).await;
+            refreshing.set(false);
+            match r {
+                Ok(k) => channel.data.set(Some(k)),
+                Err(e) => crate::toast::toast(Tone::Err, e.text()),
+            }
+        });
+    };
+    let body = move || {
+        if let Some(v) = channel.gate(6) {
+            return v;
+        }
+        let s = channel.data.get().unwrap_or_default();
+        let behind = s.newer.len();
+        let cand = s.candidate().cloned();
+        let cur = s.series.iter().find(|x| x.current).cloned();
+        let others: Vec<KernelSeriesState> = s.series.iter().filter(|x| !x.current).cloned().collect();
+        let cur_idx = s.series.iter().position(|x| x.current).unwrap_or(0);
+        let total = s.cves();
+        let head = if behind == 0 {
+            status(Tone::Ok, t("kch.uptodate").to_string())
+        } else {
+            status(Tone::Info, tn("kch.behind", behind as u64, &[]))
+        };
+        let due = s.auto_due_ms.map(|ms| ui::note(Tone::Info, icons::CALENDAR_CLOCK, view! { {tf("kch.auto_due", &[("date", &i18n::datetime(ms))])} }.into_any()));
+        let feed_err = s.feed_error.clone().map(|e| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("kch.feed_error")}<span class="muted small" lang="en">" "{e}</span> }.into_any()));
+        let titles = s.cve_titles.clone();
+        let offers = s.newer.iter().enumerate().map(|(i, k)| kernel_offer(k, &titles, i == 0)).collect_view();
+        let install = cand.clone().map(|c| {
+            let (v, r) = (c.version.clone(), c.release.clone());
+            view! {
+                <button class="btn primary" disabled=move || busy.get()
+                    on:click=move |_| ask.set(Some(Ask::Kernel { version: v.clone(), release: r.clone() }))>
+                    <Icon icon=icons::DOWNLOAD size=16 />{tr("kch.install")}
+                </button>
+            }
+        });
+        let switches = others
+            .into_iter()
+            .map(|o| {
+                let idx = s.series.iter().position(|x| x.id == o.id).unwrap_or(0);
+                let older = idx < cur_idx;
+                let name = series_name(&o);
+                let id = o.id.clone();
+                let label = tf("kch.switch", &[("series", &name)]);
+                view! {
+                    <button class="btn ghost" disabled=move || busy.get()
+                        on:click=move |_| ask.set(Some(Ask::Series { id: id.clone(), name: name.clone(), older }))>
+                        {label}
+                    </button>
+                }
+            })
+            .collect_view();
+        view! {
+            <div class="chips upd-head">{head}</div>
+            {feed_err}
+            {due}
+            <dl class="kvs">
+                {ui::kv("kch.installed", view! { <span class="mono">{s.installed_release.clone().or(s.installed_version.clone()).unwrap_or_else(|| ui::DASH.into())}</span> }.into_any())}
+                {cur.filter(|_| s.series.len() > 1).map(|c| ui::kv("kch.series", text(series_name(&c))))}
+                {(!s.held.is_empty()).then(|| ui::kv("kch.held", view! { <span class="mono">{s.held.join(", ")}</span> }.into_any()))}
+                {s.last_install_ms.map(|ms| ui::kv("kch.last_install", text(i18n::datetime(ms))))}
+                {(behind > 0).then(|| ui::kv("kch.cves_total", text(match &total {
+                    Some(c) => tn("kch.cves", c.len() as u64, &[]),
+                    None => t("kch.cves_unknown").to_string(),
+                })))}
+            </dl>
+            {(behind > 0).then(|| view! { <div class="kch-offers">{offers}</div> })}
+            <div class="card-actions">{install}{switches}</div>
+        }
+        .into_any()
+    };
+    // built once: the draft follows the server (form::Draft)
+    let policy_part = move || {
+        if let Some(v) = policy.gate(3) {
+            return v;
+        }
+        let s = policy.data.get_untracked().unwrap_or_default();
+        kernel_policy_form(s, policy, channel)
+    };
+    view! {
+        {move || channel.data.with(|s| s.as_ref().is_none_or(|s| s.supported)).then(|| view! {
+            <section class="card widget w-12">
+                <WidgetHead icon=icons::CPU title="kch.title">
+                    <button class="icon-btn sm" aria-label=tr("kch.refresh") title=tr("kch.refresh") disabled=move || refreshing.get() on:click=refresh>
+                        <Icon icon=icons::REFRESH_CW size=16 />
+                    </button>
+                </WidgetHead>
+                {body}
+                {policy_part}
+            </section>
+        })}
+    }
+    .into_any()
+}
+
+fn kernel_policy_form(s: KernelPolicyState, policy: Remote<KernelPolicyState>, channel: Remote<KernelChannelState>) -> AnyView {
+    let init = s.pending.unwrap_or(s.applied);
+    let draft = Draft::new(init, move || policy.data.with(|s| s.as_ref().map(|s| s.pending.unwrap_or(s.applied))));
+    let d = draft.d;
+    let dirty = draft.dirty();
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let (mode, set_mode) = lens(
+        d,
+        |p| kmode_key(p.mode),
+        |p, v| {
+            p.mode = match v.as_str() {
+                "manual" => KernelMode::Manual,
+                "notify" => KernelMode::Notify,
+                "auto" => KernelMode::Auto,
+                _ => KernelMode::System,
+            }
+        },
+    );
+    let (interval, set_interval) = lens(d, |p| p.interval_days.to_string(), |p, v| p.interval_days = v.trim().parse().unwrap_or(0));
+    let (age, set_age) = lens(d, |p| p.min_age_days.to_string(), |p, v| p.min_age_days = v.trim().parse().unwrap_or(u16::MAX));
+    let (reboot, set_reboot) = lens_bool(d, |p| p.reboot, |p, v| p.reboot = v);
+    let m = move || d.with(|p| p.mode);
+    let help = move || {
+        t(match m() {
+            KernelMode::System => "kch.help_system",
+            KernelMode::Manual => "kch.help_manual",
+            KernelMode::Notify => "kch.help_notify",
+            KernelMode::Auto => "kch.help_auto",
+        })
+    };
+    let invalid = move || d.with(|p| !(1..=365).contains(&p.interval_days) || p.min_age_days > 365);
+    let pending = Signal::derive(move || policy.data.with(|s| s.as_ref().is_some_and(|s| s.pending.is_some())));
+    let save = move |_| {
+        if invalid() {
+            error.set(Some(t("form.check").to_string()));
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        let body = d.get_untracked();
+        spawn_local(async move {
+            match api::put::<_, KernelPolicyState>(POLICY, &body).await {
+                Ok(_) => {
+                    if crate::config::apply_now(&[crate::config::keys::UPDATES_KERNEL], error).await {
+                        saved_applied();
+                        policy.reload();
+                        channel.reload();
+                    }
+                }
+                Err(e) => error.set(Some(e.text())),
+            }
+            let _ = busy.try_set(false);
+        });
+    };
+    let reset = Callback::new(move |_| {
+        draft.reset();
+        error.set(None);
+    });
+    view! {
+        <form class="form kch-form" on:submit=move |ev| ev.prevent_default()>
+            {segmented("kch.mode", KMODES, mode, set_mode)}
+            <p class="field-help">{help}</p>
+            <div hidden=move || !matches!(m(), KernelMode::Notify | KernelMode::Auto)>
+                {move || number_field("kch.interval", Some(if m() == KernelMode::Auto { "kch.interval_help_auto" } else { "kch.interval_help_notify" }), interval, set_interval, 1, 365)}
+            </div>
+            <div hidden=move || m() != KernelMode::Auto>
+                {number_field("kch.min_age", Some("kch.min_age_help"), age, set_age, 0, 365)}
+                {switch("kch.reboot", Some("kch.reboot_help"), reboot, set_reboot)}
+                <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("kch.window_note")}</p>
+            </div>
+            {move || pending.get().then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("upd.pending_note")}</p> })}
+            {stale_notice(draft.stale, reset)}
+            {form_error(error)}
+            <div class="card-actions">
+                <button type="button" class="btn ghost" disabled=move || !dirty.get() on:click=move |_| reset.run(())>{tr("reset")}</button>
+                <button type="button" class="btn primary" disabled=move || busy.get() || !dirty.get() on:click=save>{spinner(busy)}{tr("save")}</button>
+            </div>
+        </form>
+    }
+    .into_any()
+}
+
 // ------------------------------------------------------------------ demo data
 
 #[cfg(feature = "demo")]
@@ -606,7 +921,7 @@ mod demo {
         UpdatePackage { name: name.into(), arch: "amd64".into(), current: cur.map(Into::into), candidate: new.into(), origin: origin.into(), security }
     }
 
-    pub fn fill(st: Remote<UpdatesStatus>, auto: Remote<AutoUpdatesState>, kernel: Remote<KernelStatus>) {
+    pub fn fill(st: Remote<UpdatesStatus>, auto: Remote<AutoUpdatesState>, kernel: Remote<KernelStatus>, channel: Remote<KernelChannelState>, kpolicy: Remote<KernelPolicyState>) {
         let live = use_live();
         Effect::new(move |_| {
             if live.conn.get() != Conn::Demo {
@@ -654,6 +969,50 @@ mod demo {
                 }),
                 read_at_ms: Some(now - 600_000),
                 error: None,
+            }));
+            let day = 86_400_000;
+            let policy = KernelPolicy { mode: KernelMode::Manual, ..Default::default() };
+            kpolicy.data.set(Some(KernelPolicyState { applied: policy, pending: None }));
+            let cves = |ids: &[&str]| Some(ids.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            channel.data.set(Some(KernelChannelState {
+                supported: true,
+                module: true,
+                series: vec![
+                    KernelSeriesState { id: "longterm".into(), branch: Some("6.18".into()), image: "linux-image-synodeb-longterm".into(), installed: false, current: false },
+                    KernelSeriesState { id: "stable".into(), branch: Some("7.3".into()), image: "linux-image-synodeb-stable".into(), installed: true, current: true },
+                ],
+                metapackages: vec!["linux-image-synodeb-stable".into()],
+                held: vec!["linux-image-synodeb-stable".into()],
+                installed_version: Some("7.3.4-11".into()),
+                installed_release: Some("7.3.4-11-synodeb".into()),
+                newer: vec![
+                    KernelOffer {
+                        release: "7.3.5-13-synodeb".into(),
+                        version: "7.3.5-13".into(),
+                        available: true,
+                        published_ms: Some(now - day),
+                        published_known: true,
+                        upstream: Some("7.3.5".into()),
+                        changelog: Some("https://cdn.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.3.5".into()),
+                        changes: vec!["kernel: built with the upstream 7.3.5".into()],
+                        cves: cves(&["CVE-2026-43001", "CVE-2026-43017"]),
+                    },
+                    KernelOffer {
+                        release: "7.3.4-12-synodeb".into(),
+                        version: "7.3.4-12".into(),
+                        available: false,
+                        published_ms: Some(now - 10 * day),
+                        published_known: true,
+                        upstream: Some("7.3.4".into()),
+                        changelog: Some("https://cdn.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.3.4".into()),
+                        changes: Vec::new(),
+                        cves: cves(&[]),
+                    },
+                ],
+                cve_titles: [("CVE-2026-43001".to_string(), "net: fix a use-after-free in the socket layer".to_string())].into_iter().collect(),
+                feed_read_ms: Some(now - 3_600_000),
+                policy,
+                ..Default::default()
             }));
         });
     }

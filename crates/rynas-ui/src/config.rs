@@ -263,6 +263,7 @@ pub mod keys {
     pub const UPS_DEVICE: &str = "ups.device";
     pub const UPS_NETSERVER: &str = "ups.netserver";
     pub const UPDATES: &str = "updates.auto";
+    pub const UPDATES_KERNEL: &str = "updates.kernel";
     pub const DISKS: &str = "storage.disks";
     pub const REMOVABLE: &str = "removable";
     pub const DOCKER: &str = "docker";

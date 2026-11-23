@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 rynas-api-types.workspace = true
 rynas-config.workspace = true
+rynas-tasks.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

@@ -238,6 +238,7 @@ impl TaskOwner {
             TaskAction::Dedup { volume } => (OwnerFeature::Dedup, volume.clone()),
             TaskAction::UpdatesCheck => (OwnerFeature::Updates, "check".into()),
             TaskAction::SystemUpgrade => (OwnerFeature::Updates, "upgrade".into()),
+            TaskAction::KernelUpdate => (OwnerFeature::Updates, "kernel".into()),
             TaskAction::DockerImageCheck => (OwnerFeature::Docker, "image-check".into()),
             TaskAction::DockerAutoUpdate => (OwnerFeature::Docker, "auto-update".into()),
             TaskAction::AppsCatalog => (OwnerFeature::Apps, "catalog".into()),
@@ -539,6 +540,10 @@ pub enum TaskAction {
     /// ([`system::system_upgrade`]): listed by the Task Scheduler, never stored in its
     /// configuration and without units of its own.
     SystemUpgrade,
+    /// The automatic kernel installation (`updates.kernel` in mode `auto`): inside the
+    /// window of the automatic system updates, a kernel old enough and not too soon after
+    /// the last one ([`system::kernel_update`]).
+    KernelUpdate,
     /// The check of the Docker stacks' images for updates (`/api/v1/docker/updates`).
     DockerImageCheck,
     /// The automatic updates of the Docker stacks and apps that take them, one at a time,
@@ -592,6 +597,7 @@ impl TaskAction {
                 | TaskAction::PcMaintenance
                 | TaskAction::DockerAutoUpdate
                 | TaskAction::SystemUpgrade
+                | TaskAction::KernelUpdate
                 | TaskAction::MdCheck { .. }
                 | TaskAction::SmartTest { test: SmartTestKind::Long, .. }
         )
@@ -607,6 +613,7 @@ impl TaskAction {
                 | TaskAction::PcMaintenance
                 | TaskAction::DockerAutoUpdate
                 | TaskAction::SystemUpgrade
+                | TaskAction::KernelUpdate
                 | TaskAction::MdCheck { .. }
                 | TaskAction::SmartTest { test: SmartTestKind::Long, .. }
         )
@@ -1495,10 +1502,11 @@ pub mod system {
         MissedPolicy, NotifyPolicy, RunPolicy, ScheduledTask, TaskAction, TaskOwner, TaskTrigger,
     };
     use crate::docker::AutoUpdateSettings;
-    use crate::updates::AutoUpdates;
+    use crate::updates::{AutoUpdates, KernelMode, KernelPolicy};
 
     pub const UPDATES_CHECK: &str = "updates-check";
     pub const SYSTEM_UPGRADE: &str = "apt-upgrade";
+    pub const KERNEL_UPDATE: &str = "kernel-update";
     pub const DOCKER_IMAGE_CHECK: &str = "docker-update-check";
     pub const DOCKER_AUTO_UPDATE: &str = "docker-auto-update";
     pub const APPS_CATALOG: &str = "apps-catalog-refresh";
@@ -1511,6 +1519,7 @@ pub mod system {
     pub const RESERVED: &[&str] = &[
         UPDATES_CHECK,
         SYSTEM_UPGRADE,
+        KERNEL_UPDATE,
         DOCKER_IMAGE_CHECK,
         DOCKER_AUTO_UPDATE,
         APPS_CATALOG,
@@ -1621,6 +1630,30 @@ pub mod system {
             },
         );
         t.enabled = a.mode != crate::updates::AutoMode::Off;
+        t.policy.missed = Some(MissedPolicy::RunOnce { within_h: None });
+        t.policy.jitter_s = Some(jitter);
+        t.policy.window_min = Some(u32::from(a.window_min));
+        t
+    }
+
+    /// The automatic kernel installation: the window of `updates.auto` (start, a random
+    /// delay up to a third of it as Docker's), on while `updates.kernel` is in mode `auto`.
+    /// A start after boot inside the window still runs; outside it, not.
+    pub fn kernel_update(a: &AutoUpdates, k: &KernelPolicy) -> ScheduledTask {
+        let jitter = docker_window_delay_s(a.window_min);
+        let mut t = task(
+            KERNEL_UPDATE,
+            "Automatic kernel installation",
+            "Installs a newer kernel inside the update window once it is old enough. Set in Updates.",
+            TaskAction::KernelUpdate,
+            TaskTrigger::Calendar {
+                on_calendar: daily(a.hour, a.minute),
+                cron: None,
+                persistent: true,
+                randomized_delay_s: jitter,
+            },
+        );
+        t.enabled = k.mode == KernelMode::Auto;
         t.policy.missed = Some(MissedPolicy::RunOnce { within_h: None });
         t.policy.jitter_s = Some(jitter);
         t.policy.window_min = Some(u32::from(a.window_min));

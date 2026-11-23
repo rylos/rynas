@@ -295,6 +295,10 @@ pub fn routes() -> Router<AppState> {
         .route("/updates/packages/{name}/changelog", post(forward))
         .route("/updates/auto", get(forward).put(forward))
         .route("/updates/kernel", get(forward))
+        .route("/updates/kernel/channel", get(forward))
+        .route("/updates/kernel/policy", get(forward).put(forward))
+        .route("/updates/kernel/install", post(forward))
+        .route("/updates/kernel/series", post(forward))
         .route("/updates/backports", get(forward).put(forward))
         // removable drives: state, actions as tasks, settings; changes come on /events
         // as `removable.state`

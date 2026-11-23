@@ -4000,6 +4000,7 @@ version = "0.8.35"
 dependencies = [
  "rynas-api-types",
  "rynas-config",
+ "rynas-tasks",
  "serde",
  "serde_json",
  "tempfile",

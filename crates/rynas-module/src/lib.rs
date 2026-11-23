@@ -30,6 +30,9 @@
 //! - [`Module::boot`]: a [`boot::BootLayer`] when the machine boots from a device of its own
 //!   (its entries on the updates page, the boot half of a root rollback). Without one the
 //!   updates page shows the kernels in `/boot` and a root rollback is a console procedure.
+//! - [`Module::kernel_channel`]: a [`kernel::KernelChannel`] when the module's system layer
+//!   publishes its own kernels (series, feed, the step after a kernel change). Without one
+//!   the distribution's kernel metapackage is the only series.
 //! - [`Module::rescue_feedback`]: how the machine signals the network rescue paths (beeps,
 //!   LEDs; `rynas_net::rescue::Feedback`). Without one they are silent.
 //! - [`Module::reset_button`]: the machine's reset button and whether a double press restores
@@ -50,10 +53,12 @@ pub use rynas_net::rescue::{Feedback, Signal};
 
 pub mod boot;
 pub mod http;
+pub mod kernel;
 pub mod notify;
 pub mod ups;
 
 pub use boot::{BootLayer, BootSync};
+pub use kernel::{KernelChannel, KernelSeries};
 pub use notify::EventForward;
 pub use ups::UpsLayer;
 
@@ -119,6 +124,11 @@ pub trait Module: Send + Sync {
 
     /// The boot layer, when the machine boots from a device of its own.
     fn boot(&self) -> Option<Arc<dyn BootLayer>> {
+        None
+    }
+
+    /// The kernels the module's system layer publishes for the machine.
+    fn kernel_channel(&self) -> Option<Arc<dyn KernelChannel>> {
         None
     }
 
@@ -228,6 +238,11 @@ impl Modules {
             Some(mr) => r.nest(&format!("/v1/modules/{}", m.id()), mr),
             None => r,
         })
+    }
+
+    /// The first module's kernel channel.
+    pub fn kernel_channel(&self) -> Option<Arc<dyn KernelChannel>> {
+        self.0.iter().find_map(|m| m.kernel_channel())
     }
 
     /// The first module's rescue feedback.

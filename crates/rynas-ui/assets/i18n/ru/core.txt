@@ -6125,3 +6125,72 @@ wol.power	Питание
 wol.by_other	Другой пользователь
 wol.h.timeout	Время истекло
 wol.pc.add_hint	(откроется в новой вкладке)
+upd.kernel_held	Удерживаются по выбору
+upd.kernel_held_help	Ядро устанавливается в разделе «Обновления ядра».
+kch.title	Обновления ядра
+kch.refresh	Снова поискать новые ядра
+kch.uptodate	Установлено самое новое ядро серии
+kch.behind.one	{n} более новое ядро
+kch.behind.few	{n} более новых ядра
+kch.behind.many	{n} более новых ядер
+kch.behind.other	{n} более нового ядра
+kch.auto_due	Будет установлено в окне обновлений начиная с {date}.
+kch.feed_error	Не удалось прочитать список опубликованных ядер: даты, изменения и CVE могут отсутствовать.
+kch.installed	Установленное ядро
+kch.series	Серия
+kch.held	Удерживаемые пакеты
+kch.last_install	Последнее ядро, установленное здесь
+kch.cves_total	Исправлено обновлением
+kch.cves.one	{n} исправленная CVE
+kch.cves.few	{n} исправленные CVE
+kch.cves.many	{n} исправленных CVE
+kch.cves.other	{n} исправленной CVE
+kch.cves_unknown	CVE неизвестны
+kch.cves_title	CVE
+kch.no_cves	Не указаны
+kch.install	Установить ядро
+kch.switch	Перейти на {series}
+kch.switch_action	Сменить серию
+kch.released	выпущено {date}
+kch.first_seen	замечено {date}
+kch.installable	Можно установить
+kch.not_available	Больше нет в репозитории
+kch.upstream_only	Только обновление upstream
+kch.changelog	Журнал изменений
+kch.changes	Изменения
+kch.s.longterm	Долгосрочная
+kch.s.stable	Стабильная
+kch.s.default	Дистрибутив
+kch.mode	Когда устанавливать новые ядра
+kch.mode_system	Вместе с другими обновлениями
+kch.mode_manual	Вручную
+kch.mode_notify	Вручную, с уведомлением
+kch.mode_auto	Автоматически
+kch.help_system	Более новое ядро устанавливается как любой другой пакет: кнопкой «Установить всё» или автоматическими обновлениями.
+kch.help_manual	Ядро удерживается: оно меняется, только когда вы нажимаете «Установить ядро». Оно может оставаться прежним месяцами.
+kch.help_notify	Ядро удерживается, а уведомление сообщает о выходе более нового.
+kch.help_auto	Ядро удерживается, а rynas сам устанавливает более новое в окне обновлений, когда оно достаточно старое.
+kch.interval	Не чаще чем раз в (дней)
+kch.interval_help_notify	Не больше одного уведомления за столько дней.
+kch.interval_help_auto	Не больше одной установки за столько дней.
+kch.min_age	Минимальный возраст (дней)
+kch.min_age_help	Ядро устанавливается, когда оно опубликовано столько дней: неудачный выпуск обычно заменяют за это время.
+kch.reboot	Перезагрузить после установки
+kch.reboot_help	Во время перезагрузки автоматических обновлений.
+kch.window_note	Устанавливается в окне автоматических обновлений, никогда во время обслуживания или резервного копирования.
+kch.confirm_title	Установить ядро {k}?
+kch.confirm_text	Ядро устанавливается сейчас и запустится при следующей перезагрузке. Предыдущее ядро остаётся установленным как запасное.
+kch.series_title	Перейти на серию {series}?
+kch.series_text	Ядро серии устанавливается сейчас и запустится при следующей перезагрузке. Текущее ядро остаётся установленным как запасное.
+kch.series_text_back	Ядро серии устанавливается сейчас, а пакеты более новой серии удаляются; более старое ядро запустится при следующей перезагрузке. Текущее ядро остаётся как запасное.
+task.updates.kernel	Установка ядра
+task.updates.kernel-series	Смена серии ядра
+sch.act.kernel_update	Автоматическая установка ядра
+nev.updates.kernel_available.title	Доступно ядро {kernel}
+nev.updates.kernel_available.body	Ядер новее установленного: {behind}. Исправлено CVE: {cves}.
+nev.updates.kernel_available.body_2	Ядер новее установленного: {behind}.
+nev.updates.kernel_installed.title	Ядро {kernel} установлено, перезагрузка в {at}
+nev.updates.kernel_installed.title_2	Ядро {kernel} установлено
+nev.updates.kernel_failed.title	Ядро {kernel} не установлено
+nev.updates.kernel_failed.body	{error}
+cfg.key.updates.kernel	Обновления ядра

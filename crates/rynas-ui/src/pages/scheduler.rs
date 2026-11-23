@@ -181,6 +181,7 @@ impl ActionDraft {
             TaskAction::Dedup { .. } => d.kind = "dedup".into(),
             TaskAction::UpdatesCheck
             | TaskAction::SystemUpgrade
+            | TaskAction::KernelUpdate
             | TaskAction::DockerImageCheck
             | TaskAction::DockerAutoUpdate
             | TaskAction::AppsCatalog
@@ -257,6 +258,7 @@ pub fn action_text(a: &TaskAction) -> (String, String) {
         TaskAction::Dedup { volume } => (t("sch.act.dedup").to_string(), crate::pages::storage::dedup::job_name(volume)),
         TaskAction::UpdatesCheck => (t("sch.act.updates_check").to_string(), t("upd.title").to_string()),
         TaskAction::SystemUpgrade => (t("sch.act.system_upgrade").to_string(), t("upd.title").to_string()),
+        TaskAction::KernelUpdate => (t("sch.act.kernel_update").to_string(), t("upd.title").to_string()),
         TaskAction::DockerImageCheck => (t("sch.act.docker_image_check").to_string(), t("dk.title").to_string()),
         TaskAction::DockerAutoUpdate => (t("sch.act.docker_auto_update").to_string(), t("dk.title").to_string()),
         TaskAction::AppsCatalog => (t("sch.act.apps_catalog").to_string(), t("dk.title").to_string()),
@@ -273,7 +275,7 @@ pub fn action_text(a: &TaskAction) -> (String, String) {
 /// read-only here), and that page's name.
 pub fn owner_page(a: &TaskAction) -> Option<(&'static str, &'static str)> {
     match a {
-        TaskAction::UpdatesCheck | TaskAction::SystemUpgrade => Some(("/system/updates", "upd.title")),
+        TaskAction::UpdatesCheck | TaskAction::SystemUpgrade | TaskAction::KernelUpdate => Some(("/system/updates", "upd.title")),
         TaskAction::DockerImageCheck | TaskAction::DockerAutoUpdate | TaskAction::AppsCatalog => Some(("/docker", "dk.title")),
         TaskAction::PcMaintenance | TaskAction::PcRetention => Some(("/backup", "nav.backup")),
         TaskAction::PowerShutdown { .. } => Some(("/hardware", "nav.hardware")),
@@ -429,6 +431,7 @@ pub(crate) fn own_job_key(id: &str) -> Option<&'static str> {
     Some(match id {
         s::UPDATES_CHECK => "sch.act.updates_check",
         s::SYSTEM_UPGRADE => "sch.act.system_upgrade",
+        s::KERNEL_UPDATE => "sch.act.kernel_update",
         s::DOCKER_IMAGE_CHECK => "sch.act.docker_image_check",
         s::DOCKER_AUTO_UPDATE => "sch.act.docker_auto_update",
         s::APPS_CATALOG => "sch.act.apps_catalog",
@@ -846,7 +849,7 @@ fn task_row(
     let is_managed = managed.is_some() || system;
     let fixed = is_managed || !rynas_api_types::scheduler::TaskOwner::of_action(&task.action).is_user();
     // the feature decides whether these are on
-    let feature_switch = system || matches!(task.action, TaskAction::DockerAutoUpdate | TaskAction::AppsCatalog);
+    let feature_switch = system || matches!(task.action, TaskAction::DockerAutoUpdate | TaskAction::AppsCatalog | TaskAction::KernelUpdate);
     let owner = owner_page(&task.action);
     let (akind, adetail) = action_text(&task.action);
     let enabled = task.enabled;

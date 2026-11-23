@@ -358,6 +358,9 @@ fn open_config(
             https: args.web_https,
         }),
         Arc::new(rynas_updates::AutoDomain),
+        Arc::new(rynas_updates::KernelDomain {
+            module_kernels: modules.kernel_channel().is_some(),
+        }),
     ];
     domains.extend(modules.domains());
     // ups.safemode: a module layer's policy file, else the rynas policy file read by rynasd's
@@ -1152,10 +1155,14 @@ fn main() -> std::io::Result<()> {
                 config_root(&args),
             )
             .with_boot(opened.modules.boot())
+            .with_kernel_channel(opened.modules.kernel_channel())
+            .with_state_dir(args.state_dir.clone())
             .with_system_layer(opened.modules.boot().is_some() || opened.modules.ups().is_some()),
         );
         // the daily check is the scheduler task updates-check
         let _ = rynasd::updates::SVC.set(updates.clone());
+        // the kernel holds of the policy (its default needs no apply)
+        rynasd::kernel_updates::ensure_holds(updates.clone());
         state.updates = Some(updates.clone());
         state.zram = Some(Arc::new(rynasd::zram::ZramApi {
             zram: Arc::new(rynasd::zram::Zram::new(config_root(&args), args.dry_system)),

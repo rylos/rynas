@@ -545,9 +545,9 @@ async fn set_enabled(st: ProtState, h: HeaderMap, id: String, on: bool) -> Res<J
                     "a deduplication task is turned on and off with its settings in Storage",
                 ));
             }
-            if matches!(t.action, TaskAction::DockerAutoUpdate | TaskAction::AppsCatalog) {
+            if matches!(t.action, TaskAction::DockerAutoUpdate | TaskAction::AppsCatalog | TaskAction::KernelUpdate) {
                 return Err(invalid(
-                    "this task is on while its feature uses it: change it in Docker or Apps",
+                    "this task is on while its feature uses it: change it in Docker, Apps or Updates",
                 ));
             }
             t.enabled = on;
