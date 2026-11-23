@@ -122,7 +122,7 @@ fn grow_view(v: &View, new: &[(&str, u64)]) -> Grown {
     let mut v = v.clone();
     let ns = sizes(new);
     for (n, s) in &ns {
-        v.disks.push(VDisk { name: n.clone(), size: *s, parts: Vec::new(), others: 0 });
+        v.disks.push(VDisk { name: n.clone(), size: *s, parts: Vec::new(), others: 0, sector: 0 });
     }
     let growth = tiers::grow(&v.shapes(), &v.layout_disks(), &ns, v.tolerance, MIN_TIER);
     let goal = Goal { old: None, new: ns.iter().map(|(n, _)| n.clone()).collect() };
@@ -383,7 +383,7 @@ fn add_a_12_to_4_8_8() {
 fn replace_the_4_with_a_12_in_4_8_8() {
     let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
     let mut v = start.clone();
-    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new(), others: 0 });
+    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new(), others: 0, sector: 0 });
     let g = tiers::replace(&v.shapes(), &v.layout_disks(), "sda", &("sdd".into(), 12 * TB), 1, MIN_TIER).unwrap();
     let goal = Goal { old: Some("sda".into()), new: vec!["sdd".into()] };
     let begin = v.clone();
@@ -509,7 +509,7 @@ fn replace_a_failed_disk_in_the_model() {
             m.role = MemberRole::Faulty;
         }
     }
-    start.disks.push(VDisk { name: "sdd".into(), size: 8 * TB, parts: Vec::new(), others: 0 });
+    start.disks.push(VDisk { name: "sdd".into(), size: 8 * TB, parts: Vec::new(), others: 0, sector: 0 });
     let g = tiers::replace(&start.shapes(), &start.layout_disks(), "sdb", &("sdd".into(), 8 * TB), 1, MIN_TIER).unwrap();
     let goal = Goal { old: Some("sdb".into()), new: vec!["sdd".into()] };
     let mut end = start.clone();
@@ -772,7 +772,7 @@ fn scrub_dates() {
 fn the_replaced_disk_is_erased_best_effort() {
     let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
     let mut v = start.clone();
-    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new(), others: 0 });
+    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new(), others: 0, sector: 0 });
     let g = tiers::replace(&v.shapes(), &v.layout_disks(), "sda", &("sdd".into(), 12 * TB), 1, MIN_TIER).unwrap();
     let goal = Goal { old: Some("sda".into()), new: vec!["sdd".into()] };
     let steps = growth_steps(&mut v, &goal, Some(&g.tiers)).unwrap();
@@ -809,7 +809,7 @@ fn a_rebuild_that_leaves_the_tier_degraded_waits_for_that() {
         t.members.retain(|m| m.disk != "sdc" && m.disk != "sdd");
     }
     start.disks.retain(|d| d.name != "sdc" && d.name != "sdd");
-    start.disks.push(VDisk { name: "sde".into(), size: 8 * TB, parts: Vec::new(), others: 0 });
+    start.disks.push(VDisk { name: "sde".into(), size: 8 * TB, parts: Vec::new(), others: 0, sector: 0 });
     let (goal, target) = replace_missing(&start, ("sde", 8 * TB));
     let mut end = start.clone();
     let steps = growth_steps(&mut end, &goal, Some(&target)).unwrap();
@@ -854,6 +854,7 @@ fn a_disk_with_leftover_slices_is_cleared_and_used() {
             VPart { tier: 2, kname: "sdd2".into(), start: b1 - 64 * MIB, end: b2, fresh: false, partn: 2 },
         ],
         others: 0,
+        sector: 0,
     });
     let ns = vec![("sdd".to_string(), 8 * TB)];
     let growth = tiers::grow(&v.shapes(), &v.layout_disks(), &ns, 1, MIN_TIER);
@@ -899,6 +900,7 @@ fn leftover_slices_next_to_other_partitions_keep_them() {
             VPart { tier: 2, kname: "sdd2".into(), start: b1 - 64 * MIB, end: b2, fresh: true, partn: 2 },
         ],
         others: 1,
+        sector: 0,
     });
     let ns = vec![("sdd".to_string(), 8 * TB)];
     let growth = tiers::grow(&v.shapes(), &v.layout_disks(), &ns, 1, MIN_TIER);
@@ -948,7 +950,7 @@ fn replace_missing_with_the_old_disk_still_attached() {
     assert!(end.tiers.iter().all(|t| t.degraded() == 0));
     // another disk
     let mut v = start.clone();
-    v.disks.push(VDisk { name: "sdd".into(), size: 8 * TB, parts: Vec::new(), others: 0 });
+    v.disks.push(VDisk { name: "sdd".into(), size: 8 * TB, parts: Vec::new(), others: 0, sector: 0 });
     let (goal, target) = replace_missing(&v, ("sdd", 8 * TB));
     let begin = v.clone();
     let steps = growth_steps(&mut v, &goal, Some(&target)).unwrap();
@@ -1024,7 +1026,7 @@ fn a_new_tier_refuses_a_partition_with_a_superblock() {
         fresh: false,
         partn: 2,
     });
-    v.disks.push(VDisk { name: "sde".into(), size: 12 * TB, parts: Vec::new(), others: 0 });
+    v.disks.push(VDisk { name: "sde".into(), size: 12 * TB, parts: Vec::new(), others: 0, sector: 0 });
     let ns = vec![("sde".to_string(), 12 * TB)];
     let growth = tiers::grow(&v.shapes(), &v.layout_disks(), &ns, 2, MIN_TIER);
     let goal = Goal { old: None, new: vec!["sde".into()] };
@@ -1075,7 +1077,7 @@ fn complete_the_partitions_of_a_new_tier() {
 fn leftover_slices_without_superblocks_are_never_adopted() {
     let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
     let mut v = start.clone();
-    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new(), others: 0 });
+    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new(), others: 0, sector: 0 });
     let g = tiers::replace(&v.shapes(), &v.layout_disks(), "sda", &("sdd".into(), 12 * TB), 1, MIN_TIER).unwrap();
     let goal = Goal { old: Some("sda".into()), new: vec!["sdd".into()] };
     let steps = growth_steps(&mut v, &goal, Some(&g.tiers)).unwrap();
@@ -1085,7 +1087,7 @@ fn leftover_slices_without_superblocks_are_never_adopted() {
     let old_part = start.disks.iter().find(|d| d.name == "sda").unwrap().parts[0].clone();
     assert_eq!(old_part.tier, 1);
     v.disks.retain(|d| d.name != "sda");
-    v.disks.push(VDisk { name: "sda".into(), size: 4 * TB, parts: vec![VPart { fresh: true, ..old_part }], others: 0 });
+    v.disks.push(VDisk { name: "sda".into(), size: 4 * TB, parts: vec![VPart { fresh: true, ..old_part }], others: 0, sector: 0 });
     let after_replace = v.clone();
     let touches_sda = |steps: &[PlanStep]| {
         steps.iter().any(|s| line(s).contains("/dev/sda") || s.destroys.contains(&"sda".to_string()))
@@ -1122,7 +1124,7 @@ fn leftover_slices_without_superblocks_are_never_adopted() {
         t.members.retain(|m| m.disk != "sdb");
     }
     v.disks.retain(|d| d.name != "sdb");
-    v.disks.push(VDisk { name: "sdf".into(), size: 8 * TB, parts: Vec::new(), others: 0 });
+    v.disks.push(VDisk { name: "sdf".into(), size: 8 * TB, parts: Vec::new(), others: 0, sector: 0 });
     let (goal, target) = replace_missing(&v, ("sdf", 8 * TB));
     let steps = growth_steps(&mut v, &goal, Some(&target)).unwrap();
     assert!(!touches_sda(&steps), "{:?}", lines(&steps));

@@ -70,6 +70,12 @@ pub struct Inventory {
 }
 
 impl Inventory {
+    /// Logical sector size of `disk` in bytes: the unit of sgdisk's sector numbers (512
+    /// when lsblk did not say).
+    pub fn sector_size(&self, disk: &str) -> u64 {
+        self.graph.get(disk).and_then(|d| d.log_sec).map_or(512, u64::from)
+    }
+
     /// Thinnest flexible RAID tier for this inventory (smaller on loop files).
     pub fn min_tier(&self) -> u64 {
         if self.min_tier == 0 {

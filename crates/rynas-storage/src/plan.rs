@@ -553,10 +553,7 @@ pub(crate) fn finish(mut p: StoragePlan) -> StoragePlan {
     p
 }
 
-/// Erases `disk` and makes its md partition: up to [`END_RESERVE`] before the end, or up to
-/// the absolute byte offset `end` (a disk joining an array it holds only without the
-/// reserve).
-fn partition_steps(steps: &mut Vec<PlanStep>, disk: &str, label: &str, end: Option<u64>) {
+fn partition_steps(steps: &mut Vec<PlanStep>, disk: &str, label: &str, end: Option<u64>, sector: u64) {
     let dev = format!("/dev/{disk}");
     steps.push(destroying(
         cmd(
@@ -572,9 +569,10 @@ fn partition_steps(steps: &mut Vec<PlanStep>, disk: &str, label: &str, end: Opti
         ),
         &[disk],
     ));
+    // sgdisk counts in the disk's logical sectors (4096 bytes on a 4K native disk)
     let new = match end {
         None => "--new=1:0:-128M".to_string(),
-        Some(e) => format!("--new=1:{}:{}", PART_START / 512, e / 512 - 1),
+        Some(e) => format!("--new=1:{}:{}", PART_START / sector, e.div_ceil(sector) - 1),
     };
     steps.push(cmd(
         d_on(PlanStepKind::CreatePartition, disk),
@@ -723,7 +721,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
     let md = format!("/dev/md/{label}");
     let mut steps = Vec::new();
     for d in &chosen {
-        partition_steps(&mut steps, &d.name, label, None);
+        partition_steps(&mut steps, &d.name, label, None, inv.sector_size(&d.name));
     }
     steps.push(cmd(d(PlanStepKind::WaitUdev), &["udevadm", "settle"]));
     let parts: Vec<String> = chosen
@@ -1199,7 +1197,7 @@ pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
     let md = a.path.clone();
     let mut steps = Vec::new();
     for (d, end) in &new {
-        partition_steps(&mut steps, &d.name, &label, *end);
+        partition_steps(&mut steps, &d.name, &label, *end, inv.sector_size(&d.name));
     }
     steps.push(cmd(d(PlanStepKind::WaitUdev), &["udevadm", "settle"]));
     let mut add: Vec<String> = vec!["mdadm".into(), md.clone(), "--add".into()];
@@ -1321,23 +1319,36 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
         );
     }
     let old = req.old.trim_start_matches("/dev/");
+    // "missing": a slot md lost with its disk (gone at a restart, the array assembled
+    // degraded without it): no member to take out, the new disk only joins
+    let missing = old == crate::flex::plan::MISSING;
     let member = a
         .members
         .iter()
-        .find(|m| m.device == old || m.disk.as_deref() == Some(old));
-    let Some(member) = member else {
+        .find(|m| !missing && (m.device == old || m.disk.as_deref() == Some(old)));
+    if missing {
+        let listed = a.members.iter().filter(|m| m.role == MemberRole::Faulty).count() as u32;
+        if a.degraded <= listed {
+            let m = format!("{} has no missing member", a.name);
+            fail(&mut p, PlanIssueCode::NotAMember, "old", Some(old), m);
+            return finish(p);
+        }
+    } else if member.is_none() {
         let m = format!("{old} is not a member of {}", a.name);
         fail(&mut p, PlanIssueCode::NotAMember, "old", Some(old), m);
         return finish(p);
-    };
-    if member.role == MemberRole::Spare {
-        warn_on(&mut p, PlanWarningCode::SpareMember, &member.device);
     }
+    if let Some(m) = member
+        && m.role == MemberRole::Spare
+    {
+        warn_on(&mut p, PlanWarningCode::SpareMember, &m.device);
+    }
+    let replaced = member.map(|m| m.device.as_str());
     // the healthy members left to rebuild from
     let healthy: Vec<&rynas_api_types::storage::MdMember> = a
         .members
         .iter()
-        .filter(|m| m.role == MemberRole::Active && m.device != member.device && m.disk.is_some())
+        .filter(|m| m.role == MemberRole::Active && Some(m.device.as_str()) != replaced && m.disk.is_some())
         .collect();
     if healthy.is_empty() {
         let m = format!("{}: no healthy member left to rebuild from", a.name);
@@ -1450,11 +1461,12 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
     };
     let part_no = match &source {
         Some((disk, dev)) => part_no_of(dev, Some(disk)),
-        None => part_no_of(&member.device, member.disk.as_deref()),
+        None => member
+            .and_then(|m| part_no_of(&m.device, m.disk.as_deref()))
+            .or_else(|| part_no_of(&smallest.device, smallest.disk.as_deref())),
     }
     .unwrap_or(1);
     let new_part = format!("/dev/{}", part_name(&new.name, part_no));
-    let old_dev = format!("/dev/{}", member.device);
     let md = a.path.clone();
     let wipe = destroying(
         cmd(
@@ -1509,7 +1521,13 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
                     d_on(PlanStepKind::CreatePartition, &new.name),
                     &[
                         "sgdisk",
-                        &format!("--new={part_no}:{}:{}", start / 512, fresh_end / 512 - 1),
+                        &{
+                            // in the new disk's logical sectors; a start that is not on one
+                            // moves the whole partition up, its length kept
+                            let ss = inv.sector_size(&new.name);
+                            let first = start.div_ceil(ss);
+                            format!("--new={part_no}:{first}:{}", first + (fresh_end - start).div_ceil(ss) - 1)
+                        },
                         &format!("--typecode={part_no}:FD00"),
                         &format!("--change-name={part_no}:rynas-{label}"),
                         &new_dev,
@@ -1519,8 +1537,9 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
         }
     };
     steps.push(cmd(d(PlanStepKind::WaitUdev), &["udevadm", "settle"]));
-    let hot = member.role == MemberRole::Active && a.health == ArrayHealth::Healthy;
-    if hot {
+    let hot = member.filter(|m| m.role == MemberRole::Active && a.health == ArrayHealth::Healthy);
+    if let Some(member) = hot {
+        let old_dev = format!("/dev/{}", member.device);
         // keeps full redundancy during the copy
         steps.push(cmd(
             d(PlanStepKind::AddSpare),
@@ -1539,16 +1558,19 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
             &["mdadm", &md, "--remove", &old_dev],
         ));
     } else {
-        if member.role != MemberRole::Faulty {
+        if let Some(member) = member {
+            let old_dev = format!("/dev/{}", member.device);
+            if member.role != MemberRole::Faulty {
+                steps.push(cmd(
+                    d_on(PlanStepKind::MarkFailed, &member.device),
+                    &["mdadm", &md, "--fail", &old_dev],
+                ));
+            }
             steps.push(cmd(
-                d_on(PlanStepKind::MarkFailed, &member.device),
-                &["mdadm", &md, "--fail", &old_dev],
+                d_on(PlanStepKind::RemoveMember, &member.device),
+                &["mdadm", &md, "--remove", &old_dev],
             ));
         }
-        steps.push(cmd(
-            d_on(PlanStepKind::RemoveMember, &member.device),
-            &["mdadm", &md, "--remove", &old_dev],
-        ));
         steps.push(cmd(
             d(PlanStepKind::AddForRebuild),
             &["mdadm", &md, "--add", &new_part],
@@ -1560,14 +1582,14 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
     }
     p.summary = vec![
         ("array".into(), md),
-        ("old".into(), member.device.clone()),
+        ("old".into(), replaced.unwrap_or(crate::flex::plan::MISSING).to_string()),
         (
             "new".into(),
             new_part.trim_start_matches("/dev/").to_string(),
         ),
         (
             "mode".into(),
-            if hot { "hot replace" } else { "rebuild" }.into(),
+            if hot.is_some() { "hot replace" } else { "rebuild" }.into(),
         ),
     ];
     p.steps = steps;
@@ -2214,6 +2236,44 @@ mod tests {
         assert!(p.errors[0].contains("not a member"));
     }
 
+    /// A classic array assembled degraded after a restart without its failed disk: md no
+    /// longer lists it, so the replace takes "missing" and the new disk only joins.
+    #[test]
+    fn classic_replace_of_a_missing_member() {
+        let mut inv = nas_inventory();
+        let mut new = inv.disks.iter().find(|d| d.name == "sda").unwrap().clone();
+        new.name = "sdf".into();
+        inv.disks.push(new);
+        let req = ReplacePlanRequest {
+            array: "md2".into(),
+            old: "missing".into(),
+            new_disk: "sdf".into(),
+            volume: None,
+        };
+        let arr = inv.arrays.iter_mut().find(|a| a.name == "md2").unwrap();
+        arr.sync = None;
+        arr.members.retain(|m| m.device != "sdc1");
+        for m in &mut arr.members {
+            m.role = MemberRole::Active;
+        }
+        // nothing is missing yet
+        arr.degraded = 0;
+        arr.health = ArrayHealth::Healthy;
+        let p = plan_replace(&inv, &req);
+        assert!(!p.valid);
+        assert!(p.issues.iter().any(|i| i.code == PlanIssueCode::NotAMember), "{:?}", p.issues);
+        let arr = inv.arrays.iter_mut().find(|a| a.name == "md2").unwrap();
+        arr.degraded = 1;
+        arr.health = ArrayHealth::Degraded;
+        let p = plan_replace(&inv, &req);
+        assert!(p.valid, "{:?}", p.errors);
+        assert_codes_match(&p);
+        let a = argvs(&p);
+        assert!(a.contains(&"mdadm /dev/md2 --add /dev/sdf1".to_string()), "{a:?}");
+        assert!(!a.iter().any(|l| l.contains("--fail") || l.contains("--remove")), "{a:?}");
+        assert!(p.summary.iter().any(|(k, v)| k == "old" && v == "missing"), "{:?}", p.summary);
+    }
+
     const TB: u64 = 1_000_000_000_000;
 
     /// md2 healthy over 4 + 4 + 8 TB (sda, sdb: 4 TB, sdc: 8 TB, partitions made by rynas)
@@ -2311,6 +2371,23 @@ mod tests {
         assert!(!p.valid);
         assert!(p.issues.iter().any(|i| i.code == PlanIssueCode::DiskTooSmall), "{:?}", p.issues);
         assert!(p.errors.iter().any(|e| e.contains("GB missing")), "{:?}", p.errors);
+    }
+
+    /// A 4K native disk: sgdisk takes its sector numbers in 4096-byte sectors, the partition
+    /// lands on the same bytes as on a 512-byte disk.
+    #[test]
+    fn partition_sectors_follow_the_logical_sector_size() {
+        let part = usable_partition(4 * TB);
+        let mut inv = mixed_raid5(4 * TB - 5_000_000);
+        let g = inv.graph.devs.entry("sdf".into()).or_default();
+        g.log_sec = Some(4096);
+        assert_eq!(inv.sector_size("sdf"), 4096);
+        assert_eq!(inv.sector_size("nope"), 512);
+        let p = grow_md2(&inv);
+        assert!(p.valid, "{:?}", p.errors);
+        let end = PART_START + part.div_ceil(MIB) * MIB;
+        let want = format!("sgdisk --new=1:256:{} --typecode=1:FD00 --change-name=1:rynas-vol1 /dev/sdf", end / 4096 - 1);
+        assert!(argvs(&p).contains(&want), "{:?}", argvs(&p));
     }
 
     const MD_OVERHEAD_TEST: u64 = rynas_api_types::capacity::MD_OVERHEAD;

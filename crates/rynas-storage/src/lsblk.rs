@@ -11,12 +11,13 @@ use serde_json::Value;
 
 /// Columns asked from lsblk. `MAJ:MIN` comes back as the key "maj:min". `START` (in 512-byte
 /// sectors, whatever the logical sector size) and `PARTN` place a partition on its disk:
-/// the tiers of a flexible RAID are told apart by them.
+/// the tiers of a flexible RAID are told apart by them. `LOG-SEC` is the unit of the sector
+/// numbers sgdisk takes (4096 on a 4K native disk).
 pub const LSBLK_ARGS: &[&str] = &[
     "--json",
     "--bytes",
     "--output",
-    "NAME,KNAME,PATH,TYPE,FSTYPE,FSVER,LABEL,UUID,PARTLABEL,SIZE,ROTA,TRAN,MODEL,SERIAL,WWN,REV,MOUNTPOINTS,RM,HOTPLUG,MAJ:MIN,START,PARTN",
+    "NAME,KNAME,PATH,TYPE,FSTYPE,FSVER,LABEL,UUID,PARTLABEL,SIZE,ROTA,TRAN,MODEL,SERIAL,WWN,REV,MOUNTPOINTS,RM,HOTPLUG,MAJ:MIN,START,PARTN,LOG-SEC",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -48,6 +49,8 @@ pub struct BlockDev {
     pub start: Option<u64>,
     /// Partition number (`PARTN`); `None` for whole devices.
     pub partn: Option<u32>,
+    /// Logical sector size in bytes (`LOG-SEC`); `None` when lsblk did not say.
+    pub log_sec: Option<u32>,
     /// Devices below (e.g. the partitions of an md array).
     pub parents: Vec<String>,
     /// Devices stacked on top.
@@ -149,6 +152,7 @@ impl BlockGraph {
             majmin: s(v, "maj:min"),
             start: s(v, "start").and_then(|x| x.parse::<u64>().ok()).map(|x| x * 512),
             partn: s(v, "partn").and_then(|x| x.parse().ok()),
+            log_sec: s(v, "log-sec").and_then(|x| x.parse().ok()).filter(|&n: &u32| n >= 512 && n.is_power_of_two()),
             parents: Vec::new(),
             children: Vec::new(),
         });

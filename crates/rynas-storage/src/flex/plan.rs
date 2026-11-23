@@ -135,6 +135,15 @@ pub struct VDisk {
     pub parts: Vec<VPart>,
     /// Partitions that are not slices of this volume: the disk is never cleared whole.
     pub others: u32,
+    /// Logical sector size in bytes; 0 means 512 (see [`VDisk::sector`]).
+    pub sector: u64,
+}
+
+impl VDisk {
+    /// The unit of the sector numbers sgdisk takes for this disk.
+    pub fn sector(&self) -> u64 {
+        if self.sector == 0 { 512 } else { self.sector }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,6 +580,7 @@ impl View {
             size,
             parts,
             others,
+            sector: inv.sector_size(name),
         });
     }
 
@@ -738,12 +748,13 @@ impl View {
                     let f: Vec<u64> = n.split(':').filter_map(|x| x.parse().ok()).collect();
                     if let [num, s, e] = f[..] {
                         let d = self.disk_mut(&disk);
+                        let ss = d.sector();
                         d.parts.retain(|p| p.tier != num as u32);
                         d.parts.push(VPart {
                             tier: num as u32,
                             kname: part_name(&disk, num as u32),
-                            start: s * 512,
-                            end: (e + 1) * 512,
+                            start: s * ss,
+                            end: (e + 1) * ss,
                             fresh: true,
                             partn: num as u32,
                         });
@@ -1085,7 +1096,7 @@ fn partition_steps(v: &mut View, target: &[Tier], new: &[String]) -> Result<Vec<
         let devp = dev(&disk);
         let spec = |t: &Tier| {
             [
-                format!("--new={}:{}:{}", t.index, t.start / 512, t.end / 512 - 1),
+                format!("--new={}:{}:{}", t.index, t.start / vd.sector(), t.end / vd.sector() - 1),
                 format!("--typecode={}:FD00", t.index),
                 format!("--change-name={}:{}", t.index, tier_partlabel(&v.label, t.index)),
             ]
@@ -1820,6 +1831,9 @@ pub fn plan_create(
     }
 
     let mut v = View::blank(label, tolerance, &sizes);
+    for d in &mut v.disks {
+        d.sector = inv.sector_size(&d.name);
+    }
     let new: Vec<String> = sizes.iter().map(|(n, _)| n.clone()).collect();
     let mut steps = match partition_steps(&mut v, &created, &new) {
         Ok(s) => s,

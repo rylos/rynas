@@ -1256,14 +1256,20 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
         None => {
             let mut members = md.members.clone();
             members.sort_by_key(|m| m.role != MemberRole::Faulty);
-            members
+            let faulty = members.iter().filter(|m| m.role == MemberRole::Faulty).count() as u32;
+            let mut v: Vec<(String, String)> = members
                 .into_iter()
                 .map(|m| {
                     let role = format!("{:?}", m.role).to_lowercase();
                     let label = format!("{} · {}", m.device, i18n::try_t(&format!("sto.r.{role}")).unwrap_or(&role));
                     (m.device, label)
                 })
-                .collect()
+                .collect();
+            // a slot md lost with its disk (gone at a restart): the new drive only joins
+            if md.degraded > faulty {
+                v.insert(0, ("missing".to_string(), t("sto.replace_missing").to_string()));
+            }
+            v
         }
     };
     let flex = vol.flex.is_some();
