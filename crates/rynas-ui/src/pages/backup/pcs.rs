@@ -64,6 +64,17 @@ struct Pcs {
     saved: RwSignal<u32>,
 }
 
+/// "measured 2 d ago": when a space figure was read (shown while backups came or went since).
+fn measured_ago(at_ms: u64) -> String {
+    let now = js_sys::Date::now() as u64;
+    tf("bk.usage_measured", &[("ago", &i18n::ago(now.saturating_sub(at_ms) / 1000))])
+}
+
+/// How long an agent's run took, in seconds (`None` when it does not say).
+pub(super) fn run_secs(h: &rynas_api_types::pcagent::PcRun) -> Option<u64> {
+    (h.ended_ms > h.started_ms).then(|| (h.ended_ms - h.started_ms) / 1000)
+}
+
 fn target_url(device: &str) -> String {
     format!("{URL}/{}", api::encode(device))
 }
@@ -560,7 +571,8 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                 let paired = p.agent.then(|| device_of(&p.device)).flatten();
                 // what the last backup sent (rynas-agent tells), under the space on disk
                 let last_sent = paired.as_ref().and_then(|d| d.last_run.as_ref()).filter(|r| r.ok && r.bytes_added > 0).map(|r| tf("pcb.last_sent", &[("size", &i18n::bytes(r.bytes_added))]));
-                let stale = p.usage_stale.then(|| t("bk.usage_stale_short").to_string());
+                // an older figure says when it was measured (snapshots came or went since)
+                let stale = p.usage.filter(|_| p.usage_stale).map(|u| measured_ago(u.read_at_ms));
                 let space_sub = match (stale, last_sent) {
                     (Some(s), Some(l)) => Some(format!("{s} · {l}")),
                     (s, l) => s.or(l),
@@ -1599,6 +1611,10 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                     if let Some(h) = h.filter(|h| h.bytes_added > 0) {
                         sub.push(tf("pcb.sent_size", &[("size", &i18n::bytes(h.bytes_added))]));
                     }
+                    // how long the agent's run took
+                    if let Some(d) = h.and_then(run_secs) {
+                        sub.push(tf("pcb.took", &[("time", &i18n::elapsed(d))]));
+                    }
                     // a run that brought some subvolumes and not others is partial, also when
                     // the agent's run failed on the missing one
                     let failed = h.is_some_and(|h| !h.ok);
@@ -1793,7 +1809,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 let title = p.usage.map(|u| tf("bk.usage_title", &[("excl", &i18n::bytes(u.exclusive_bytes)), ("shared", &i18n::bytes(u.shared_bytes)), ("when", &i18n::datetime(u.read_at_ms))])).unwrap_or_default();
                 view! {
                     <span title=title>{text}</span>
-                    {p.usage_stale.then(|| view! { <div class="warn-text">{tr("bk.usage_stale")}</div> })}
+                    {p.usage.filter(|_| p.usage_stale).map(|u| view! { <div class="small muted">{tf("bk.usage_stale", &[("ago", &i18n::ago((js_sys::Date::now() as u64).saturating_sub(u.read_at_ms) / 1000))])}</div> })}
                 }
                 .into_any()
             }

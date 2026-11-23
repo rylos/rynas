@@ -5276,8 +5276,8 @@ bk.measured	Spazio misurato
 bk.usage_text	{disk} su disco · {data} di dati in {backups} · misurato {ago}
 bk.on_disk	{size} su disco
 bk.usage_title	{excl} solo in questi snapshot, {shared} in comune contati una volta (misurato il {when})
-bk.usage_stale	Non aggiornato: da allora sono arrivati o spariti dei backup
-bk.usage_stale_short	Non aggiornato
+bk.usage_stale	Misurato {ago}: da allora sono arrivati o spariti dei backup
+bk.usage_measured	misurato {ago}
 bk.usage_none	Non ancora misurato
 bk.rules.off	Elimina solo il NAS
 bk.rules.on	Gestita dal PC: restano i {keep} più recenti, nessuno più giovane di {days} giorni
@@ -5395,6 +5395,7 @@ pcb.goes_after	va via dopo il {when}
 pcb.n_backups.one	{n} backup
 pcb.n_backups.other	{n} backup
 pcb.sent_size	{size} inviati
+pcb.took	durata {time}
 pcb.restore	Ripristino
 pcb.restore.file	File e cartelle
 pcb.restore.file_text	Apri il backup più recente in File e copia indietro ciò che ti serve.

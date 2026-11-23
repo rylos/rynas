@@ -5322,8 +5322,8 @@ bk.measured	Место измерено
 bk.usage_text	{disk} на диске · {data} данных · {backups} · измерено {ago}
 bk.on_disk	{size} на диске
 bk.usage_title	{excl} только в этих снимках, {shared} общих, учтены один раз (измерено {when})
-bk.usage_stale	Устарело: с тех пор копии добавились или удалились
-bk.usage_stale_short	Устарело
+bk.usage_stale	Измерено {ago}: с тех пор копии добавились или удалились
+bk.usage_measured	измерено {ago}
 bk.usage_none	Ещё не измерено
 bk.rules.off	Удаляет только NAS
 bk.rules.on	Управляет ПК: остаются последние ({keep}), не моложе {days} дн.
@@ -5858,6 +5858,7 @@ pcb.n_backups.few	{n} копии
 pcb.n_backups.many	{n} копий
 pcb.n_backups.other	{n} копии
 pcb.sent_size	Отправлено: {size}
+pcb.took	заняло {time}
 pcb.restore	Восстановление
 pcb.restore.file	Файлы и папки
 pcb.restore.file_text	Откройте самую свежую копию в «Файлах» и скопируйте обратно то, что нужно.

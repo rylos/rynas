@@ -795,6 +795,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                     ui::text_cell("pca.col.what", "", what),
                     ui::cell("col.status", "wrap", if h.ok { ui::status(Tone::Ok, t("pca.h.ok").to_string()) } else { view! { <div class="cell-main">{ui::status(Tone::Err, t("pca.st.failed").to_string())}<span class="cell-sub small">{h.error.clone().unwrap_or_default()}</span></div> }.into_any() }),
                     ui::text_cell("pca.col.added", "num tnum", if h.restore { ui::DASH.into() } else { i18n::bytes(h.bytes_added) }),
+                    ui::text_cell("tasks.col_duration", "num tnum", super::pcs::run_secs(h).map(i18n::elapsed).unwrap_or_else(|| ui::DASH.into())),
                 ])
             })
             .collect::<Vec<_>>();
@@ -887,7 +888,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
             })}
             {(!history.is_empty()).then(|| view! {
                 <h3 class="mini-title">{tr("pca.history")}</h3>
-                {ui::table("pca-history", &["pca.col.when", "pca.col.what", "col.status", "#pca.col.added"], history)}
+                {ui::table("pca-history", &["pca.col.when", "pca.col.what", "col.status", "#pca.col.added", "#tasks.col_duration"], history)}
             })}
             {move || edit.get().then(|| device_settings(p.clone(), Callback::new(move |_| { detail.reload(); tab.data.reload(); }), Callback::new(move |_| edit.set(false))))}
         }
