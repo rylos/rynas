@@ -1619,14 +1619,17 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                     // a run that brought some subvolumes and not others is partial, also when
                     // the agent's run failed on the missing one
                     let failed = h.is_some_and(|h| !h.ok);
-                    let partial = !r.lacks.is_empty() && !r.incomplete && !parts.is_empty();
+                    let partial = !r.in_progress && !r.lacks.is_empty() && !r.incomplete && !parts.is_empty();
                     if partial {
                         sub.push(tf("bkpc.run.lacks", &[("names", &r.lacks.join(", "))]));
                     }
                     if let Some(x) = r.exclusive_bytes {
                         sub.push(i18n::bytes(x));
                     }
-                    let flag = if partial {
+                    // the run the agent is still sending: what it lacks is on its way
+                    let flag = if r.in_progress {
+                        ui::status(Tone::Info, t("bkpc.run.running").to_string())
+                    } else if partial {
                         // the pill stays short: the missing names are on the line below, the
                         // agent's error (when its run failed on one) in the body
                         ui::status(if failed { Tone::Warn } else { Tone::Info }, t("bkpc.run.partial").to_string())

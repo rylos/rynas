@@ -633,6 +633,15 @@ impl PcAgent {
             let d = a.device(device).ok().filter(|d| !d.revoked && d.settings.method == PcMethod::Btrfs)?;
             Some(missed_online(&d, a.paused_all(), &rynas_power::system_tz(), now_ms()))
         }));
+        // the run its agent is sending now: its live progress, under the run's id
+        // (`run-<started ms>`)
+        let me = Arc::downgrade(self);
+        let _ = side.agent_running.set(Box::new(move |device| {
+            let a = me.upgrade()?;
+            let progress = a.progress.lock().unwrap_or_else(|p| p.into_inner());
+            let (p, _) = progress.get(device).filter(|(p, _)| now_ms().saturating_sub(p.updated_ms) < 120_000)?;
+            p.run_id.strip_prefix("run-")?.parse().ok()
+        }));
         let _ = self.btrfs.set(side);
     }
 

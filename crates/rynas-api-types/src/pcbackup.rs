@@ -387,6 +387,9 @@ pub struct PcRun {
     pub lacks: Vec<String>,
     /// Some snapshot of the run is an interrupted receive.
     pub incomplete: bool,
+    /// The PC's agent is still sending this run: what it lacks is still to come.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_progress: bool,
     /// Sums over the run's snapshots when every size is known.
     pub referenced_bytes: Option<u64>,
     pub exclusive_bytes: Option<u64>,

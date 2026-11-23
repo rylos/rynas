@@ -6176,6 +6176,7 @@ dict! { BLOB, LENS;
     "bkpc.sizes_note" => "Size: what the snapshot references (about what a restore transfers) · what only it holds (about what deleting it alone frees). Measuring reads every file's extents at low priority and can take a while; each snapshot is measured once.";
     "bkpc.run.lacks" => "Lacks {names}";
     "bkpc.run.partial" => "Partial";
+    "bkpc.run.running" => "In progress";
     "bkpc.delete_snap" => "Delete snapshot";
     "bkpc.delete_snap_title" => "Delete {name}?";
     "bkpc.delete_snap_text" => "The snapshot is deleted from the NAS and its space is freed in the background. The other snapshots and the PC's next incremental send are not affected.";

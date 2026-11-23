@@ -1827,6 +1827,7 @@ fn runs(list: &[ReceivedSnapshot], expected: &BTreeSet<String>) -> Vec<PcRun> {
                 snapshots: snaps.iter().map(|s| s.name.clone()).collect(),
                 lacks: expected.iter().filter(|g| !complete.contains(g.as_str())).cloned().collect(),
                 incomplete: snaps.iter().any(|s| s.incomplete),
+                in_progress: false,
                 referenced_bytes: sum(|z| z.referenced_bytes),
                 exclusive_bytes: sum(|z| z.exclusive_bytes),
             }
@@ -2186,6 +2187,8 @@ struct Registry {
 pub type AgentRemoved = Box<dyn Fn(&str, u64) + Send + Sync>;
 /// See [`PcBackup::agent_missed`].
 pub type AgentMissed = Box<dyn Fn(&str) -> Option<bool> + Send + Sync>;
+/// See [`PcBackup::agent_running`].
+pub type AgentRunning = Box<dyn Fn(&str) -> Option<u64> + Send + Sync>;
 
 /// A cached scan of [`PcBackup::agent_facts`]: folder mtime, when, runs, readiness.
 type FolderFacts = (Option<std::time::SystemTime>, std::time::Instant, u32, BareMetal);
@@ -2230,6 +2233,9 @@ pub struct PcBackup {
     /// (`None`: no live agent, nothing tells whether the PC is on), set once at start
     /// ([`crate::pc_agent::PcAgent::bind_btrfs`]).
     pub agent_missed: std::sync::OnceLock<AgentMissed>,
+    /// When the run the live agent of a device is sending now started (`None`: no run going),
+    /// set once at start ([`crate::pc_agent::PcAgent::bind_btrfs`]).
+    pub agent_running: std::sync::OnceLock<AgentRunning>,
     /// [`Self::agent_facts`]' last scan per device: (folder mtime, when, runs, readiness).
     facts: Mutex<BTreeMap<String, FolderFacts>>,
 }
@@ -2282,6 +2288,7 @@ impl PcBackup {
             sending: Mutex::new(BTreeSet::new()),
             on_agent_removed: std::sync::OnceLock::new(),
             agent_missed: std::sync::OnceLock::new(),
+            agent_running: std::sync::OnceLock::new(),
             facts: Mutex::new(BTreeMap::new()),
         })
     }
@@ -2417,7 +2424,14 @@ impl PcBackup {
         let parents = receive::parents(&entries, now_ms);
         let manifest = if present { self.find_manifest(root, &entries, &parents) } else { None };
         let expected = expected_of(manifest.as_ref().map(|m| &m.2), &complete, &t.ignored_groups);
-        let runs = runs(&s.list, &expected);
+        let mut runs = runs(&s.list, &expected);
+        // the run the PC's agent is sending now (its snapshots are named in whole minutes, so
+        // the newest run made since a minute before it started): what it lacks is still to come
+        if let Some(since) = self.running_since(device)
+            && let Some(r) = runs.first_mut().filter(|r| r.created_ms.is_some_and(|c| c.saturating_add(120_000) >= since))
+        {
+            r.in_progress = true;
+        }
         let space = if present { self.host.space(root) } else { None };
         let receiving = present && self.host.receiving(root);
         let full_set_bytes = s
@@ -2469,8 +2483,9 @@ impl PcBackup {
         if !missed {
             issues.retain(|i| i.code != PcIssueCode::Late);
         }
-        // the newest run that brought something complete (not a receive still going)
-        let newest_run = runs.iter().find(|r| {
+        // the newest run that brought something complete (not a receive still going, nor the
+        // run the agent is still sending)
+        let newest_run = runs.iter().filter(|r| !r.in_progress).find(|r| {
             r.snapshots.iter().any(|n| s.list.iter().any(|x| &x.name == n && !x.incomplete))
         });
         let bare_metal = bare_metal(&complete, manifest, newest_run);
@@ -2538,6 +2553,11 @@ impl PcBackup {
     /// See [`PcBackup::agent_missed`] (`None` before it is bound).
     fn missed(&self, device: &str) -> Option<bool> {
         self.agent_missed.get().and_then(|f| f(device))
+    }
+
+    /// See [`PcBackup::agent_running`] (`None` before it is bound).
+    fn running_since(&self, device: &str) -> Option<u64> {
+        self.agent_running.get().and_then(|f| f(device))
     }
 
     fn setup(&self) -> ReceiveSetup {

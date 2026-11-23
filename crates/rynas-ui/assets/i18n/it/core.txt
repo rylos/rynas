@@ -5489,6 +5489,7 @@ bkpc.sizes_quota	Le dimensioni arrivano in tempo reale dai gruppi di quota del v
 bkpc.sizes_note	Dimensione: quanto lo snapshot referenzia (circa quanto trasferisce un ripristino) · quanto contiene solo lui (circa quanto libera eliminarlo da solo). La misura legge gli extent di ogni file a bassa priorità e può richiedere tempo; ogni snapshot viene misurato una volta sola.
 bkpc.run.lacks	Manca {names}
 bkpc.run.partial	Parziale
+bkpc.run.running	In corso
 bkpc.delete_snap	Elimina lo snapshot
 bkpc.delete_snap_title	Eliminare {name}?
 bkpc.delete_snap_text	Lo snapshot viene eliminato dal NAS e il suo spazio liberato in background. Gli altri snapshot e il prossimo invio incrementale del PC non ne risentono.
