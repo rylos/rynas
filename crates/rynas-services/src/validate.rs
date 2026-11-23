@@ -120,6 +120,11 @@ pub fn share_path(p: &str) -> Result<(), String> {
     if p.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
         return Err(format!("{p:?} has characters that are not allowed"));
     }
+    // Samba reads `%U`, `%S`, … in a share's path as variables, with no way to write a
+    // literal '%': the share would open another folder
+    if p.contains('%') {
+        return Err(format!("{p:?}: '%' cannot be used in the folder of a share (rename the folder)"));
+    }
     if p.len() > 1 && p.ends_with('/') {
         return Err(format!("{p:?}: remove the trailing '/'"));
     }
@@ -301,6 +306,8 @@ mod tests {
     fn paths() {
         assert!(share_path("/srv/vol1/photos").is_ok());
         assert!(share_path("/home/alice/shared").is_ok());
+        assert!(share_path("/srv/vol1/100%").is_err());
+        assert!(share_path("/srv/vol1/%U").is_err());
         for bad in [
             "srv/x",
             "/",
