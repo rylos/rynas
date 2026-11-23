@@ -693,3 +693,134 @@ fn unreachable_provider_is_a_network_error() {
         other => panic!("{other:?}"),
     }
 }
+
+/// `%XX` decoding of a query value (the fake servers read what the clients encoded).
+fn unpct(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn query_of(path: &str) -> BTreeMap<String, String> {
+    path.split_once('?')
+        .map(|(_, q)| q.split('&').filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), unpct(v))).collect())
+        .unwrap_or_default()
+}
+
+fn xml_tag(xml: &str, t: &str) -> Vec<String> {
+    let (o, c) = (format!("<{t}>"), format!("</{t}>"));
+    xml.split(&o).skip(1).filter_map(|p| p.split_once(&c).map(|(v, _)| v.to_string())).collect()
+}
+
+/// Route 53: zones by name (the next zone in order when the one asked does not exist), record
+/// sets listed from a name, changes as XML batches; every request signed for AKIDTEST.
+fn route53_handler() -> Handler {
+    Box::new(|r: &Req, st: &mut State| {
+        let auth = r.headers.get("authorization").cloned().unwrap_or_default();
+        if !auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIDTEST/") || !auth.contains("/us-east-1/route53/aws4_request") || !r.headers.contains_key("x-amz-date") {
+            return (403, "<ErrorResponse><Error><Code>InvalidSignatureException</Code><Message>bad signature</Message></Error></ErrorResponse>".into());
+        }
+        let q = query_of(&r.path);
+        let path = r.path.split('?').next().unwrap_or("");
+        match (r.method.as_str(), path) {
+            ("GET", "/2013-04-01/hostedzonesbyname") => {
+                let name = if q.get("dnsname").map(String::as_str) == Some("example.com") { "example.com." } else { "other.org." };
+                (200, format!("<ListHostedZonesByNameResponse><HostedZones><HostedZone><Id>/hostedzone/Z123</Id><Name>{name}</Name><Config><PrivateZone>false</PrivateZone></Config></HostedZone></HostedZones></ListHostedZonesByNameResponse>"))
+            }
+            ("GET", "/2013-04-01/hostedzone/Z123/rrset") => {
+                let key = format!("{}|{}", q.get("name").cloned().unwrap_or_default().replace("\\052", "*"), q.get("type").cloned().unwrap_or_default());
+                let sets = match st.sets.get(&key) {
+                    Some(v) => {
+                        let (name, t) = key.split_once('|').unwrap();
+                        let vals: String = v["values"].as_array().unwrap().iter().map(|x| format!("<ResourceRecord><Value>{}</Value></ResourceRecord>", x.as_str().unwrap())).collect();
+                        format!("<ResourceRecordSet><Name>{}.</Name><Type>{t}</Type><TTL>{}</TTL><ResourceRecords>{vals}</ResourceRecords></ResourceRecordSet>", name.replace('*', "\\052"), v["ttl"])
+                    }
+                    // the list goes on with the next name: never the one asked
+                    None => "<ResourceRecordSet><Name>zzz.example.com.</Name><Type>A</Type><TTL>300</TTL><ResourceRecords><ResourceRecord><Value>198.51.100.9</Value></ResourceRecord></ResourceRecords></ResourceRecordSet>".into(),
+                };
+                (200, format!("<ListResourceRecordSetsResponse><ResourceRecordSets>{sets}</ResourceRecordSets></ListResourceRecordSetsResponse>"))
+            }
+            ("POST", "/2013-04-01/hostedzone/Z123/rrset") => {
+                let action = xml_tag(&r.body, "Action").pop().unwrap_or_default();
+                let name = xml_tag(&r.body, "Name").pop().unwrap_or_default();
+                let t = xml_tag(&r.body, "Type").pop().unwrap_or_default();
+                let ttl: u64 = xml_tag(&r.body, "TTL").pop().and_then(|x| x.parse().ok()).unwrap_or(0);
+                let key = format!("{name}|{t}");
+                match action.as_str() {
+                    "UPSERT" => {
+                        st.sets.insert(key, json!({"values": xml_tag(&r.body, "Value"), "ttl": ttl}));
+                    }
+                    "DELETE" => {
+                        st.sets.remove(&key);
+                    }
+                    _ => return (400, "<ErrorResponse><Error><Code>InvalidInput</Code><Message>action</Message></Error></ErrorResponse>".into()),
+                }
+                (200, "<ChangeResourceRecordSetsResponse><ChangeInfo><Id>/change/C1</Id><Status>PENDING</Status></ChangeInfo></ChangeResourceRecordSetsResponse>".into())
+            }
+            _ => (404, String::new()),
+        }
+    })
+}
+
+#[test]
+fn route53_records() {
+    let fake = Fake::start(route53_handler());
+    let api = fake.api(DnsProvider::Route53, &[("access_key_id", "AKIDTEST"), ("secret_access_key", "s3cret/key")]);
+    let z = api.zone("home.example.com").unwrap();
+    assert_eq!((z.id.as_str(), z.name.as_str()), ("Z123", "example.com"));
+    assert!(api.get(&z, "home.example.com", Rtype::A).unwrap().is_none());
+    api.set(&z, "home.example.com", Rtype::A, &["192.0.2.10".into()], 60).unwrap();
+    let got = api.get(&z, "home.example.com", Rtype::A).unwrap().unwrap();
+    assert_eq!((got.values, got.ttl), (vec!["192.0.2.10".to_string()], 60));
+    api.delete(&z, "home.example.com", Rtype::A).unwrap();
+    assert!(api.get(&z, "home.example.com", Rtype::A).unwrap().is_none());
+    // the LAN records of an own domain, wildcard included
+    round_trip(api.as_ref(), "nas.example.com");
+    // a zone no apex of the name matches
+    assert!(matches!(api.zone("host.nowhere.net"), Err(DnsError::NoZone(_))));
+    // a bad key: refused, the secret never in the message
+    let bad = fake.api(DnsProvider::Route53, &[("access_key_id", "AKIDOTHER"), ("secret_access_key", "s3cret/key")]);
+    match bad.zone("home.example.com") {
+        Err(DnsError::Auth(m)) => assert!(m.contains("InvalidSignatureException") && !m.contains("s3cret"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn dyndns2_updates() {
+    let fake = Fake::start(Box::new(|r: &Req, _st: &mut State| {
+        // "user:pa ss" in Basic form
+        let ok = r.headers.get("authorization").map(String::as_str) == Some("Basic dXNlcjpwYSBzcw==");
+        match (ok, r.path.as_str()) {
+            (false, _) => (200, "badauth".into()),
+            (true, "/nic/update?hostname=home.example.com&myip=192.0.2.10") => (200, "good 192.0.2.10".into()),
+            (true, "/nic/update?hostname=home.example.com&myip=2001%3Adb8%3A%3A10") => (200, "nochg 2001:db8::10".into()),
+            (true, _) => (200, "nohost".into()),
+        }
+    }));
+    let api = fake.api(DnsProvider::Dyndns2, &[("update_server", "members.example.org"), ("username", "user"), ("password", "pa ss")]);
+    assert!(!api.readable());
+    let z = api.zone("home.example.com").unwrap();
+    api.set(&z, "home.example.com", Rtype::A, &["192.0.2.10".into()], 60).unwrap();
+    api.set(&z, "home.example.com", Rtype::Aaaa, &["2001:db8::10".into()], 60).unwrap();
+    let e = api.set(&z, "other.example.com", Rtype::A, &["192.0.2.10".into()], 60).unwrap_err();
+    assert!(e.to_string().contains("nohost"), "{e}");
+    let bad = fake.api(DnsProvider::Dyndns2, &[("update_server", "members.example.org"), ("username", "user"), ("password", "wrong-pass")]);
+    match bad.set(&z, "home.example.com", Rtype::A, &["192.0.2.10".into()], 60) {
+        Err(DnsError::Auth(m)) => assert!(!m.contains("wrong-pass")),
+        other => panic!("{other:?}"),
+    }
+}

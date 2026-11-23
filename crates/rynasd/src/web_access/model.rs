@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rynas_api_types::apps::WebAuth;
 use rynas_api_types::web_access::{
-    AccessLevel, ChallengeKind, DnsProvider, ProxyMode, RouteKind, UpstreamScheme,
+    AccessLevel, ChallengeKind, DdnsMode, DnsProvider, ProxyMode, RouteKind, UpstreamScheme,
     WebAccessConfig, WebRoute,
 };
 use rynas_config::Invalid;
@@ -684,6 +684,12 @@ fn validate_w2(c: &mut WebAccessConfig) -> Result<(), Invalid> {
             }
             None => d.credential = None,
             Some(p) => {
+                if !rynas_dns::info(p).acme {
+                    return Err(Invalid::at(
+                        at("provider"),
+                        "this provider only keeps dynamic DNS names: a domain needs a provider of the certificate engine",
+                    ));
+                }
                 if p == DnsProvider::Acmedns && d.challenge != ChallengeKind::CnameDelegation {
                     return Err(Invalid::at(
                         at("provider"),
@@ -748,6 +754,7 @@ fn validate_w2(c: &mut WebAccessConfig) -> Result<(), Invalid> {
         }
         d.take_over = take;
     }
+    validate_ddns(c)?;
     let a = &mut c.acme;
     if let Some(e) = a.email.as_mut() {
         *e = e.trim().to_string();
@@ -771,6 +778,61 @@ fn validate_w2(c: &mut WebAccessConfig) -> Result<(), Invalid> {
                 "acme.profile",
                 "a profile name such as classic or tlsserver",
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Most dynamic DNS names.
+pub const MAX_DDNS: usize = 32;
+
+/// The dynamic DNS names: ids and names unique, a credential of a provider rynas writes names
+/// with for `update`, at least one address family, a sane TTL.
+fn validate_ddns(c: &mut WebAccessConfig) -> Result<(), Invalid> {
+    if c.ddns.len() > MAX_DDNS {
+        return Err(Invalid::at("ddns", format!("at most {MAX_DDNS} dynamic DNS names")));
+    }
+    let mut ids = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    let creds: Vec<(String, DnsProvider)> = c.credentials.iter().map(|cr| (cr.id.clone(), cr.provider)).collect();
+    for (i, n) in c.ddns.iter_mut().enumerate() {
+        let at = |f: &str| format!("ddns[{i}].{f}");
+        n.id = n.id.trim().to_string();
+        if !valid_label(&n.id, 63) {
+            return Err(Invalid::at(at("id"), "use 1-63 characters a-z, 0-9 and '-'"));
+        }
+        if !ids.insert(n.id.clone()) {
+            return Err(Invalid::at(at("id"), format!("the id {} is used twice", n.id)));
+        }
+        let name = dns_name(&n.name, MAX_DOMAIN)
+            .ok_or_else(|| Invalid::at(at("name"), format!("a host name such as home.example.com, at most {MAX_DOMAIN} characters, no wildcard")))?;
+        if !names.insert(name.clone()) {
+            return Err(Invalid::at(at("name"), format!("{name} is used twice")));
+        }
+        n.name = name;
+        if !n.ipv4 && !n.ipv6 {
+            return Err(Invalid::at(at("ipv4"), "publish the IPv4 address, the IPv6 address or both"));
+        }
+        if n.ttl != 0 && !(60..=86_400).contains(&n.ttl) {
+            return Err(Invalid::at(at("ttl"), "between 60 and 86400 seconds (0: the provider's lowest)"));
+        }
+        n.credential = n.credential.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        match (n.mode, n.credential.as_deref()) {
+            (DdnsMode::Update, None) => {
+                return Err(Invalid::at(at("credential"), "choose the DNS provider credential that writes the name"));
+            }
+            (_, Some(cid)) => {
+                let Some((_, p)) = creds.iter().find(|(id, _)| id == cid) else {
+                    return Err(Invalid::at(at("credential"), format!("no credential {cid}")));
+                };
+                if !rynas_dns::info(*p).ddns {
+                    return Err(Invalid::at(at("credential"), format!("rynas cannot write names through {}", p.as_str())));
+                }
+                if *p == DnsProvider::Duckdns && !(n.name.ends_with(".duckdns.org") && n.name.split('.').count() == 3) {
+                    return Err(Invalid::at(at("name"), "a DuckDNS name is <name>.duckdns.org"));
+                }
+            }
+            (DdnsMode::Check, None) => {}
         }
     }
     Ok(())

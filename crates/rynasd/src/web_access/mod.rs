@@ -36,6 +36,7 @@ pub mod admin;
 pub mod avahi;
 pub mod caddy;
 pub mod certs;
+pub mod ddns;
 pub mod diag;
 pub mod domains;
 pub mod imported;
@@ -461,6 +462,12 @@ pub struct WebAccessSvc {
     /// Whether the group of the watched folders must exist (default: when running as root,
     /// where the folders get it; tests set `true` to see the missing-group path).
     pub drop_group_check: OnceLock<bool>,
+    /// The public IPv4 address of the network (dynamic DNS names; tests and `--dry-system`
+    /// replace it so no outside service is asked).
+    pub public_ipv4: Box<dyn Fn() -> Result<std::net::Ipv4Addr, String> + Send + Sync>,
+    ddns_mem: Mutex<ddns::Mem>,
+    /// One check of the dynamic DNS names at a time.
+    ddns_run: Mutex<()>,
 }
 
 /// What the certificate checks remember.
@@ -539,6 +546,9 @@ impl WebAccessSvc {
             cert_mem: Mutex::new(CertMem::default()),
             imports: Mutex::new(imported::ImportMem::default()),
             drop_group_check: OnceLock::new(),
+            public_ipv4: Box::new(|| rynas_dns::public::ipv4(rynas_dns::public::IPV4_SERVICES)),
+            ddns_mem: Mutex::new(ddns::Mem::default()),
+            ddns_run: Mutex::new(()),
         }
     }
 
@@ -3130,6 +3140,20 @@ async fn providers_get(
     ))
 }
 
+/// `GET /api/v1/web-access/ddns`: the last check of the dynamic DNS names.
+async fn ddns_get(State(st): State<WaState>, hd: HeaderMap) -> Res<Json<DdnsView>> {
+    let (s, ops) = wsvc(&st)?;
+    admin_user(&ops, &hd, "web access")?;
+    Ok(Json(blocking(move || Ok(s.ddns_view())).await?))
+}
+
+/// `POST /api/v1/web-access/ddns/check`: checks (and updates) every name now.
+async fn ddns_check_post(State(st): State<WaState>, hd: HeaderMap) -> Res<Json<DdnsView>> {
+    let (s, ops) = wsvc(&st)?;
+    admin_user(&ops, &hd, "web access")?;
+    Ok(Json(blocking(move || Ok(s.ddns_check(true))).await?))
+}
+
 pub fn router(st: WaState) -> Router {
     Router::new()
         .route("/v1/web-access", get(state_get).put(state_put))
@@ -3144,6 +3168,8 @@ pub fn router(st: WaState) -> Router {
         )
         .route("/v1/web-access/certificates", get(certificates_get))
         .route("/v1/web-access/providers", get(providers_get))
+        .route("/v1/web-access/ddns", get(ddns_get))
+        .route("/v1/web-access/ddns/check", post(ddns_check_post))
         .route(
             "/v1/web-access/imports",
             get(imports_get).post(imports_post),

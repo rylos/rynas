@@ -5049,6 +5049,40 @@ dns.f.server_url	URL сервера
 dns.f.username	Имя пользователя учётной записи
 dns.f.subdomain	Поддомен
 dns.f.password	Пароль
+dns.f.update_server	Сервер обновлений
+ddns.title	Динамический DNS
+ddns.intro	Публичные имена, которые следуют за адресом вашего интернет-подключения. rynas записывает имя через его DNS-провайдера, когда адрес меняется, или только проверяет имя, которое обновляет другое устройство (роутер). Каждые 5 минут; публичный адрес запрашивается у нескольких независимых сервисов.
+ddns.check	Проверить сейчас
+ddns.add	Добавить имя
+ddns.add_title	Добавить имя динамического DNS
+ddns.empty	Имён динамического DNS пока нет.
+ddns.public_v4	Публичный адрес IPv4: {ip}
+ddns.public_v4_err	Публичный адрес IPv4 не найден: {error}
+ddns.public_v6	Адрес IPv6 NAS: {ip}
+ddns.addr_diff	{published} (должно быть {wanted})
+ddns.col.name	Имя
+ddns.col.address	Адрес
+ddns.st.ok	Актуально
+ddns.st.updated	Записано, распространяется
+ddns.st.mismatch	Указывает в другое место
+ddns.st.failed	Обновление не удалось
+ddns.st.disabled	Выключено
+ddns.st.pending	Ещё не проверено
+ddns.name_help	Полное имя, например home.example.com (для DuckDNS: <имя>.duckdns.org).
+ddns.mode	Режим
+ddns.mode_help	Обновлять: имя записывает rynas. Только проверка: его записывает другое устройство (роутер), а rynas предупреждает, если оно указывает в другое место.
+ddns.mode.update	Обновлять имя
+ddns.mode.check	Только проверка
+ddns.credential_help	Одни из учётных данных ниже. Используйте токен, ограниченный этим именем, если провайдер это позволяет.
+ddns.no_creds	Сначала добавьте учётные данные провайдера, который умеет записывать имена (Учётные данные, ниже).
+ddns.ipv4	Публичный адрес IPv4
+ddns.ipv4_help	Адрес вашего интернет-подключения (запись A).
+ddns.ipv6	Адрес IPv6 NAS
+ddns.ipv6_help	Собственный глобальный адрес IPv6 NAS (запись AAAA).
+ddns.enabled	Включено
+ddns.remove	Удалить имя динамического DNS?
+ddns.remove_text	rynas перестанет его обновлять и проверять. Запись у провайдера останется как есть.
+ddns.dyndns2	Другой сервис (dyndns2)
 cert.inv.title	Все сертификаты
 cert.inv.text	Все сертификаты, которые обслуживает этот NAS. О проблеме с любым из них приходит уведомление.
 cert.inv.at	Прочитано {when}
@@ -5131,6 +5165,11 @@ wa.import.err.private_key	Закрытый ключ отклонён
 nev.web_access.cert_import_names_changed.title	Сертификат, отправленный для «{name}», выдан на другие имена
 nev.web_access.cert_import_names_changed.body	Он выдан на {names}. Прежний сертификат используется, пока вы не примете новые имена в разделе «Сеть › Веб-доступ › Сертификат».
 nev.web_access.cert_import_ok.title	Файлы сертификата «{name}» снова в порядке
+nev.web_access.ddns_failed.title	Не удалось обновить имя динамического DNS {name}
+nev.web_access.ddns_failed.body	{error}. Проверьте имя в разделе Сеть › Веб-доступ › Домены.
+nev.web_access.ddns_mismatch.title	Имя динамического DNS {name} указывает в другое место
+nev.web_access.ddns_mismatch.body	Публичные резолверы отвечают {published}, публичный адрес — {wanted}. Устройство, обновляющее имя, возможно, остановилось.
+nev.web_access.ddns_ok.title	Имя динамического DNS {name} снова верное
 cert.staging	Тестовый
 cert.st.ok	Действителен
 cert.st.expires_soon	Скоро истекает

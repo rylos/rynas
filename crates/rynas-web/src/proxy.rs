@@ -369,6 +369,8 @@ pub fn routes() -> Router<AppState> {
         .route("/web-access/domains/{id}/records", post(forward))
         .route("/web-access/certificates", get(forward))
         .route("/web-access/providers", get(forward))
+        .route("/web-access/ddns", get(forward))
+        .route("/web-access/ddns/check", post(forward))
         // imported certificates (§5.5)
         .route("/web-access/imports", get(forward).post(forward))
         .route("/web-access/imports/inspect", post(forward))

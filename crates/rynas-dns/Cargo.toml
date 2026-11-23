@@ -12,6 +12,10 @@ serde.workspace = true
 serde_json.workspace = true
 getrandom.workspace = true
 hex = "0.4.3"
+# Route 53 request signatures (SigV4: SHA-256 and HMAC-SHA256)
+sha2.workspace = true
+# dyndns2: HTTP Basic authentication
+base64.workspace = true
 # OVH request signatures ("$1$" + SHA-1 hex)
 sha1 = "0.11.0"
 # the same HTTP stack as rynas-notify (OpenSSL through native-tls: Debian security updates)

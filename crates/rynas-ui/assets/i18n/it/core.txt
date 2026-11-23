@@ -5003,6 +5003,40 @@ dns.f.server_url	URL del server
 dns.f.username	Nome utente dell'account
 dns.f.subdomain	Sottodominio
 dns.f.password	Password
+dns.f.update_server	Server di aggiornamento
+ddns.title	DNS dinamico
+ddns.intro	Nomi pubblici che seguono l'indirizzo della tua connessione internet. rynas scrive un nome tramite il suo provider DNS quando l'indirizzo cambia, oppure controlla soltanto un nome che aggiorna un altro dispositivo (il router). Ogni 5 minuti; l'indirizzo pubblico viene chiesto ad alcuni servizi indipendenti.
+ddns.check	Controlla ora
+ddns.add	Aggiungi nome
+ddns.add_title	Aggiungi nome DNS dinamico
+ddns.empty	Ancora nessun nome DNS dinamico.
+ddns.public_v4	Indirizzo IPv4 pubblico: {ip}
+ddns.public_v4_err	Indirizzo IPv4 pubblico non trovato: {error}
+ddns.public_v6	Indirizzo IPv6 del NAS: {ip}
+ddns.addr_diff	{published} (dovrebbe essere {wanted})
+ddns.col.name	Nome
+ddns.col.address	Indirizzo
+ddns.st.ok	Aggiornato
+ddns.st.updated	Scritto, in propagazione
+ddns.st.mismatch	Punta altrove
+ddns.st.failed	Aggiornamento non riuscito
+ddns.st.disabled	Spento
+ddns.st.pending	Non ancora controllato
+ddns.name_help	Il nome completo, per esempio home.example.com (con DuckDNS: <nome>.duckdns.org).
+ddns.mode	Modalità
+ddns.mode_help	Aggiorna: il nome lo scrive rynas. Solo controllo: lo scrive un altro dispositivo (il router) e rynas avvisa quando punta altrove.
+ddns.mode.update	Aggiorna il nome
+ddns.mode.check	Solo controllo
+ddns.credential_help	Una delle credenziali qui sotto. Usa un token limitato a questo nome, se il provider lo permette.
+ddns.no_creds	Prima aggiungi una credenziale di un provider che può scrivere nomi (Credenziali, qui sotto).
+ddns.ipv4	Indirizzo IPv4 pubblico
+ddns.ipv4_help	L'indirizzo della tua connessione internet (record A).
+ddns.ipv6	Indirizzo IPv6 del NAS
+ddns.ipv6_help	L'indirizzo IPv6 globale del NAS stesso (record AAAA).
+ddns.enabled	Attivo
+ddns.remove	Rimuovere il nome DNS dinamico?
+ddns.remove_text	rynas smette di aggiornarlo o controllarlo. Il record presso il provider resta com'è.
+ddns.dyndns2	Altro servizio (dyndns2)
 cert.inv.title	Tutti i certificati
 cert.inv.text	Ogni certificato servito da questo NAS. Un problema con uno di essi diventa una notifica.
 cert.inv.at	Letto {when}
@@ -5085,6 +5119,11 @@ wa.import.err.private_key	La chiave privata è stata rifiutata
 nev.web_access.cert_import_names_changed.title	Il certificato depositato per {name} è per altri nomi
 nev.web_access.cert_import_names_changed.body	È per {names}. Resta in uso il certificato precedente finché non accetti i nuovi nomi in Rete › Accesso web › Certificato.
 nev.web_access.cert_import_ok.title	I file del certificato per {name} sono di nuovo a posto
+nev.web_access.ddns_failed.title	Non è stato possibile aggiornare il nome DNS dinamico {name}
+nev.web_access.ddns_failed.body	{error}. Controlla il nome in Rete › Accesso web › Domini.
+nev.web_access.ddns_mismatch.title	Il nome DNS dinamico {name} punta altrove
+nev.web_access.ddns_mismatch.body	I resolver pubblici rispondono {published}, l'indirizzo pubblico è {wanted}. Il dispositivo che aggiorna il nome potrebbe essersi fermato.
+nev.web_access.ddns_ok.title	Il nome DNS dinamico {name} è di nuovo corretto
 cert.staging	Prova
 cert.st.ok	Valido
 cert.st.expires_soon	Scade presto

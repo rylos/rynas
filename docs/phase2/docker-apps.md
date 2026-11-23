@@ -1040,7 +1040,9 @@ the administrator role (reads too); rynas-web forwards them unchanged.
 | POST | `/web-access/domains/{id}/test` | — | `RouteDiagnostics` (the checklist below). 404 |
 | POST | `/web-access/domains/{id}/records` | — | `DnsSyncReport`: writes the domain's records now ("Write records"). 404 |
 | GET | `/web-access/certificates` | — | `CertificateInventory` |
-| GET | `/web-access/providers` | — | `[DnsProviderInfo]` {provider, fields [{name, secret, optional}], records, wildcard_records, scoped_tokens, min_ttl, token_hint} |
+| GET | `/web-access/providers` | — | `[DnsProviderInfo]` {provider, fields [{name, secret, optional}], records, wildcard_records, scoped_tokens, min_ttl, token_hint, ddns, acme} (`acme`: usable for an own domain; `ddns`: rynas writes dynamic DNS names with it; `dyndns2` is dynamic DNS only) |
+| GET | `/web-access/ddns` | — | `DdnsView` {names [`DdnsStatus` {id, name, mode, state (pending, ok, updated, mismatch, failed, no_address, disabled), wanted, published, checked_ms, updated_ms?, error?}], public_ipv4?, public_ipv4_error?, ipv6?, checked_ms}: the last check of the dynamic DNS names (`web_access.ddns`: [`DdnsName`] {id, name, mode update/check, credential?, ipv4, ipv6, ttl, enabled}) |
+| POST | `/web-access/ddns/check` | — | `DdnsView`: checks every name now. Every 5 minutes rynasd asks the public IPv4 address of three services over IPv4 (two must agree; carrier-grade NAT and private ranges refused), takes the NAS's global IPv6 address, compares with what 1.1.1.1/9.9.9.9 answer and, in `update` mode, writes the differing set through the credential's provider (Route 53 SigV4, Cloudflare, deSEC, Hetzner, Porkbun, OVH, DuckDNS, dyndns2). A readable provider is read first; DuckDNS and dyndns2 get the same address again only after a day. `check` mode (the router writes the name) only reports. Notifications `web_access.ddns_failed`, `web_access.ddns_mismatch`, resolved by `web_access.ddns_ok`; last writes in `<state>/web-access/ddns.json` |
 
 No new error codes (`invalid_value`, `not_found`, `forbidden`, `backend_unavailable`).
 

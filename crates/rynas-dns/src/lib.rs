@@ -25,6 +25,7 @@ pub mod cache;
 pub mod http;
 pub mod plan;
 pub mod providers;
+pub mod public;
 pub mod rebind;
 pub mod wire;
 
@@ -231,6 +232,12 @@ pub fn fields(p: DnsProvider) -> &'static [FieldSpec] {
             f!("subdomain", false, false, false),
             f!("password", true, false, true),
         ],
+        // rynas's own client only (no certificate module)
+        DnsProvider::Dyndns2 => &[
+            f!("update_server", false, false, false),
+            f!("username", false, false, false),
+            f!("password", true, false, false),
+        ],
     }
 }
 
@@ -287,11 +294,11 @@ pub fn info(p: DnsProvider) -> DnsProviderInfo {
             "Create a personal access token limited to this domain with the permission 'Manage domain technical configurations'.",
         ),
         DnsProvider::Route53 => (
-            false,
+            true,
             true,
             true,
             60,
-            "Create an IAM user whose policy allows route53:ChangeResourceRecordSets and ListResourceRecordSets on the one hosted zone, plus route53:ListHostedZonesByName and GetChange.",
+            "Create an IAM user of its own (not the keys of another device) whose policy allows route53:ChangeResourceRecordSets and ListResourceRecordSets on the one hosted zone, plus route53:ListHostedZonesByName and GetChange. Limit the changes to the names rynas writes with the condition route53:ChangeResourceRecordSetsNormalizedRecordNames (and to the types A, AAAA and TXT).",
         ),
         DnsProvider::Digitalocean => (
             false,
@@ -314,8 +321,29 @@ pub fn info(p: DnsProvider) -> DnsProviderInfo {
             0,
             "Register an account on the acme-dns server and add the CNAME _acme-challenge.<domain> → <fulldomain> once. The account can only change that one TXT record.",
         ),
+        DnsProvider::Dyndns2 => (
+            false,
+            false,
+            true,
+            60,
+            "For dynamic DNS services that speak the dyndns2 protocol: the server name of their update API (for example members.example.org), and the user name and password (or update token) of the host. Dynamic DNS only: no certificates.",
+        ),
     };
+    // dynamic DNS names: providers with rynas's own client that can write any one name
+    let ddns = matches!(
+        p,
+        DnsProvider::Cloudflare
+            | DnsProvider::Desec
+            | DnsProvider::Hetzner
+            | DnsProvider::Porkbun
+            | DnsProvider::Ovh
+            | DnsProvider::Duckdns
+            | DnsProvider::Route53
+            | DnsProvider::Dyndns2
+    );
     DnsProviderInfo {
+        ddns,
+        acme: p != DnsProvider::Dyndns2,
         provider: p,
         fields: fields(p)
             .iter()
@@ -424,6 +452,26 @@ pub fn client(
             base: endpoints.base(p, providers::duckdns::BASE),
             token: get("api_token"),
         }),
+        DnsProvider::Route53 => Box::new(providers::route53::Route53 {
+            http,
+            base: endpoints.base(p, providers::route53::BASE),
+            key_id: get("access_key_id"),
+            secret: get("secret_access_key"),
+        }),
+        DnsProvider::Dyndns2 => {
+            // tests point it at a fake server; otherwise the account's own server (https only)
+            let base = match endpoints.overrides.get(&p) {
+                Some(b) => b.trim_end_matches('/').to_string(),
+                None => providers::dyndns2::base_of(&get("update_server"))
+                    .ok_or_else(|| DnsError::Unsupported("the dyndns2 server must be a host name or an https URL".into()))?,
+            };
+            Box::new(providers::dyndns2::Dyndns2 {
+                http,
+                base,
+                username: get("username"),
+                password: get("password"),
+            })
+        }
         _ => return Ok(None),
     }))
 }
@@ -449,10 +497,12 @@ mod tests {
             let i = info(p);
             assert!(!i.fields.is_empty(), "{p:?}");
             assert!(!i.token_hint.is_empty());
-            let has_client = client(p, &Creds::new(), &Endpoints::default())
-                .unwrap()
-                .is_some();
-            assert_eq!(has_client, i.records, "{p:?}");
+            // dyndns2 needs its server to build a client
+            let mut c = Creds::new();
+            c.insert("update_server".into(), "members.example.org".into());
+            let has_client = client(p, &c, &Endpoints::default()).unwrap().is_some();
+            assert_eq!(has_client, i.records || i.ddns, "{p:?}");
+            assert!(!i.records || i.ddns, "{p:?}: records but no dynamic names");
         }
     }
 

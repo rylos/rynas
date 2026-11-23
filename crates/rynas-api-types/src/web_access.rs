@@ -396,6 +396,125 @@ pub struct WebAccessConfig {
     /// ACME account settings shared by every domain (wave W2).
     #[serde(default, skip_serializing_if = "AcmeSettings::is_default")]
     pub acme: AcmeSettings,
+    /// Dynamic DNS names: public addresses kept current through a provider, or only checked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ddns: Vec<DdnsName>,
+}
+
+/// What rynas does with a dynamic DNS name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DdnsMode {
+    /// rynas writes the addresses through the provider when they change.
+    #[default]
+    Update,
+    /// Another device (the router) writes the name: rynas only checks that the public
+    /// resolvers answer the public address, and warns when they do not.
+    Check,
+}
+
+/// One dynamic DNS name (`home.example.com`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DdnsName {
+    /// `[a-z0-9-]`, 1-63 characters, unique; never changes.
+    pub id: String,
+    /// Lowercase DNS name, at least two labels, no wildcard.
+    pub name: String,
+    #[serde(default)]
+    pub mode: DdnsMode,
+    /// Id of the [`DnsCredential`] that writes the name (required with `update`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+    /// The public IPv4 address (A record).
+    #[serde(default = "yes")]
+    pub ipv4: bool,
+    /// The NAS's stable IPv6 address (AAAA record).
+    #[serde(default)]
+    pub ipv6: bool,
+    /// TTL of the records written (0: the provider's lowest, at least 60 s).
+    #[serde(default)]
+    pub ttl: u32,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+impl Default for DdnsName {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            mode: DdnsMode::Update,
+            credential: None,
+            ipv4: true,
+            ipv6: false,
+            ttl: 0,
+            enabled: true,
+        }
+    }
+}
+
+/// How a dynamic DNS name stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DdnsState {
+    /// Not checked yet.
+    #[default]
+    Pending,
+    /// The public resolvers answer the wanted addresses.
+    Ok,
+    /// Written through the provider: waiting for the resolvers to follow (the old TTL).
+    Updated,
+    /// `check` mode: the resolvers answer other addresses than the public ones.
+    Mismatch,
+    /// The provider refused the change or could not be reached.
+    Failed,
+    /// No address to publish: the public IPv4 address could not be found, or the NAS has no
+    /// stable IPv6 address.
+    NoAddress,
+    /// Turned off.
+    Disabled,
+}
+
+/// One name as the page shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DdnsStatus {
+    pub id: String,
+    pub name: String,
+    pub mode: DdnsMode,
+    pub state: DdnsState,
+    /// Addresses the name should have now.
+    #[serde(default)]
+    pub wanted: Vec<String>,
+    /// Addresses the public resolvers answer.
+    #[serde(default)]
+    pub published: Vec<String>,
+    /// Last check (ms; 0: never).
+    #[serde(default)]
+    pub checked_ms: i64,
+    /// Last write through the provider (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_ms: Option<i64>,
+    /// English detail of a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `GET /api/v1/web-access/ddns` and `POST /api/v1/web-access/ddns/check`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DdnsView {
+    pub names: Vec<DdnsStatus>,
+    /// The public IPv4 address found at the last check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_ipv4: Option<String>,
+    /// Why it was not found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_ipv4_error: Option<String>,
+    /// The NAS's stable IPv6 address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<String>,
+    /// Last check of all names (ms; 0: never).
+    #[serde(default)]
+    pub checked_ms: i64,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -422,10 +541,13 @@ pub enum DnsProvider {
     Rfc2136,
     /// acme-dns: only for `cname_delegation` (it holds nothing but the challenge TXT).
     Acmedns,
+    /// The dyndns2 update protocol of most dynamic DNS services: dynamic DNS names only (no
+    /// certificate challenge, no own domain).
+    Dyndns2,
 }
 
 impl DnsProvider {
-    pub const ALL: [DnsProvider; 11] = [
+    pub const ALL: [DnsProvider; 12] = [
         Self::Cloudflare,
         Self::Desec,
         Self::Hetzner,
@@ -437,6 +559,7 @@ impl DnsProvider {
         Self::Digitalocean,
         Self::Rfc2136,
         Self::Acmedns,
+        Self::Dyndns2,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -452,6 +575,7 @@ impl DnsProvider {
             Self::Digitalocean => "digitalocean",
             Self::Rfc2136 => "rfc2136",
             Self::Acmedns => "acmedns",
+            Self::Dyndns2 => "dyndns2",
         }
     }
 }
@@ -606,6 +730,12 @@ pub struct DnsProviderInfo {
     pub min_ttl: u32,
     /// English guidance for a minimum-scope token, shown under the form.
     pub token_hint: String,
+    /// rynas keeps dynamic DNS names current with this provider ([`DdnsName`]).
+    #[serde(default)]
+    pub ddns: bool,
+    /// The certificate engine proves names with it (DNS-01): usable for an own domain.
+    #[serde(default = "yes")]
+    pub acme: bool,
 }
 
 /// What a record sync does to one record set.

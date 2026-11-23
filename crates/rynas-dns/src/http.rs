@@ -71,6 +71,18 @@ impl Http {
         headers: &[(&str, String)],
         body: Option<&serde_json::Value>,
     ) -> Result<Resp, DnsError> {
+        let text = body.map(|b| b.to_string());
+        self.send_body(method, url, headers, text.as_deref().map(|t| ("application/json", t)))
+    }
+
+    /// [`Http::send`] with a body of any type: `(content type, text)` (Route 53 takes XML).
+    pub fn send_body(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(&str, String)],
+        body: Option<(&str, &str)>,
+    ) -> Result<Resp, DnsError> {
         match self.send_once(method, url, headers, body)? {
             Sent::Done(r) => Ok(r),
             Sent::Throttled(Some(wait)) if wait <= MAX_RETRY_AFTER => {
@@ -94,7 +106,7 @@ impl Http {
         method: &str,
         url: &str,
         headers: &[(&str, String)],
-        body: Option<&serde_json::Value>,
+        body: Option<(&str, &str)>,
     ) -> Result<Sent, DnsError> {
         let m = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|e| DnsError::Network(e.to_string()))?;
@@ -102,10 +114,8 @@ impl Http {
         for (k, v) in headers {
             req = req.header(*k, v);
         }
-        if let Some(b) = body {
-            req = req
-                .header("Content-Type", "application/json")
-                .body(b.to_string());
+        if let Some((ctype, text)) = body {
+            req = req.header("Content-Type", ctype).body(text.to_string());
         }
         let resp = req
             .send()

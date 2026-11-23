@@ -4,9 +4,11 @@
 pub mod cloudflare;
 pub mod desec;
 pub mod duckdns;
+pub mod dyndns2;
 pub mod hetzner;
 pub mod ovh;
 pub mod porkbun;
+pub mod route53;
 
 use crate::DnsError;
 use crate::http::{Http, Resp};

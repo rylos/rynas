@@ -408,8 +408,9 @@ fn open_config(
         );
         svc.state_dir = args.state_dir.clone();
         if args.dry_system {
-            // DNS providers are never called in development
+            // DNS providers are never called in development, nor the public address services
             svc.dns = rynasd::web_access::domains::offline_factory();
+            svc.public_ipv4 = Box::new(|| Err("development mode: the public address is not looked up".into()));
         }
         let _ = svc.tls.set(tls.clone());
         Arc::new(svc)
@@ -1456,6 +1457,7 @@ fn main() -> std::io::Result<()> {
                 web.names.spawn();
             }
             rynasd::web_access::spawn_watch(web.clone(), opened.hostname.clone());
+            rynasd::web_access::ddns::spawn_watch(web.clone());
             // watched folders of imported certificates (§5.5)
             rynasd::web_access::imported::spawn_watch(web.clone());
             state.web_access = Some(web);

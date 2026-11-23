@@ -285,6 +285,8 @@ fn env_with(confirm: Duration, installed: bool) -> Env {
     );
     svc.confirm_timeout = confirm;
     svc.installed_override = Some(installed);
+    // dynamic DNS: a fixed public address, never an outside service
+    svc.public_ipv4 = Box::new(|| Ok("203.0.113.5".parse().unwrap()));
     // W2: providers in memory, the age key, notifications, the engine's log
     svc.state_dir = dir.path().join("state");
     let dns = Arc::new(MemDns::default());
@@ -3004,4 +3006,65 @@ fn watched_folder_needs_its_group() {
     e.svc
         .save_import(&upload("wild", &wildcard_pair(rynas_tls::now())))
         .unwrap();
+}
+
+/// Dynamic DNS: a name the public resolvers answer wrong is written through the provider
+/// once (not again while the provider holds it), a refused write raises a notification that
+/// ends when the name is right; a `check` name is only reported.
+#[test]
+fn dynamic_dns_names() {
+    let e = env();
+    let mut c = one_domain();
+    c.ddns = vec![
+        DdnsName { id: "home".into(), name: "Home.Example.com".into(), credential: Some("cf".into()), ..Default::default() },
+        DdnsName { id: "router".into(), name: "gw.example.org".into(), mode: DdnsMode::Check, ..Default::default() },
+    ];
+    e.apply(&c).unwrap();
+    assert_eq!(e.applied().ddns[0].name, "home.example.com");
+    e.dns.calls.lock().unwrap().clear();
+    let _ = e.notes.take();
+    let old: SocketAddr = "1.1.1.1:53".parse().unwrap();
+    e.probe.answers.lock().unwrap().insert(old, Answer::Addrs(vec!["198.51.100.1".parse().unwrap()]));
+    // before any check: pending
+    assert_eq!(e.svc.ddns_view().names[0].state, DdnsState::Pending);
+    let v = e.svc.ddns_check(false);
+    assert_eq!(v.public_ipv4.as_deref(), Some("203.0.113.5"));
+    let home = &v.names[0];
+    assert_eq!((home.state, home.wanted.clone(), home.published.clone()), (DdnsState::Updated, vec!["203.0.113.5".to_string()], vec!["198.51.100.1".to_string()]));
+    assert!(home.updated_ms.is_some());
+    assert_eq!(*e.dns.calls.lock().unwrap(), ["set home.example.com A 203.0.113.5"]);
+    let gw = &v.names[1];
+    assert_eq!(gw.state, DdnsState::Mismatch);
+    let ev = e.notes.take();
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].fields.get("name").map(String::as_str), Some("gw.example.org"));
+    // the provider holds it already: no second write while the resolvers follow
+    e.svc.ddns_check(false);
+    assert_eq!(e.dns.calls.lock().unwrap().len(), 1);
+    let _ = e.notes.take();
+    // the resolvers follow: right, and the mismatch of the router's name ends
+    e.probe.answers.lock().unwrap().insert(old, Answer::Addrs(vec!["203.0.113.5".parse().unwrap()]));
+    let v = e.svc.ddns_check(false);
+    assert!(v.names.iter().all(|n| n.state == DdnsState::Ok), "{v:?}");
+    let ev = e.notes.take();
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].state, rynas_api_types::notify::EventState::Resolved);
+    // a new public address the provider refuses: failed, notified once raised
+    *e.dns.fail.lock().unwrap() = true;
+    e.dns.sets.lock().unwrap().clear();
+    e.probe.answers.lock().unwrap().insert(old, Answer::Addrs(vec!["198.51.100.7".parse().unwrap()]));
+    let v = e.svc.ddns_check(true);
+    assert_eq!(v.names[0].state, DdnsState::Failed);
+    assert!(v.names[0].error.as_deref().unwrap_or("").contains("rate limited"), "{v:?}");
+    let ev = e.notes.take();
+    assert!(ev.iter().any(|x| x.fields.get("name").map(String::as_str) == Some("home.example.com") && x.state == rynas_api_types::notify::EventState::Firing), "{ev:?}");
+    // the GET answers the last check
+    assert_eq!(e.svc.ddns_view().names[0].state, DdnsState::Failed);
+    // validation: update needs a credential that writes names; a family at least
+    let mut bad = one_domain();
+    bad.ddns = vec![DdnsName { id: "x".into(), name: "x.example.com".into(), ..Default::default() }];
+    assert!(e.apply(&bad).unwrap_err().contains("credential"));
+    bad.ddns[0].credential = Some("cf".into());
+    bad.ddns[0].ipv4 = false;
+    assert!(e.apply(&bad).is_err());
 }

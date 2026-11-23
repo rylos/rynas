@@ -19,7 +19,8 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::web_access::{
-    CertEntry, CertKind, CertStatus, CertificateInventory, DnsAction, DnsChange, DnsProviderInfo, DnsSyncReport, DomainView, RouteDiagnostics,
+    CertEntry, CertKind, CertStatus, CertificateInventory, DdnsMode, DdnsState, DdnsView, DnsAction, DnsChange, DnsProviderInfo, DnsSyncReport, DomainView,
+    RouteDiagnostics,
 };
 use serde_json::{Map, Value, json};
 
@@ -64,6 +65,7 @@ fn brand(p: &str) -> String {
         "digitalocean" => "DigitalOcean",
         "rfc2136" => "RFC 2136",
         "acmedns" => "acme-dns",
+        "dyndns2" => return t("ddns.dyndns2").to_string(),
         other => return other.to_string(),
     }
     .to_string()
@@ -222,6 +224,7 @@ pub fn panel() -> AnyView {
                 </WidgetHead>
                 {move || w.state.view(5, domain_list)}
             </section>
+            {ddns_card()}
             <section class="card widget w-6">
                 <WidgetHead icon=icons::SHIELD_CHECK title="dom.acme.title" />
                 {acme_card}
@@ -439,7 +442,8 @@ fn cred_list() -> AnyView {
         .iter()
         .map(|c| {
             let id = s_at(c, "/id", "");
-            let used = list(&cfg, "domains").iter().filter(|dm| dm.get("credential").and_then(Value::as_str) == Some(id.as_str())).count();
+            // domains and dynamic DNS names that use it
+            let used = ["domains", "ddns"].iter().flat_map(|k| list(&cfg, k)).filter(|dm| dm.get("credential").and_then(Value::as_str) == Some(id.as_str())).count();
             let label = s_at(c, "/label", "");
             let fields = str_list(c, "fields");
             let (id_e, id_r) = (id.clone(), id.clone());
@@ -462,6 +466,218 @@ fn cred_list() -> AnyView {
     view! {
         <ul class="wa-checks">{items}</ul>
         {move || ask.get().map(|_| ui::confirm(Confirm { busy, error, ..Confirm::new(t("dom.cred.remove").to_string(), t("dom.cred.remove_text").to_string(), "dom.remove_go", true, remove, Callback::new(move |_| ask.set(None))) }))}
+    }
+    .into_any()
+}
+
+// ------------------------------------------------------------------ dynamic DNS names
+
+const DDNS: &str = "/api/v1/web-access/ddns";
+
+fn ddns_state(s: DdnsState) -> (Tone, &'static str) {
+    match s {
+        DdnsState::Ok => (Tone::Ok, "ddns.st.ok"),
+        DdnsState::Updated => (Tone::Info, "ddns.st.updated"),
+        DdnsState::Mismatch => (Tone::Warn, "ddns.st.mismatch"),
+        DdnsState::Failed => (Tone::Err, "ddns.st.failed"),
+        DdnsState::NoAddress => (Tone::Warn, "net.no_address"),
+        DdnsState::Disabled => (Tone::Unknown, "ddns.st.disabled"),
+        DdnsState::Pending => (Tone::Unknown, "ddns.st.pending"),
+    }
+}
+
+/// "Dynamic DNS": the names, their state, Check now and the dialog of one name.
+fn ddns_card() -> AnyView {
+    let view = Remote::<DdnsView>::with_config(DDNS);
+    let open = RwSignal::new(None::<String>);
+    let checking = RwSignal::new(false);
+    let check = move |_| {
+        checking.set(true);
+        spawn_local(async move {
+            match api::post::<(), DdnsView>(&format!("{DDNS}/check"), None).await {
+                Ok(v) => view.data.set(Some(v)),
+                Err(e) => crate::toast::toast(Tone::Err, e.text()),
+            }
+            let _ = checking.try_set(false);
+        });
+    };
+    let addresses = move || {
+        view.data.with(|v| {
+            v.as_ref().map(|v| {
+                let v4 = v.public_ipv4.clone().map(|a| tf("ddns.public_v4", &[("ip", &a)])).or_else(|| v.public_ipv4_error.as_ref().map(|e| tf("ddns.public_v4_err", &[("error", e)])));
+                let v6 = v.ipv6.clone().map(|a| tf("ddns.public_v6", &[("ip", &a)]));
+                let line = [v4, v6].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                (!line.is_empty()).then(|| view! { <p class="small muted">{line}</p> })
+            })
+        })
+    };
+    let rows = move || {
+        let Some(v) = view.data.get() else { return ().into_any() };
+        if v.names.is_empty() {
+            return ui::empty_line("ddns.empty");
+        }
+        let now = js_sys::Date::now() as i64;
+        let rows = v
+            .names
+            .iter()
+            .map(|n| {
+                let (tone, key) = ddns_state(n.state);
+                let id = n.id.clone();
+                let label = ui::verb_name("edit", &n.name);
+                let mode = (n.mode == DdnsMode::Check).then(|| view! { <span class="cell-sub">{tr("ddns.mode.check")}</span> });
+                let addrs = if n.published.is_empty() && n.wanted.is_empty() {
+                    ui::DASH.to_string()
+                } else if n.published == n.wanted {
+                    n.wanted.join(", ")
+                } else {
+                    tf("ddns.addr_diff", &[("published", &if n.published.is_empty() { ui::DASH.to_string() } else { n.published.join(", ") }), ("wanted", &n.wanted.join(", "))])
+                };
+                let when = n.updated_ms.map(|t| i18n::ago(((now - t).max(0) / 1000) as u64)).unwrap_or_else(|| ui::DASH.to_string());
+                let err = n.error.clone();
+                ui::row(vec![
+                    ui::cell("ddns.col.name", "wrap", view! { <div class="cell-main"><span class="mono">{n.name.clone()}</span>{mode}</div> }.into_any()),
+                    ui::cell("col.status", "", view! { <div class="cell-main">{ui::status(tone, t(key).to_string())}{err.map(|e| view! { <span class="cell-sub wrap">{e}</span> })}</div> }.into_any()),
+                    ui::text_cell("ddns.col.address", "mono wrap", addrs),
+                    ui::text_cell("hw.updated", "", when),
+                    ui::cell("", "actions", view! { <button class="btn ghost sm" aria-label=label on:click=move |_| open.set(Some(id.clone()))><Icon icon=icons::PENCIL size=14 /></button> }.into_any()),
+                ])
+            })
+            .collect();
+        ui::table("ddns-table", &["ddns.col.name", "col.status", "ddns.col.address", "hw.updated", ""], rows)
+    };
+    view! {
+        <section class="card widget w-12">
+            <WidgetHead icon=icons::NETWORK title="ddns.title">
+                <button class="btn ghost sm" disabled=move || checking.get() on:click=check>{spinner(checking)}<Icon icon=icons::REFRESH_CW size=14 /><span class="btn-label">{tr("ddns.check")}</span></button>
+                <button class="btn primary sm" on:click=move |_| open.set(Some(String::new()))><Icon icon=icons::PLUS size=14 />{tr("ddns.add")}</button>
+            </WidgetHead>
+            <p class="small muted">{tr("ddns.intro")}</p>
+            {addresses}
+            {move || view.view(3, rows)}
+        </section>
+        {move || open.get().map(|id| ddns_dialog(id, view, Callback::new(move |_| open.set(None))))}
+    }
+    .into_any()
+}
+
+/// Adds or edits one name (`id` empty: a new one).
+fn ddns_dialog(id: String, view: Remote<DdnsView>, close: Callback<()>) -> AnyView {
+    let d = dom();
+    let cfg = current().unwrap_or(Value::Null);
+    let cur = by_id(list(&cfg, "ddns"), &id).cloned();
+    let is_new = cur.is_none();
+    let get = |k: &str, def: &str| cur.as_ref().map(|c| s_at(c, &format!("/{k}"), def)).unwrap_or_else(|| def.to_string());
+    let name = RwSignal::new(get("name", ""));
+    let mode = RwSignal::new(get("mode", "update"));
+    let credential = RwSignal::new(get("credential", ""));
+    let ipv4 = RwSignal::new(cur.as_ref().map(|c| b_at(c, "/ipv4", true)).unwrap_or(true));
+    let ipv6 = RwSignal::new(cur.as_ref().map(|c| b_at(c, "/ipv6", false)).unwrap_or(false));
+    let enabled = RwSignal::new(cur.as_ref().map(|c| b_at(c, "/enabled", true)).unwrap_or(true));
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let asking = RwSignal::new(false);
+    // the credentials of providers rynas writes names with
+    let creds: Vec<(String, String)> = list(&cfg, "credentials")
+        .iter()
+        .filter(|c| provider_info(d, &s_at(c, "/provider", "")).is_some_and(|i| i.ddns))
+        .map(|c| {
+            let label = s_at(c, "/label", "");
+            let p = brand(&s_at(c, "/provider", ""));
+            (s_at(c, "/id", ""), if label.is_empty() { p } else { format!("{p} · {label}") })
+        })
+        .collect();
+    if credential.get_untracked().is_empty()
+        && let Some((first, _)) = creds.first()
+    {
+        credential.set(first.clone());
+    }
+    let no_creds = creds.is_empty();
+    let id_s = StoredValue::new(id.clone());
+    let done = Callback::new(move |_| {
+        view.reload();
+        close.run(());
+    });
+    let save = move |_| {
+        let n = name.get_untracked().trim().trim_end_matches('.').to_ascii_lowercase();
+        let check = mode.get_untracked() == "check";
+        let cred = credential.get_untracked();
+        let mut entry = json!({ "name": n, "mode": mode.get_untracked(), "ipv4": ipv4.get_untracked(), "ipv6": ipv6.get_untracked(), "enabled": enabled.get_untracked() });
+        if !cred.is_empty() && !check {
+            put(&mut entry, "credential", Value::String(cred));
+        }
+        let old = id_s.get_value();
+        save_with(
+            move |cfg| {
+                let taken = ids(list(cfg, "ddns"));
+                let items = list_mut(cfg, "ddns");
+                match items.iter_mut().find(|v| v.get("id").and_then(Value::as_str) == Some(old.as_str())) {
+                    Some(v) => {
+                        // the id never changes; the TTL set elsewhere stays
+                        if let (Some(m), Some(e)) = (v.as_object_mut(), entry.as_object()) {
+                            m.remove("credential");
+                            for (k, x) in e {
+                                m.insert(k.clone(), x.clone());
+                            }
+                        }
+                    }
+                    None => {
+                        let mut e = entry;
+                        put(&mut e, "id", Value::String(free_id(&n, &taken)));
+                        items.push(e);
+                    }
+                }
+            },
+            busy,
+            error,
+            done,
+        );
+    };
+    let remove = Callback::new(move |_| {
+        let old = id_s.get_value();
+        save_with(move |cfg| list_mut(cfg, "ddns").retain(|v| v.get("id").and_then(Value::as_str) != Some(old.as_str())), busy, error, done);
+    });
+    const MODES: &[(&str, &str)] = &[("update", "ddns.mode.update"), ("check", "ddns.mode.check")];
+    let cred_field = move || {
+        (mode.get() == "update").then(|| {
+            if no_creds {
+                return ui::note(Tone::Warn, icons::KEY, ui::text(t("ddns.no_creds").to_string()));
+            }
+            let fid = crate::form::fid();
+            let opts = creds.clone();
+            view! {
+                <div class="field">
+                    <label class="field-label" for=fid.clone()>{tr("dom.provider")}</label>
+                    <select id=fid class="input" on:change=move |ev| credential.set(event_target_value(&ev))>
+                        {opts.into_iter().map(|(v, l)| { let v2 = v.clone(); view! { <option value=v selected=move || credential.with(|x| *x == v2)>{l}</option> } }).collect_view()}
+                    </select>
+                    <span class="field-help">{tr("ddns.credential_help")}</span>
+                </div>
+            }
+            .into_any()
+        })
+    };
+    let body = view! {
+        <div class="form">
+            {text_field("net.hostname", name.into(), Callback::new(move |v| name.set(v)), Signal::stored(None), In { mono: true, help: Some("ddns.name_help"), maxlength: 253, ..In::default() })}
+            {crate::form::select_field("ddns.mode", Some("ddns.mode_help"), MODES, mode.into(), Callback::new(move |v| mode.set(v)))}
+            {cred_field}
+            {switch("ddns.ipv4", Some("ddns.ipv4_help"), ipv4.into(), Callback::new(move |v| ipv4.set(v)))}
+            {switch("ddns.ipv6", Some("ddns.ipv6_help"), ipv6.into(), Callback::new(move |v| ipv6.set(v)))}
+            {switch("ddns.enabled", None, enabled.into(), Callback::new(move |v| enabled.set(v)))}
+        </div>
+    }
+    .into_any();
+    let secondary = (!is_new).then(|| view! { <button type="button" class="btn ghost" on:click=move |_| asking.set(true)><Icon icon=icons::TRASH_2 size=16 />{tr("dom.remove_go")}</button> }.into_any());
+    let foot = save_bar_with(SaveBar {
+        can_save: Signal::derive(move || !name.with(|n| n.trim().is_empty()) && (ipv4.get() || ipv6.get()) && (mode.get() == "check" || !credential.with(String::is_empty))),
+        error: Some(error),
+        secondary,
+        ..SaveBar::new(busy, "save", close, Callback::new(save))
+    });
+    let title = if is_new { t("ddns.add_title").to_string() } else { get("name", "") };
+    view! {
+        {ui::dialog(ui::DlgKind::Normal, Signal::stored(title), close, body, Some(foot))}
+        {move || asking.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(t("ddns.remove").to_string(), t("ddns.remove_text").to_string(), "dom.remove_go", true, remove, Callback::new(move |_| asking.set(false))) }))}
     }
     .into_any()
 }
@@ -1184,7 +1400,7 @@ fn domain_form(id: String, saved: Callback<String>) -> (AnyView, RwSignal<bool>,
     };
     let provider_part = move || {
         let Some(list) = d.providers.data.get() else { return d.providers.view(3, || ().into_any()) };
-        let list: Vec<DnsProviderInfo> = list.into_iter().filter(|p| p.provider.as_str() != "acmedns" || challenge.get() == "cname_delegation").collect();
+        let list: Vec<DnsProviderInfo> = list.into_iter().filter(|p| p.acme && (p.provider.as_str() != "acmedns" || challenge.get() == "cname_delegation")).collect();
         view! {
             {provider_select("dom.provider", list, provider, false)}
             {move || provider_info(d, &provider.get()).map(|i| view! {
