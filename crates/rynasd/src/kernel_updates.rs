@@ -672,7 +672,17 @@ pub fn spawn_auto(who: &str) -> Res<String> {
             ctx.log(&format!("maintenance runs ({why}): the kernel waits for tomorrow"));
             return Ok(());
         }
+        // one kernel change at a time: the last one must have started and passed its trial
+        let k = me.kernel(true).await;
+        if k.boot.as_ref().is_some_and(|b| b.trial != rynas_api_types::updates::KernelTrial::None) {
+            ctx.log("the boot device has a kernel on trial: nothing new until it is confirmed");
+            return Ok(());
+        }
         let st = me.channel_state(true).await;
+        if let Some(rel) = st.installed_release.as_ref().filter(|r| !k.running.is_empty() && **r != k.running) {
+            ctx.log(&format!("kernel {rel} is installed but not started yet (running {}): nothing new until it is", k.running));
+            return Ok(());
+        }
         let Some(c) = st.candidate().cloned() else {
             ctx.log("no newer kernel to install");
             return Ok(());
