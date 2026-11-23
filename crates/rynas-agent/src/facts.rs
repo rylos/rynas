@@ -1,8 +1,8 @@
 //! The PC's facts for the NAS (`AgentFacts`, docs/research/wake-on-lan.md §3.5): physical
 //! network cards with their MAC, IPv4 and Wake-on-LAN state, and the sleep modes this PC
 //! has. Sent at the service's start, every 6 hours when they changed, and within 5 minutes of
-//! a change of the cards' IPv4 addresses; an older NAS (404, or 401 from its web front) gets
-//! nothing more until the agent restarts. Failures are logged, never fatal.
+//! a change of the cards' IPv4 addresses; an older NAS (404, or 401 from its web front) is
+//! asked again at the next 6-hour check. Failures are logged, never fatal.
 
 use std::path::Path;
 
@@ -209,8 +209,6 @@ pub struct Sender {
     next_ms: u64,
     /// The next cheap look at the cards' IPv4 addresses (ms).
     addr_next_ms: u64,
-    /// The NAS answered 404 or 401 (older than 0.8.26): nothing more until the agent restarts.
-    off: bool,
 }
 
 /// What a collection leads to.
@@ -226,9 +224,9 @@ pub fn should_send(last: Option<&AgentFacts>, new: &AgentFacts) -> SendDecision 
 }
 
 impl Sender {
-    /// A collection is due (never after a 404).
+    /// A collection is due.
     pub fn due(&self, now_ms: u64) -> bool {
-        !self.off && now_ms >= self.next_ms
+        now_ms >= self.next_ms
     }
 
     /// The next check comes at once (an `EnableWol` changed the cards).
@@ -238,7 +236,7 @@ impl Sender {
 
     /// A look at the addresses is due (every [`ADDR_EVERY_MS`], once facts were sent).
     pub fn addresses_due(&self, now_ms: u64) -> bool {
-        !self.off && self.last.is_some() && now_ms >= self.addr_next_ms
+        self.last.is_some() && now_ms >= self.addr_next_ms
     }
 
     /// The reported cards' IPv4 addresses changed: the facts go out at once.
@@ -262,10 +260,11 @@ impl Sender {
             }
             // an older NAS: 404, or 401 from its web front's fallback for an unknown path (the
             // service sends only right after a poll with the same token succeeded, so a 401
-            // here is no revoked token)
+            // here is no revoked token); also a NAS in the middle of its own update: tried
+            // again at the next regular check, not only after the agent restarts
             Err(e) if e.starts_with("HTTP 404") || e.starts_with("HTTP 401") => {
-                eprintln!("the NAS does not take the PC's facts (an older rynas: {e}): not sent again until the agent restarts");
-                self.off = true;
+                eprintln!("the NAS does not take the PC's facts ({e}): tried again in 6 hours");
+                self.next_ms = now_ms + EVERY_MS;
             }
             Err(e) => {
                 eprintln!("PC facts to the NAS: {e}");
@@ -400,12 +399,14 @@ mod tests {
         // an EnableWol: at once
         s.soon();
         assert!(s.due(2001));
-        // an older NAS: never again (404, or 401 from its web front)
+        // an older NAS (404, or 401 from its web front), or one updating: at the next regular
+        // check, no address checks meanwhile
+        let mut s = Sender::default();
         s.tick(3000, b.clone(), |_| Err("HTTP 404: not found".into()));
-        assert!(!s.due(u64::MAX) && !s.addresses_due(u64::MAX));
+        assert!(!s.due(3000 + EVERY_MS - 1) && s.due(3000 + EVERY_MS) && !s.addresses_due(u64::MAX));
         let mut s = Sender::default();
         s.tick(3000, b, |_| Err("HTTP 401: unauthenticated".into()));
-        assert!(!s.due(u64::MAX));
+        assert!(!s.due(3000 + EVERY_MS - 1) && s.due(3000 + EVERY_MS));
         // sleep modes: fixed order, once each, never unknown
         assert_eq!(
             normalize_sleep(vec![SleepMode::Poweroff, SleepMode::Unknown, SleepMode::Suspend, SleepMode::Poweroff]),
