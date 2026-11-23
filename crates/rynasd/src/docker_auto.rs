@@ -170,6 +170,11 @@ pub fn judge_app(c: &AppCandidate, own: Option<UpdatePolicy>) -> (Verdict, Optio
     (v, change)
 }
 
+/// What [`Held`] records of a catalogue app's update that failed: its version change.
+fn app_hold_key(change: &str) -> String {
+    format!("app:{change}")
+}
+
 /// Every stack with an update and what its policy does with it. `managed`: rynas can change
 /// the stack's files.
 pub fn stack_updates(
@@ -223,7 +228,13 @@ pub fn stack_updates(
     }
     for c in apps {
         let own = set.of(&c.stack);
-        let (v, change) = judge_app(c, own.policy);
+        let (mut v, change) = judge_app(c, own.policy);
+        // the same entry failed at its last automatic update
+        if let Some(ch) = &change
+            && held.get(&c.stack).is_some_and(|h| h.digests.contains(&app_hold_key(ch)))
+        {
+            v = Verdict::Hold(HoldReason::Failed);
+        }
         let (verdict, reason) = v.api();
         out.push(StackUpdate {
             stack: c.stack.clone(),
@@ -873,6 +884,25 @@ pub async fn stack_update(s: &Arc<DockerSvc>, ctx: &TaskCtx, u: &StackUpdate) ->
             Err(e2) => Err(e2),
         },
     };
+    // the version that failed is not tried again every night: the stack waits for a newer
+    // one (other digests), or for an update by hand
+    let digests: BTreeSet<String> = report
+        .images
+        .iter()
+        .filter(|i| u.images.contains(&i.image))
+        .filter_map(|i| i.remote_digest.clone())
+        .collect();
+    if !digests.is_empty() {
+        s.auto_change(|a| {
+            a.held.insert(
+                u.stack.clone(),
+                Held {
+                    digests,
+                    reason: Some(HoldReason::Failed),
+                },
+            );
+        });
+    }
     match back {
         Ok(()) => (AutoOutcome::RolledBack, Some(e)),
         Err(e2) => (AutoOutcome::Failed, Some(format!("{e}; the rollback failed too: {e2}"))),
@@ -946,6 +976,18 @@ pub async fn app_update(s: &Arc<DockerSvc>, ctx: &TaskCtx, u: &StackUpdate) -> (
             Err(e2) => Err(e2),
         },
     };
+    // the catalogue entry that failed is not tried again every night (see `stack_updates`)
+    if let Some(change) = &u.change {
+        s.auto_change(|a| {
+            a.held.insert(
+                u.stack.clone(),
+                Held {
+                    digests: [app_hold_key(change)].into(),
+                    reason: Some(HoldReason::Failed),
+                },
+            );
+        });
+    }
     match back {
         Ok(()) => (AutoOutcome::RolledBack, Some(e)),
         Err(e2) => (AutoOutcome::Failed, Some(format!("{e}; the rollback failed too: {e2}"))),

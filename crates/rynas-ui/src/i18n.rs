@@ -4960,6 +4960,7 @@ dict! { BLOB, LENS;
     "dk.au.r_policy" => "the policy is notify only";
     "dk.au.r_review" => "the new entry needs answers or is a major change";
     "dk.au.r_managed" => "rynas does not manage the files of this stack";
+    "dk.au.r_failed" => "this version failed at its last update: waiting for a newer one";
     "dk.au.o_updated" => "Updated automatically {when}.";
     "dk.au.o_rolled_back" => "Automatic update of {when} rolled back:";
     "dk.au.o_held" => "Automatic update of {when} not installed:";

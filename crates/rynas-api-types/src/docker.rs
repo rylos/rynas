@@ -1030,6 +1030,9 @@ pub enum HoldReason {
     NeedsReview,
     /// rynas cannot update this stack (not in its folder, adopted read-only).
     NotManaged,
+    /// This version failed at its automatic update (start or health check) and was rolled
+    /// back: it is tried again when a newer one comes out.
+    Failed,
 }
 
 /// One stack's update in [`UpdateReport::stacks`].

@@ -561,6 +561,7 @@ fn reason_text(r: HoldReason) -> &'static str {
         HoldReason::Policy => "dk.au.r_policy",
         HoldReason::NeedsReview => "dk.au.r_review",
         HoldReason::NotManaged => "dk.au.r_managed",
+        HoldReason::Failed => "dk.au.r_failed",
     }
 }
 

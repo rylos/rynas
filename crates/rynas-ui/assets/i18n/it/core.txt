@@ -4277,6 +4277,7 @@ dk.au.r_unknown	versione non leggibile
 dk.au.r_policy	la regola è solo notifica
 dk.au.r_review	la nuova voce chiede risposte o è un cambio importante
 dk.au.r_managed	rynas non gestisce i file di questo stack
+dk.au.r_failed	questa versione è fallita all'ultimo aggiornamento: si attende una più recente
 dk.au.o_updated	Aggiornato automaticamente {when}.
 dk.au.o_rolled_back	Aggiornamento automatico di {when} annullato:
 dk.au.o_held	Aggiornamento automatico di {when} non installato:
