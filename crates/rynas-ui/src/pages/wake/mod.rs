@@ -390,6 +390,47 @@ pub(crate) fn sleep_menu(w: Wol, id: String) -> AnyView {
         });
     };
     let confirm_off = Callback::new(move |_| send(SleepMode::Poweroff));
+    // the menu is placed on the page (fixed), not in the row: a table scrolls sideways and
+    // would clip it; it closes when the page scrolls or resizes (it would float away)
+    let pos = RwSignal::new(String::new());
+    let listeners: StoredValue<Vec<WindowListenerHandle>, LocalStorage> = StoredValue::new_local(Vec::new());
+    let drop_listeners = move || {
+        if let Some(v) = listeners.try_update_value(std::mem::take) {
+            for h in v {
+                h.remove();
+            }
+        }
+    };
+    Effect::new(move |_| {
+        if open.get() {
+            let a = window_event_listener(leptos::ev::scroll, move |_| {
+                let _ = open.try_set(false);
+            });
+            let b = window_event_listener(leptos::ev::resize, move |_| {
+                let _ = open.try_set(false);
+            });
+            listeners.update_value(|v| v.extend([a, b]));
+        } else {
+            drop_listeners();
+        }
+    });
+    on_cleanup(drop_listeners);
+    let place = move |e: &web_sys::MouseEvent| {
+        use wasm_bindgen::JsCast;
+        let Some(el) = e.current_target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) else { return };
+        let r = el.get_bounding_client_rect();
+        let win = window();
+        let px = |v: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| v.ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let (vw, vh) = (px(win.inner_width()), px(win.inner_height()));
+        let right = (vw - r.right()).max(8.0);
+        let below = vh - r.bottom();
+        // upward when there is little room below and more above
+        pos.set(if below < 200.0 && r.top() > below {
+            format!("position:fixed;top:auto;bottom:{}px;right:{right}px", vh - r.top() + 8.0)
+        } else {
+            format!("position:fixed;top:{}px;right:{right}px", r.bottom() + 8.0)
+        });
+    };
     let menu = move || {
         let (name, modes, on, backing_up) = state.get()?;
         let why = if backing_up { Some(t("wol.sleep_busy")) } else if !on { Some(t("wol.sleep_off")) } else { None };
@@ -425,11 +466,16 @@ pub(crate) fn sleep_menu(w: Wol, id: String) -> AnyView {
                 }>
                 <button type="button" class="btn ghost sm" aria-label=label aria-haspopup="menu" aria-expanded=move || open.get().to_string()
                     disabled=move || why.is_some() || busy.get() title=why.unwrap_or("")
-                    on:click=move |_| open.update(|o| *o = !*o)>
+                    on:click=move |e| {
+                        if !open.get_untracked() {
+                            place(&e);
+                        }
+                        open.update(|o| *o = !*o)
+                    }>
                     {crate::form::spinner_icon(busy.into(), icons::MOON)}{tr("wol.power")}<Icon icon=icons::CHEVRON_DOWN size=14 />
                 </button>
                 <Show when=move || open.get()>
-                    <div class="popover menu wol-menu" role="menu">{items()}</div>
+                    <div class="popover menu wol-menu" role="menu" style=move || pos.get()>{items()}</div>
                 </Show>
             </div>
         })
