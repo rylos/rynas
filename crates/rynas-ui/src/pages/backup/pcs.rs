@@ -1585,9 +1585,10 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             .iter()
             .map(|r| {
                 let i = hist.iter().enumerate().position(|(i, h)| !used[i] && h.snapshot.as_deref() == Some(r.timestamp.as_str())).or_else(|| {
-                    // a failed run names no snapshot: the one whose time falls in it
+                    // a run that names no snapshot (a failed one; btrfs sends report none):
+                    // the one whose time falls in it (snapshot names have whole minutes)
                     let at = r.created_ms?;
-                    hist.iter().enumerate().position(|(i, h)| !used[i] && !h.ok && at + 60_000 >= h.started_ms && at <= h.ended_ms.max(h.started_ms) + 60_000)
+                    hist.iter().enumerate().position(|(i, h)| !used[i] && at + 120_000 >= h.started_ms && at <= h.ended_ms.max(h.started_ms) + 60_000)
                 })?;
                 used[i] = true;
                 Some(&hist[i])
