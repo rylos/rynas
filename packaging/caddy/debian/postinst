@@ -11,8 +11,11 @@ fi
 if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ] || [ "$1" = "abort-deconfigure" ] || [ "$1" = "abort-remove" ]; then
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload >/dev/null || true
-        # external proxy mode (rynasd disabled the unit): an upgrade keeps it off
-        if [ -z "$2" ] || systemctl is-enabled --quiet rynas-caddy.service; then
+        # external proxy mode (rynasd disabled the unit): an upgrade keeps it off; a
+        # reinstall after remove turns it on again when it was on at the removal (prerm)
+        marker=/var/lib/rynas-caddy/.enabled-at-remove
+        if [ -z "$2" ] || [ -e "$marker" ] || systemctl is-enabled --quiet rynas-caddy.service; then
+            rm -f "$marker"
             systemctl enable rynas-caddy.service >/dev/null || true
             systemctl restart rynas-caddy.service || true
         fi

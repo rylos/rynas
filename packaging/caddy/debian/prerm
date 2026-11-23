@@ -1,8 +1,14 @@
 #!/bin/sh
-# rynas-caddy prerm: stop and disable on removal (an upgrade restarts in postinst).
+# rynas-caddy prerm: stop and disable on removal (an upgrade restarts in postinst). A unit
+# that was enabled leaves a marker in the state directory (kept by remove, gone with purge):
+# a later reinstall enables it again, while one rynasd turned off (external proxy mode)
+# stays off.
 set -e
 
 if [ "$1" = "remove" ] && [ -d /run/systemd/system ]; then
+    if systemctl is-enabled --quiet rynas-caddy.service 2>/dev/null && [ -d /var/lib/rynas-caddy ]; then
+        : > /var/lib/rynas-caddy/.enabled-at-remove || true
+    fi
     systemctl disable --now rynas-caddy.service >/dev/null 2>&1 || true
 fi
 
