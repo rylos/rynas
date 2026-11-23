@@ -758,14 +758,15 @@ fn scrub_card(v: &Vol, modal: RwSignal<Open>, stop: ScrubStop) -> AnyView {
     .into_any()
 }
 
-/// The state chip of a scrub that ran: errors that were all corrected are a warning (the data
-/// is good again), errors left uncorrected an error.
+/// The state chip of a scrub that ran: errors that were all corrected are information (the data
+/// is good again; the device error counters keep the warning until they are reset), errors
+/// left uncorrected an error.
 pub fn scrub_state(s: &ScrubStatus) -> (Tone, String) {
     match s.status {
         ScrubState::Running => (Tone::Info, t("sto.scrub_running").to_string()),
         ScrubState::Aborted | ScrubState::Interrupted => (Tone::Warn, t("sto.scrub_aborted").to_string()),
         ScrubState::Finished if s.errors == 0 => (Tone::Ok, t("sto.scrub_finished").to_string()),
-        ScrubState::Finished if s.all_corrected() => (Tone::Warn, i18n::tn("sto.scrub_corrected", s.corrected.unwrap_or(s.errors), &[])),
+        ScrubState::Finished if s.all_corrected() => (Tone::Info, i18n::tn("sto.scrub_corrected", s.corrected.unwrap_or(s.errors), &[])),
         ScrubState::Finished => match s.uncorrectable.filter(|n| *n > 0) {
             Some(n) => (Tone::Err, i18n::tn("sto.scrub_uncorrectable", n, &[])),
             None => (Tone::Err, t("sto.scrub_errors").to_string()),
