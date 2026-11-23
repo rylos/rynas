@@ -69,6 +69,9 @@ const FEED_MIN_REFRESH: Duration = Duration::from_secs(60);
 const FEED_LIMIT: usize = 8 << 20;
 const FEED_TIMEOUT: Duration = Duration::from_secs(30);
 const STATE_FILE: &str = "kernel-updates.json";
+/// The holds at start: tries while dpkg's lock is held.
+const HOLD_TRIES: u32 = 40;
+const HOLD_RETRY: Duration = Duration::from_secs(15);
 const NOTIFY_KEY: &str = "updates:kernel";
 const DRY_FEED: &str = include_str!("../../rynas-updates/src/fixtures/kernels.json");
 
@@ -591,16 +594,38 @@ async fn fetch_feed(url: &str) -> Result<KernelFeed, String> {
     parse_feed(&String::from_utf8_lossy(&body))
 }
 
-/// At the start of rynasd: the holds the policy wants (the default needs no apply).
 pub fn ensure_holds(u: Arc<Updates>) {
     if u.dry || !u.apt_present() {
         return;
     }
     tokio::spawn(async move {
-        if let Err(e) = u.sync_holds(None).await {
-            tracing::warn!("kernel holds: {e}");
+        // the package's own upgrade restarts rynasd while its dpkg still holds the lock:
+        // try again until it is free
+        for attempt in 1..=HOLD_TRIES {
+            match u.sync_holds(None).await {
+                Ok(()) => return,
+                Err(e) if attempt < HOLD_TRIES && e.contains("lock") => {
+                    tracing::info!("kernel holds: dpkg is busy, trying again in {}s", HOLD_RETRY.as_secs());
+                    tokio::time::sleep(HOLD_RETRY).await;
+                }
+                Err(e) => {
+                    tracing::warn!("kernel holds: {e}");
+                    return;
+                }
+            }
         }
     });
+}
+
+/// The daily check: holds the metapackages the policy wants (a kernel metapackage installed
+/// since, or released by hand on the console).
+pub(crate) async fn check_holds(u: &Updates, ctx: &TaskCtx) {
+    if u.dry || !u.apt_present() {
+        return;
+    }
+    if let Err(e) = u.sync_holds(Some(ctx)).await {
+        ctx.log(&format!("kernel holds: {e}"));
+    }
 }
 
 /// What keeps the automatic installation from starting: the scheduler's lock table (package

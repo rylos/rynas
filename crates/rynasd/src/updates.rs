@@ -775,7 +775,10 @@ pub fn spawn_scheduled_check(who: &str) -> Res<String> {
         };
         let s = me.status(false).await;
         me.notify(&s);
-        // a newer kernel, in the kernel policy's notify mode
+        // the kernel holds, and a newer kernel in the kernel policy's notify mode
+        if !other {
+            crate::kernel_updates::check_holds(&me, &ctx).await;
+        }
         me.kernel_notify().await;
         r
     })?)
