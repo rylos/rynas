@@ -22,6 +22,7 @@ struct Env {
 fn appliers() -> Vec<Arc<dyn Applier>> {
     vec![
         Arc::new(HostnameDomain::new()),
+        Arc::new(ModelNameDomain),
         Arc::new(
             FileDomain::new(
                 "test.app",
@@ -284,6 +285,21 @@ fn apply_update_reads_and_applies_inside_the_apply_lock() {
         None
     );
     assert_eq!(e.cfg.revisions(10).unwrap().len(), 3);
+}
+
+#[test]
+fn model_name_written_and_removed() {
+    let e = env();
+    let file = e.root.join("etc/rynas/model-name");
+    for bad in ["x\u{7}", "# x", "", &"m".repeat(65)] {
+        assert!(e.cfg.apply_value("a", MODEL_NAME_KEY, Some(json!({ "name": bad })), "", &|_| {}).is_err(), "{bad}");
+    }
+    e.cfg.apply_value("a", MODEL_NAME_KEY, Some(json!({ "name": "  QNAP HS-251 " })), "", &|_| {}).unwrap();
+    assert_eq!(e.cfg.current(MODEL_NAME_KEY).unwrap(), Some(json!({ "name": "QNAP HS-251" })));
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(text.lines().find(|l| !l.starts_with('#') && !l.is_empty()), Some("QNAP HS-251"));
+    e.cfg.apply_value("a", MODEL_NAME_KEY, None, "", &|_| {}).unwrap();
+    assert!(!file.exists());
 }
 
 #[test]

@@ -1527,6 +1527,9 @@ soon.plugins	Plugin che aggiungono pagine, widget e comandi tramite un manifest 
 soon.system	Log di sistema e terminale web sono in arrivo.
 sys.subtitle	Informazioni di sistema e preferenze dell'interfaccia
 sys.info	Informazioni di sistema
+sys.model.edit	Cambia il nome del modello
+sys.model.help	Mostrato nella dashboard e qui. Lascia vuoto per usare il nome letto dall'hardware.
+sys.model.invalid	Al massimo 64 caratteri, senza # all'inizio.
 sys.prefs	Interfaccia
 notfound	Pagina non trovata
 notfound.text	Questo indirizzo non corrisponde a nessuna sezione.

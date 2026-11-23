@@ -58,13 +58,20 @@ pub fn system_info() -> SystemInfo {
         hostname: read_trim("/proc/sys/kernel/hostname"),
         os,
         kernel: read_trim("/proc/sys/kernel/osrelease"),
-        model: crate::hardware::dmi_model(),
+        model: chosen_model(&fs::read_to_string(rynas_api_types::MODEL_NAME_FILE).unwrap_or_default())
+            .unwrap_or_else(crate::hardware::dmi_model),
         cpu_model,
         cpu_threads,
         mem_total: parse_meminfo(&fs::read_to_string("/proc/meminfo").unwrap_or_default()).total,
         uptime_s,
         rynas_version: env!("CARGO_PKG_VERSION").to_string(),
     }
+}
+
+/// The model's name chosen in the system page (`system.model_name`, written by rynasd): the
+/// first line of the file that is not its header comment.
+fn chosen_model(file: &str) -> Option<String> {
+    file.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_string)
 }
 
 #[cfg(test)]
@@ -79,6 +86,13 @@ mod tests {
             pretty_name(s).as_deref(),
             Some("Debian GNU/Linux 13 (trixie)")
         );
+    }
+
+    #[test]
+    fn model_chosen_by_hand() {
+        assert_eq!(chosen_model("# managed by rynas\n# do not edit\nQNAP HS-251\n").as_deref(), Some("QNAP HS-251"));
+        assert_eq!(chosen_model(""), None);
+        assert_eq!(chosen_model("# only a header\n\n"), None);
     }
 
     #[test]

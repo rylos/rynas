@@ -844,6 +844,20 @@ pub struct HostnameConfig {
     pub hostname: String,
 }
 
+/// `system.model_name`: the model's name shown for the machine (dashboard, system page) in
+/// place of the one read from the firmware or recognised by a hardware module. `GET`/`PUT
+/// /api/v1/system/model-name`, applied at once; an empty name goes back to the automatic one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModelNameConfig {
+    /// At most [`MODEL_NAME_MAX`] characters, no control characters; empty: automatic.
+    pub name: String,
+}
+
+/// Longest model name, in characters.
+pub const MODEL_NAME_MAX: usize = 64;
+/// Where the chosen model name is written (one line, world-readable) for rynas-web.
+pub const MODEL_NAME_FILE: &str = "/etc/rynas/model-name";
+
 /// `GET /api/v1/system/hostname` (and answer of `PUT`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct HostnameState {

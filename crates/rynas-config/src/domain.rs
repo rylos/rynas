@@ -287,6 +287,45 @@ pub struct HostnameDomain {
     renamed: Mutex<Option<String>>,
 }
 
+/// `system.model_name`: the model's name chosen by hand ([`rynas_api_types::ModelNameConfig`]),
+/// written to [`rynas_api_types::MODEL_NAME_FILE`] (0644) where rynas-web reads it before the
+/// firmware's strings and the hardware module. An empty name removes the key and the file.
+pub struct ModelNameDomain;
+
+pub const MODEL_NAME_KEY: &str = "system.model_name";
+
+impl Applier for ModelNameDomain {
+    fn key(&self) -> &str {
+        MODEL_NAME_KEY
+    }
+
+    fn validate(&self, value: Value) -> Result<Value, Invalid> {
+        let c: rynas_api_types::ModelNameConfig =
+            serde_json::from_value(value).map_err(|e| Invalid::from(e.to_string()))?;
+        let name = c.name.trim();
+        if name.is_empty() {
+            return Err(Invalid::at("name", "empty: remove the key instead"));
+        }
+        if name.chars().count() > rynas_api_types::MODEL_NAME_MAX {
+            return Err(Invalid::at("name", format!("at most {} characters", rynas_api_types::MODEL_NAME_MAX)));
+        }
+        // `#` starts the file's header comment
+        if name.chars().any(char::is_control) || name.starts_with('#') {
+            return Err(Invalid::at("name", "no control characters, not starting with #"));
+        }
+        Ok(serde_json::json!({ "name": name }))
+    }
+
+    fn render(&self, value: &Value, _ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
+        let name = value.get("name").and_then(Value::as_str).unwrap_or_default();
+        Ok(vec![ManagedFile::whole(rynas_api_types::MODEL_NAME_FILE, name.to_string(), true)])
+    }
+
+    fn render_removed(&self, _old: Option<&Value>, _ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
+        Ok(vec![ManagedFile::absent(rynas_api_types::MODEL_NAME_FILE)])
+    }
+}
+
 /// Called with the new running host name once an apply that changed it is committed (never
 /// for a rollback). Runs inside the apply: it must not apply configuration itself (wake a
 /// task that does).

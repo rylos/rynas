@@ -201,6 +201,7 @@ pub fn router(ops: OpsState) -> Router {
         .route("/v1/config/drift/{key}/import", post(drift_import))
         .route("/v1/config/drift/{key}/overwrite", post(drift_overwrite))
         .route("/v1/system/hostname", get(hostname_get).put(hostname_put))
+        .route("/v1/system/model-name", get(model_name_get).put(model_name_put))
         .route("/v1/tasks", get(tasks))
         .route("/v1/tasks/stream", get(task_stream))
         .route("/v1/tasks/{id}", get(task))
@@ -535,6 +536,39 @@ async fn hostname_put(
                 .map_err(|e| ConfigError::Invalid(e.to_string().into()))?;
             c.stage(&user, HOSTNAME_KEY, Some(v))?;
             hostname_state(c, &user)
+        })
+        .await?,
+    ))
+}
+
+fn model_name_of(c: &Config) -> Result<rynas_api_types::ModelNameConfig, ConfigError> {
+    match c.current(rynas_config::MODEL_NAME_KEY)? {
+        Some(v) => serde_json::from_value(v).map_err(|e| ConfigError::Storage(e.to_string())),
+        None => Ok(rynas_api_types::ModelNameConfig::default()),
+    }
+}
+
+async fn model_name_get(State(st): State<OpsState>) -> Res<Json<rynas_api_types::ModelNameConfig>> {
+    let ops = ops(&st)?;
+    Ok(Json(blocking(&ops, model_name_of).await?))
+}
+
+/// Applied at once (a label, nothing to review): an empty name removes the key.
+async fn model_name_put(
+    State(st): State<OpsState>,
+    h: HeaderMap,
+    body: Result<Json<rynas_api_types::ModelNameConfig>, JsonRejection>,
+) -> Res<Json<rynas_api_types::ModelNameConfig>> {
+    let (ops, user) = (ops(&st)?, user(&h)?);
+    let Json(req) = body?;
+    Ok(Json(
+        blocking(&ops, move |c| {
+            let name = req.name.trim().to_string();
+            if model_name_of(c)?.name != name {
+                let v = (!name.is_empty()).then(|| serde_json::json!({ "name": name }));
+                c.apply_value(&user, rynas_config::MODEL_NAME_KEY, v, "model name", &|_| {})?;
+            }
+            model_name_of(c)
         })
         .await?,
     ))

@@ -30,10 +30,14 @@ pub fn System() -> impl IntoView {
     let lang_pref = RwSignal::new(i18n::lang_pref());
     let sys = live.system;
     let f = move |g: fn(&rynas_api_types::SystemInfo) -> String| move || sys.with(|s| s.as_ref().map(g).unwrap_or_default());
+    let editing_model = RwSignal::new(false);
 
     view! {
         <div class="page">
             <PageHeader icon=icons::SETTINGS title="nav.system" subtitle="sys.subtitle" />
+            <Show when=move || editing_model.get()>
+                {move || model_dialog(Callback::new(move |_| editing_model.set(false)))}
+            </Show>
             <div class="grid">
                 <section class="card widget w-6" style="--i:0">
                     <h2 class="section-title">{tr("sys.prefs")}</h2>
@@ -90,7 +94,10 @@ pub fn System() -> impl IntoView {
                     <Show when=move || sys.with(Option::is_some) fallback=|| view! { <Pending lines=6 res=Res::System /> }>
                         <dl class="kvs">
                             <div class="kv"><dt>{tr("f.host")}</dt><dd class="mono">{f(|s| s.hostname.clone())}</dd></div>
-                            <div class="kv"><dt>{tr("f.model")}</dt><dd>{f(|s| s.model.clone())}</dd></div>
+                            <div class="kv"><dt>{tr("f.model")}</dt><dd>
+                                {f(|s| s.model.clone())}" "
+                                <button type="button" class="btn ghost sm" title=tr("sys.model.edit") aria-label=tr("sys.model.edit") on:click=move |_| editing_model.set(true)><Icon icon=icons::PENCIL size=14 /></button>
+                            </dd></div>
                             <div class="kv"><dt>{tr("f.os")}</dt><dd>{f(|s| s.os.clone())}</dd></div>
                             <div class="kv"><dt>{tr("f.kernel")}</dt><dd class="mono">{f(|s| s.kernel.clone())}</dd></div>
                             <div class="kv"><dt>{tr("f.cpu")}</dt><dd>{f(|s| s.cpu_model.clone())}</dd></div>
@@ -175,4 +182,74 @@ pub fn System() -> impl IntoView {
             <p class="muted small soon-note">{tr("soon.system")}</p>
         </div>
     }
+}
+
+/// The model's name shown for the machine (`PUT /system/model-name`, applied at once): empty
+/// goes back to the name read from the firmware or recognised by the hardware module.
+fn model_dialog(close: Callback<()>) -> AnyView {
+    use leptos::task::spawn_local;
+    use rynas_api_types::{MODEL_NAME_MAX, ModelNameConfig};
+
+    use crate::api;
+    use crate::i18n::t;
+    use crate::ui::{DlgKind, dialog};
+
+    let live = use_live();
+    let value = RwSignal::new(String::new());
+    let loaded = RwSignal::new(false);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    spawn_local(async move {
+        match api::get::<ModelNameConfig>("/api/v1/system/model-name").await {
+            Ok(c) => {
+                let _ = value.try_set(c.name);
+            }
+            Err(e) => {
+                let _ = error.try_set(Some(e.text()));
+            }
+        }
+        let _ = loaded.try_set(true);
+    });
+    let invalid = Signal::derive(move || {
+        let v = value.get();
+        let v = v.trim();
+        (v.chars().count() > MODEL_NAME_MAX || v.starts_with('#') || v.chars().any(char::is_control)).then(|| t("sys.model.invalid").to_string())
+    });
+    let can_save = Signal::derive(move || loaded.get() && invalid.get().is_none());
+    let save = move |_| {
+        if !can_save.get_untracked() || busy.get_untracked() {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        let body = ModelNameConfig { name: value.get_untracked().trim().to_string() };
+        spawn_local(async move {
+            match api::put::<_, ModelNameConfig>("/api/v1/system/model-name", &body).await {
+                Ok(_) => {
+                    // the dashboard, the app bar and this page read it from the system facts
+                    live.refresh_system();
+                    close.try_run(());
+                }
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
+                }
+            }
+            let _ = busy.try_set(false);
+        });
+    };
+    let body = view! {
+        <form class="form" on:submit=move |ev| { ev.prevent_default(); save(()); }>
+            {crate::form::text_field(
+                "f.model",
+                value.into(),
+                Callback::new(move |v: String| value.set(v)),
+                invalid,
+                crate::form::In { maxlength: MODEL_NAME_MAX as u32, help: Some("sys.model.help"), ..crate::form::In::default() },
+            )}
+            {crate::form::form_error(error)}
+        </form>
+    }
+    .into_any();
+    let foot = crate::form::save_bar_with(crate::form::SaveBar { can_save, ..crate::form::SaveBar::new(busy, "save", close, Callback::new(save)) });
+    dialog(DlgKind::Normal, Signal::derive(|| t("sys.model.edit").to_string()), close, body, Some(foot))
 }

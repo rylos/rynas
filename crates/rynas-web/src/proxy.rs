@@ -42,6 +42,7 @@ pub fn routes() -> Router<AppState> {
         .route("/config/drift/{key}/import", post(forward))
         .route("/config/drift/{key}/overwrite", post(forward))
         .route("/system/hostname", get(forward).put(forward))
+        .route("/system/model-name", get(forward).put(forward))
         // HTTPS certificate of the web interface (W0): details, local CA download, import,
         // back to the local certificate; the served pair is reloaded right after a change
         .route("/system/tls", get(forward))

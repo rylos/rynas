@@ -336,6 +336,7 @@ fn open_config(
     }));
     let mut domains: Vec<Arc<dyn rynas_config::Applier>> = vec![
         Arc::new(hostname_domain),
+        Arc::new(rynas_config::ModelNameDomain),
         homes.clone(),
         users.clone(),
         shares.clone(),
