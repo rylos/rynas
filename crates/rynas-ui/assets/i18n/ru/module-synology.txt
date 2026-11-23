@@ -78,6 +78,9 @@ nev.synodeb.ups_battery_low.body	Заряд батареи {battery}%, врем�
 nev.synodeb.ups_battery_low.body_2	Переход в безопасный режим.
 nev.synodeb.ups_unreachable.title	ИБП недоступен
 nev.synodeb.ups_unreachable.body	Нет связи с {ups} не менее {minutes} мин.
+nev.synodeb.boot_stalled.title	Запуск завис
+nev.synodeb.boot_stalled.body	Через 10 минут после включения система так и не запустилась полностью: ещё ожидаются {jobs}. Вход всё равно разрешён. Адреса: {addresses}.
+nev.synodeb.boot_stalled.body_2	Через 10 минут после включения система так и не запустилась полностью. Вход всё равно разрешён.
 cfg.key.synology.hw	Настройки оборудования
 syn.tab	Synology
 syn.not_running	synohwd не запущен: состояние неактуально, звуковые сигналы и идентификация недоступны. Настройки по-прежнему можно сохранить; при их применении synohwd перезапускается.

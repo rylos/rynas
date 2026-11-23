@@ -78,6 +78,9 @@ nev.synodeb.ups_battery_low.body	Batteria {battery}%, autonomia {runtime} s: avv
 nev.synodeb.ups_battery_low.body_2	Avvio della modalità sicura.
 nev.synodeb.ups_unreachable.title	UPS non raggiungibile
 nev.synodeb.ups_unreachable.body	Nessuna comunicazione con {ups} da almeno {minutes} minuti.
+nev.synodeb.boot_stalled.title	Avvio bloccato
+nev.synodeb.boot_stalled.body	A 10 minuti dall'accensione il sistema non ha finito di avviarsi: aspetta ancora {jobs}. I login sono stati sbloccati comunque. Indirizzi: {addresses}.
+nev.synodeb.boot_stalled.body_2	A 10 minuti dall'accensione il sistema non ha finito di avviarsi. I login sono stati sbloccati comunque.
 cfg.key.synology.hw	Impostazioni hardware
 syn.tab	Synology
 syn.not_running	synohwd non è in esecuzione: lo stato non è aggiornato e i segnali acustici o l'identificazione non sono disponibili. Le impostazioni si possono comunque salvare; applicarle riavvia synohwd.

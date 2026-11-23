@@ -88,6 +88,9 @@ crate::i18n::dict! { BLOB, LENS;
     "nev.synodeb.ups_battery_low.body_2" => "Entering Safe Mode.";
     "nev.synodeb.ups_unreachable.title" => "UPS unreachable";
     "nev.synodeb.ups_unreachable.body" => "No communication with {ups} for at least {minutes} minutes.";
+    "nev.synodeb.boot_stalled.title" => "Startup is stuck";
+    "nev.synodeb.boot_stalled.body" => "10 minutes after power-on the system has not finished starting: still waiting for {jobs}. Logins were allowed anyway. Addresses: {addresses}.";
+    "nev.synodeb.boot_stalled.body_2" => "10 minutes after power-on the system has not finished starting. Logins were allowed anyway.";
     // configuration key
     "cfg.key.synology.hw" => "Hardware settings";
     // Hardware › Synology
