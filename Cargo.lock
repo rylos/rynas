@@ -3545,7 +3545,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rynas-api-types"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "rynas-schedule",
  "serde",
@@ -3554,7 +3554,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-apps"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "base64 0.23.1",
  "blake2",
@@ -3577,7 +3577,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-auth"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -3595,7 +3595,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-backup"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "libc",
  "rynas-api-types",
@@ -3610,7 +3610,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-btrfs"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "base64 0.23.1",
  "jiff",
@@ -3629,7 +3629,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-config"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "age",
  "minijinja",
@@ -3649,7 +3649,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-dedup"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "jiff",
  "rynas-api-types",
@@ -3661,7 +3661,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-dns"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -3676,7 +3676,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-docker"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "base64 0.23.1",
  "bollard",
@@ -3698,7 +3698,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-files"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "aes-gcm",
  "crc32fast",
@@ -3718,7 +3718,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-http"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "axum",
  "rynas-api-types",
@@ -3732,14 +3732,14 @@ dependencies = [
 
 [[package]]
 name = "rynas-hw"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "rynas-api-types",
 ]
 
 [[package]]
 name = "rynas-hw-qnap"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "axum",
  "libc",
@@ -3757,7 +3757,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-hw-synology"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "axum",
  "libc",
@@ -3780,7 +3780,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-module"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "axum",
  "rynas-api-types",
@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-net"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
@@ -3816,7 +3816,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-notify"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "age",
  "jiff",
@@ -3837,7 +3837,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-nut"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "rynas-api-types",
  "tokio",
@@ -3846,7 +3846,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-power"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "jiff",
  "rynas-api-types",
@@ -3861,7 +3861,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-removable"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "libc",
  "rynas-api-types",
@@ -3874,7 +3874,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-schedule"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "jiff",
  "serde",
@@ -3883,7 +3883,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-scheduler"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "jiff",
  "libc",
@@ -3900,7 +3900,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-services"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -3919,7 +3919,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-storage"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "jiff",
  "libc",
@@ -3936,7 +3936,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-tailscale"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "jiff",
  "rynas-api-types",
@@ -3948,7 +3948,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-tasks"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "nix",
  "rynas-api-types",
@@ -3962,7 +3962,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-tls"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -3978,7 +3978,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-tz"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "jiff",
  "tempfile",
@@ -3986,7 +3986,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-ui"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
@@ -4005,7 +4005,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-updates"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "rynas-api-types",
  "rynas-config",
@@ -4017,7 +4017,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-web"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4057,7 +4057,7 @@ dependencies = [
 
 [[package]]
 name = "rynasd"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "axum",
  "base64 0.23.1",
