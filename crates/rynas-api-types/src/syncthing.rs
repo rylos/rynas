@@ -17,6 +17,10 @@ fn not(b: &bool) -> bool {
     !*b
 }
 
+/// The `run_as` value naming the apps' account (`docker-apps`) explicitly, in a request
+/// and in [`SyncthingAdoptPreview::run_as`].
+pub const RUN_AS_APPS: &str = "@apps";
+
 /// Where an instance to adopt comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +134,10 @@ pub struct StignoreProposal {
     pub removed: Vec<String>,
     /// Lines added.
     pub added: Vec<String>,
+    /// Lines of other systems' patterns kept: the folder holds such folders, which the line
+    /// keeps out of the synchronization (removed only when none exist).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<String>,
 }
 
 /// Why a folder is not mapped to a share.
@@ -215,13 +223,30 @@ pub struct SyncthingAdoptPreview {
     pub volumes: Vec<AdoptVolume>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owners: Option<AdoptOwners>,
-    /// The NAS user the app will run as: the request's `run_as`, else the user owning most
-    /// synchronized files (`owners.user`), else the installed app's; `None`: the apps'
-    /// account. Files arriving from the devices belong to this user.
+    /// The NAS user the app will run as: the request's `run_as`, else the installed app's
+    /// user, else the user owning most synchronized files (`owners.user`); [`RUN_AS_APPS`]
+    /// (or `None` when nothing could be proposed): the apps' account. Files arriving from the
+    /// devices belong to this user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_as: Option<String>,
     /// The shares the app will mount (each at `/shares/<share>`).
     pub shares: Vec<String>,
+    /// The share permission entries the adoption adds or raises for the app's user (they
+    /// also let that user into the share over SMB and NFS).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<crate::apps::PlannedShareGrant>,
+    /// A container source started by a compose project of another tool: it may come back
+    /// with `compose up` until the project is removed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose: Option<AdoptCompose>,
+    /// The old GUI served HTTPS itself: the copy turns it off (`tls="false"`), rynas' proxy
+    /// serves the interface over HTTPS.
+    #[serde(default, skip_serializing_if = "not")]
+    pub gui_tls_off: bool,
+    /// Sync listen addresses other than `default` or port 22000 (the app publishes 22000):
+    /// the adoption needs `reset_listen` to set them back to `default`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listen_addresses: Vec<String>,
     /// The catalogue app installed now (stack), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed: Option<String>,
@@ -247,9 +272,24 @@ pub struct SyncthingAdoptRequest {
     /// Stack name of a new install (default `syncthing`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
-    /// The NAS user the app runs as, instead of the preview's proposal.
+    /// The NAS user the app runs as ([`RUN_AS_APPS`]: the apps' account), instead of the
+    /// preview's proposal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_as: Option<String>,
+    /// Set custom sync listen addresses ([`SyncthingAdoptPreview::listen_addresses`]) back
+    /// to `default`; without it such a source is refused.
+    #[serde(skip_serializing_if = "not")]
+    pub reset_listen: bool,
+}
+
+/// The compose project a container source belongs to (its labels).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AdoptCompose {
+    /// `com.docker.compose.project`.
+    pub project: String,
+    /// `com.docker.compose.project.working_dir`, when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
 }
 
 // ---------------------------------------------------------------------------------------------

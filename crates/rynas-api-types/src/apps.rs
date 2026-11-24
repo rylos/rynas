@@ -895,6 +895,10 @@ pub struct InstalledApp {
     /// The shares of the entry's `[share_set]` mounted now (read from `.env`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub share_set: Vec<InstalledShareSetItem>,
+    /// Share permission entries the app added or raised (an uninstall with `remove_grants`
+    /// removes them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added_grants: Vec<AppAddedGrant>,
 }
 
 /// `GET /api/v1/apps/installed/{stack}`.
@@ -981,4 +985,35 @@ pub struct AppUninstallRequest {
     pub delete_data: bool,
     /// The stack name, required with `delete_data`.
     pub confirm: Option<String>,
+    /// Also remove the share permission entries the app's installs and share set changes
+    /// added or raised ([`InstalledApp::added_grants`]). Default false: they stay.
+    pub remove_grants: bool,
+}
+
+/// A share permission entry an app's install or share set change added or raised (kept in
+/// rynasd's record of the stack), removed by an uninstall with `remove_grants`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AppAddedGrant {
+    pub share: String,
+    /// `user` or `group`.
+    pub kind: crate::PrincipalKind,
+    pub name: String,
+    /// The access given.
+    pub access: crate::Access,
+    /// The access the entry had before (`None`: the entry was added).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<crate::Access>,
+}
+
+/// `POST /api/v1/apps/installed/{stack}/share-set/plan` (same body as the `PUT`): what the
+/// change does, no side effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShareSetPlan {
+    /// The items mounted after the change.
+    pub items: Vec<InstalledShareSetItem>,
+    /// Items mounted now that the change removes (names).
+    pub removed: Vec<String>,
+    /// The share permission entries the change adds or raises for the app's account or user
+    /// (they also open the share to that user or group over SMB and NFS).
+    pub grants: Vec<PlannedShareGrant>,
 }

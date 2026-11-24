@@ -362,6 +362,15 @@ pub struct RollbackPreview {
     /// Share rollback: the subvolume that goes back.
     #[serde(default)]
     pub subvolume: Option<String>,
+    /// Share rollback: Syncthing folders inside the share (labels). They are paused before
+    /// the rollback and stay paused after it: resuming one sends the rolled-back state,
+    /// deletions included, to every device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub syncthing_folders: Vec<String>,
+    /// Share rollback: running containers with a bind of the share (or inside it), stopped
+    /// before the subvolume is swapped and started again after it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restart_containers: Vec<String>,
 }
 
 /// Why a rollback cannot run from rynas.
