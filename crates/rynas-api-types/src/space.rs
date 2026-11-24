@@ -64,8 +64,14 @@ pub enum SourceKind {
     SystemPoints,
     /// A PC backup folder (removed PCs included).
     PcBackup,
-    /// Replicas received from this NAS's own jobs for a target that is no longer configured.
+    /// Replicas received from this NAS's own jobs for a target that is no longer configured
+    /// (only with a record of that target).
     Replica,
+    /// Received snapshots whose owner rynas does not know (no PC, no target on record).
+    Received,
+    /// Replicas another NAS sends here (`.replicas/<name>` without a local job): never removed
+    /// from Space.
+    IncomingReplica,
 }
 
 /// Why a snapshot cannot be removed from Space (or by the automatic thinning).
@@ -85,6 +91,8 @@ pub enum Protection {
     Pinned,
     /// Not a read-only snapshot (an interrupted receive, a writable copy): left alone.
     Writable,
+    /// A replica another NAS sends here: its sender decides.
+    IncomingReplica,
 }
 
 /// How the "freed if removed" number of a source was obtained.
@@ -224,6 +232,8 @@ pub enum ReviewKind {
     RemovedTargetReplicas,
     /// The folder of a PC that is no longer paired.
     RemovedPcFolder,
+    /// Received snapshots whose owner rynas does not know (the newest of each line stays).
+    ReceivedUnknownOwner,
     /// An installed kernel that is neither running, the newest of its series nor held.
     OldKernel,
     /// A tagged Docker image no container, stack or rollback point uses.
@@ -292,6 +302,12 @@ pub struct SpaceOverview {
     /// When the last scan of the whole system finished.
     #[serde(default)]
     pub scanned_at_ms: Option<u64>,
+    /// The journal's size limit in force (bytes; `None`: journald's own default).
+    #[serde(default)]
+    pub journal_cap_bytes: Option<u64>,
+    /// That limit is the administrator's own `SystemMaxUse=` (rynas then writes none).
+    #[serde(default)]
+    pub journal_cap_by_admin: bool,
 }
 
 /// `POST /api/v1/space/preview`: measures exactly what removing these snapshots frees

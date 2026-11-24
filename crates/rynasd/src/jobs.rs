@@ -344,16 +344,43 @@ fn prune_except(
     pinned: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<String>, String> {
     let dir = std::path::Path::new(&j.snapshot_dir);
+    let latest: Vec<Option<String>> = j
+        .replicas
+        .iter()
+        .filter(|t| t.enabled)
+        .map(|t| rynas_btrfs::replication::read_status(state_dir, &j.name, &t.id).latest)
+        .collect();
     let mut gone = Vec::new();
-    for n in crate::snapshots::would_prune(state_dir, j)? {
-        if pinned.contains(&dir.join(&n).display().to_string()) {
-            continue;
-        }
+    for n in prune_candidates(&crate::snapshots::would_prune(state_dir, j)?, j, pinned, &latest) {
         if rynas_btrfs::scan::delete(dir, &j.name, &n, &rynas_btrfs::scan::lock_path(&j.name)).is_ok() {
             gone.push(n);
         }
     }
     Ok(gone)
+}
+
+/// What rynas's own prune may delete of the names btrbk's dry run gave: never a pinned
+/// snapshot, never one a replica target still needs (its latest replica and everything newer,
+/// which it has not received yet; all of them while a target has none: as btrbk keeps them).
+fn prune_candidates(
+    names: &[String],
+    j: &SnapshotsJobRef,
+    pinned: &std::collections::BTreeSet<String>,
+    latest: &[Option<String>],
+) -> Vec<String> {
+    let dir = std::path::Path::new(&j.snapshot_dir);
+    names
+        .iter()
+        .filter(|n| rynas_btrfs::name::split_snapshot_name(n).is_some_and(|(p, _)| p == j.name))
+        .filter(|n| !pinned.contains(&dir.join(n).display().to_string()))
+        .filter(|n| {
+            latest.iter().all(|l| match l {
+                None => false,
+                Some(l) => rynas_btrfs::name::compare_names(n, l) == std::cmp::Ordering::Less,
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// Task `snapshot.run`: `btrbk -c /etc/rynas/btrbk/<job>.conf run --format=raw`, with a
@@ -411,13 +438,18 @@ pub async fn spawn_snapshot(p: &Arc<Protection>, job: &str, user: &str) -> Res<S
             let mut deleted = r.deleted.len();
             if !pinned.is_empty() {
                 let (sd, j2) = (p.state_dir.clone(), j.clone());
-                let gone = tokio::task::spawn_blocking(move || prune_except(&sd, &j2, &pinned))
-                    .await
-                    .map_err(|e| e.to_string())??;
-                for n in &gone {
-                    ctx.log(&format!("deleted {n} (retention; pinned snapshots kept)"));
+                // the snapshot is taken: a failed prune only warns, never fails the run nor
+                // holds back the replicas that follow
+                match tokio::task::spawn_blocking(move || prune_except(&sd, &j2, &pinned)).await {
+                    Ok(Ok(gone)) => {
+                        for n in &gone {
+                            ctx.log(&format!("deleted {n} (retention; pinned snapshots kept)"));
+                        }
+                        deleted += gone.len();
+                    }
+                    Ok(Err(e)) => ctx.log(&format!("warning: old snapshots not pruned: {e}")),
+                    Err(e) => ctx.log(&format!("warning: old snapshots not pruned: {e}")),
                 }
-                deleted += gone.len();
             }
             ctx.log(&format!(
                 "snapshot job {}: {} created, {} deleted",
@@ -430,4 +462,47 @@ pub async fn spawn_snapshot(p: &Arc<Protection>, job: &str, user: &str) -> Res<S
             crate::replication::after_snapshots(&ctx, &p, &j).await;
             Ok(())
         })?)
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    #[test]
+    fn own_prune_takes_only_this_folder_and_keeps_what_targets_need() {
+        // a job whose local replica target keeps fewer replicas than the job keeps snapshots
+        let j: SnapshotsJobRef = serde_json::from_value(serde_json::json!({
+            "name": "docs",
+            "subvolume": "/vol1/docs",
+            "snapshot_dir": "/vol1/.snapshots/docs",
+            "retention": {"hourly": 48, "daily": 14},
+            "replicas": [{"id": "copy", "destination": {"kind": "local", "path": "/vol2/.replicas/docs"}, "retention": {"daily": 2}}]
+        }))
+        .unwrap();
+        let line = |t: &str, url: &str| format!("format=\"transaction\" type=\"{t}\" status=\"dryrun_success\" target_url=\"{url}\"\n");
+        let out = [
+            line("delete_snapshot", "/vol1/.snapshots/docs/docs.20261101T0100"),
+            line("delete_snapshot", "/vol1/.snapshots/docs/docs.20261102T0100"),
+            line("delete_snapshot", "/vol1/.snapshots/docs/docs.20261103T0100"),
+            // the target's shorter retention: backups, never taken
+            line("delete_target", "/vol2/.replicas/docs/docs.20261104T0100"),
+            // same name in another folder, a nested path, a remote URL
+            line("delete_snapshot", "/vol2/.replicas/docs/docs.20261105T0100"),
+            line("delete_snapshot", "/vol1/.snapshots/docs/x/docs.20261106T0100"),
+            line("delete_snapshot", "ssh://nas/vol1/.snapshots/docs/docs.20261107T0100"),
+        ]
+        .concat();
+        let names = rynas_btrfs::btrbk::snapshot_deletions(&out, std::path::Path::new(&j.snapshot_dir));
+        assert_eq!(names, ["docs.20261101T0100", "docs.20261102T0100", "docs.20261103T0100"]);
+        let pinned: std::collections::BTreeSet<String> = ["/vol1/.snapshots/docs/docs.20261101T0100".to_string()].into();
+        // the target last received 0102: 0102 and newer stay
+        let v = prune_candidates(&names, &j, &pinned, &[Some("docs.20261102T0100".into())]);
+        assert!(v.is_empty(), "{v:?}");
+        let v = prune_candidates(&names, &j, &Default::default(), &[Some("docs.20261103T0100".into())]);
+        assert_eq!(v, ["docs.20261101T0100", "docs.20261102T0100"]);
+        // a target without any replica yet: nothing goes
+        assert!(prune_candidates(&names, &j, &Default::default(), &[None]).is_empty());
+        // no target: only the pinned one stays
+        assert_eq!(prune_candidates(&names, &j, &pinned, &[]), ["docs.20261102T0100", "docs.20261103T0100"]);
+    }
 }

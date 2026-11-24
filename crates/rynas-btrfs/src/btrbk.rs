@@ -222,6 +222,34 @@ pub fn parse_report(out: &str) -> RunReport {
     r
 }
 
+/// The snapshot names a (dry) `btrbk prune` deletes from `snapshot_dir`: only transactions
+/// of type `delete_snapshot` that succeeded, whose `target_url` is a plain absolute path whose
+/// parent is exactly `snapshot_dir` (target backups, other folders and remote URLs are never
+/// taken, whatever their last component).
+pub fn snapshot_deletions(out: &str, snapshot_dir: &std::path::Path) -> Vec<String> {
+    let mut v = Vec::new();
+    for line in out.lines() {
+        let f = parse_raw_line(line);
+        if f.get("format").map(String::as_str) != Some("transaction")
+            || f.get("type").map(String::as_str) != Some("delete_snapshot")
+            || !matches!(f.get("status").map(String::as_str), Some("success" | "dryrun_success"))
+        {
+            continue;
+        }
+        let Some(url) = f.get("target_url") else { continue };
+        let p = std::path::Path::new(url);
+        if !url.starts_with('/') || url.contains(':') || p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
+            continue;
+        }
+        if p.parent() == Some(snapshot_dir)
+            && let Some(n) = p.file_name().and_then(|n| n.to_str())
+        {
+            v.push(n.to_string());
+        }
+    }
+    v
+}
+
 /// Applies a preset (if any) to the counts.
 pub fn normalize_retention(r: &Retention) -> Retention {
     match r.preset {

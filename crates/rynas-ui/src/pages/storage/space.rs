@@ -55,6 +55,8 @@ fn kind_key(k: SourceKind) -> &'static str {
         SourceKind::SystemPoints => "snap.tab.system",
         SourceKind::PcBackup => "sp.kind.pc_backup",
         SourceKind::Replica => "sp.rev.removed_target_replicas",
+        SourceKind::Received => "sp.rev.received_unknown_owner",
+        SourceKind::IncomingReplica => "sp.kind.incoming_replica",
     }
 }
 
@@ -66,6 +68,7 @@ fn protection_key(p: Protection) -> &'static str {
         Protection::BootReference => "sp.prot.boot_reference",
         Protection::Pinned => "sp.prot.pinned",
         Protection::Writable => "sp.prot.writable",
+        Protection::IncomingReplica => "sp.prot.incoming_replica",
     }
 }
 
@@ -90,6 +93,7 @@ fn review_key(k: ReviewKind) -> &'static str {
         ReviewKind::OrphanSnapshots => "sp.rev.orphan_snapshots",
         ReviewKind::RemovedTargetReplicas => "sp.rev.removed_target_replicas",
         ReviewKind::RemovedPcFolder => "sp.rev.removed_pc_folder",
+        ReviewKind::ReceivedUnknownOwner => "sp.rev.received_unknown_owner",
         ReviewKind::OldKernel => "sp.rev.old_kernel",
         ReviewKind::UnusedImage => "sp.rev.unused_image",
         ReviewKind::UnusedVolume => "sp.rev.unused_volume",
@@ -345,7 +349,10 @@ pub fn SpacePage() -> impl IntoView {
                     <p class="muted small">{tr("sp.review_text")}</p>
                     {review_view}
                 </section>
-                <Guardrails volumes=Signal::derive(move || ov.data.with(|o| o.as_ref().map(|o| o.volumes.iter().map(|v| v.volume.clone()).collect::<Vec<_>>()).unwrap_or_default())) />
+                <Guardrails
+                    volumes=Signal::derive(move || ov.data.with(|o| o.as_ref().map(|o| o.volumes.iter().map(|v| v.volume.clone()).collect::<Vec<_>>()).unwrap_or_default()))
+                    journal=Signal::derive(move || ov.data.with(|o| o.as_ref().map(|o| (o.journal_cap_bytes, o.journal_cap_by_admin)).unwrap_or_default()))
+                />
             }.into_any())}
             {move || preview.get().map(|p| preview_dialog(p, selected, preview, delete_busy, delete_err, ov))}
             {move || review_ask.get().then(|| {
@@ -621,7 +628,7 @@ fn BudgetDialog(source: SnapshotSource, on_close: Callback<()>) -> impl IntoView
 /// The guardrails (key `space`): notifications, automatic cleanup per volume, journal cap,
 /// recycle bins and thumbnails. Save stages and applies the key.
 #[component]
-fn Guardrails(volumes: Signal<Vec<String>>) -> impl IntoView {
+fn Guardrails(volumes: Signal<Vec<String>>, journal: Signal<(Option<u64>, bool)>) -> impl IntoView {
     let server = Remote::<SpaceSettings>::new(SETTINGS);
     let dr = Draft::new(SpaceSettings::default(), move || server.data.get());
     let busy = RwSignal::new(false);
@@ -695,6 +702,11 @@ fn Guardrails(volumes: Signal<Vec<String>>) -> impl IntoView {
                     <p class="small muted">{tr("sp.auto_free_help")}</p>
                     <div class="space-auto">{auto}</div>
                 </div>
+                <p class="small muted">{move || match journal.get() {
+                    (Some(b), true) => tf("sp.journal_admin", &[("size", &i18n::bytes(b))]),
+                    (Some(b), false) => tf("sp.journal_in_force", &[("size", &i18n::bytes(b))]),
+                    (None, _) => t("sp.journal_default").to_string(),
+                }}</p>
                 <div class="form-row three">
                     {form::number_field("sp.journal_cap", Some("sp.journal_cap_help"),
                         Signal::derive(move || dr.d.with(|s| s.journal_cap_mib.map(|n| n.to_string()).unwrap_or_default())),
@@ -719,10 +731,27 @@ mod tests {
         for c in [SpaceCategory::Snapshots, SpaceCategory::RecycleBins, SpaceCategory::Docker, SpaceCategory::System, SpaceCategory::Leftovers, SpaceCategory::Data] {
             assert!(i18n::try_t(category_key(c)).is_some(), "{c:?}");
         }
-        for k in [SourceKind::ShareJob, SourceKind::OrphanJob, SourceKind::AppStack, SourceKind::SystemPoints, SourceKind::PcBackup, SourceKind::Replica] {
+        for k in [
+            SourceKind::ShareJob,
+            SourceKind::OrphanJob,
+            SourceKind::AppStack,
+            SourceKind::SystemPoints,
+            SourceKind::PcBackup,
+            SourceKind::Replica,
+            SourceKind::Received,
+            SourceKind::IncomingReplica,
+        ] {
             assert!(i18n::try_t(kind_key(k)).is_some(), "{k:?}");
         }
-        for p in [Protection::Newest, Protection::ReplicationParent, Protection::NewestBackup, Protection::BootReference, Protection::Pinned, Protection::Writable] {
+        for p in [
+            Protection::Newest,
+            Protection::ReplicationParent,
+            Protection::NewestBackup,
+            Protection::BootReference,
+            Protection::Pinned,
+            Protection::Writable,
+            Protection::IncomingReplica,
+        ] {
             assert!(i18n::try_t(protection_key(p)).is_some(), "{p:?}");
         }
         for a in [
@@ -747,6 +776,7 @@ mod tests {
             ReviewKind::OrphanSnapshots,
             ReviewKind::RemovedTargetReplicas,
             ReviewKind::RemovedPcFolder,
+            ReviewKind::ReceivedUnknownOwner,
             ReviewKind::OldKernel,
             ReviewKind::UnusedImage,
             ReviewKind::UnusedVolume,

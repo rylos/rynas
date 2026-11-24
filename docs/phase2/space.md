@@ -187,6 +187,40 @@ Configuration key `space` (`SpaceSettings`, staged and applied like every domain
 Administrators only (also checked in rynasd). Event codes: `space.low_free`, `space.free_ok`,
 `space.snapshots_growth`, `space.auto_freed`.
 
+## 7. Data-safety review (2026-11-24)
+
+- **Own prune of jobs with pins**: the dry run reads the job's configuration without its replica
+  target sections; only `delete_snapshot` transactions whose `target_url` parent is exactly the
+  job's snapshot folder count; never the latest replica of an enabled target nor anything newer
+  (all of them while a target has none); a failed prune only warns, after the snapshot was taken
+  and before the replication that follows.
+- **Received snapshots without a configured owner** are "received, owner unknown" (rynas keeps no
+  record of removed PCs or targets, so it never calls them that); the newest of each line
+  (`<name>.<time>`) is kept; deleting is refused while a `btrfs receive` writes into the folder
+  (a process `btrfs … receive` with an argument or working folder inside it). `.replicas/<name>`
+  folders without a local target are replicas another NAS sends here: protected.
+- **An unreadable `snapshots` or `shares` key** stops discovery (scan, previews, deletions fail)
+  instead of making live job folders look deleted.
+- **Leftovers** are never a configured share, job subvolume, app folder, PC or replica folder,
+  nor a folder holding one; a plain folder is removed only when no subvolume (inode 256 or
+  another device) or mount point is below it, checked again on the way down; restore copies that
+  are files are listed too.
+- **Pins** go only with their snapshot deleted by rynas, or when the volume is mounted and the
+  snapshot's folder is there (on that filesystem) without it.
+- **Automatic cleanup**: `btrfs subvolume sync` and a free-space reading after every deletion; a
+  pass stops when 5 deletions freed less than 1 GiB together, then pauses 24 hours; at most 100
+  deletions per volume and day; every pass is logged and notified with why it stopped.
+- **Claims**: every Space deletion first asks the scheduler's lock table and is refused while a
+  replication, receive, scrub, backup or snapshot run holds the volume, then holds the volume in
+  the filesystem lock; app snapshots also take the stack's busy mark.
+- **Extent walk**: each range set is capped (1 Mi ranges, peak under 128 MiB) and a measurement
+  with any unreadable file is "not measured".
+- **journald**: an administrator's `SystemMaxUse=` (journald.conf or a drop-in sorting before
+  rynas's) wins: rynas writes no drop-in, the Space tab shows it; the journal action uses the cap
+  in force (the administrator's or the applied one), never an unapplied default.
+- **Identical app snapshots**: checked on a real btrfs (Debian 13, kernel 7.3): a read-only
+  snapshot does not bump the source's generation, so `generation <= otransid` stays the rule.
+
 ## 6. Open items
 
 - Leftovers deeper than the walk (depth 4) are not found; restore copies inside deep folders of

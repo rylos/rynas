@@ -132,6 +132,11 @@ impl Ranges {
         }
     }
 
+    /// Bytes the ranges take in memory now.
+    pub fn memory(&self) -> usize {
+        self.v.capacity() * std::mem::size_of::<(u64, u64)>()
+    }
+
     /// Sorts and merges overlapping or touching ranges.
     pub fn merge(&mut self) {
         self.v.sort_unstable();
@@ -227,7 +232,8 @@ pub struct Walk {
 
 /// Limits of a measurement.
 pub struct Limits<'a> {
-    /// Most shared ranges kept for the set (16 bytes each).
+    /// Most ranges kept for the set and, separately, for the kept members (16 bytes each;
+    /// a vector may hold twice that while it grows, so the peak is about 4 × 16 × this).
     pub max_ranges: usize,
     /// Asked every few hundred files: `true` stops the walk.
     pub stop: &'a dyn Fn() -> bool,
@@ -308,7 +314,10 @@ pub fn measure_set(set: &[PathBuf], keep: &[PathBuf], lim: &Limits) -> Result<Se
                 }
             }
             if shared.len() > lim.max_ranges {
-                return Err(WalkError::TooLarge);
+                shared.merge();
+                if shared.len() > lim.max_ranges {
+                    return Err(WalkError::TooLarge);
+                }
             }
             Ok(())
         })?;
@@ -330,6 +339,9 @@ pub fn measure_set(set: &[PathBuf], keep: &[PathBuf], lim: &Limits) -> Result<Se
                 }
                 if kept.len() > lim.max_ranges {
                     kept.merge();
+                    if kept.len() > lim.max_ranges {
+                        return Err(WalkError::TooLarge);
+                    }
                 }
                 Ok(())
             })?;
@@ -390,6 +402,7 @@ mod tests {
         assert_eq!(a.bytes(), 25);
         let mut b = r(&[(100, 10), (0, 1)]);
         assert_eq!(b.bytes(), 11);
+        assert!(b.memory() >= 16);
     }
 
     #[test]

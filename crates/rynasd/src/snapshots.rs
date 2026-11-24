@@ -543,8 +543,15 @@ async fn preview_retention(
 /// Names `btrbk prune` would delete now with `job`'s retention: a dry run of the job's
 /// configuration without its lock line (used after a run with `--preserve-snapshots`, when
 /// pinned snapshots must stay and rynas deletes the rest itself).
+///
+/// The dry run reads a configuration **without** the replica target sections (their
+/// retention deletes backups, never something here), and only `delete_snapshot`
+/// transactions in exactly this job's snapshot folder are kept
+/// ([`rynas_btrfs::btrbk::snapshot_deletions`]).
 pub(crate) fn would_prune(state_dir: &FsPath, job: &SnapshotJob) -> Result<Vec<String>, String> {
-    let conf: String = render_conf(job)
+    let mut own = job.clone();
+    own.replicas.clear();
+    let conf: String = render_conf(&own)
         .map_err(|e| e.to_string())?
         .lines()
         .filter(|l| !l.starts_with("lockfile"))
@@ -566,7 +573,7 @@ pub(crate) fn would_prune(state_dir: &FsPath, job: &SnapshotJob) -> Result<Vec<S
     if !out.success() || !r.errors.is_empty() {
         return Err(format!("btrbk prune: {} {}", r.errors.join("; "), out.stderr.trim()));
     }
-    Ok(r.deleted)
+    Ok(rynas_btrfs::btrbk::snapshot_deletions(&out.stdout, FsPath::new(&job.snapshot_dir)))
 }
 
 /// A private file with `text` (mode 0600, unique name).

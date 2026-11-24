@@ -22,6 +22,68 @@ pub struct History {
     /// Volumes in the low-space state (hysteresis survives restarts).
     #[serde(default)]
     pub low: Vec<String>,
+    /// The automatic cleanup's daily count and pause, per volume.
+    #[serde(default)]
+    pub thin: BTreeMap<String, ThinDay>,
+}
+
+/// Most automatic deletions per volume and day.
+pub const DAILY_CAP: u32 = 100;
+/// A pass stops when this many deletions in a row …
+pub const NO_GAIN_WINDOW: usize = 5;
+/// … freed less than this together.
+pub const NO_GAIN_BYTES: u64 = 1 << 30;
+/// The pause after a pass stopped for no gain.
+pub const COOLDOWN_MS: u64 = 24 * 3600 * 1000;
+
+/// Why a pass of the automatic cleanup stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinStop {
+    Recovered,
+    Nothing,
+    NoGain,
+    DailyCap,
+    PassCap,
+    Failed,
+    Cooldown,
+}
+
+/// The automatic cleanup of one volume today.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinDay {
+    pub day: u32,
+    pub count: u32,
+    pub cooldown_until_ms: u64,
+}
+
+impl ThinDay {
+    /// Deletions still allowed now, or why none (a pause, the daily cap).
+    pub fn allowance(&mut self, now_ms: u64) -> Result<u32, ThinStop> {
+        if now_ms < self.cooldown_until_ms {
+            return Err(ThinStop::Cooldown);
+        }
+        if self.day != day_of(now_ms) {
+            self.day = day_of(now_ms);
+            self.count = 0;
+        }
+        DAILY_CAP.checked_sub(self.count).filter(|n| *n > 0).ok_or(ThinStop::DailyCap)
+    }
+}
+
+/// The brake of one pass: what each deletion gave back.
+#[derive(Debug, Default)]
+pub struct Brake {
+    gains: Vec<u64>,
+}
+
+impl Brake {
+    /// Records one deletion's gain; `true`: the last [`NO_GAIN_WINDOW`] together freed less than
+    /// [`NO_GAIN_BYTES`] (stop the pass).
+    pub fn record(&mut self, gained: u64) -> bool {
+        self.gains.push(gained);
+        let n = self.gains.len();
+        n >= NO_GAIN_WINDOW && self.gains[n - NO_GAIN_WINDOW..].iter().sum::<u64>() < NO_GAIN_BYTES
+    }
 }
 
 pub fn day_of(ms: u64) -> u32 {
@@ -226,6 +288,34 @@ mod tests {
         assert_eq!(order[0], "/vol1/job:a/432000000");
         assert_eq!(order[1], "/vol1/stack:b/1728000000");
         assert_eq!(order[2], "/vol1/job:a/3456000000");
+    }
+
+    #[test]
+    fn the_brake_stops_passes_without_gain() {
+        let mut b = Brake::default();
+        for _ in 0..4 {
+            assert!(!b.record(100 << 20));
+        }
+        // five deletions that freed 500 MiB together: stop
+        assert!(b.record(100 << 20));
+        let mut b = Brake::default();
+        for _ in 0..10 {
+            assert!(!b.record(1 << 30));
+        }
+        // the window slides: four good, then five that gave nothing
+        for i in 0..5 {
+            assert_eq!(b.record(0), i == 4);
+        }
+        // the daily cap and the pause
+        let mut d = ThinDay::default();
+        let now = 100 * D;
+        assert_eq!(d.allowance(now), Ok(DAILY_CAP));
+        d.count = DAILY_CAP;
+        assert_eq!(d.allowance(now + 1), Err(ThinStop::DailyCap));
+        assert_eq!(d.allowance(now + D), Ok(DAILY_CAP), "a new day");
+        d.cooldown_until_ms = now + D + COOLDOWN_MS;
+        assert_eq!(d.allowance(now + D + 1), Err(ThinStop::Cooldown));
+        assert!(d.allowance(now + 2 * D + COOLDOWN_MS).is_ok());
     }
 
     #[test]

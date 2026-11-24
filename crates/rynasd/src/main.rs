@@ -1537,7 +1537,7 @@ fn main() -> std::io::Result<()> {
                 args.state_dir.join("catalog"),
                 rynasd::space::pins::install(&args.state_dir),
             )
-            .with(state.docker.clone(), state.pc_backup.clone());
+            .with(state.docker.clone(), state.pc_backup.clone(), state.protection.as_ref().map(|p| p.gate.clone()));
             rynasd::space::spawn_loop(space.clone());
             state.space = Some(space);
         }

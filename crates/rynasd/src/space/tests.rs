@@ -51,6 +51,8 @@ struct TestEnv {
     root: PathBuf,
     space: Mutex<(u64, u64)>,
     ran: Mutex<Vec<String>>,
+    /// Folders a `btrfs receive` writes into now.
+    receiving: Mutex<Vec<PathBuf>>,
 }
 
 impl Env for TestEnv {
@@ -85,6 +87,12 @@ impl Env for TestEnv {
         self.ran.lock().unwrap().push(c.display());
         Ok(String::new())
     }
+    fn receiving(&self, dir: &Path) -> bool {
+        self.receiving.lock().unwrap().iter().any(|r| r.starts_with(dir))
+    }
+    fn fs_id(&self, path: &Path) -> Option<String> {
+        path.exists().then(|| "test-fs".to_string())
+    }
 }
 
 struct World {
@@ -107,6 +115,7 @@ fn world() -> World {
         subvol(&vol.join(format!(".snapshots/old/old.{t}")), RO);
     }
     subvol(&vol.join("pcs/gone/root.20261001T0100"), r#"{"readonly": true, "received_uuid": "x"}"#);
+    subvol(&vol.join("pcs/gone/root.20260901T0100"), r#"{"readonly": true, "received_uuid": "y"}"#);
     std::fs::create_dir_all(vol.join("docs.rynas-rollback-20261105T101010/sub")).unwrap();
     std::fs::write(vol.join("docs.rynas-rollback-20261105T101010/sub/f"), vec![1u8; 9000]).unwrap();
     let config = Arc::new(
@@ -116,7 +125,7 @@ fn world() -> World {
     ops.admins = AdminPolicy::new(vec!["rynas-admin".into()], groups);
     let ops = Arc::new(ops);
     let notes = Arc::new(MemoryNotifier::default());
-    let env = Arc::new(TestEnv { vol, root, space: Mutex::new((1000, 500)), ran: Mutex::new(Vec::new()) });
+    let env = Arc::new(TestEnv { vol, root, space: Mutex::new((1000, 500)), ran: Mutex::new(Vec::new()), receiving: Mutex::new(Vec::new()) });
     let thumbs = dir.path().join("thumbs");
     std::fs::create_dir_all(thumbs.join("1000")).unwrap();
     std::fs::write(thumbs.join("1000/a.jpg"), vec![0u8; 4096]).unwrap();
@@ -178,9 +187,20 @@ async fn scan_pin_preview_delete() {
     assert!(v.scanned_at_ms.is_some());
     let old = v.sources.iter().find(|s| s.name == "old").expect("orphaned job");
     assert_eq!((old.count, old.freed_bytes, old.freed_at_least_bytes), (2, Some(200), Some(20)));
-    assert!(v.sources.iter().any(|s| s.id.starts_with("pc-removed:")));
+    // received snapshots of a PC rynas has no record of: "owner unknown", the newest kept
+    let received = v.sources.iter().find(|s| s.id.starts_with("received:")).expect("received source");
+    assert_eq!(received.snapshots[0].protected, Some(rynas_api_types::space::Protection::Newest));
+    assert_eq!(received.snapshots[1].protected, None);
     let kinds: Vec<String> = o.review.iter().map(|r| format!("{:?}", r.kind)).collect();
     assert!(kinds.contains(&"OrphanSnapshots".to_string()) && kinds.contains(&"RollbackCopy".to_string()), "{kinds:?}");
+    assert!(kinds.contains(&"ReceivedUnknownOwner".to_string()), "{kinds:?}");
+    // never while a receive writes into the folder
+    let old_received = received.snapshots[1].path.clone();
+    w.env.receiving.lock().unwrap().push(w.env.vol.join("pcs/gone/.incoming"));
+    let (_, b) = call(&w, "admin", "POST", "/v1/space/delete", Some(json!({"paths": [old_received], "confirm": 1}))).await;
+    assert_eq!(task(&w, &b).await.status, TaskStatus::Error);
+    assert!(Path::new(&old_received).exists());
+    w.env.receiving.lock().unwrap().clear();
     let leftover = o.review.iter().find(|r| r.label.contains("rynas-rollback")).unwrap();
     assert!(leftover.bytes.unwrap_or(0) > 0);
     let thumbs = o.safe_actions.iter().find(|a| a.kind == rynas_api_types::space::SafeActionKind::Thumbnails).unwrap();
@@ -235,6 +255,35 @@ async fn scan_pin_preview_delete() {
     let (_, b) = call(&w, "admin", "POST", "/v1/space/review/delete", Some(json!({"ids": [leftover.id], "confirm": 1}))).await;
     assert_eq!(task(&w, &b).await.status, TaskStatus::Ok);
     assert!(!w.env.vol.join("docs.rynas-rollback-20261105T101010").exists());
+}
+
+#[tokio::test]
+async fn pins_go_only_with_their_snapshot_and_unreadable_config_stops_everything() {
+    let w = world();
+    let snaps = w.env.vol.join(".snapshots/old");
+    let gone = snaps.join("old.20260101T0100").display().to_string();
+    let kept_parent_missing = w.env.vol.join(".snapshots/nofolder/x.20260101T0100").display().to_string();
+    let elsewhere = "/vol9/.snapshots/a/a.20260101T0100".to_string();
+    let here = snaps.join("old.20261001T0100").display().to_string();
+    for p in [&gone, &kept_parent_missing, &elsewhere, &here] {
+        w.space.pins.set(p, true).unwrap();
+    }
+    w.space.prune_pins();
+    let left = w.space.pins.all();
+    // the folder is there on the mounted volume, the snapshot is not: forgotten
+    assert!(!left.contains(&gone));
+    // no folder, or a volume rynas does not see mounted: kept
+    assert!(left.contains(&kept_parent_missing) && left.contains(&elsewhere) && left.contains(&here), "{left:?}");
+
+    // a `snapshots` value that does not read: discovery stops, nothing is called "deleted job"
+    let db = rusqlite::Connection::open(w._dir.path().join("state/config.db")).unwrap();
+    db.execute("INSERT OR REPLACE INTO config (key, value, rev) VALUES ('snapshots', '{\"jobs\": 5}', 1)", []).unwrap();
+    assert!(w.space.discover().is_err());
+    let (_, b) = call(&w, "admin", "POST", "/v1/space/scan", None).await;
+    assert_eq!(task(&w, &b).await.status, TaskStatus::Error);
+    let (_, b) = call(&w, "admin", "POST", "/v1/space/delete", Some(json!({"paths": [here], "confirm": 1}))).await;
+    assert_eq!(task(&w, &b).await.status, TaskStatus::Error);
+    assert!(Path::new(&here).exists());
 }
 
 #[tokio::test]

@@ -57,8 +57,10 @@ use crate::ops::{Error, Ops, Res, user};
 pub const VOLUME_BUDGET: Duration = Duration::from_secs(45 * 60);
 /// A scan is due after this long.
 pub const SCAN_EVERY: Duration = Duration::from_secs(24 * 3600);
-/// Most shared ranges a measurement keeps (16 bytes each: 128 MiB).
-pub const MAX_RANGES: usize = 8 << 20;
+/// Most ranges a measurement keeps per range set (16 bytes each). With the set's and the
+/// kept members' sets, vector growth and the merge's copy, the peak stays under 128 MiB
+/// (2 × 3 × 16 MiB); more shared extents than that are "not measured".
+pub const MAX_RANGES: usize = 1 << 20;
 /// Most snapshots the automatic thinning removes in one pass.
 pub const THIN_MAX: usize = 50;
 
@@ -95,6 +97,10 @@ pub trait Env: Send + Sync {
     }
     /// Runs a command that changes the system (`None`: refused, e.g. `--dry-system`).
     fn run(&self, c: Cmd) -> Result<String, String>;
+    /// A `btrfs receive` writes into `dir` now.
+    fn receiving(&self, dir: &Path) -> bool;
+    /// The filesystem holding `path` (its UUID), when it can be read.
+    fn fs_id(&self, path: &Path) -> Option<String>;
 }
 
 /// The machine. `dry`: nothing is deleted or run (logged instead).
@@ -199,6 +205,11 @@ impl Env for HostEnv {
         }
         let lim = rynas_btrfs::extents::Limits { max_ranges: MAX_RANGES, stop };
         match rynas_btrfs::extents::measure_set(set, keep, &lim) {
+            // a file that could not be read may hold anything: no number rather than a wrong one
+            Ok(m) if m.unreadable > 0 => {
+                tracing::info!("space: {} files unreadable, not measured", m.unreadable);
+                Measured::default()
+            }
             Ok(m) => Measured { freed: Some(m.freed), at_least: Some(m.exclusive), method: MeasureMethod::ExtentWalk },
             Err(e) => {
                 tracing::info!("space: {}: {e}", set.first().map(|p| p.display().to_string()).unwrap_or_default());
@@ -226,8 +237,16 @@ impl Env for HostEnv {
             tracing::info!("space (dry system): would remove {}", path.display());
             return Ok(());
         }
-        let m = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if m.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(|e| format!("{}: {e}", path.display()))
+        // never across a subvolume or a mount point
+        actions::remove_plain_tree(path)
+    }
+
+    fn receiving(&self, dir: &Path) -> bool {
+        actions::receive_running(dir, Path::new("/proc"))
+    }
+
+    fn fs_id(&self, path: &Path) -> Option<String> {
+        rynas_btrfs::ioctl::open_dir(path).ok().and_then(|f| rynas_btrfs::ioctl::fs_uuid(&f).ok())
     }
 
     fn sync(&self, mount: &Path) -> Result<(), String> {
@@ -300,10 +319,16 @@ pub struct Space {
     pub docker: crate::docker::DkState,
     pub pc: crate::pc_backup::PbState,
     pub pins: Arc<pins::Pins>,
+    /// The scheduling gate (its leases are in the lock table the deletions ask).
+    pub gate: Option<Arc<crate::gate::Gate>>,
     scanning: AtomicBool,
-    previews: Mutex<HashMap<String, SpacePreview>>,
+    /// Previews by task id, with when they were asked (the oldest finished ones go first).
+    previews: Mutex<HashMap<String, (u64, SpacePreview)>>,
     history: Mutex<History>,
 }
+
+/// Previews kept in memory.
+const PREVIEWS_KEPT: usize = 32;
 
 pub type SpaceState = Option<Arc<Space>>;
 
@@ -370,6 +395,7 @@ impl Space {
             docker: None,
             pc: None,
             pins,
+            gate: None,
             scanning: AtomicBool::new(false),
             previews: Mutex::new(HashMap::new()),
             history: Mutex::new(history),
@@ -377,11 +403,24 @@ impl Space {
     }
 
     /// Docker and PC backups, once they exist.
-    pub fn with(self: Arc<Self>, docker: crate::docker::DkState, pc: crate::pc_backup::PbState) -> Arc<Self> {
+    pub fn with(self: Arc<Self>, docker: crate::docker::DkState, pc: crate::pc_backup::PbState, gate: Option<Arc<crate::gate::Gate>>) -> Arc<Self> {
         let mut s = Arc::try_unwrap(self).unwrap_or_else(|_| panic!("Space::with before sharing"));
         s.docker = docker;
         s.pc = pc;
+        s.gate = gate;
         Arc::new(s)
+    }
+
+    /// Keeps a preview's answer; above [`PREVIEWS_KEPT`] the oldest finished ones go (never
+    /// one still measuring).
+    fn keep_preview(&self, id: String, p: SpacePreview) {
+        let mut m = self.previews.lock().unwrap();
+        let asked = m.get(&id).map(|x| x.0).unwrap_or_else(now_ms);
+        m.insert(id, (asked, p));
+        while m.len() > PREVIEWS_KEPT {
+            let Some(old) = m.iter().filter(|(_, v)| v.1.done).min_by_key(|(_, v)| v.0).map(|(k, _)| k.clone()) else { break };
+            m.remove(&old);
+        }
     }
 
     /// The applied settings (defaults when unset or unreadable).
@@ -402,10 +441,19 @@ impl Space {
         self.write_json("history.json", &h);
     }
 
-    /// The configuration's facts (applied values).
-    fn facts(&self) -> Facts {
+    /// The configuration's facts (applied values). An unreadable `snapshots` or `shares` key
+    /// is an error, never "nothing configured": every live job folder would look deleted.
+    fn facts(&self) -> Result<Facts, String> {
         let c = &self.ops.config;
-        let snaps: SnapshotsConfig = c.applied(SNAPSHOTS_KEY).ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        let read = |key: &str| -> Result<Option<serde_json::Value>, String> { c.applied(key).map_err(|e| format!("configuration key {key}: {e}")) };
+        let snaps: SnapshotsConfig = match read(SNAPSHOTS_KEY)? {
+            Some(v) => serde_json::from_value(v).map_err(|e| format!("configuration key {SNAPSHOTS_KEY}: {e}"))?,
+            None => SnapshotsConfig::default(),
+        };
+        let shares: SharesConfig = match read(SHARES_KEY)? {
+            Some(v) => serde_json::from_value(v).map_err(|e| format!("configuration key {SHARES_KEY}: {e}"))?,
+            None => SharesConfig::default(),
+        };
         let mut replica_dirs = Vec::new();
         let jobs = snaps
             .jobs
@@ -437,7 +485,7 @@ impl Space {
             let l = d.layout()?;
             Some((l.stacks(), l.snapshots(), d.settings().keep_snapshots))
         });
-        Facts {
+        Ok(Facts {
             jobs,
             system: Some(SystemFact {
                 dir: sys.snapshot_dir.clone(),
@@ -450,12 +498,15 @@ impl Space {
             pc_folders: self.pc.as_ref().map(|p| p.snapshot_folders()).unwrap_or_default(),
             replica_dirs,
             pins: self.pins.all(),
+            live: Vec::new(),
         }
+        .with_live(shares.shares.into_iter().map(|s| s.path)))
     }
 
-    /// Finds every source and leftover now, with protections (no measurement).
-    pub fn discover(&self) -> Discovered {
-        let facts = self.facts();
+    /// Finds every source and leftover now, with protections (no measurement). Fails when
+    /// the configuration cannot be read.
+    pub fn discover(&self) -> Result<Discovered, String> {
+        let facts = self.facts()?;
         let probe = self.env.probe();
         let volumes = self.env.volumes();
         let mounts: Vec<(String, PathBuf)> = volumes.iter().map(|(l, m, _)| (l.clone(), m.clone())).collect();
@@ -473,7 +524,7 @@ impl Space {
             discover::mark_identical(s, live.as_ref());
             discover::protect(s, &facts, &pc_parents);
         }
-        Discovered { sources: discover::by_volume(all, &mounts), volumes, leftovers, facts }
+        Ok(Discovered { sources: discover::by_volume(all, &mounts), volumes, leftovers, facts })
     }
 
     /// The cached overview.
@@ -520,13 +571,22 @@ impl Space {
             }
             volumes.push(v);
         }
-        SpaceOverview { volumes, safe_actions: g.safe_actions, review: g.review, scanning: self.scanning.load(Ordering::Acquire), scanned_at_ms: g.scanned_at_ms }
+        let (journal_cap_bytes, journal_cap_by_admin) = self.journal_cap();
+        SpaceOverview {
+            volumes,
+            safe_actions: g.safe_actions,
+            review: g.review,
+            scanning: self.scanning.load(Ordering::Acquire),
+            scanned_at_ms: g.scanned_at_ms,
+            journal_cap_bytes,
+            journal_cap_by_admin,
+        }
     }
 
     /// Measures and records everything (blocking; run in a thread of its own).
     /// `only`: one volume; `automatic`: sleeping volumes are left alone.
-    pub fn scan(&self, only: Option<&str>, automatic: bool, docker: &DockerFacts, log: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) {
-        let d = self.discover();
+    pub fn scan(&self, only: Option<&str>, automatic: bool, docker: &DockerFacts, log: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<(), String> {
+        let d = self.discover()?;
         let settings = self.settings();
         let now = now_ms();
         let mut hist = self.history.lock().unwrap().clone();
@@ -573,8 +633,7 @@ impl Space {
             for s in sources.iter() {
                 let kind = match s.kind {
                     SourceKind::OrphanJob => ReviewKind::OrphanSnapshots,
-                    SourceKind::Replica => ReviewKind::RemovedTargetReplicas,
-                    SourceKind::PcBackup if s.id.starts_with("pc-removed:") => ReviewKind::RemovedPcFolder,
+                    SourceKind::Received => ReviewKind::ReceivedUnknownOwner,
                     _ => continue,
                 };
                 review.push(ReviewItem { id: s.id.clone(), kind, volume: Some(label.clone()), label: s.dir.clone(), bytes: s.freed_bytes, created_ms: s.newest_ms });
@@ -662,7 +721,7 @@ impl Space {
         // the global part
         let root = self.env.root();
         let journal = self.env.tree_bytes(&root.join("var/log/journal"), &|| false).unwrap_or(0);
-        let cap = domain::journal_cap(&settings, domain::journal_fs_bytes(&root));
+        let (cap, _) = self.journal_cap();
         let (apt_bytes, apt_n) = actions::apt_cache_bytes(&root);
         let thumbs = actions::cache_files(&self.thumbs);
         let serials = actions::stale_serials(&self.catalog);
@@ -704,6 +763,19 @@ impl Space {
         }
         g.safe_actions = safe_actions;
         self.write_json("_global.json", &g);
+        Ok(())
+    }
+
+    /// The applied settings, `None` while the key was never applied.
+    fn applied_settings(&self) -> Option<SpaceSettings> {
+        self.ops.config.applied(SPACE_KEY).ok().flatten().and_then(|v| serde_json::from_value(v).ok())
+    }
+
+    /// The journal's cap in force and whether it is the administrator's.
+    pub fn journal_cap(&self) -> (Option<u64>, bool) {
+        let root = self.env.root();
+        let admin = domain::admin_journal_cap(&root);
+        (domain::effective_journal_cap(self.applied_settings().as_ref(), domain::journal_fs_bytes(&root), admin), admin.is_some())
     }
 
     fn old_kernels(&self) -> Vec<actions::Kernel> {
@@ -730,6 +802,18 @@ fn top_level_leftovers(root: &Path) -> Vec<(u64, String)> {
     actions::top_level_subvolumes(&out).into_iter().filter(|(_, n)| discover::leftover_of(n).is_some_and(|x| x.0 == ReviewKind::RollbackCopy)).collect()
 }
 
+/// A pinned snapshot is gone for sure ([`Space::prune_pins`]).
+fn pin_gone(p: &Path, mounts: &[(String, PathBuf)], env: &dyn Env) -> bool {
+    if std::fs::symlink_metadata(p).is_ok() {
+        return false;
+    }
+    let Some(parent) = p.parent().filter(|d| d.is_dir()) else { return false };
+    let Some(mount) = discover::volume_of(parent, mounts).and_then(|l| mounts.iter().find(|m| m.0 == l)).map(|m| &m.1) else {
+        return false;
+    };
+    matches!((env.fs_id(parent), env.fs_id(mount)), (Some(a), Some(b)) if a == b)
+}
+
 /// Names a PC folder's next incremental sends need (the newest complete per subvolume).
 fn pc_parents(dir: &Path) -> BTreeSet<String> {
     rynas_btrfs::receive::scan_dir(dir).map(|(entries, _)| rynas_btrfs::receive::parents(&entries, now_ms()).into_iter().collect()).unwrap_or_default()
@@ -743,6 +827,8 @@ fn kind_word(k: SourceKind) -> &'static str {
         SourceKind::SystemPoints => "restore points",
         SourceKind::PcBackup => "PC backup",
         SourceKind::Replica => "replicas",
+        SourceKind::Received => "received, owner unknown",
+        SourceKind::IncomingReplica => "incoming replica",
     }
 }
 
@@ -755,6 +841,7 @@ fn kind_id(k: ReviewKind) -> &'static str {
         ReviewKind::OrphanSnapshots => "orphan",
         ReviewKind::RemovedTargetReplicas => "replica",
         ReviewKind::RemovedPcFolder => "pc-removed",
+        ReviewKind::ReceivedUnknownOwner => "received",
         ReviewKind::OldKernel => "kernel",
         ReviewKind::UnusedImage => "image",
         ReviewKind::UnusedVolume => "volume",
@@ -816,6 +903,11 @@ impl Space {
                 self.env.delete_subvolume(&x.path)
             }
             SourceKind::AppStack => {
+                // the stack's own busy mark: never during an update, a rollback, a snapshot
+                let _busy = match &self.docker {
+                    Some(dk) => Some(dk.take_busy(&s.name).map_err(|e| e.2)?),
+                    None => None,
+                };
                 self.env.delete_subvolume(&x.path)?;
                 let _ = std::fs::remove_file(s.dir.join(format!("{}.json", x.name)));
                 Ok(())
@@ -824,8 +916,16 @@ impl Space {
                 let pc = self.pc.as_ref().ok_or("PC backups not available")?;
                 pc.delete_for_space(&s.name, &x.name)
             }
-            SourceKind::PcBackup | SourceKind::OrphanJob | SourceKind::Replica => self.env.delete_subvolume(&x.path),
+            SourceKind::IncomingReplica => Err(format!("{path} is a replica another NAS sends here")),
+            SourceKind::PcBackup | SourceKind::OrphanJob | SourceKind::Replica | SourceKind::Received => {
+                if self.env.receiving(&s.dir) {
+                    return Err(format!("a btrfs receive into {} is running", s.dir.display()));
+                }
+                self.env.delete_subvolume(&x.path)
+            }
         }?;
+        // the only time a pin goes with its snapshot (pinned ones never get here anyway)
+        let _ = self.pins.set(path, false);
         log(&format!("deleted {path}"));
         Ok(())
     }
@@ -845,7 +945,7 @@ impl Space {
 
     /// Task `space.delete`: every path must be unprotected now, or nothing is deleted.
     pub fn run_delete(&self, paths: &[String], log: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<(), String> {
-        let d = self.discover();
+        let d = self.discover()?;
         let refused: Vec<String> = paths
             .iter()
             .filter_map(|p| match d.find(p) {
@@ -880,8 +980,15 @@ impl Space {
     /// Task `space.preview`: the exact number for the set.
     pub fn run_preview(&self, paths: &[String], cancelled: &dyn Fn() -> bool) -> SpacePreview {
         background_priority();
-        let d = self.discover();
         let mut out = SpacePreview::default();
+        let d = match self.discover() {
+            Ok(d) => d,
+            Err(e) => {
+                out.error = Some(e);
+                out.done = true;
+                return out;
+            }
+        };
         let mut by_source: BTreeMap<String, (PathBuf, Vec<PathBuf>, Vec<PathBuf>)> = BTreeMap::new();
         for p in paths {
             match d.find(p) {
@@ -924,7 +1031,7 @@ impl Space {
 
     /// Task `space.review-delete`: each id must still be in a fresh review list.
     pub fn run_review_delete(&self, ids: &[String], log: &dyn Fn(&str)) -> Result<(), String> {
-        let d = self.discover();
+        let d = self.discover()?;
         let mut touched = BTreeSet::new();
         let mut failed = 0usize;
         for id in ids {
@@ -980,12 +1087,15 @@ impl Space {
                 log(&format!("removed {name} (subvolume {num})"));
                 Ok(Some(rynas_api_types::storage::SYSTEM_VOLUME.into()))
             }
-            "orphan" | "replica" | "pc-removed" => {
+            "orphan" | "received" => {
                 let (vol, s) = d
                     .sources
                     .iter()
                     .find_map(|(v, ss)| ss.iter().find(|s| s.id == id).map(|s| (v.clone(), s)))
                     .ok_or("not found any more")?;
+                if self.env.receiving(&s.dir) {
+                    return Err(format!("a btrfs receive into {} is running", s.dir.display()));
+                }
                 for x in &s.snaps {
                     if x.protected.is_some() {
                         log(&format!("{} kept ({:?})", x.path.display(), x.protected));
@@ -995,8 +1105,10 @@ impl Space {
                     let _ = std::fs::remove_file(s.dir.join(format!("{}.json", x.name)));
                     log(&format!("deleted {}", x.path.display()));
                 }
-                // the folder itself only when nothing is left in it
-                let _ = std::fs::remove_dir(&s.dir);
+                // the folder itself only when nothing is left in it and it is a plain folder
+                if self.env.probe().subvol(&s.dir).is_none() {
+                    let _ = std::fs::remove_dir(&s.dir);
+                }
                 Ok(Some(vol))
             }
             "kernel" => {
@@ -1014,11 +1126,10 @@ impl Space {
 
     /// The safe action `kind` (blocking part; Docker images are removed by the caller).
     pub fn run_action(&self, kind: SafeActionKind, log: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<(), String> {
-        let root = self.env.root();
-        let settings = self.settings();
         match kind {
             SafeActionKind::JournalVacuum => {
-                let cap = domain::journal_cap(&settings, domain::journal_fs_bytes(&root)).ok_or("no journal cap is set")?;
+                // the cap in force (the administrator's, or the applied one), never a default
+                let cap = self.journal_cap().0.ok_or("no journal size limit is in force")?;
                 let out = self.env.run(Cmd::new("journalctl").arg(format!("--vacuum-size={}M", cap >> 20)).timeout(Duration::from_secs(600)))?;
                 log(out.trim());
             }
@@ -1048,7 +1159,7 @@ impl Space {
                 }
             }
             SafeActionKind::IdenticalAppSnapshots => {
-                let d = self.discover();
+                let d = self.discover()?;
                 let paths: Vec<String> = d
                     .sources
                     .values()
@@ -1097,6 +1208,14 @@ impl Space {
         Ok(())
     }
 
+    /// Forgets the pins of snapshots that are gone, and only those: the volume holding one is
+    /// mounted and the snapshot's folder is there, on that volume's filesystem, without it.
+    /// A missing or unmounted volume keeps every pin.
+    pub fn prune_pins(&self) {
+        let mounts: Vec<(String, PathBuf)> = self.env.volumes().into_iter().map(|(l, m, _)| (l, m)).collect();
+        self.pins.prune(&|p| !pin_gone(Path::new(p), &mounts, self.env.as_ref()));
+    }
+
     /// Evicts the least recently used thumbnails above the cap.
     pub fn evict_thumbs(&self, log: &dyn Fn(&str)) {
         let cap = u64::from(self.settings().thumbs_cap_mib) << 20;
@@ -1117,7 +1236,9 @@ impl Space {
 impl Space {
     /// One pass of the low-space watch (every few minutes): notifications with hysteresis
     /// and, on volumes where it is on, the automatic thinning.
-    pub fn guard(&self, log: &dyn Fn(&str)) {
+    /// The volumes where the automatic cleanup should run now are returned: the caller takes
+    /// their volume claim and runs [`Space::thin`].
+    pub fn guard(&self, log: &dyn Fn(&str)) -> Vec<(String, PathBuf)> {
         let settings = self.settings();
         let mut entered: Vec<(String, PathBuf)> = Vec::new();
         for (label, mount, _) in self.env.volumes() {
@@ -1152,49 +1273,83 @@ impl Space {
                 entered.push((label, mount));
             }
         }
-        for (label, mount) in entered {
-            self.thin(&label, &mount, &settings, log);
-        }
+        let _ = log;
+        entered
     }
 
     /// The automatic thinning of one volume: the oldest unprotected snapshots first (budgets
     /// first), synced every few deletions, until free space is back above the recovery
     /// limit; every deletion logged, one notification for the pass.
     pub fn thin(&self, label: &str, mount: &Path, settings: &SpaceSettings, log: &dyn Fn(&str)) -> Vec<String> {
-        let mut deleted = Vec::new();
-        while deleted.len() < THIN_MAX {
-            let Some((total, free)) = self.env.space(mount) else { break };
-            if !model::low_state(true, free, total, settings.low_free_pct, settings.recover_pct) {
-                break;
+        let now = now_ms();
+        let mut day = self.history.lock().unwrap().thin.get(label).cloned().unwrap_or_default();
+        let allowance = match day.allowance(now) {
+            Ok(n) => n.min(THIN_MAX as u32) as usize,
+            Err(why) => {
+                log(&format!("{label}: automatic cleanup waits ({why:?})"));
+                return Vec::new();
             }
-            let d = self.discover();
-            let sources: Vec<SnapshotSource> = d.sources.get(label).into_iter().flatten().map(|s| to_api(label, s, Measured::default())).collect();
-            let order = model::thin_order(&sources, settings, now_ms());
-            let Some(next) = order.into_iter().find(|p| !deleted.contains(p)) else {
-                log(&format!("{label}: nothing more the automatic cleanup may remove"));
-                break;
-            };
-            match self.delete_snapshot(&d, &next, log) {
-                Ok(()) => {
-                    tracing::info!("space: {label}: automatic cleanup deleted {next}");
-                    deleted.push(next);
-                }
+        };
+        let mut deleted = Vec::new();
+        let mut brake = model::Brake::default();
+        let stop = loop {
+            if deleted.len() >= allowance {
+                break if day.count >= model::DAILY_CAP { model::ThinStop::DailyCap } else { model::ThinStop::PassCap };
+            }
+            let Some((total, free)) = self.env.space(mount) else { break model::ThinStop::Failed };
+            if !model::low_state(true, free, total, settings.low_free_pct, settings.recover_pct) {
+                break model::ThinStop::Recovered;
+            }
+            let d = match self.discover() {
+                Ok(d) => d,
                 Err(e) => {
                     log(&e);
-                    break;
+                    break model::ThinStop::Failed;
                 }
+            };
+            let sources: Vec<SnapshotSource> = d.sources.get(label).into_iter().flatten().map(|s| to_api(label, s, Measured::default())).collect();
+            let order = model::thin_order(&sources, settings, now_ms());
+            let Some(next) = order.into_iter().find(|p| !deleted.contains(p)) else { break model::ThinStop::Nothing };
+            if let Err(e) = self.delete_snapshot(&d, &next, log) {
+                log(&e);
+                break model::ThinStop::Failed;
             }
-            if deleted.len() % 3 == 0 {
-                let _ = self.env.sync(mount);
-            }
-        }
-        if !deleted.is_empty() {
+            tracing::info!("space: {label}: automatic cleanup deleted {next}");
+            deleted.push(next);
+            day.count += 1;
+            // what the deletion gave back, once the filesystem freed it
             let _ = self.env.sync(mount);
+            let after = self.env.space(mount).map(|x| x.1).unwrap_or(free);
+            if brake.record(after.saturating_sub(free)) {
+                day.cooldown_until_ms = now_ms() + model::COOLDOWN_MS;
+                break model::ThinStop::NoGain;
+            }
+        };
+        self.history.lock().unwrap().thin.insert(label.to_string(), day);
+        self.save_history();
+        log(&format!("{label}: automatic cleanup: {} snapshots deleted, stopped: {stop:?}", deleted.len()));
+        if !deleted.is_empty() || matches!(stop, model::ThinStop::NoGain | model::ThinStop::Failed | model::ThinStop::Nothing) {
             let list: Vec<&str> = deleted.iter().take(10).map(String::as_str).collect();
-            let mut ev = oneshot(NotifyCategory::Storage, NotifySeverity::Warning, "space", format!("space:{label}:auto_freed:{}", now_ms() / 60_000), format!("Old snapshots removed on {label} to free space"));
-            ev.body = format!("{} snapshots removed by the automatic cleanup: {}{}", deleted.len(), list.join(", "), if deleted.len() > 10 { ", …" } else { "" });
+            let why = match stop {
+                model::ThinStop::Recovered => "free space is back above the recovery limit",
+                model::ThinStop::Nothing => "nothing more may be removed automatically",
+                model::ThinStop::NoGain => "the last deletions freed almost nothing: paused for 24 hours",
+                model::ThinStop::DailyCap => "the daily limit of automatic deletions is reached",
+                model::ThinStop::PassCap => "the limit of one pass is reached",
+                model::ThinStop::Failed => "a deletion failed",
+                model::ThinStop::Cooldown => "paused",
+            };
+            let sev = if matches!(stop, model::ThinStop::Recovered) { NotifySeverity::Warning } else { NotifySeverity::Error };
+            let mut ev = oneshot(NotifyCategory::Storage, sev, "space", format!("space:{label}:auto_freed:{}", now_ms() / 60_000), format!("Old snapshots removed on {label} to free space"));
+            ev.body = format!(
+                "{} snapshots removed by the automatic cleanup{}{}; it stopped because {why}.",
+                deleted.len(),
+                if list.is_empty() { "" } else { ": " },
+                list.join(", ")
+            );
             ev.actions = vec![EventAction { label: "Open Space".into(), url: "/storage/space".into() }];
             let ev = field(field(code(ev, "space.auto_freed"), "volume", label), "count", deleted.len());
+            let ev = field(ev, "stopped", format!("{stop:?}").to_lowercase());
             self.notifier.emit(field(ev, "snapshots", list.join(", ")));
         }
         deleted
@@ -1279,6 +1434,45 @@ async fn remove_images(d: &crate::docker::DkState, which: Option<&BTreeSet<Strin
     Ok(())
 }
 
+/// The holder (other than Space's own work and deduplication, which gives way) that holds
+/// one of the volume `keys` in the lock table: a replication, a receive, a scrub, a snapshot
+/// run, a backup.
+pub fn volume_holder(t: &crate::claims::Table, keys: &[String]) -> Option<String> {
+    use rynas_scheduler::queue::{Claim, EVERY, Gives};
+    t.holders
+        .iter()
+        .filter(|h| h.gives != Gives::Dedup && !h.kind.as_deref().is_some_and(|k| k.starts_with("space.")))
+        .find(|h| h.claims.iter().any(|c| matches!(c, Claim::Volume(k) if k == EVERY || keys.contains(k))))
+        .map(|h| h.kind.clone().or(h.task.clone()).unwrap_or_else(|| h.name.clone()))
+}
+
+impl Space {
+    /// Takes the volumes at `mounts` for a deletion: refused while other work holds one of
+    /// them (the lock table), then held in the filesystem lock until the guard drops, so
+    /// replication, receives, scrubs and snapshot runs wait for it in the scheduling gate.
+    pub async fn claim_volumes(&self, mounts: &[PathBuf], what: &str) -> Result<crate::fslock::HeavyGuard, String> {
+        let keys: Vec<String> = mounts.iter().filter_map(|m| crate::fslock::key_of(&m.display().to_string())).collect();
+        let mdstat = std::fs::read_to_string("/proc/mdstat").unwrap_or_default();
+        let table = crate::claims::table(self.gate.as_deref(), &self.ops.tasks, &mdstat, &[]);
+        if let Some(h) = volume_holder(&table, &keys) {
+            return Err(format!("the volume is busy ({h}): try again when it ends"));
+        }
+        Ok(crate::fslock::FsLocks::global().heavy(&keys, what).await)
+    }
+
+    /// The mount points of the volumes holding `paths`.
+    fn mounts_of<'a>(&self, paths: impl IntoIterator<Item = &'a str>) -> Vec<PathBuf> {
+        let vols: Vec<(String, PathBuf)> = self.env.volumes().into_iter().map(|(l, m, _)| (l, m)).collect();
+        let mut out: Vec<PathBuf> = paths
+            .into_iter()
+            .filter_map(|p| discover::volume_of(Path::new(p), &vols).and_then(|l| vols.iter().find(|v| v.0 == l)).map(|v| v.1.clone()))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
 /// Runs `f` in a thread of its own (the scan lowers its priority; the pool's threads must
 /// not keep that).
 async fn in_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
@@ -1305,12 +1499,12 @@ impl Space {
             let c = ctx.clone();
             let r = in_thread(move || {
                 background_priority();
-                s2.scan(only.as_deref(), automatic, &docker, &|m| c.log(m), &|| c.is_cancelled());
+                s2.scan(only.as_deref(), automatic, &docker, &|m| c.log(m), &|| c.is_cancelled())
             })
             .await;
             s.scanning.store(false, Ordering::Release);
             s.growth_check();
-            r
+            r?
         });
         match r {
             Ok(id) => Ok(id),
@@ -1331,7 +1525,21 @@ pub fn spawn_loop(s: Arc<Space>) {
         let mut last_daily: Option<Instant> = None;
         loop {
             let s2 = s.clone();
-            let _ = in_thread(move || s2.guard(&|m| tracing::info!("space: {m}"))).await;
+            let low = in_thread(move || s2.guard(&|m| tracing::info!("space: {m}"))).await.unwrap_or_default();
+            for (label, mount) in low {
+                match s.claim_volumes(std::slice::from_ref(&mount), "space.auto-free").await {
+                    Ok(claim) => {
+                        let s2 = s.clone();
+                        let _ = in_thread(move || {
+                            let _claim = claim;
+                            let settings = s2.settings();
+                            s2.thin(&label, &mount, &settings, &|m| tracing::info!("space: {m}"))
+                        })
+                        .await;
+                    }
+                    Err(e) => tracing::info!("space: {label}: automatic cleanup waits: {e}"),
+                }
+            }
             let due = last_daily.is_none_or(|t| t.elapsed() >= SCAN_EVERY);
             if due {
                 let stale = s.overview().scanned_at_ms.is_none_or(|t| now_ms().saturating_sub(t) >= SCAN_EVERY.as_millis() as u64);
@@ -1345,7 +1553,7 @@ pub fn spawn_loop(s: Arc<Space>) {
                         let _ = s2.clean_bins(&|m| tracing::info!("space: recycle: {m}"), &|| false);
                     }
                     s2.evict_thumbs(&|m| tracing::info!("space: {m}"));
-                    s2.pins.prune(&|p| Path::new(p).exists());
+                    s2.prune_pins();
                 })
                 .await;
                 last_daily = Some(Instant::now());
@@ -1430,23 +1638,19 @@ async fn preview(State(st): State<SpaceState>, h: HeaderMap, body: Result<Json<S
             let paths = req.paths.clone();
             let p = in_thread(move || s3.run_preview(&paths, &|| c.is_cancelled())).await?;
             ctx.log(&format!("{} snapshots can go, {} kept: {}", p.paths.len(), p.refused.len(), bytes_text(p.freed_bytes)));
-            let id = ctx.id().to_string();
-            let mut m = s2.previews.lock().unwrap();
-            if m.len() > 32 {
-                m.clear();
-            }
-            m.insert(id, p);
-            Ok(())
+            let err = p.error.clone();
+            s2.keep_preview(ctx.id().to_string(), p);
+            err.map_or(Ok(()), Err)
         })
         .map_err(Error::internal)?;
-    s.previews.lock().unwrap().insert(id.clone(), SpacePreview::default());
+    s.previews.lock().unwrap().entry(id.clone()).or_insert_with(|| (now_ms(), SpacePreview::default()));
     Ok(started(id))
 }
 
 async fn preview_get(State(st): State<SpaceState>, h: HeaderMap, UrlPath(id): UrlPath<String>) -> Res<Json<SpacePreview>> {
     let s = sp(&st)?;
     admin(&s, &h)?;
-    s.previews.lock().unwrap().get(&id).cloned().map(Json).ok_or_else(|| Error::not_found(format!("preview {id}")))
+    s.previews.lock().unwrap().get(&id).map(|x| x.1.clone()).map(Json).ok_or_else(|| Error::not_found(format!("preview {id}")))
 }
 
 async fn delete(State(st): State<SpaceState>, h: HeaderMap, body: Result<Json<SpaceDeleteRequest>, JsonRejection>) -> Res<Response> {
@@ -1463,6 +1667,8 @@ async fn delete(State(st): State<SpaceState>, h: HeaderMap, body: Result<Json<Sp
         .ops
         .tasks
         .spawn("space.delete", &who, move |ctx| async move {
+            let mounts = s2.mounts_of(req.paths.iter().map(String::as_str));
+            let _claim = s2.claim_volumes(&mounts, "space.delete").await?;
             let c = ctx.clone();
             in_thread(move || s2.run_delete(&req.paths, &|m| c.log(m), &|| c.is_cancelled())).await?
         })
@@ -1487,6 +1693,14 @@ async fn action(State(st): State<SpaceState>, h: HeaderMap, UrlPath(kind): UrlPa
             if kind == SafeActionKind::DockerDangling {
                 remove_images(&s2.docker, None, &ctx).await?;
             }
+            // deleting app snapshots takes their volume like every deletion
+            let _claim = if kind == SafeActionKind::IdenticalAppSnapshots {
+                let dir = s2.docker.as_ref().and_then(|d| d.layout()).map(|l| l.snapshots()).unwrap_or_default();
+                let mounts = s2.mounts_of([dir.as_str()]);
+                Some(s2.claim_volumes(&mounts, "space.action").await?)
+            } else {
+                None
+            };
             let c = ctx.clone();
             let s3 = s2.clone();
             in_thread(move || s3.run_action(kind, &|m| c.log(m), &|| c.is_cancelled())).await??;
@@ -1537,6 +1751,14 @@ async fn review_delete(State(st): State<SpaceState>, h: HeaderMap, body: Result<
             if rest.is_empty() {
                 return Ok(());
             }
+            // the volumes of the paths the ids name (a top-level system copy: the root)
+            let paths: Vec<String> = rest
+                .iter()
+                .filter_map(|i| i.split_once(':').map(|(k, p)| if k == "rollback-top" { "/".to_string() } else { p.to_string() }))
+                .filter(|p| p.starts_with('/'))
+                .collect();
+            let mounts = s2.mounts_of(paths.iter().map(String::as_str));
+            let _claim = s2.claim_volumes(&mounts, "space.review-delete").await?;
             let c = ctx.clone();
             in_thread(move || s2.run_review_delete(&rest, &|m| c.log(m))).await?
         })

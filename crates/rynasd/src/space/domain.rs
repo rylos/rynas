@@ -23,6 +23,68 @@ pub const JOURNAL_MAX_PCT: u64 = 5;
 /// Never below 64 MiB (journald needs room for a few files).
 pub const JOURNAL_MIN_BYTES: u64 = 64 << 20;
 
+/// A `SystemMaxUse=` value in bytes (`2G`, `500M`, `1048576`; 1024-based suffixes).
+pub fn parse_size(v: &str) -> Option<u64> {
+    let v = v.trim();
+    let (num, mul) = match v.char_indices().last()? {
+        (i, c) if c.is_ascii_alphabetic() => (
+            &v[..i],
+            match c.to_ascii_uppercase() {
+                'K' => 1u64 << 10,
+                'M' => 1 << 20,
+                'G' => 1 << 30,
+                'T' => 1 << 40,
+                'P' => 1 << 50,
+                _ => return None,
+            },
+        ),
+        _ => (v, 1),
+    };
+    num.trim().parse::<u64>().ok().map(|n| n.saturating_mul(mul))
+}
+
+/// The administrator's own `SystemMaxUse=` below `root`: `/etc/systemd/journald.conf` and the
+/// drop-ins of `/etc/systemd/journald.conf.d/` and `/usr/lib/systemd/journald.conf.d/` that
+/// sort before rynas's (the last one read wins, as journald reads them). `None`: not set.
+pub fn admin_journal_cap(root: &Path) -> Option<u64> {
+    let ours = Path::new(JOURNALD_DROPIN).file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+    let mut files: Vec<PathBuf> = vec![root.join("etc/systemd/journald.conf")];
+    let mut dropins: Vec<(String, PathBuf)> = Vec::new();
+    for d in ["usr/lib/systemd/journald.conf.d", "etc/systemd/journald.conf.d"] {
+        for e in std::fs::read_dir(root.join(d)).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n.ends_with(".conf") && n < ours {
+                // a file in /etc hides the one of the same name in /usr/lib
+                dropins.retain(|(x, _)| *x != n);
+                dropins.push((n, e.path()));
+            }
+        }
+    }
+    dropins.sort();
+    files.extend(dropins.into_iter().map(|x| x.1));
+    let mut cap = None;
+    for f in files {
+        let Ok(t) = std::fs::read_to_string(&f) else { continue };
+        let mut in_journal = false;
+        for l in t.lines().map(str::trim) {
+            if l.starts_with('[') {
+                in_journal = l == "[Journal]";
+            } else if in_journal && let Some(v) = l.strip_prefix("SystemMaxUse=") {
+                // an empty value resets to the default
+                cap = if v.trim().is_empty() { None } else { parse_size(v) };
+            }
+        }
+    }
+    cap
+}
+
+/// The cap in force: the administrator's (`admin`) when set, else rynas's
+/// ([`journal_cap`]) from the applied settings (`None`: never applied), else journald's
+/// default (`None`).
+pub fn effective_journal_cap(applied: Option<&SpaceSettings>, fs_bytes: u64, admin: Option<u64>) -> Option<u64> {
+    admin.or_else(|| applied.and_then(|s| journal_cap(s, fs_bytes)))
+}
+
 /// The cap in bytes for the settings and the size of the journal's filesystem; `None`: no
 /// cap from rynas.
 pub fn journal_cap(s: &SpaceSettings, fs_bytes: u64) -> Option<u64> {
@@ -84,8 +146,11 @@ impl Applier for SpaceDomain {
         serde_json::to_value(s).map_err(|e| e.to_string().into())
     }
 
+    /// No drop-in at all when the administrator set `SystemMaxUse=` in an earlier file: theirs
+    /// stays in force (the Space tab shows it).
     fn render(&self, value: &Value, ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
-        Ok(vec![match journal_cap(&settings(value), journal_fs_bytes(ctx.root)) {
+        let cap = if admin_journal_cap(ctx.root).is_some() { None } else { journal_cap(&settings(value), journal_fs_bytes(ctx.root)) };
+        Ok(vec![match cap {
             Some(cap) => ManagedFile::whole(JOURNALD_DROPIN, dropin(cap), false),
             None => ManagedFile::absent(JOURNALD_DROPIN),
         }])
@@ -99,6 +164,9 @@ impl Applier for SpaceDomain {
     /// kept in systemd's file descriptor store), then the journal is cut to the cap at once.
     fn reconcile(&self, from: Option<&Value>, to: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {
         let fs = journal_fs_bytes(ctx.root);
+        if admin_journal_cap(ctx.root).is_some() {
+            return Ok(());
+        }
         let cap = |v: Option<&Value>| v.map(settings).and_then(|s| journal_cap(&s, fs));
         let (old, new) = (cap(from), cap(to));
         if old == new && from.is_some() {
@@ -132,6 +200,31 @@ mod tests {
         s2.journal_cap_mib = Some(500);
         assert_eq!(journal_cap(&s2, 1 << 40), Some(500 << 20));
         assert!(dropin(2 << 30).contains("SystemMaxUse=2048M"));
+    }
+
+    #[test]
+    fn the_administrators_cap_wins() {
+        let d = tempfile::tempdir().unwrap();
+        let etc = d.path().join("etc/systemd");
+        std::fs::create_dir_all(etc.join("journald.conf.d")).unwrap();
+        assert_eq!(admin_journal_cap(d.path()), None);
+        std::fs::write(etc.join("journald.conf"), "[Journal]\n#SystemMaxUse=\nStorage=auto\n").unwrap();
+        assert_eq!(admin_journal_cap(d.path()), None);
+        std::fs::write(etc.join("journald.conf"), "[Journal]\nSystemMaxUse=500M\n").unwrap();
+        assert_eq!(admin_journal_cap(d.path()), Some(500 << 20));
+        // a drop-in numbered before rynas's overrides, ours and later ones are not the admin's
+        std::fs::write(etc.join("journald.conf.d/10-site.conf"), "[Journal]\nSystemMaxUse=1G\n").unwrap();
+        std::fs::write(etc.join("journald.conf.d/50-rynas-space.conf"), "[Journal]\nSystemMaxUse=2048M\n").unwrap();
+        std::fs::write(etc.join("journald.conf.d/90-late.conf"), "[Journal]\nSystemMaxUse=3G\n").unwrap();
+        assert_eq!(admin_journal_cap(d.path()), Some(1 << 30));
+        let s = SpaceSettings::default();
+        assert_eq!(effective_journal_cap(Some(&s), 1 << 40, Some(1 << 30)), Some(1 << 30));
+        assert_eq!(effective_journal_cap(Some(&s), 1 << 40, None), Some(JOURNAL_MAX_BYTES));
+        // never applied: journald's own default, not rynas's
+        assert_eq!(effective_journal_cap(None, 1 << 40, None), None);
+        assert_eq!(parse_size("2G"), Some(2 << 30));
+        assert_eq!(parse_size("4096"), Some(4096));
+        assert_eq!(parse_size("5%"), None);
     }
 
     #[test]

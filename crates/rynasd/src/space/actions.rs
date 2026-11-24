@@ -178,6 +178,88 @@ pub fn homes_of(passwd: &str) -> Vec<String> {
         .collect()
 }
 
+/// A `btrfs receive` writes into `dir` now: a process `btrfs … receive …` (or btrbk's
+/// `btrfs receive` behind its filter) with an argument or its working folder inside `dir`.
+/// `proc` is `/proc` (a canned tree in tests).
+pub fn receive_running(dir: &Path, proc: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(proc) else { return true };
+    for e in rd.flatten() {
+        let pid = e.path();
+        if !e.file_name().to_str().is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())) {
+            continue;
+        }
+        let Ok(cmd) = std::fs::read(pid.join("cmdline")) else { continue };
+        let args: Vec<String> = cmd.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+        let is_btrfs = args.first().and_then(|a| Path::new(a).file_name()).is_some_and(|n| n == "btrfs");
+        if !is_btrfs || !args.iter().any(|a| a == "receive") {
+            continue;
+        }
+        let inside = |p: &Path| p.starts_with(dir);
+        let cwd = std::fs::read_link(pid.join("cwd")).ok();
+        if args.iter().any(|a| inside(Path::new(a))) || cwd.as_deref().is_some_and(inside) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Checks that `root` is a plain tree on one device: no subvolume (inode 256 on btrfs, or
+/// another device number) and no mount point anywhere below it. `boundary` decides for each
+/// directory (the default: [`is_boundary`]).
+pub fn plain_tree(root: &Path, boundary: &dyn Fn(&std::fs::Metadata, &std::fs::Metadata) -> bool) -> Result<(), String> {
+    let top = std::fs::symlink_metadata(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    if !top.is_dir() {
+        return Ok(());
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).map_err(|e| format!("{}: {e}", d.display()))?.flatten() {
+            let m = std::fs::symlink_metadata(e.path()).map_err(|x| format!("{}: {x}", e.path().display()))?;
+            if m.is_dir() {
+                if boundary(&top, &m) {
+                    return Err(format!("{} is a subvolume or a mount point", e.path().display()));
+                }
+                stack.push(e.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Another device, or the top of a btrfs subvolume (inode 256), below `top`.
+pub fn is_boundary(top: &std::fs::Metadata, m: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    m.dev() != top.dev() || m.ino() == rynas_btrfs::ioctl::SUBVOL_TOP_INO
+}
+
+/// Removes a plain file or folder tree: checked first with [`plain_tree`], then removed
+/// bottom up, every directory checked again before it is entered, links never followed.
+pub fn remove_plain_tree(path: &Path) -> Result<(), String> {
+    let m = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !m.is_dir() {
+        return std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()));
+    }
+    plain_tree(path, &is_boundary)?;
+    fn rm(d: &Path, top: &std::fs::Metadata) -> Result<(), String> {
+        for e in std::fs::read_dir(d).map_err(|e| format!("{}: {e}", d.display()))?.flatten() {
+            let p = e.path();
+            let m = std::fs::symlink_metadata(&p).map_err(|x| format!("{}: {x}", p.display()))?;
+            if m.is_dir() {
+                if is_boundary(top, &m) {
+                    return Err(format!("{} is a subvolume or a mount point", p.display()));
+                }
+                rm(&p, top)?;
+                std::fs::remove_dir(&p).map_err(|x| format!("{}: {x}", p.display()))?;
+            } else {
+                std::fs::remove_file(&p).map_err(|x| format!("{}: {x}", p.display()))?;
+            }
+        }
+        Ok(())
+    }
+    rm(path, &m)?;
+    std::fs::remove_dir(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// A command run to completion (logged error text on failure).
 pub fn run(c: Cmd) -> Result<String, String> {
     let out = c.output_blocking().map_err(|e| e.to_string())?;
@@ -263,6 +345,51 @@ mod tests {
         std::os::unix::fs::symlink(d.path().join("102"), d.path().join("previous")).unwrap();
         let v = stale_serials(d.path());
         assert_eq!(v, [d.path().join("100"), d.path().join("101")]);
+    }
+
+    #[test]
+    fn plain_trees_only() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path().join("copy.rynas-rollback-20261101T101010");
+        std::fs::create_dir_all(t.join("a/sub")).unwrap();
+        std::fs::write(t.join("a/sub/f"), b"x").unwrap();
+        // a directory named "sub" stands for a subvolume or a mount point
+        let fake = |_: &std::fs::Metadata, m: &std::fs::Metadata| {
+            use std::os::unix::fs::MetadataExt;
+            m.ino() == std::fs::metadata(t.join("a/sub")).unwrap().ino()
+        };
+        assert!(plain_tree(&t, &fake).unwrap_err().contains("subvolume or a mount point"));
+        assert!(plain_tree(&t, &is_boundary).is_ok());
+        remove_plain_tree(&t).unwrap();
+        assert!(!t.exists());
+        // a link is removed, never followed
+        let keep = d.path().join("keep");
+        std::fs::create_dir(&keep).unwrap();
+        std::fs::write(keep.join("precious"), b"x").unwrap();
+        std::fs::create_dir(&t).unwrap();
+        std::os::unix::fs::symlink(&keep, t.join("link")).unwrap();
+        remove_plain_tree(&t).unwrap();
+        assert!(keep.join("precious").exists());
+    }
+
+    #[test]
+    fn receives_into_a_folder_are_seen() {
+        let d = tempfile::tempdir().unwrap();
+        let proc = d.path().join("proc");
+        let p = |pid: &str, cmd: &[&str], cwd: &str| {
+            std::fs::create_dir_all(proc.join(pid)).unwrap();
+            std::fs::write(proc.join(pid).join("cmdline"), cmd.join("\0") + "\0").unwrap();
+            std::os::unix::fs::symlink(cwd, proc.join(pid).join("cwd")).unwrap();
+        };
+        p("10", &["/usr/bin/btrfs", "receive", "/vol1/pcs/a/.incoming/x"], "/");
+        p("11", &["btrfs", "-q", "receive", "-e"], "/vol1/.replicas/docs");
+        p("12", &["btrfs", "subvolume", "list", "/vol1/other"], "/vol1/other");
+        p("13", &["sh", "-c", "btrfs receive /vol1/other"], "/");
+        assert!(receive_running(Path::new("/vol1/pcs/a"), &proc));
+        assert!(receive_running(Path::new("/vol1/.replicas/docs"), &proc));
+        assert!(!receive_running(Path::new("/vol1/other"), &proc));
+        // an unreadable /proc: assume one runs
+        assert!(receive_running(Path::new("/vol1/other"), &d.path().join("none")));
     }
 
     #[test]

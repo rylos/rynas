@@ -6480,3 +6480,9 @@ nev.space.snapshots_growth.title	Gli snapshot su {volume} sono cresciuti di {gro
 nev.space.snapshots_growth.body	Crescita maggiore: {top}.
 nev.space.auto_freed.title	Snapshot vecchi eliminati su {volume} per liberare spazio
 nev.space.auto_freed.body	{count} snapshot eliminati dalla pulizia automatica: {snapshots}
+sp.kind.incoming_replica	Replica in arrivo
+sp.prot.incoming_replica	Inviata da un altro NAS
+sp.rev.received_unknown_owner	Ricevuti, proprietario sconosciuto
+sp.journal_admin	Limite del registro impostato dall'amministratore: {size} (rynas non ne imposta).
+sp.journal_in_force	Limite del registro in vigore: {size}.
+sp.journal_default	Limite del registro: il predefinito del sistema (10 % del suo filesystem, al massimo 4 GiB) finché queste impostazioni non vengono salvate.

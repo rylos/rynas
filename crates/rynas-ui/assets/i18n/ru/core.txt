@@ -6542,3 +6542,9 @@ nev.space.snapshots_growth.title	Снимки на {volume} выросли на 
 nev.space.snapshots_growth.body	Наибольший рост: {top}.
 nev.space.auto_freed.title	На {volume} удалены старые снимки для освобождения места
 nev.space.auto_freed.body	Автоочистка удалила снимков: {count}: {snapshots}
+sp.kind.incoming_replica	Входящая реплика
+sp.prot.incoming_replica	Отправлено другим NAS
+sp.rev.received_unknown_owner	Получено, владелец неизвестен
+sp.journal_admin	Лимит журнала задан администратором: {size} (rynas свой не задаёт).
+sp.journal_in_force	Действующий лимит журнала: {size}.
+sp.journal_default	Лимит журнала: системный по умолчанию (10 % файловой системы, не более 4 ГиБ), пока эти настройки не сохранены.

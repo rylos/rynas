@@ -31,6 +31,24 @@ pub trait Probe: Send + Sync {
     fn subvol(&self, path: &Path) -> Option<SubvolFacts>;
     /// The directories in `dir` (names), symbolic links left out.
     fn dirs(&self, dir: &Path) -> Vec<String>;
+    /// The directories and regular files in `dir`: `(name, is a directory)`, links left out.
+    fn entries(&self, dir: &Path) -> Vec<(String, bool)> {
+        self.dirs(dir).into_iter().map(|n| (n, true)).collect()
+    }
+}
+
+/// [`Probe::entries`] of the real filesystem.
+pub fn host_entries(dir: &Path) -> Vec<(String, bool)> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut v: Vec<(String, bool)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let t = e.file_type().ok()?;
+            (t.is_dir() || t.is_file()).then(|| e.file_name().into_string().ok().map(|n| (n, t.is_dir())))?
+        })
+        .collect();
+    v.sort();
+    v
 }
 
 /// The machine: subvolume facts from the unprivileged ioctl.
@@ -63,6 +81,10 @@ impl Probe for HostProbe {
             .collect();
         v.sort();
         v
+    }
+
+    fn entries(&self, dir: &Path) -> Vec<(String, bool)> {
+        host_entries(dir)
     }
 }
 
@@ -102,6 +124,25 @@ pub struct Facts {
     /// Folders of configured local replica targets.
     pub replica_dirs: Vec<String>,
     pub pins: BTreeSet<String>,
+    /// Live folders a leftover may never be, nor hold: shares, job subvolumes, app folders,
+    /// PC backup and replica folders.
+    pub live: Vec<PathBuf>,
+}
+
+impl Facts {
+    /// Fills [`Facts::live`] from the rest and the share folders.
+    pub fn with_live(mut self, shares: impl IntoIterator<Item = String>) -> Self {
+        let mut v: Vec<PathBuf> = shares.into_iter().map(PathBuf::from).collect();
+        v.extend(self.jobs.iter().map(|j| PathBuf::from(&j.subvolume)));
+        if let Some((stacks, _, _)) = &self.docker {
+            v.push(PathBuf::from(stacks));
+        }
+        v.extend(self.pc_folders.iter().map(|(_, f)| PathBuf::from(f)));
+        v.extend(self.replica_dirs.iter().map(PathBuf::from));
+        v.retain(|p| p.is_absolute() && p != Path::new("/"));
+        self.live = v;
+        self
+    }
 }
 
 /// One snapshot found.
@@ -289,19 +330,21 @@ pub fn walk(base: &Path, known: &BTreeSet<PathBuf>, f: &Facts, p: &dyn Probe) ->
         if opened > MAX_ENTRIES {
             break;
         }
-        let names = p.dirs(&dir);
-        // a folder of received snapshots nothing owns: a removed PC or replica target
+        let entries = p.entries(&dir);
+        // a folder of received snapshots nothing configured owns. rynas keeps no record of
+        // removed PCs or targets, so it is never called one: replicas another NAS sends here
+        // (`.replicas/<name>`) are protected, anything else is "received, owner unknown"
         if depth > 0 && !known.contains(&dir) && !replica_dirs.contains(&dir) {
             let received: Vec<Snap> = snaps_in(p, &dir, &|n| !n.starts_with('.'))
                 .into_iter()
                 .filter(|s| s.facts.received_uuid.is_some())
                 .collect();
             if !received.is_empty() {
-                let replica = dir.parent().and_then(|x| x.file_name()).is_some_and(|n| n == ".replicas");
+                let incoming = dir.parent().and_then(|x| x.file_name()).is_some_and(|n| n == ".replicas");
                 let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 found.sources.push(Source {
-                    id: format!("{}:{}", if replica { "replica" } else { "pc-removed" }, dir.display()),
-                    kind: if replica { SourceKind::Replica } else { SourceKind::PcBackup },
+                    id: format!("{}:{}", if incoming { "incoming" } else { "received" }, dir.display()),
+                    kind: if incoming { SourceKind::IncomingReplica } else { SourceKind::Received },
                     name,
                     dir: dir.clone(),
                     live: None,
@@ -311,10 +354,19 @@ pub fn walk(base: &Path, known: &BTreeSet<PathBuf>, f: &Facts, p: &dyn Probe) ->
                 continue;
             }
         }
-        for n in names {
+        for (n, is_dir) in entries {
             let path = dir.join(&n);
             if let Some((kind, created_ms)) = leftover_of(&n) {
-                found.leftovers.push(Leftover { kind, path, created_ms });
+                // a regular file only as the copy a restore keeps
+                let file_ok = !is_dir && kind == ReviewKind::RestoreCopy;
+                // never something live: a share, a job's subvolume, an app folder, a PC or
+                // replica folder, or a folder holding one
+                if (is_dir || file_ok) && !f.live.iter().any(|l| l.starts_with(&path)) {
+                    found.leftovers.push(Leftover { kind, path, created_ms });
+                }
+                continue;
+            }
+            if !is_dir {
                 continue;
             }
             if n == ".snapshots" {
@@ -364,10 +416,22 @@ pub fn protect(s: &mut Source, f: &Facts, pc_parents: &BTreeSet<String>) {
     let boot = f.system.as_ref().and_then(|x| x.running_parent_uuid.clone()).filter(|_| s.kind == SourceKind::SystemPoints);
     let newest_ro = s.snaps.iter().position(|x| x.facts.readonly);
     let newest_applies = matches!(s.kind, SourceKind::ShareJob | SourceKind::AppStack | SourceKind::SystemPoints);
+    // received snapshots without a known owner: the newest of each line (the snapshots of
+    // one sending subvolume, `<name>.<time>`) may be the parent of the next receive
+    let mut lines_seen: BTreeSet<String> = BTreeSet::new();
+    let newest_of_line: Vec<bool> = s
+        .snaps
+        .iter()
+        .map(|x| s.kind == SourceKind::Received && x.facts.readonly && lines_seen.insert(lineage(&x.name)))
+        .collect();
     for (i, x) in s.snaps.iter_mut().enumerate() {
         let path = x.path.display().to_string();
-        x.protected = if f.pins.contains(&path) {
+        x.protected = if s.kind == SourceKind::IncomingReplica {
+            Some(Protection::IncomingReplica)
+        } else if f.pins.contains(&path) {
             Some(Protection::Pinned)
+        } else if newest_of_line[i] {
+            Some(Protection::Newest)
         } else if boot.is_some() && x.facts.uuid == boot {
             Some(Protection::BootReference)
         } else if job.is_some_and(|j| j.replica_parents.contains(&x.name)) {
@@ -384,9 +448,23 @@ pub fn protect(s: &mut Source, f: &Facts, pc_parents: &BTreeSet<String>) {
     }
 }
 
+/// The line a received snapshot belongs to: its name without the time (`root.20261101T0100`
+/// → `root`; btrbk's long names, PC agent names).
+pub fn lineage(name: &str) -> String {
+    rynas_btrfs::name::split_snapshot_name(name)
+        .map(|(p, _)| p.to_string())
+        .or_else(|| name.rsplit_once('.').map(|(p, _)| p.to_string()))
+        .unwrap_or_else(|| name.to_string())
+}
+
 /// App stack snapshots identical to the stack folder now: the folder's generation is not
 /// newer than the transaction that made the snapshot (btrbk's "onchange" rule). Only marks
 /// the flag; the newest stays protected anyway.
+///
+/// Checked on a real btrfs (Debian 13, kernel 7.3, DS920+, 2026-11-24): taking a read-only
+/// snapshot does not bump the source subvolume's generation (it stayed 1645 across two
+/// snapshots with otransid 1646 and 1647), and any write after a snapshot raises it above
+/// that snapshot's otransid.
 pub fn mark_identical(s: &mut Source, live: Option<&SubvolFacts>) {
     let Some(live) = live.filter(|_| s.kind == SourceKind::AppStack) else { return };
     for x in &mut s.snaps {
@@ -450,6 +528,9 @@ pub mod fake {
         fn dirs(&self, dir: &Path) -> Vec<String> {
             HostProbe.dirs(dir)
         }
+        fn entries(&self, dir: &Path) -> Vec<(String, bool)> {
+            host_entries(dir)
+        }
     }
 
     /// Makes `path` a fake subvolume with `json` facts.
@@ -491,6 +572,8 @@ mod tests {
         // received snapshots: a known PC folder, a removed PC, a removed replica target
         subvol(&v.join("backups/laptop/root.20261101T0100"), r#"{"readonly": true, "received_uuid": "r1"}"#);
         subvol(&v.join("backups/oldpc/root.20261001T0100"), r#"{"readonly": true, "received_uuid": "r2"}"#);
+        subvol(&v.join("backups/oldpc/root.20261002T0100"), r#"{"readonly": true, "received_uuid": "r4"}"#);
+        subvol(&v.join("backups/oldpc/home.20261002T0100"), r#"{"readonly": true, "received_uuid": "r5"}"#);
         subvol(&v.join(".replicas/gone/docs.20261001T0100"), r#"{"readonly": true, "received_uuid": "r3"}"#);
         let f = Facts {
             jobs: vec![JobFact {
@@ -522,15 +605,52 @@ mod tests {
         let found = walk(d.path(), &known(&conf), &f, &TreeProbe);
         let mut ids: Vec<(String, SourceKind)> = found.sources.iter().map(|s| (s.name.clone(), s.kind)).collect();
         ids.sort_by(|a, b| a.0.cmp(&b.0));
+        // without a record of a removed target or PC: an incoming replica and "owner unknown"
         assert_eq!(
             ids,
-            [("gone".into(), SourceKind::Replica), ("old".into(), SourceKind::OrphanJob), ("oldpc".into(), SourceKind::PcBackup)]
+            [("gone".into(), SourceKind::IncomingReplica), ("old".into(), SourceKind::OrphanJob), ("oldpc".into(), SourceKind::Received)]
         );
         let mut kinds: Vec<ReviewKind> = found.leftovers.iter().map(|l| l.kind).collect();
         kinds.sort_by_key(|k| format!("{k:?}"));
         assert_eq!(kinds, [ReviewKind::AdoptCopy, ReviewKind::RestoreCopy, ReviewKind::RollbackCopy, ReviewKind::StackCopy]);
         // the configured PC folder is never reported as unowned
         assert!(!found.sources.iter().any(|s| s.name == "laptop"));
+        // incoming replicas are never removable; received ones keep the newest of each line
+        let mut incoming = found.sources.iter().find(|s| s.name == "gone").unwrap().clone();
+        protect(&mut incoming, &f, &BTreeSet::new());
+        assert!(incoming.snaps.iter().all(|s| s.protected == Some(Protection::IncomingReplica)));
+        let mut received = found.sources.iter().find(|s| s.name == "oldpc").unwrap().clone();
+        protect(&mut received, &f, &BTreeSet::new());
+        let p: Vec<(String, Option<Protection>)> = received.snaps.iter().map(|s| (s.name.clone(), s.protected)).collect();
+        assert_eq!(
+            p,
+            [
+                ("root.20261002T0100".to_string(), Some(Protection::Newest)),
+                ("home.20261002T0100".to_string(), Some(Protection::Newest)),
+                ("root.20261001T0100".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn leftovers_are_never_live() {
+        let (d, mut f) = tree();
+        let v = d.path();
+        // a "rollback copy" that is the share itself, one that holds a share, a restore copy as
+        // a file; a rollback "copy" file is not one
+        std::fs::create_dir_all(v.join("shares.rynas-rollback-20261105T101010/music")).unwrap();
+        std::fs::create_dir_all(v.join("live.rynas-rollback-20261105T101010")).unwrap();
+        std::fs::write(v.join("docs/a.txt.rynas-before-restore-20261106T101010"), b"x").unwrap();
+        std::fs::write(v.join("x.rynas-rollback-20261106T101010"), b"x").unwrap();
+        f = f.with_live([
+            v.join("shares.rynas-rollback-20261105T101010/music").display().to_string(),
+            v.join("live.rynas-rollback-20261105T101010").display().to_string(),
+        ]);
+        let conf = configured(&f, &TreeProbe);
+        let found = walk(v, &known(&conf), &f, &TreeProbe);
+        let paths: Vec<String> = found.leftovers.iter().map(|l| l.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert!(!paths.iter().any(|p| p.starts_with("shares.") || p.starts_with("live.") || p.starts_with("x.")), "{paths:?}");
+        assert!(paths.contains(&"a.txt.rynas-before-restore-20261106T101010".to_string()), "{paths:?}");
     }
 
     #[test]
