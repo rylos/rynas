@@ -257,14 +257,17 @@ fn sources(a: Adopt, cands: Vec<AdoptCandidate>) -> AnyView {
     .into_any()
 }
 
-/// The home folder of a copied instance and its volume lines.
+/// The home folder of a copied instance and its volume lines. Any change drops the preview:
+/// the adoption must be checked again with what it will send.
 fn path_form(a: Adopt) -> AnyView {
     let add = move |_| {
         let key = a.next_key.get_value();
         a.next_key.set_value(key + 1);
         a.lines.update(|l| l.push(Line { key, container: String::new(), host: String::new() }));
+        a.preview.set(None);
     };
     let set = move |key: u32, host: bool, v: String| {
+        a.preview.set(None);
         a.lines.update(|l| {
             if let Some(x) = l.iter_mut().find(|x| x.key == key) {
                 if host {
@@ -277,7 +280,10 @@ fn path_form(a: Adopt) -> AnyView {
     };
     view! {
         <div class="form">
-            {text_field("users.home", a.path.into(), Callback::new(move |v: String| a.path.set(v)), Signal::stored(None), In { mono: true, help: Some("stg.ad.home_help"), maxlength: 1024, ..In::default() })}
+            {text_field("users.home", a.path.into(), Callback::new(move |v: String| {
+                a.path.set(v);
+                a.preview.set(None);
+            }), Signal::stored(None), In { mono: true, help: Some("stg.ad.home_help"), maxlength: 1024, ..In::default() })}
             <div class="field">
                 <span class="field-label">{tr("stg.ad.volumes")}</span>
                 <span class="field-help">{tr("stg.ad.volumes_help")}</span>
@@ -291,7 +297,10 @@ fn path_form(a: Adopt) -> AnyView {
                                 <span class="muted" aria-hidden="true">"→"</span>
                                 <input class="input mono" aria-label=tr("stg.ad.vol_host") placeholder="/srv/volume/share" prop:value=l.host.clone()
                                     on:input=move |ev| set(k, true, event_target_value(&ev)) />
-                                {ui::icon_btn(icons::TRASH_2, t("stg.ad.vol_remove").to_string(), true, Signal::stored(false), Callback::new(move |_| a.lines.update(|v| v.retain(|x| x.key != k))))}
+                                {ui::icon_btn(icons::TRASH_2, t("stg.ad.vol_remove").to_string(), true, Signal::stored(false), Callback::new(move |_| {
+                                    a.lines.update(|v| v.retain(|x| x.key != k));
+                                    a.preview.set(None);
+                                }))}
                             </div>
                         }
                     }

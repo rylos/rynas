@@ -347,7 +347,8 @@ pub(super) async fn unlock(
         let crypt = s.shares.crypt();
         if crypt.state(&sh.path) == CryptState::InUse {
             // a fresh unlock stops the gocryptfs that still serves these containers
-            let users = super::containers_using(&sh.path, true);
+            let h = super::lock_holders(&sh.path).map_err(cannot_check)?;
+            let users: Vec<String> = h.blocking.into_iter().chain(h.restart).collect();
             if !users.is_empty() {
                 return Err(crypt_error(CryptError::Busy(format!(
                     "gocryptfs still serves containers started while it was unlocked: {}; stop them first",
@@ -361,9 +362,9 @@ pub(super) async fn unlock(
         audit(&w, "unlock", &sh.path);
         after_change(s, &sh, true);
         crate::syncthing::live::after_unlock(&sh.path);
-        // running containers that mount it were started while it was locked: they keep the
-        // empty folder until they are restarted
-        let containers = super::containers_using(&sh.path, true);
+        // running containers with a private bind were started while it was locked: they keep
+        // the empty folder until they are restarted (a follower bind shows the mount now)
+        let containers = super::lock_holders(&sh.path).map(|h| h.blocking).unwrap_or_default();
         let share = share_view(s, &w, &sh.name)?;
         Ok(Ok(CryptUnlockResponse { share, containers }))
     })
@@ -374,49 +375,113 @@ pub(super) async fn unlock(
     }
 }
 
-/// Running containers holding their own copy of the mount of `path` (a bind that does not
-/// follow the host's mounts): an unmount would succeed here while the plaintext stays
-/// readable in them.
-fn holders(path: &str) -> Res<()> {
-    let users = super::containers_using(path, true);
-    if users.is_empty() {
-        return Ok(());
+/// Docker could not be asked which containers use a folder: a lock or unlock cannot know
+/// whether the plaintext stays readable somewhere.
+fn cannot_check(e: String) -> Error {
+    conflict(error_codes::CONFLICT, format!("cannot check the containers using this share: {e}"))
+}
+
+/// The containers to restart around the lock of `path` ([`super::Holders::restart`]), or 409
+/// while a running container holds a private copy of the mount (an unmount would succeed
+/// here while the plaintext stays readable in it) or when Docker cannot be asked.
+fn holders(path: &str) -> Res<Vec<String>> {
+    let h = super::lock_holders(path).map_err(cannot_check)?;
+    if !h.blocking.is_empty() {
+        return Err(crypt_error(CryptError::Busy(format!("running containers use it: {}; stop them first", h.blocking.join(", ")))));
     }
-    Err(crypt_error(CryptError::Busy(format!("running containers use it: {}; stop them first", users.join(", ")))))
+    Ok(h.restart)
+}
+
+/// `docker <action>` of each container, in order: the ones done and the failures (a stop
+/// ends at the first failure, a start tries every container).
+async fn docker_each(action: &'static str, names: Vec<String>) -> (Vec<String>, Option<String>) {
+    tokio::task::spawn_blocking(move || {
+        let mut done = Vec::new();
+        let mut errors = Vec::new();
+        for n in names {
+            match super::docker_cmd(action, &n) {
+                Ok(()) => done.push(n),
+                Err(e) => {
+                    errors.push(format!("{n}: {e}"));
+                    if action == "stop" {
+                        break;
+                    }
+                }
+            }
+        }
+        (done, (!errors.is_empty()).then(|| errors.join("; ")))
+    })
+    .await
+    .unwrap_or_else(|e| (Vec::new(), Some(e.to_string())))
 }
 
 pub(super) async fn lock(State(st): State<SvcState>, h: HeaderMap, Path(name): Path<String>) -> Res<Json<ShareView>> {
     let (s, who) = (svc(&st)?, user(&h)?);
     s.ops.admins.require_admin(&who, "encrypted folders")?;
     let (w, n) = (who.clone(), name.clone());
-    let path = blocking(&s, move |s| {
+    let (path, restart) = blocking(&s, move |s| {
         let sh = applied_share(s, &w, &n)?;
-        holders(&sh.path)?;
-        Ok(sh.path)
+        let restart = holders(&sh.path)?;
+        Ok((sh.path, restart))
     })
     .await?;
-    // Syncthing folders inside it are paused (and resumed after the unlock) and left idle
+    // Syncthing folders inside it are paused first (and resumed after the unlock), so the
+    // app comes back paused, not in error
     crate::syncthing::live::before_lock(&path).await;
-    let v = blocking(&s, move |s| {
-        let sh = applied_share(s, &who, &name)?;
-        holders(&sh.path)?;
-        let sys = s.ops.config.system();
-        // Samba keeps files of its clients open: their connections to this share end first
-        if sh.smb.enabled && unit_running(s, SMBD) {
-            let _ = sys.run(&rynas_tasks::Cmd::new("smbcontrol").args(["smbd", "close-share", &sh.name]));
+    // containers whose follower bind was made while the folder was mounted keep the mount
+    // after the host unmounts it: stopped for the lock, started again after it (from then on
+    // their bind follows the folder)
+    if !restart.is_empty() {
+        tracing::info!("encrypted folder lock of {path}: restarting around it: {}", restart.join(", "));
+    }
+    let (stopped, stop_err) = docker_each("stop", restart).await;
+    let r = match stop_err {
+        Some(e) => Err(conflict(error_codes::CONFLICT, format!("a container using the share could not be stopped for the lock: {e}"))),
+        None => {
+            let p = path.clone();
+            blocking(&s, move |s| {
+                let sh = applied_share(s, &who, &name)?;
+                let late = holders(&sh.path)?;
+                if !late.is_empty() {
+                    return Err(crypt_error(CryptError::Busy(format!("containers started meanwhile use it: {}; try again", late.join(", ")))));
+                }
+                let sys = s.ops.config.system();
+                // Samba keeps files of its clients open: their connections to this share end first
+                if sh.smb.enabled && unit_running(s, SMBD) {
+                    let _ = sys.run(&rynas_tasks::Cmd::new("smbcontrol").args(["smbd", "close-share", &sh.name]));
+                }
+                if sh.nfs.enabled && unit_running(s, NFS_SERVER) {
+                    let _ = sys.run(&rynas_tasks::Cmd::new("exportfs").arg("-f"));
+                }
+                let r = s.shares.crypt().lock(&sh.path, &|l| tracing::info!("{l}"));
+                // the state changed even when gocryptfs still serves another namespace
+                after_change(s, &sh, false);
+                r.map_err(crypt_error)?;
+                // last check: no running container may still see the plaintext
+                if let Some(cipher) = crypt::cipher_dir(&p) {
+                    let still = super::mount_holders(&cipher).map_err(cannot_check)?;
+                    if !still.is_empty() {
+                        return Err(crypt_error(CryptError::Busy(format!(
+                            "unmounted here, but still mounted in containers: {}; stop them, then lock again",
+                            still.join(", ")
+                        ))));
+                    }
+                }
+                audit(&who, "lock", &sh.path);
+                share_view(s, &who, &sh.name)
+            })
+            .await
         }
-        if sh.nfs.enabled && unit_running(s, NFS_SERVER) {
-            let _ = sys.run(&rynas_tasks::Cmd::new("exportfs").arg("-f"));
+    };
+    if !stopped.is_empty() {
+        let (_, e) = docker_each("start", stopped).await;
+        if let Some(e) = e {
+            tracing::warn!("encrypted folder lock of {path}: a stopped container was not started again: {e}");
         }
-        let r = s.shares.crypt().lock(&sh.path, &|l| tracing::info!("{l}"));
-        // the state changed even when gocryptfs still serves another namespace
-        after_change(s, &sh, false);
-        r.map_err(crypt_error)?;
-        audit(&who, "lock", &sh.path);
-        share_view(s, &who, &sh.name)
-    })
-    .await?;
-    Ok(Json(v))
+    }
+    // a failed lock resumes the Syncthing folders it paused
+    crate::syncthing::live::lock_finished(&path, r.is_ok());
+    r.map(Json)
 }
 
 pub(super) async fn change_password(

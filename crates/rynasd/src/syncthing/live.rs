@@ -45,13 +45,16 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_S: u64 = 60;
 /// Device stats are read this often.
 const DEVICE_STATS_MS: u64 = 10 * 60 * 1000;
+/// The start time of Syncthing is compared this often (a restart quicker than a request).
+const STATUS_EVERY_MS: u64 = 30 * 1000;
 /// Detection runs at least this often.
 const DETECT_EVERY: Duration = Duration::from_secs(60);
 /// Alerts are evaluated this often.
 const ALERTS_EVERY: Duration = Duration::from_secs(30);
 /// How long a lock waits for Syncthing (pausing, then the folders to stop scanning or
-/// syncing): the whole lock answers within the interface's 30 s request timeout.
-const IDLE_WAIT: Duration = Duration::from_secs(20);
+/// syncing). Short: the app's container is restarted around the lock anyway, and the whole
+/// lock should answer within the interface's 30 s request timeout.
+const IDLE_WAIT: Duration = Duration::from_secs(10);
 /// Folder states during which Syncthing touches files.
 const BUSY: &[&str] = &["scanning", "syncing", "sync-preparing", "cleaning"];
 const SOURCE: &str = "syncthing";
@@ -180,6 +183,11 @@ impl Client {
         Ok(v.as_array().cloned().unwrap_or_default())
     }
 
+    /// The id of the latest event of the subscription (0: none yet).
+    async fn position(&self) -> Result<u64, String> {
+        Ok(self.events(0, 1, Some(1)).await?.iter().filter_map(|e| e.get("id").and_then(Value::as_u64)).max().unwrap_or(0))
+    }
+
     pub async fn set_paused(&self, id: &str, paused: bool) -> Result<(), String> {
         let rb = self
             .http
@@ -239,6 +247,8 @@ struct Inner {
     reachable: bool,
     error: Option<String>,
     device_stats_ms: u64,
+    /// `startTime` of `/rest/system/status` at the last full read.
+    start_time: String,
 }
 
 /// A running instance and what is known of it.
@@ -294,6 +304,8 @@ pub struct Persist {
     pub settings: SyncthingSettings,
     /// stack → folder ids paused by rynas while their encrypted share was locked.
     pub paused_by_rynas: BTreeMap<String, BTreeSet<String>>,
+    /// stack → the notified conditions of its alerts ([`Alerts::persisted`]).
+    pub alerts: BTreeMap<String, Alerts>,
 }
 
 struct Loop {
@@ -315,6 +327,10 @@ pub struct Live {
     alerts: Mutex<BTreeMap<String, Alerts>>,
     /// `stack/folder` kept paused after an unlock (marker missing), already notified.
     kept_paused: Mutex<BTreeSet<String>>,
+    /// Encrypted shares being locked now: locked for [`Live::reconcile`] until the lock ends.
+    locking: Mutex<BTreeSet<String>>,
+    /// Detection ran once (before it, no stack counts as gone).
+    detected_once: std::sync::atomic::AtomicBool,
     handle: tokio::runtime::Handle,
     wake: tokio::sync::Notify,
 }
@@ -339,7 +355,8 @@ impl Live {
     /// Must run inside the tokio runtime. `state_dir`: rynasd's state folder.
     pub fn new(root: &Path, state_dir: &Path, facts: Arc<dyn ShareFacts>, notifier: Arc<dyn Notifier>) -> Arc<Self> {
         let file = state_dir.join("syncthing").join(STATE_FILE);
-        let persist = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let persist: Persist = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let alerts = persist.alerts.clone();
         Arc::new(Self {
             root: root.to_path_buf(),
             facts,
@@ -349,8 +366,10 @@ impl Live {
             detected: Mutex::new(Vec::new()),
             instances: Mutex::new(BTreeMap::new()),
             loops: Mutex::new(BTreeMap::new()),
-            alerts: Mutex::new(BTreeMap::new()),
+            alerts: Mutex::new(alerts),
             kept_paused: Mutex::new(BTreeSet::new()),
+            locking: Mutex::new(BTreeSet::new()),
+            detected_once: std::sync::atomic::AtomicBool::new(false),
             handle: tokio::runtime::Handle::current(),
             wake: tokio::sync::Notify::new(),
         })
@@ -431,6 +450,7 @@ impl Live {
             api: Ok((inst.client.base.clone(), String::new())),
         });
         lock(&self.instances).insert(inst.stack.clone(), inst);
+        self.detected_once.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Asks detection to run now (an app installed, started, stopped...).
@@ -459,7 +479,8 @@ impl Live {
         .unwrap_or_default();
         let running: BTreeSet<String> = match apps.docker.containers().await {
             Ok(cs) => cs.into_iter().filter(|c| c.c.state == ContainerState::Running).filter_map(|c| c.c.stack).collect(),
-            Err(_) => BTreeSet::new(),
+            // Docker did not answer: what ran keeps running for now
+            Err(_) => lock(&self.detected).iter().filter(|d| d.installed.running).map(|d| d.installed.stack.clone()).collect(),
         };
         let mut det: Vec<Detected> = found
             .into_iter()
@@ -506,6 +527,7 @@ impl Live {
             }
         }
         *lock(&self.detected) = det;
+        self.detected_once.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// The instance's loop: sessions, with a growing pause after a failure.
@@ -530,10 +552,24 @@ impl Live {
     /// One connection: position, full read, then events until an error.
     async fn session(&self, inst: &Arc<Instance>) -> Result<(), String> {
         let c = inst.client.clone();
-        let mut last = c.events(0, 1, Some(1)).await?.iter().filter_map(|e| e.get("id").and_then(Value::as_u64)).max().unwrap_or(0);
+        let mut last = c.position().await?;
         self.full_read(inst, true).await?;
         self.reconcile(inst).await;
+        let mut status_ms = now_ms();
         loop {
+            // a restart quicker than a request (the long poll of the old process answered,
+            // the new one numbers its events from 1 again): its start time changed
+            if now_ms().saturating_sub(status_ms) >= STATUS_EVERY_MS {
+                status_ms = now_ms();
+                let started = st(&c.get("/rest/system/status").await?, "startTime");
+                if !started.is_empty() && inst.with(|i| i.start_time != started) {
+                    tracing::info!("syncthing: {}: Syncthing restarted: reading everything again", inst.stack);
+                    last = c.position().await?;
+                    self.full_read(inst, true).await?;
+                    self.reconcile(inst).await;
+                    continue;
+                }
+            }
             if now_ms().saturating_sub(inst.with(|i| i.device_stats_ms)) >= DEVICE_STATS_MS {
                 let v = c.get("/rest/stats/device").await?;
                 inst.with(|i| {
@@ -588,6 +624,7 @@ impl Live {
         // the counter needs the metrics endpoint (on by default); skipped when it is not there
         let counters = c.text("/metrics").await.ok().map(|t| model::conflict_counters(&t));
         let my_id = st(&status, "myID");
+        let start_time = st(&status, "startTime");
         let known: BTreeSet<String> = inst.with(|i| i.model.folders.iter().map(|f| f.id.clone()).collect());
         let mut statuses = Vec::new();
         for f in folders.iter().filter(|f| !f.paused && (all || !known.contains(&f.id))) {
@@ -636,15 +673,22 @@ impl Live {
                 }
             }
             m.read_ms = Some(now);
+            i.start_time = start_time;
             i.reachable = true;
             i.error = None;
         });
         Ok(())
     }
 
+    /// The encrypted shares; one being locked now counts as locked.
     async fn encrypted(&self) -> Vec<(String, bool)> {
         let f = self.facts.clone();
-        tokio::task::spawn_blocking(move || f.encrypted()).await.unwrap_or_default()
+        let mut v = tokio::task::spawn_blocking(move || f.encrypted()).await.unwrap_or_default();
+        let locking = lock(&self.locking).clone();
+        for (p, locked) in &mut v {
+            *locked |= locking.contains(p);
+        }
+        v
     }
 
     /// After a full read: folders inside a locked encrypted share are paused (and
@@ -654,25 +698,33 @@ impl Live {
         let enc = self.encrypted().await;
         let folders = inst.with(|i| i.model.folders.clone());
         for f in folders {
-            let flagged = self.flagged(&inst.stack, &f.id);
-            if flagged && !f.paused {
-                self.flag(&inst.stack, &f.id, false);
-                continue;
+            if !f.paused {
+                // running again, whoever resumed it
+                lock(&self.kept_paused).remove(&format!("{}/{}", inst.stack, f.id));
             }
-            let Some(host) = inst.host(&f.path) else { continue };
-            let share = enc.iter().filter(|(p, _)| config::is_within(&host, p)).max_by_key(|(p, _)| p.len());
+            let flagged = self.flagged(&inst.stack, &f.id);
+            let share = inst.host(&f.path).and_then(|host| enc.iter().filter(|(p, _)| config::is_within(&host, p)).max_by_key(|(p, _)| p.len()).cloned());
             match share {
-                Some((p, true)) if !f.paused => {
+                // locked, or being locked: never resumed, paused when running
+                Some((p, true)) => {
+                    if f.paused {
+                        continue;
+                    }
+                    self.flag(&inst.stack, &f.id, true);
                     match inst.client.set_paused(&f.id, true).await {
                         Ok(()) => {
                             tracing::info!("syncthing: {}: folder {} paused: its encrypted share {p} is locked", inst.stack, f.id);
                             self.flag(&inst.stack, &f.id, true);
                             inst.with(|i| set_paused(&mut i.model, &f.id, true));
                         }
-                        Err(e) => tracing::warn!("syncthing: {}: folder {} inside the locked share {p} not paused: {e}", inst.stack, f.id),
+                        Err(e) => {
+                            self.flag(&inst.stack, &f.id, false);
+                            tracing::warn!("syncthing: {}: folder {} inside the locked share {p} not paused: {e}", inst.stack, f.id);
+                        }
                     }
                 }
-                Some((_, true)) => {}
+                // a remembered folder found running: the user resumed it
+                _ if flagged && !f.paused => self.flag(&inst.stack, &f.id, false),
                 _ if flagged => self.resume_checked(inst, &f).await,
                 _ => {}
             }
@@ -683,7 +735,8 @@ impl Live {
     /// paused, with a notification.
     async fn resume_checked(&self, inst: &Instance, f: &model::Folder) {
         let Some((host, share, _)) = host_of(&inst.binds, &f.path) else { return };
-        let marker = super::marker_state(&self.root, &host, &f.marker_name, &f.id);
+        let (root, h, name, id) = (self.root.clone(), host.clone(), f.marker_name.clone(), f.id.clone());
+        let marker = tokio::task::spawn_blocking(move || super::marker_state(&root, &h, &name, &id)).await.unwrap_or(MarkerState::Unknown);
         if marker != MarkerState::Verified {
             // once per folder until it is resumed (full reads come back to it)
             if !lock(&self.kept_paused).insert(format!("{}/{}", inst.stack, f.id)) {
@@ -720,79 +773,104 @@ impl Live {
     // encrypted shares
     // -----------------------------------------------------------------------------------------
 
-    /// Before the lock of the share at `share_path`: its folders are paused (the ones the user
-    /// paused are left alone) and remembered, then the lock waits until none scans or syncs
-    /// (at most [`IDLE_WAIT`]). An instance that does not answer is skipped with a warning:
-    /// its folders go to `error` once the plaintext is gone, which is safe.
+    /// Before the lock of the share at `share_path`: the share counts as locked for the
+    /// event loops until [`Live::lock_finished`]; its running folders, in every instance, are
+    /// paused at once (the ones the user paused are left alone) and remembered, then the lock
+    /// waits until none scans or syncs, with one deadline for all ([`IDLE_WAIT`]). An
+    /// instance that does not answer is skipped with a warning: its folders go to `error`
+    /// once the plaintext is gone, which is safe.
     pub async fn pause_inside(&self, share_path: &str) {
+        lock(&self.locking).insert(share_path.to_string());
         let deadline = tokio::time::Instant::now() + IDLE_WAIT;
-        for inst in self.instances() {
-            if tokio::time::timeout_at(deadline, self.pause_one(&inst, share_path, deadline)).await.is_err() {
-                tracing::warn!("syncthing: {}: no answer within {} s before the lock of {share_path}: locking anyway", inst.stack, IDLE_WAIT.as_secs());
-            }
-        }
-    }
-
-    async fn pause_one(&self, inst: &Instance, share_path: &str, deadline: tokio::time::Instant) {
-        {
-            let folders = match inst.client.get("/rest/config/folders").await {
-                Ok(v) => model::folders_of_config(&v),
-                Err(e) => {
-                    tracing::warn!("syncthing: {}: folders inside {share_path} not paused before the lock: {e}", inst.stack);
-                    return;
+        let insts = self.instances();
+        let lists = futures_util::future::join_all(insts.iter().map(|i| async move {
+            match tokio::time::timeout_at(deadline, i.client.get("/rest/config/folders")).await {
+                Ok(Ok(v)) => model::folders_of_config(&v),
+                Ok(Err(e)) => {
+                    tracing::warn!("syncthing: {}: folders inside {share_path} not paused before the lock: {e}", i.stack);
+                    Vec::new()
                 }
-            };
-            let mut wait = Vec::new();
+                Err(_) => {
+                    tracing::warn!("syncthing: {}: no answer before the lock of {share_path}: locking anyway", i.stack);
+                    Vec::new()
+                }
+            }
+        }))
+        .await;
+        let mut to_pause = Vec::new();
+        let mut wait = Vec::new();
+        for (inst, folders) in insts.iter().zip(lists) {
             for f in folders {
                 if !inst.host(&f.path).is_some_and(|h| config::is_within(&h, share_path)) {
                     continue;
                 }
-                if f.paused {
-                    if self.flagged(&inst.stack, &f.id) {
-                        wait.push(f.id);
-                    }
-                    continue;
-                }
-                // remembered first: a pause cut short leaves a remembered running folder,
-                // which the next full read forgets, never a paused folder nobody resumes
-                self.flag(&inst.stack, &f.id, true);
-                match inst.client.set_paused(&f.id, true).await {
-                    Ok(()) => {
-                        tracing::info!("syncthing: {}: folder {} paused before the lock of {share_path}", inst.stack, f.id);
-                        inst.with(|i| set_paused(&mut i.model, &f.id, true));
-                        wait.push(f.id);
-                    }
-                    Err(e) => {
-                        self.flag(&inst.stack, &f.id, false);
-                        tracing::warn!("syncthing: {}: folder {} not paused before the lock: {e}", inst.stack, f.id);
-                    }
+                if !f.paused {
+                    // remembered first: a pause cut short leaves a remembered running
+                    // folder, which a later full read forgets, never a paused folder that
+                    // nobody resumes
+                    self.flag(&inst.stack, &f.id, true);
+                    to_pause.push((inst.clone(), f.id));
+                } else if self.flagged(&inst.stack, &f.id) {
+                    wait.push((inst.clone(), f.id));
                 }
             }
-            while !wait.is_empty() {
-                let mut busy = Vec::new();
-                for id in &wait {
-                    if let Ok(s) = inst.client.folder_state(id).await
-                        && BUSY.contains(&s.as_str())
-                    {
-                        busy.push(id.clone());
-                    }
+        }
+        let results = futures_util::future::join_all(
+            to_pause.iter().map(|(inst, id)| async move { tokio::time::timeout_at(deadline, inst.client.set_paused(id, true)).await }),
+        )
+        .await;
+        for ((inst, id), r) in to_pause.into_iter().zip(results) {
+            match r {
+                Ok(Ok(())) => {
+                    tracing::info!("syncthing: {}: folder {id} paused before the lock of {share_path}", inst.stack);
+                    // again: an event loop may have read the folder running in between
+                    self.flag(&inst.stack, &id, true);
+                    inst.with(|i| set_paused(&mut i.model, &id, true));
+                    wait.push((inst, id));
                 }
-                wait = busy;
-                if wait.is_empty() {
-                    break;
+                Ok(Err(e)) => {
+                    self.flag(&inst.stack, &id, false);
+                    tracing::warn!("syncthing: {}: folder {id} not paused before the lock: {e}", inst.stack);
                 }
-                if tokio::time::Instant::now() + Duration::from_millis(500) >= deadline {
-                    tracing::warn!("syncthing: {}: folders still busy after {} s, locking anyway: {}", inst.stack, IDLE_WAIT.as_secs(), wait.join(", "));
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                // the answer may still come: kept remembered, sorted out by the next full read
+                Err(_) => tracing::warn!("syncthing: {}: folder {id}: no answer to the pause before the lock", inst.stack),
             }
+        }
+        while !wait.is_empty() {
+            let states = futures_util::future::join_all(
+                wait.iter().map(|(inst, id)| async move { tokio::time::timeout_at(deadline, inst.client.folder_state(id)).await }),
+            )
+            .await;
+            wait = wait.into_iter().zip(states).filter(|(_, s)| matches!(s, Ok(Ok(s)) if BUSY.contains(&s.as_str()))).map(|(w, _)| w).collect();
+            if wait.is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() + Duration::from_millis(500) >= deadline {
+                let names: Vec<String> = wait.iter().map(|(i, id)| format!("{}/{id}", i.stack)).collect();
+                tracing::warn!("syncthing: folders still busy after {} s, locking anyway: {}", IDLE_WAIT.as_secs(), names.join(", "));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    /// The lock of the share at `share_path` ended: the event loops see its real state again;
+    /// a failed lock resumes the folders [`Live::pause_inside`] paused (in the background).
+    pub fn lock_finished(self: &Arc<Self>, share_path: &str, locked: bool) {
+        lock(&self.locking).remove(share_path);
+        if !locked {
+            let (me, p) = (self.clone(), share_path.to_string());
+            self.handle.spawn(async move { me.resume_inside(&p).await });
         }
     }
 
     /// After the unlock of the share at `share_path`: the folders rynas paused inside it are
     /// resumed when their marker is there.
     pub async fn resume_inside(&self, share_path: &str) {
+        // a lock that failed after the unmount leaves it locked: nothing to resume yet
+        if self.encrypted().await.iter().any(|(p, locked)| *locked && config::is_within(share_path, p)) {
+            return;
+        }
         for inst in self.instances() {
             let folders = match inst.client.get("/rest/config/folders").await {
                 Ok(v) => model::folders_of_config(&v),
@@ -822,9 +900,20 @@ impl Live {
     /// Evaluates the alerts of every installed instance and emits the transitions.
     pub fn alerts_now(&self, now: u64) {
         let set = self.settings();
+        if !self.detected_once.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
         let det = lock(&self.detected).clone();
         let mut al = lock(&self.alerts);
-        al.retain(|k, _| det.iter().any(|d| d.installed.stack == *k));
+        // a stack that went away: what it had open is resolved, quietly
+        let gone: Vec<String> = al.keys().filter(|k| !det.iter().any(|d| d.installed.stack == **k)).cloned().collect();
+        for stack in gone {
+            if let Some(mut a) = al.remove(&stack) {
+                for alert in a.resolve_all() {
+                    self.notifier.emit(quietly(event_of(&stack, alert)));
+                }
+            }
+        }
         for d in &det {
             let stack = d.installed.stack.clone();
             let inst = self.instance(&stack);
@@ -839,6 +928,9 @@ impl Live {
                 self.notifier.emit(event_of(&stack, alert));
             }
         }
+        let kept: BTreeMap<String, Alerts> = al.iter().map(|(k, a)| (k.clone(), a.persisted())).collect();
+        drop(al);
+        self.update_persist(|p| p.alerts = kept);
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1018,6 +1110,18 @@ fn event_of(stack: &str, a: Alert) -> rynas_api_types::notify::NewEvent {
             ev.body = format!("Syncthing has not seen {name} for {days} days: its changes do not reach the NAS.");
             field(field(field(code(ev, "syncthing.device_unseen"), "stack", stack), "device", name), "days", days)
         }
+        Alert::DevicesUnseen { names, days } => {
+            let (count, list) = (names.len(), names.join(", "));
+            let mut ev = oneshot(
+                cat,
+                NotifySeverity::Warning,
+                SOURCE,
+                format!("syncthing:devices:{stack}"),
+                format!("{count} devices have not connected for {days} days or more"),
+            );
+            ev.body = format!("Syncthing has not seen these devices for {days} days or more: {list}. Their changes do not reach the NAS.");
+            field(field(field(field(code(ev, "syncthing.devices_unseen"), "stack", stack), "count", count), "devices", list), "days", days)
+        }
         Alert::DeviceSeen { device, name } => {
             let ev = resolved(cat, SOURCE, format!("syncthing:device:{stack}:{device}"), format!("Device {name} connected again"));
             quietly(field(field(code(ev, "syncthing.device_seen"), "stack", stack), "device", name))
@@ -1071,6 +1175,14 @@ pub fn spawn(live: Arc<Live>, apps: Arc<AppsSvc>) {
 pub async fn before_lock(share_path: &str) {
     if let Some(l) = get() {
         l.pause_inside(share_path).await;
+    }
+}
+
+/// After the lock of an encrypted share, whether it succeeded or not (crypt.rs): see
+/// [`Live::lock_finished`].
+pub fn lock_finished(share_path: &str, locked: bool) {
+    if let Some(l) = get() {
+        l.lock_finished(share_path, locked);
     }
 }
 
@@ -1312,9 +1424,11 @@ mod tests {
         // lock: the share's running folders paused, the user's left alone, idle awaited
         live.pause_inside("/vol1/secret").await;
         facts.0.lock().unwrap()[0].1 = true;
+        live.lock_finished("/vol1/secret", true);
         let log = fake.lock().unwrap().log.clone();
-        let pauses: Vec<&String> = log.iter().filter(|l| l.starts_with("pause")).collect();
-        assert_eq!(pauses, ["pause work", "pause gone"]);
+        let mut pauses: Vec<&String> = log.iter().filter(|l| l.starts_with("pause")).collect();
+        pauses.sort();
+        assert_eq!(pauses, ["pause gone", "pause work"]);
         assert!(log.iter().filter(|l| l.starts_with("status")).count() >= 3, "{log:?}");
         let pos_last_pause = log.iter().rposition(|l| l.starts_with("pause")).unwrap();
         let pos_first_status = log.iter().position(|l| l.starts_with("status")).unwrap();
@@ -1386,6 +1500,38 @@ mod tests {
         let s = live.state(None);
         let work = s.folders.iter().find(|f| f.id == "work").unwrap();
         assert_eq!((work.share.as_deref(), work.sub_path.as_deref(), work.locked), (Some("secret"), Some("work"), false));
+    }
+
+    #[tokio::test]
+    async fn a_lock_in_progress_is_locked_for_the_event_loop_and_a_failed_one_resumes() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let fake: FakeSt = Arc::new(Mutex::new(Fake { folders: vec![folder("work", "/shares/secret/work", false)], ..Default::default() }));
+        let base = serve(fake.clone()).await;
+        // the share is still mounted while the lock runs
+        let facts = Arc::new(Facts(Mutex::new(vec![("/vol1/secret".into(), false)])));
+        let live = Live::new(root.path(), state.path(), facts, Arc::new(rynas_notify::NullNotifier));
+        let binds = vec![Bind { container: "/shares/secret".into(), host: "/vol1/secret".into(), share: Some("secret".into()) }];
+        let inst = Instance::new("sync", Client::new(&base, "k3y").unwrap(), binds);
+        live.add_instance(inst.clone(), true);
+        marker(root.path(), "/vol1/secret/work", "work");
+        live.pause_inside("/vol1/secret").await;
+        // a full read during the lock (a ConfigSaved of the pause) never resumes it
+        let v = inst.client.get("/rest/config/folders").await.unwrap();
+        inst.with(|i| i.model.replace_config(model::folders_of_config(&v), Vec::new()));
+        live.reconcile(&inst).await;
+        assert_eq!(fake.lock().unwrap().log.iter().filter(|l| !l.starts_with("status")).collect::<Vec<_>>(), ["pause work"]);
+        assert!(live.persisted().paused_by_rynas["sync"].contains("work"));
+        // the lock failed: resumed in the background
+        live.lock_finished("/vol1/secret", false);
+        for _ in 0..50 {
+            if fake.lock().unwrap().log.iter().any(|l| l == "resume work") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(fake.lock().unwrap().log.iter().any(|l| l == "resume work"));
+        assert!(live.persisted().paused_by_rynas.is_empty());
     }
 
     #[tokio::test]

@@ -6336,6 +6336,8 @@ nev.syncthing.folder_error.body	{error}. В этой папке ничего н�
 nev.syncthing.folder_recovered.title	Папка Syncthing {folder} снова работает
 nev.syncthing.device_unseen.title	Устройство {device} не подключалось {days} дн.
 nev.syncthing.device_unseen.body	Syncthing не видел {device} {days} дн.: его изменения не доходят до NAS.
+nev.syncthing.devices_unseen.title	Устройства ({count}) не подключались {days} дн. или дольше
+nev.syncthing.devices_unseen.body	Syncthing не видел эти устройства {days} дн. или дольше: {devices}. Их изменения не доходят до NAS.
 nev.syncthing.device_seen.title	Устройство {device} снова подключилось
 nev.syncthing.down.title	Syncthing не отвечает
 nev.syncthing.down.body	Приложение {stack} работает, но его интерфейс не отвечает {minutes} мин.: папки не синхронизируются, и rynas не видит их состояние.

@@ -137,12 +137,26 @@ systemd-run --unit=rynas-crypt-<place>-<name> --service-type=forking --quiet
   copy of the FUSE mount, so the host unmount would succeed while gocryptfs keeps serving
   the container. Then Samba connections to the share are closed (`smbcontrol smbd
   close-share`) and `umount <mount point>` runs outside the sandbox (`Outside`, never lazy);
-  a busy folder is refused. A bind with propagation `rslave`/`slave` (`Mounts[].Propagation`
-  of `docker inspect`; the share set of a catalogue app sets it for encrypted shares) is no
-  copy: it follows the host's mount, the unmount reaches it, so it does not block the lock and
-  is not listed for a restart after the unlock. Before the unmount, the folders of the
-  installed Syncthing app inside the share are paused (`syncthing.md` §2 decision 6)
-  and resumed after the unlock. gocryptfs exits by itself once the last copy of its mount is
+  a busy folder is refused. Binds by propagation (`Mounts[].Propagation` of `docker inspect`,
+  containers inspected one by one when a batch fails; Docker not answering is a 409 "cannot
+  check the containers using this share"), as measured on a test NAS:
+  - a private bind (`rprivate`, `private`) of the folder, inside it or of a folder holding it
+    keeps a copy made while mounted: the lock is refused (409 `crypt_busy`);
+  - an `rslave`/`slave` bind of a folder strictly holding it loses the mount with the host:
+    no obstacle;
+  - an `rslave`/`slave` bind of the folder itself or of a folder inside it follows mounts made
+    after the container started, but one made while the folder was mounted keeps the mount
+    after the host unmounts it. Those running containers are stopped (`docker stop`) before
+    the unmount and started again after it, whether the lock worked or not (each step
+    logged); started while locked, their bind follows the next unlock. The share set of a
+    catalogue app binds encrypted shares this way, so **the Syncthing app (and any other app
+    using the share) is briefly restarted when the share is locked**.
+  Order: the folders of the installed Syncthing app inside the share are paused first
+  (`syncthing.md` §2 decision 6) so it comes back paused, not in error; then the stops, the
+  unmount, the starts. After the unmount a last check reads `/proc/<State.Pid>/mountinfo` of
+  every running container: one still showing the gocryptfs mount (source = the ciphertext
+  folder) makes the lock an error naming the containers, never "locked". A failed lock
+  resumes the paused folders. gocryptfs exits by itself once the last copy of its mount is
   gone: rynas waits up to 5 s for the unit to end, and a unit still running is an error
   ("still in use", state `in_use`), never a lock. A later lock (or the end of that other
   copy) finishes it. Stopping the unit is not used to lock: gocryptfs falls back to a lazy
@@ -222,7 +236,7 @@ whether that version is supported (2.5 or newer) and whether a TPM2 is usable.
 | POST | `/api/v1/crypt/folders/{volume}/{name}/reveal-recovery-key` | — | `RecoveryKey`, once within the hour, to its creator |
 | POST | `/api/v1/crypt/folders/{volume}/{name}/recovery-key` | `CryptRecoveryKeyRequest {password}` | `RecoveryKey`; 400 `crypt_wrong_password` |
 | POST | `/api/v1/shares/{share}/unlock` | `CryptUnlockRequest {password}` | `CryptUnlockResponse {share, containers}`; 400 `crypt_wrong_password`; 409 `crypt_busy` (`in_use` with containers) |
-| POST | `/api/v1/shares/{share}/lock` | — | `ShareView`; 409 `crypt_busy` (open files, running containers with a private copy of the mount, still served elsewhere). Folders of the Syncthing app inside the share are paused first (at most 20 s) |
+| POST | `/api/v1/shares/{share}/lock` | — | `ShareView`; 409 `crypt_busy` (open files, running containers with a private copy of the mount, still mounted in a container after the unmount, still served elsewhere); 409 `conflict` when Docker cannot be asked. Folders of the Syncthing app inside the share are paused first (at most 10 s), running containers with a follower bind of the share or inside it are stopped and started again around the unmount |
 | POST | `/api/v1/shares/{share}/crypt/password` | `CryptPasswordRequest {current, recovery, new_password}` | `CryptPasswordResponse {auto_unlock_off}`; 400 `crypt_wrong_password` |
 | PUT | `/api/v1/shares/{share}/crypt/auto-unlock` | `CryptAutoUnlockRequest {enabled, password}` | `ShareView` |
 | POST | `/v1/crypt/auto-unlock` (rynasd only, root peers) | — | unlocked paths |

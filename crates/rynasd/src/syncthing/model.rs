@@ -418,22 +418,33 @@ pub enum Alert {
     FolderRecovered { folder: String, label: String },
     DeviceUnseen { device: String, name: String, days: u64 },
     DeviceSeen { device: String, name: String },
+    /// The first look ever found several devices away for `days` or more.
+    DevicesUnseen { names: Vec<String>, days: u32 },
     Down { minutes: u64 },
     /// `quiet`: the app was stopped, nothing to tell.
     Up { quiet: bool },
 }
 
-/// What the alerts of one instance remember (memory only: the engine keeps firing states
-/// across restarts and counts repeats instead of sending them again).
-#[derive(Debug, Clone, Default)]
+/// What the alerts of one instance remember. The notified conditions are persisted (with
+/// [`Alerts::persisted`]), so a resolution is sent after a restart of rynasd too; the timers
+/// and the pending conflict copies are memory only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Alerts {
+    #[serde(skip)]
     error_since: BTreeMap<String, u64>,
+    /// folder id → label, notified in error.
     error_notified: BTreeMap<String, String>,
     /// folder id → (first new copy ms, count, first file names).
+    #[serde(skip)]
     pending: BTreeMap<String, (u64, u32, Vec<String>)>,
     unseen_notified: BTreeSet<String>,
+    #[serde(skip)]
     down_since: Option<u64>,
     down_notified: bool,
+    /// The first evaluation with a readable state is done (devices already away then are
+    /// grouped in one notification).
+    seeded: bool,
 }
 
 /// How the instance looks to the alerts.
@@ -520,7 +531,13 @@ impl Alerts {
                 out.push(Alert::Conflict { folder: id, label, count, files });
             }
         }
-        // devices not seen for a while
+        // devices not seen for a while (the setting at 0 resolves what was open)
+        if unseen_days == 0 {
+            for id in std::mem::take(&mut self.unseen_notified) {
+                out.push(Alert::DeviceSeen { name: m.device_name(&id), device: id });
+            }
+        }
+        let mut fresh = Vec::new();
         for d in m.devices.iter().filter(|d| d.id != m.my_id) {
             if d.connected {
                 if self.unseen_notified.remove(&d.id) {
@@ -535,8 +552,31 @@ impl Alerts {
             let away = now.saturating_sub(last);
             if away >= u64::from(unseen_days) * DAY_MS {
                 self.unseen_notified.insert(d.id.clone());
-                out.push(Alert::DeviceUnseen { device: d.id.clone(), name: m.device_name(&d.id), days: away / DAY_MS });
+                fresh.push(Alert::DeviceUnseen { device: d.id.clone(), name: m.device_name(&d.id), days: away / DAY_MS });
             }
+        }
+        if !self.seeded && fresh.len() > 1 {
+            // the first look ever: devices long gone are one notification, not one each
+            let names = fresh.iter().filter_map(|a| if let Alert::DeviceUnseen { name, .. } = a { Some(name.clone()) } else { None }).collect();
+            out.push(Alert::DevicesUnseen { names, days: unseen_days });
+        } else {
+            out.extend(fresh);
+        }
+        self.seeded = true;
+        out
+    }
+
+    /// What is kept across restarts (the notified conditions).
+    pub fn persisted(&self) -> Alerts {
+        Alerts { error_notified: self.error_notified.clone(), unseen_notified: self.unseen_notified.clone(), down_notified: self.down_notified, seeded: self.seeded, ..Default::default() }
+    }
+
+    /// The instance is gone: every open condition is resolved.
+    pub fn resolve_all(&mut self) -> Vec<Alert> {
+        let mut out: Vec<Alert> = std::mem::take(&mut self.error_notified).into_iter().map(|(folder, label)| Alert::FolderRecovered { folder, label }).collect();
+        out.extend(std::mem::take(&mut self.unseen_notified).into_iter().map(|id| Alert::DeviceSeen { name: short(&id), device: id }));
+        if std::mem::take(&mut self.down_notified) {
+            out.push(Alert::Up { quiet: true });
         }
         out
     }
@@ -706,5 +746,41 @@ mod tests {
         c.evaluate(t0, Seen::Unreachable, 7, true);
         c.evaluate(t0 + DOWN_AFTER_MS, Seen::Unreachable, 7, true);
         assert_eq!(c.evaluate(t0 + DOWN_AFTER_MS, Seen::Stopped, 7, true), vec![Alert::Up { quiet: true }]);
+    }
+
+    #[test]
+    fn alerts_first_look_restart_and_resolution() {
+        let t0 = 1_000_000_000_000;
+        let mut m = model();
+        m.devices[1].last_seen_ms = Some(t0);
+        m.devices[2].last_seen_ms = Some(t0);
+        // the first look: two devices long away are one notification
+        let mut a = Alerts::default();
+        let v = a.evaluate(t0 + 30 * DAY_MS, Seen::Reachable(&m), 7, true);
+        assert_eq!(v, vec![Alert::DevicesUnseen { names: vec!["phone".into(), "LAPTOP3".into()], days: 7 }]);
+        // the notified conditions survive a restart (JSON), the timers do not
+        m.folders[0].state = "error".into();
+        a.evaluate(t0, Seen::Reachable(&m), 7, true);
+        a.evaluate(t0 + ERROR_AFTER_MS, Seen::Reachable(&m), 7, true);
+        a.evaluate(t0, Seen::Unreachable, 7, true);
+        a.evaluate(t0 + DOWN_AFTER_MS, Seen::Unreachable, 7, true);
+        let text = serde_json::to_string(&a.persisted()).unwrap();
+        let mut b: Alerts = serde_json::from_str(&text).unwrap();
+        assert_eq!(b, a.persisted());
+        // after the restart: it answers, the folder is fine: both resolutions are sent
+        m.folders[0].state = "idle".into();
+        let v = b.evaluate(t0 + 31 * DAY_MS, Seen::Reachable(&m), 7, true);
+        assert!(v.contains(&Alert::Up { quiet: false }), "{v:?}");
+        assert!(v.contains(&Alert::FolderRecovered { folder: "docs".into(), label: "Documents".into() }), "{v:?}");
+        // the setting at 0 resolves the devices
+        let v = b.evaluate(t0 + 32 * DAY_MS, Seen::Reachable(&m), 0, true);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert!(v.iter().all(|x| matches!(x, Alert::DeviceSeen { .. })));
+        // a stack that goes away resolves what is open
+        m.folders[0].state = "error".into();
+        b.evaluate(t0, Seen::Reachable(&m), 7, true);
+        b.evaluate(t0 + ERROR_AFTER_MS, Seen::Reachable(&m), 7, true);
+        assert_eq!(b.resolve_all(), vec![Alert::FolderRecovered { folder: "docs".into(), label: "Documents".into() }]);
+        assert!(b.resolve_all().is_empty());
     }
 }

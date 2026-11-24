@@ -6274,6 +6274,8 @@ nev.syncthing.folder_error.body	{error}. In questa cartella non si sincronizza n
 nev.syncthing.folder_recovered.title	La cartella Syncthing {folder} funziona di nuovo
 nev.syncthing.device_unseen.title	Il dispositivo {device} non si connette da {days} giorni
 nev.syncthing.device_unseen.body	Syncthing non vede {device} da {days} giorni: le sue modifiche non arrivano al NAS.
+nev.syncthing.devices_unseen.title	{count} dispositivi non si connettono da {days} giorni o più
+nev.syncthing.devices_unseen.body	Syncthing non vede questi dispositivi da {days} giorni o più: {devices}. Le loro modifiche non arrivano al NAS.
 nev.syncthing.device_seen.title	Il dispositivo {device} si è connesso di nuovo
 nev.syncthing.down.title	Syncthing non risponde
 nev.syncthing.down.body	L'app {stack} è in esecuzione ma la sua interfaccia non risponde da {minutes} minuti: le cartelle non vengono sincronizzate e rynas non ne vede lo stato.

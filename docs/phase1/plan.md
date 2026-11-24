@@ -1051,6 +1051,7 @@ schema 2 added the `code` and `body_format` columns.
 | `syncthing.conflict` | `stack`, `folder` (label), `count`, `files` (up to 5 names) | Conflict copies in {folder} (warning, oneshot: new copies of a folder grouped for 10 minutes; setting `conflicts_alert`; `../phase2/syncthing.md` §5) |
 | `syncthing.folder_error` / `syncthing.folder_recovered` | `stack`, `folder`, `error` (error) | Syncthing folder {folder} is in error (error, after 5 minutes in state `error`, not while paused) / works again (resolved) |
 | `syncthing.device_unseen` / `syncthing.device_seen` | `stack`, `device`, `days` (unseen) | Device {device} has not connected for {days} days (warning, a device seen before; setting `device_unseen_days`, 0 = off; once per absence) / connected again (resolved quietly) |
+| `syncthing.devices_unseen` | `stack`, `count`, `devices` (names), `days` (the setting) | {count} devices have not connected for {days} days or more (warning, oneshot: the first look ever found several devices already away; each is then counted as notified) |
 | `syncthing.down` / `syncthing.up` | `stack`, `minutes` (down) | Syncthing does not answer (error: the app runs and its REST interface has been silent for 10 minutes) / answers again (resolved; quietly when the app was stopped) |
 | `syncthing.folder_kept_paused` | `stack`, `folder`, `share` | Syncthing folder {folder} stays paused (warning: after the unlock of its encrypted share its `.stfolder` marker is missing; once per folder until it is resumed) |
 | `pcbackup.revoked` / `pcbackup.removed` | `device` | {device} revoked / removed: its open alerts resolve (resolved) |
@@ -2083,8 +2084,12 @@ smaller id, any connection error (Syncthing restarted) and after `ConfigSaved` (
 `db/status` only for new folders); device stats every 10 minutes. Conflict copies: names with
 `.sync-conflict-` in `ItemFinished` (not deletions, not failed items), the last 50 per folder in
 memory, forgotten when the file is gone at the next read; count = Syncthing's counter at the
-last full read + copies seen since. State file `<state>/syncthing/state.json` (0600): settings
-and the folders paused by rynas, per stack.
+last full read + copies seen since. A changed `startTime` of `/rest/system/status` (compared
+every 30 s) is a restart too. A Docker error in detection keeps the previous running set. State
+file `<state>/syncthing/state.json` (0600): settings, the folders paused by rynas and the
+notified alert conditions (folder errors, unseen devices, down), per stack, so resolutions
+are sent after a restart of rynasd; a stack that goes away has its open alerts resolved
+quietly, and `device_unseen_days` at 0 resolves the unseen devices.
 
 | Method | Path | Body | Response |
 |---|---|---|---|

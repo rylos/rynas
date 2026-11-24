@@ -5303,6 +5303,8 @@ dict! { BLOB, LENS;
     "nev.syncthing.folder_recovered.title" => "Syncthing folder {folder} works again";
     "nev.syncthing.device_unseen.title" => "Device {device} has not connected for {days} days";
     "nev.syncthing.device_unseen.body" => "Syncthing has not seen {device} for {days} days: its changes do not reach the NAS.";
+    "nev.syncthing.devices_unseen.title" => "{count} devices have not connected for {days} days or more";
+    "nev.syncthing.devices_unseen.body" => "Syncthing has not seen these devices for {days} days or more: {devices}. Their changes do not reach the NAS.";
     "nev.syncthing.device_seen.title" => "Device {device} connected again";
     "nev.syncthing.down.title" => "Syncthing does not answer";
     "nev.syncthing.down.body" => "The app {stack} runs but its interface has not answered for {minutes} minutes: folders are not synchronized and rynas cannot see their state.";

@@ -1279,59 +1279,162 @@ fn all_shares(s: &Services, owner: &str) -> Res<Vec<Share>> {
     Ok(v)
 }
 
-/// Containers that mount `path` or something inside it (when Docker is installed);
-/// `running`: only the running ones that hold a copy of the mounts they started with (a
-/// bind with propagation `rslave`/`slave` follows the host's mounts instead: an unmount
-/// reaches it and an unlock shows up in it, so it is not counted).
-fn containers_using(path: &str, running: bool) -> Vec<String> {
+/// `docker inspect` objects of the containers (`running`: only the running ones); empty when
+/// Docker is not installed. One batch, else one by one: a container that went away between
+/// the listing and the inspection is skipped, never the whole answer.
+fn inspect_containers(running: bool) -> Result<Vec<Value>, String> {
     if !std::path::Path::new("/usr/bin/docker").exists() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let t = std::time::Duration::from_secs(10);
-    let Ok(ids) = rynas_tasks::Cmd::new("docker")
+    let ids = rynas_tasks::Cmd::new("docker")
         .args(if running { ["ps", "-q"] } else { ["ps", "-aq"] })
         .timeout(t)
         .run_blocking()
-    else {
-        return Vec::new();
-    };
+        .map_err(|e| e.to_string())?;
     let ids: Vec<&str> = ids.stdout.split_whitespace().collect();
     if ids.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let Ok(o) = rynas_tasks::Cmd::new("docker")
-        .arg("inspect")
-        .args(ids)
-        .timeout(t)
-        .run_blocking()
-    else {
-        return Vec::new();
+    let parse = |s: &str| match serde_json::from_str::<Value>(s) {
+        Ok(Value::Array(v)) => Ok(v),
+        _ => Err("docker inspect answered something unexpected".to_string()),
     };
-    users_in_inspect(&o.stdout, path, running)
+    if let Ok(o) = rynas_tasks::Cmd::new("docker").arg("inspect").args(ids.iter().copied()).timeout(t).run_blocking() {
+        return parse(&o.stdout);
+    }
+    let mut out = Vec::new();
+    for id in ids {
+        if let Ok(o) = rynas_tasks::Cmd::new("docker").args(["inspect", id]).timeout(t).run_blocking() {
+            out.extend(parse(&o.stdout)?);
+        }
+    }
+    Ok(out)
 }
 
-/// The containers of a `docker inspect` JSON array with a mount of `path` (or holding it, or
-/// inside it); `skip_followers`: binds with propagation `rslave`/`slave` do not count.
-fn users_in_inspect(json: &str, path: &str, skip_followers: bool) -> Vec<String> {
-    let Ok(Value::Array(list)) = serde_json::from_str::<Value>(json) else {
-        return Vec::new();
-    };
-    list.iter()
-        .filter_map(|c| {
-            let name = c.get("Name")?.as_str()?.trim_start_matches('/').to_string();
-            let mounts = c.get("Mounts")?.as_array()?;
-            mounts
-                .iter()
-                .any(|m| {
-                    let src = m.get("Source").and_then(Value::as_str).unwrap_or("");
-                    let prop = m.get("Propagation").and_then(Value::as_str).unwrap_or("");
-                    !src.is_empty()
-                        && (folders::is_within(src, path) || folders::is_within(path, src))
-                        && !(skip_followers && matches!(prop, "rslave" | "slave"))
+/// Containers that mount `path` or something inside it, or a folder holding it (when Docker
+/// is installed; a failure lists none: for the usages of a folder).
+fn containers_using(path: &str, running: bool) -> Vec<String> {
+    let list = inspect_containers(running).unwrap_or_default();
+    users_in_inspect(&list, path)
+}
+
+fn container_name(c: &Value) -> Option<String> {
+    Some(c.get("Name")?.as_str()?.trim_start_matches('/').to_string())
+}
+
+/// (source, propagation) of each mount of a container.
+fn mounts_of(c: &Value) -> Vec<(String, String)> {
+    c.get("Mounts")
+        .and_then(Value::as_array)
+        .map(|ms| {
+            ms.iter()
+                .map(|m| {
+                    let get = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+                    (get("Source"), get("Propagation"))
                 })
-                .then_some(name)
+                .filter(|(s, _)| !s.is_empty())
+                .collect()
         })
+        .unwrap_or_default()
+}
+
+/// The containers with a mount of `path`, inside it or holding it.
+fn users_in_inspect(list: &[Value], path: &str) -> Vec<String> {
+    list.iter()
+        .filter(|c| mounts_of(c).iter().any(|(src, _)| folders::is_within(src, path) || folders::is_within(path, src)))
+        .filter_map(container_name)
         .collect()
+}
+
+/// The running containers that would keep an encrypted folder's plaintext after its unmount.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Holders {
+    /// A private bind (`rprivate`, `private`...): a copy of the mount it started with, which
+    /// an unmount on the host does not reach. The lock is refused.
+    pub blocking: Vec<String>,
+    /// A bind with propagation `rslave`/`slave` of the folder itself or of a folder inside it:
+    /// it follows later mounts, but one made while the folder was mounted keeps that mount
+    /// after the host unmounts it. Stopped for the lock and started again: from then on it
+    /// follows the folder.
+    pub restart: Vec<String>,
+}
+
+/// [`Holders`] of `path` among `list` (`docker inspect` objects of running containers). A
+/// follower bind of a folder strictly holding `path` loses the mount with the host: no
+/// holder.
+fn holders_in_inspect(list: &[Value], path: &str) -> Holders {
+    let mut h = Holders::default();
+    for c in list {
+        let Some(name) = container_name(c) else { continue };
+        let (mut block, mut restart) = (false, false);
+        for (src, prop) in mounts_of(c) {
+            let inside = folders::is_within(&src, path);
+            let holding = folders::is_within(path, &src);
+            if !inside && !holding {
+                continue;
+            }
+            if !matches!(prop.as_str(), "rslave" | "slave") {
+                block = true;
+            } else if inside {
+                restart = true;
+            }
+        }
+        if block {
+            h.blocking.push(name);
+        } else if restart {
+            h.restart.push(name);
+        }
+    }
+    h
+}
+
+/// [`Holders`] of `path` among the running containers; `Err` when Docker cannot be asked.
+pub(crate) fn lock_holders(path: &str) -> Result<Holders, String> {
+    inspect_containers(true).map(|l| holders_in_inspect(&l, path))
+}
+
+/// Whether a `/proc/<pid>/mountinfo` text holds a mount whose source is `cipher` (the
+/// gocryptfs mount of an encrypted folder).
+fn mountinfo_holds(text: &str, cipher: &str) -> bool {
+    let unescape = |s: &str| s.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\");
+    text.lines().any(|l| {
+        let Some((_, right)) = l.split_once(" - ") else { return false };
+        let mut it = right.split(' ');
+        let (fstype, source) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
+        fstype.starts_with("fuse") && unescape(source) == cipher
+    })
+}
+
+/// The running containers whose mount namespace still holds the gocryptfs mount of `cipher`
+/// (from `/proc/<State.Pid>/mountinfo`), after an unmount; `Err` when Docker cannot be asked.
+pub(crate) fn mount_holders(cipher: &str) -> Result<Vec<String>, String> {
+    Ok(holders_by_mountinfo(&inspect_containers(true)?, cipher, &|pid| std::fs::read_to_string(format!("/proc/{pid}/mountinfo")).ok()))
+}
+
+fn holders_by_mountinfo(list: &[Value], cipher: &str, read: &dyn Fn(u64) -> Option<String>) -> Vec<String> {
+    list.iter()
+        .filter(|c| {
+            let pid = c.pointer("/State/Pid").and_then(Value::as_u64).unwrap_or(0);
+            // a container that stopped meanwhile holds nothing
+            pid > 0 && read(pid).is_some_and(|t| mountinfo_holds(&t, cipher))
+        })
+        .filter_map(container_name)
+        .collect()
+}
+
+/// `docker stop` / `docker start` of a container around a lock, logged.
+pub(crate) fn docker_cmd(action: &str, name: &str) -> Result<(), String> {
+    tracing::info!("encrypted folder lock: docker {action} {name}");
+    rynas_tasks::Cmd::new("docker")
+        .args([action, name])
+        .timeout(std::time::Duration::from_secs(60))
+        .run_blocking()
+        .map(|_| ())
+        .map_err(|e| {
+            tracing::warn!("encrypted folder lock: docker {action} {name}: {e}");
+            e.to_string()
+        })
 }
 
 /// What else uses `path`; `share` is deleted with it (its own jobs go too).
@@ -1840,29 +1943,53 @@ fn user_groups(s: &Services, owner: &str, name: &str) -> Res<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::users_in_inspect;
+    use super::*;
 
-    fn inspect(name: &str, source: &str, propagation: &str) -> serde_json::Value {
-        serde_json::json!({ "Name": format!("/{name}"), "Mounts": [
+    fn inspect(name: &str, source: &str, propagation: &str, pid: u64) -> Value {
+        serde_json::json!({ "Name": format!("/{name}"), "State": { "Pid": pid }, "Mounts": [
             { "Type": "bind", "Source": "/vol1/docker/stacks/x/config", "Destination": "/config", "Propagation": "rprivate" },
             { "Type": "bind", "Source": source, "Destination": "/shares/secret", "Propagation": propagation }
         ]})
     }
 
+    fn list() -> Vec<Value> {
+        vec![
+            inspect("private", "/vol1/secret", "rprivate", 11),
+            inspect("follows", "/vol1/secret", "rslave", 12),
+            inspect("slave-sub", "/vol1/secret/sub", "slave", 13),
+            inspect("parent-follows", "/vol1", "rslave", 14),
+            inspect("parent-private", "/vol1", "rprivate", 15),
+            inspect("elsewhere", "/vol1/other", "rprivate", 16),
+        ]
+    }
+
     #[test]
-    fn lock_holders_skip_binds_that_follow_the_host() {
-        let all = serde_json::json!([
-            inspect("private", "/vol1/secret", "rprivate"),
-            inspect("follows", "/vol1/secret", "rslave"),
-            inspect("slave", "/vol1/secret/sub", "slave"),
-            inspect("volume-root", "/vol1", "rprivate"),
-            inspect("elsewhere", "/vol1/other", "rprivate"),
-        ])
-        .to_string();
-        // the lock: a private copy blocks it, a follower does not
-        assert_eq!(users_in_inspect(&all, "/vol1/secret", true), ["private", "volume-root"]);
-        // a share deletion counts every container that mounts it
-        assert_eq!(users_in_inspect(&all, "/vol1/secret", false), ["private", "follows", "slave", "volume-root"]);
-        assert!(users_in_inspect("not json", "/vol1/secret", true).is_empty());
+    fn lock_holders_by_propagation() {
+        let h = holders_in_inspect(&list(), "/vol1/secret");
+        // a private copy blocks; a follower of the folder itself or inside it is restarted
+        // around the lock (a bind made while mounted keeps the mount); a follower of a folder
+        // holding it loses the mount with the host
+        assert_eq!(h.blocking, ["private", "parent-private"]);
+        assert_eq!(h.restart, ["follows", "slave-sub"]);
+        // the usages of a folder count every container that mounts it
+        assert_eq!(users_in_inspect(&list(), "/vol1/secret"), ["private", "follows", "slave-sub", "parent-follows", "parent-private"]);
+    }
+
+    #[test]
+    fn mountinfo_backstop() {
+        let held = "36 25 0:32 / /config rw,relatime - ext4 /dev/sda1 rw\n\
+                    41 36 0:45 / /shares/secret rw,nosuid,nodev,relatime shared:5 master:3 - fuse.gocryptfs /vol1/.rynas-crypt/secret rw,user_id=0\n";
+        let gone = "36 25 0:32 / /config rw,relatime - ext4 /dev/sda1 rw\n41 36 0:44 / /shares/secret ro - btrfs /dev/md2 rw\n";
+        let spaced = "41 36 0:45 /sub /shares/x rw - fuse.gocryptfs /vol1/.rynas-crypt/my\\040docs rw\n";
+        assert!(mountinfo_holds(held, "/vol1/.rynas-crypt/secret"));
+        assert!(!mountinfo_holds(gone, "/vol1/.rynas-crypt/secret"));
+        assert!(!mountinfo_holds(held, "/vol1/.rynas-crypt/secret2"));
+        assert!(mountinfo_holds(spaced, "/vol1/.rynas-crypt/my docs"));
+        let read = |pid: u64| match pid {
+            12 => Some(held.to_string()),
+            13 => None,
+            _ => Some(gone.to_string()),
+        };
+        assert_eq!(holders_by_mountinfo(&list(), "/vol1/.rynas-crypt/secret", &read), ["follows"]);
     }
 }
