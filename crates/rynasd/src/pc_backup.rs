@@ -3695,6 +3695,24 @@ impl PcBackup {
         self.reg.lock().unwrap().targets.iter().map(|(d, t)| (d.clone(), t.description.clone())).collect()
     }
 
+    /// Deletes one snapshot of `device`'s folder for Storage > Space, with the rules of the
+    /// manual delete (never the parent of the next incremental, never while receiving).
+    /// Blocking: call from a thread of its own, never from the async runtime.
+    pub fn delete_for_space(&self, device: &str, name: &str) -> Result<(), String> {
+        let _g = self.change.blocking_lock();
+        let t = self.stored(device).map_err(|e| e.2)?;
+        snapshot_path(&t, name).map_err(|e| e.2)?;
+        let root = Path::new(&t.path);
+        let lock = self.host.lock(root)?.ok_or("a receive is running: try again when it ends")?;
+        let (_, entries, _) = self.host.scan(root)?.ok_or("the folder is gone")?;
+        if let Some(e) = manual_delete_refusal(&entries, name, device, false) {
+            return Err(e.2);
+        }
+        self.host.delete_snapshot(&lock, name)?;
+        audit("space", "delete_snapshot", &format!("{device}/{name}"));
+        Ok(())
+    }
+
     /// Every folder of received snapshots: (device, path). Read from the registry only (no
     /// disk access): the file manager shows them to administrators (`@backups/<device>`).
     pub fn snapshot_folders(&self) -> Vec<(String, String)> {

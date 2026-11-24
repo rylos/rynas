@@ -17,7 +17,8 @@
 //!   [`send_stream`]: the guard in front of `btrfs receive` for `rynas-agent`'s streams;
 //! - [`sysvol`]: the system volume's folder (D-ROOTVOL), the top-level subvolume
 //!   `@rynas-system` mounted on `/srv/rynas/system` on a btrfs root;
-//! - [`domain`]: the `snapshots` configuration domain.
+//! - [`domain`]: the `snapshots` configuration domain;
+//! - [`extents`]: what removing a set of snapshots gives back (a `FIEMAP` walk, Space).
 //!
 //! Ported in part from btrbk-nas (MIT, same author): `snapshot.rs`, `btrfs.rs`, `browse.rs`.
 //! No qgroups: nothing here enables or reads quotas.
@@ -26,6 +27,7 @@ pub mod browse;
 pub mod btrbk;
 pub mod btrbk_ssh;
 pub mod domain;
+pub mod extents;
 pub mod ioctl;
 pub mod name;
 pub mod readahead;

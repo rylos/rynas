@@ -1088,6 +1088,9 @@ schema 2 added the `code` and `body_format` columns.
 | `pcbackup.receive_failed` / `pcbackup.receive_stuck` / `pcbackup.receive_ok` | `device`, `subject` (snapshot) | A backup from {device} was interrupted / has been running for over a day / is received normally again (§11.8) |
 | `pcbackup.low_space` / `pcbackup.space_ok` | `device`, `free_gib`, `needed_gib` | Little space left for the backups of {device}: less than the recent backups plus the receive reserve, the next one would be refused (error) / enough again (§11.8) |
 | `pcbackup.space_tight` / `pcbackup.space_ok` | `device`, `free_gib`, `needed_gib` | Not enough space for a new full copy of {device}: incremental backups go on (warning) / enough again |
+| `space.low_free` / `space.free_ok` | `volume`, `free_pct`, `free` | Little free space on {volume} (below the low limit, 10 %; resolved at the recovery limit, 15 %), with a link to Storage › Space |
+| `space.snapshots_growth` | `volume`, `grown`, `top` | Snapshots on {volume} grew by {grown} in a week (weekly, above 50 GiB or 25 %), the largest sources |
+| `space.auto_freed` | `volume`, `count`, `snapshots` | Old snapshots removed on {volume} by the opt-in automatic cleanup |
 | `synodeb.<event>` | the forward's parameters | the forward's title; events and parameters in `../synodeb-integration.md` S1 |
 
 Not coded: the target test message (built in the target's language already) and events from
@@ -1808,6 +1811,24 @@ Containers are restarted through `POST /api/v1/docker/containers/{id}/restart`. 
 asks every 2 s while the page is visible (a written exception to S1, see D-PROCESSES). The
 unit gains `CAP_KILL`, `CAP_SYS_NICE` and `CAP_SYS_PTRACE` (read only: the I/O counters and
 listening ports of every user's processes; Marco 2026-11-11).
+
+## API v1: space (D-SPACE)
+Module `rynasd::space`, types in `rynas_api_types::space`, design in `../phase2/space.md`.
+Administrators only (checked in rynasd too). Previews and deletions are tasks; every deletion
+discovers again first and refuses protected snapshots.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/v1/space` | — | `SpaceOverview` {volumes: [`VolumeSpace` {volume, mount, total_bytes, used_bytes, free_bytes, categories: [`CategoryUsage`], sources: [`SnapshotSource`], reclaimable_bytes, scanned_at_ms?, scan_s, auto_free, low_free, btrfs}], safe_actions: [`SafeAction`], review: [`ReviewItem`], scanning, scanned_at_ms?} (cached scan + live totals) |
+| POST | `/api/v1/space/scan?volume=` | — | 202 `space.scan`; 404 unknown volume; 409 `busy` |
+| POST | `/api/v1/space/preview` | `SpacePreviewRequest` {paths} | 202 `space.preview` |
+| GET | `/api/v1/space/previews/{task_id}` | — | `SpacePreview` {paths, refused: [{path, protected?}], freed_bytes?, freed_at_least_bytes?, method none\|qgroup\|extent_walk, done, error?} |
+| POST | `/api/v1/space/delete` | `SpaceDeleteRequest` {paths, confirm = number of paths} | 202 `space.delete` (nothing deleted when one path is protected); 400 `confirmation_required` |
+| POST | `/api/v1/space/actions/{kind}` | — | 202 `space.action`; 404 unknown kind |
+| POST | `/api/v1/space/review/delete` | `ReviewDeleteRequest` {ids, confirm} | 202 `space.review-delete` |
+| GET | `/api/v1/space/pins` | — | `PinnedSnapshots` {paths} |
+| POST | `/api/v1/space/pin` · `/api/v1/space/unpin` | `PinRequest` {path} | 204; 400 `invalid_value` field `path` |
+| GET · PUT | `/api/v1/space/settings` | `SpaceSettings` | effective settings; PUT stages key `space` (apply with `keys: ["space"]`) |
 
 ## API v1: interface preferences (sidebar layout, issue #11)
 Module `rynasd::ui_prefs`, types and rules in `rynas_api_types::ui_prefs`. Preferences of the

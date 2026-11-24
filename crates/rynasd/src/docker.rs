@@ -638,7 +638,7 @@ impl DockerSvc {
     }
 
     /// Runs `f` on the engine; a connection failure drops the cached client.
-    async fn call<T, F, Fut>(&self, f: F) -> Res<T>
+    pub(crate) async fn call<T, F, Fut>(&self, f: F) -> Res<T>
     where
         F: FnOnce(Engine) -> Fut,
         Fut: std::future::Future<Output = Result<T, DockerError>>,
@@ -1755,7 +1755,7 @@ async fn stack_image_refs(s: &Arc<DockerSvc>, cs: Vec<Seen>) -> Res<Vec<String>>
 }
 
 /// The images [`updates::removable_images`] finds now.
-async fn removable_now(s: &Arc<DockerSvc>) -> Res<Vec<ImageSummary>> {
+pub(crate) async fn removable_now(s: &Arc<DockerSvc>) -> Res<Vec<ImageSummary>> {
     let images = s.call(|e| async move { e.images().await }).await?;
     let cs = s.containers().await?;
     let used: BTreeSet<String> = cs.iter().map(|x| x.c.image_id.clone()).collect();
@@ -1847,8 +1847,16 @@ async fn disk_usage(State(st): State<DkState>) -> Res<Json<DockerDiskUsage>> {
 /// What rynas keeps of `docker system df`: the totals and the volume sizes (the full
 /// answer, with every image and container, is dropped at once).
 pub(crate) struct DfCache {
-    usage: DockerDiskUsage,
-    volumes: HashMap<String, (i64, i64)>,
+    pub(crate) usage: DockerDiskUsage,
+    pub(crate) volumes: HashMap<String, (i64, i64)>,
+}
+
+/// Volumes no container (running or stopped) uses, by the engine's disk usage (Storage >
+/// Space lists them for review; `docker volume rm` refuses one taken into use meanwhile).
+pub(crate) async fn unused_volume_names(s: &Arc<DockerSvc>) -> Res<Vec<String>> {
+    let df = s.df().await?;
+    let vols = s.call(move |e| async move { e.volumes(Some(&df.volumes)).await }).await?;
+    Ok(vols.into_iter().filter(|v| v.in_use == Some(0)).map(|v| v.name).collect())
 }
 
 impl DockerSvc {
@@ -2672,7 +2680,7 @@ pub(crate) async fn pre_snapshot(
     let log = ctx.clone();
     let snap = tokio::task::spawn_blocking(move || {
         let snap = snapshots::take(&root, &l2, &n2, &r2, images, rynas_docker::now_s())?;
-        for id in snapshots::prune(&root, &l2, &n2, keep as usize, &|m| log.log(m)) {
+        for id in snapshots::prune(&root, &l2, &n2, keep as usize, &|p, _| crate::space::pins::is_pinned(p), &|m| log.log(m)) {
             log.log(&format!("old snapshot {id} deleted (keep {keep})"));
         }
         Ok::<_, String>(snap)
@@ -2718,17 +2726,24 @@ pub(crate) async fn do_rollback(
             l.stack(name)
         ));
     } else {
-        let (root, l2, n2, i2, log) = (
+        let (root, l2, n2, i2, log, keep) = (
             s.root.clone(),
             l.clone(),
             name.to_string(),
             id.to_string(),
             ctx.clone(),
+            s.settings().keep_snapshots,
         );
         tokio::task::spawn_blocking(move || {
-            snapshots::rollback(&root, &l2, &n2, &i2, now, rynas_docker::now_s(), &|m| {
+            let before = snapshots::rollback(&root, &l2, &n2, &i2, now, rynas_docker::now_s(), &|m| {
                 log.log(m)
-            })
+            })?;
+            // the retention applies to the "before rollback" snapshot too: never that one nor
+            // the snapshot just gone back to
+            for id in snapshots::prune(&root, &l2, &n2, keep as usize, &|p, id| id == before.id || id == i2 || crate::space::pins::is_pinned(p), &|m| log.log(m)) {
+                log.log(&format!("old snapshot {id} deleted (keep {keep})"));
+            }
+            Ok::<_, String>(())
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -3002,9 +3017,14 @@ async fn snapshot_take(
     let _busy = s.take_busy(&name)?;
     audit(&who, "stack.snapshot", &name);
     let images = current_images(&s, &name).await;
-    let (root, n2) = (s.root.clone(), name.clone());
+    let (root, n2, keep) = (s.root.clone(), name.clone(), s.settings().keep_snapshots);
     let snap = tokio::task::spawn_blocking(move || {
-        snapshots::take(&root, &l, &n2, "manual", images, rynas_docker::now_s())
+        let snap = snapshots::take(&root, &l, &n2, "manual", images, rynas_docker::now_s())?;
+        // the retention applies to manual snapshots too (never the one just taken: the newest)
+        for id in snapshots::prune(&root, &l, &n2, keep as usize, &|p, id| id == snap.id || crate::space::pins::is_pinned(p), &|_| {}) {
+            tracing::info!("stack {n2}: old snapshot {id} deleted (keep {keep})");
+        }
+        Ok::<_, String>(snap)
     })
     .await
     .map_err(Error::internal)?

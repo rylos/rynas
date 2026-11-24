@@ -52,6 +52,7 @@ pub mod scheduler_live;
 pub mod server;
 pub mod services;
 pub mod snapshots;
+pub mod space;
 pub mod storage_ops;
 pub mod ssh;
 pub mod syncthing;

@@ -152,17 +152,22 @@ pub fn delete(
     Ok(())
 }
 
-/// Deletes the oldest snapshots beyond `keep`; the ids deleted.
+/// Deletes the oldest snapshots beyond `keep`; the ids deleted. `kept(path, id)` names
+/// snapshots never deleted (pinned ones, the one a rollback just went back to); they do not
+/// count against `keep`. The newest snapshot always stays (`keep` is at least 1).
 pub fn prune(
     root: &Path,
     layout: &Layout,
     stack: &str,
     keep: usize,
+    kept: &dyn Fn(&Path, &str) -> bool,
     log: &dyn Fn(&str),
 ) -> Vec<String> {
+    let dir = snap_dir(root, layout, stack);
     list(root, layout, stack)
         .into_iter()
-        .skip(keep)
+        .filter(|s| !kept(&dir.join(&s.id), &s.id))
+        .skip(keep.max(1))
         .filter_map(|s| delete(root, layout, stack, &s.id, log).ok().map(|_| s.id))
         .collect()
 }
@@ -311,10 +316,15 @@ mod tests {
         assert_eq!(v[0].reason, "update");
         assert_eq!(v[0].images.len(), 1);
         assert_eq!(v[1].reason, "manual");
+        // a pinned snapshot stays and does not count against keep
+        let pinned = dir.join("20261101T100000");
         assert_eq!(
-            prune(d.path(), &l, "app", 1, &|_| {}),
-            ["20261102T100000", "20261101T100000"]
+            prune(d.path(), &l, "app", 1, &|p, _| p == pinned, &|_| {}),
+            ["20261102T100000"]
         );
+        assert_eq!(list(d.path(), &l, "app").len(), 2);
+        // keep 0 still keeps the newest
+        assert_eq!(prune(d.path(), &l, "app", 0, &|_, _| false, &|_| {}), ["20261101T100000"]);
         assert_eq!(list(d.path(), &l, "app").len(), 1);
         assert!(delete(d.path(), &l, "app", "../x", &|_| {}).is_err());
         assert!(delete(d.path(), &l, "app", "20200101T000000", &|_| {}).is_err());

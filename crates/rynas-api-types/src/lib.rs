@@ -26,6 +26,7 @@ pub mod replication;
 pub mod scheduler;
 mod services;
 pub mod snapshots;
+pub mod space;
 pub mod ssh;
 pub mod syncthing;
 pub mod storage;

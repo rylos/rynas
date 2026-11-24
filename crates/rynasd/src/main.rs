@@ -358,6 +358,7 @@ fn open_config(
             https: args.web_https,
         }),
         Arc::new(rynas_updates::AutoDomain),
+        Arc::new(rynasd::space::domain::SpaceDomain),
         Arc::new(rynas_updates::KernelDomain {
             module_kernels: modules.kernel_channel().is_some(),
         }),
@@ -1519,6 +1520,26 @@ fn main() -> std::io::Result<()> {
                 }
                 Err(e) => tracing::error!("mobile devices: {e}"),
             }
+        }
+        // Storage > Space: what takes room, the guardrails, pinned snapshots
+        {
+            let env = Arc::new(rynasd::space::HostEnv {
+                dry: args.dry_system,
+                root: if args.dry_system { config_root(&args) } else { PathBuf::from("/") },
+                shares: state.services.as_ref().map(|s| s.shares.clone()),
+            });
+            let space = rynasd::space::Space::new(
+                ops.clone(),
+                notifier.clone(),
+                env,
+                args.state_dir.clone(),
+                cache.join("thumbs"),
+                args.state_dir.join("catalog"),
+                rynasd::space::pins::install(&args.state_dir),
+            )
+            .with(state.docker.clone(), state.pc_backup.clone());
+            rynasd::space::spawn_loop(space.clone());
+            state.space = Some(space);
         }
         state.ops = Some(ops);
         // arrays of rynas volumes left inactive after boot by a missing drive

@@ -116,6 +116,61 @@ pub fn cleanup(
     Ok(stats)
 }
 
+/// What a bin holds, read only: every item, and those a cleanup with `days` would remove
+/// now (`days` 0: none). Same walk rules as [`cleanup`] (descriptors, links never followed).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BinUsage {
+    pub total_bytes: u64,
+    pub old_bytes: u64,
+    pub old_items: u64,
+}
+
+fn tally(dir: &mut Dir, cutoff_s: Option<i64>, u: &mut BinUsage, stop: &dyn Fn() -> bool) -> Result<(), String> {
+    let names: Vec<CString> = dir
+        .iter()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_owned())
+        .filter(|n| n.as_bytes() != b"." && n.as_bytes() != b"..")
+        .collect();
+    for name in names {
+        if stop() {
+            return Err("stopped".into());
+        }
+        let Ok(st) = fstatat(dir.as_fd(), name.as_c_str(), AtFlags::AT_SYMLINK_NOFOLLOW) else { continue };
+        let bytes = st.st_blocks as u64 * 512;
+        u.total_bytes += bytes;
+        if SFlag::from_bits_truncate(st.st_mode) & SFlag::S_IFMT == SFlag::S_IFDIR {
+            if let Ok(mut sub) = open_dir_at(dir.as_fd(), &name) {
+                tally(&mut sub, cutoff_s, u, stop)?;
+            }
+        } else if cutoff_s.is_some_and(|c| st.st_ctime < c) {
+            u.old_bytes += bytes;
+            u.old_items += 1;
+        }
+    }
+    Ok(())
+}
+
+/// [`BinUsage`] of `<share_path>/#recycle` (an empty answer without a bin).
+pub fn usage(share_path: &str, days: u32, now_s: i64, stop: &dyn Fn() -> bool) -> Result<BinUsage, String> {
+    let mut u = BinUsage::default();
+    let root = CString::new(share_path).map_err(|_| "invalid path".to_string())?;
+    let share = match Dir::open(root.as_c_str(), OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC, Mode::empty()) {
+        Ok(d) => d,
+        Err(nix::errno::Errno::ENOENT) => return Ok(u),
+        Err(e) => return Err(format!("{share_path}: {e}")),
+    };
+    let bin = CString::new(RECYCLE_DIR).expect("no NUL");
+    let mut dir = match open_dir_at(share.as_fd(), &bin) {
+        Ok(d) => d,
+        Err(nix::errno::Errno::ENOENT) => return Ok(u),
+        Err(e) => return Err(format!("{share_path}/{RECYCLE_DIR}: {e}")),
+    };
+    let cutoff = (days > 0).then(|| now_s - i64::from(days) * 86_400);
+    tally(&mut dir, cutoff, &mut u, stop)?;
+    Ok(u)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +213,28 @@ mod tests {
             cleanup(share.to_str().unwrap(), 30, now, &|| false).unwrap(),
             CleanupStats::default()
         );
+    }
+
+    #[test]
+    fn usage_reads_without_removing() {
+        let d = tempfile::tempdir().unwrap();
+        let share = d.path().join("share");
+        let bin = share.join(RECYCLE_DIR);
+        std::fs::create_dir_all(bin.join("docs")).unwrap();
+        std::fs::write(bin.join("docs/a.txt"), vec![0u8; 8192]).unwrap();
+        std::fs::write(bin.join("b.txt"), "bb").unwrap();
+        let now = (rynas_tasks::now_ms() / 1000) as i64;
+        let p = share.to_str().unwrap();
+        let fresh = usage(p, 30, now, &|| false).unwrap();
+        assert!(fresh.total_bytes > 0);
+        assert_eq!((fresh.old_bytes, fresh.old_items), (0, 0));
+        let later = usage(p, 30, now + 31 * 86_400, &|| false).unwrap();
+        assert_eq!(later.old_items, 2);
+        assert!(later.old_bytes > 0 && later.old_bytes <= later.total_bytes);
+        // retention 0 keeps everything
+        assert_eq!(usage(p, 0, now + 365 * 86_400, &|| false).unwrap().old_items, 0);
+        assert!(bin.join("docs/a.txt").exists(), "nothing removed");
+        // no bin, no share
+        assert_eq!(usage(d.path().join("none").to_str().unwrap(), 30, now, &|| false).unwrap(), BinUsage::default());
     }
 }
