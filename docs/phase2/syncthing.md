@@ -1,6 +1,7 @@
 # Syncthing integrated (S1)
 
-Status: design, 2026-11-24; S1a, S1b and S1c implemented the same day. Item S1 of
+Status: design, 2026-11-24; S1a to S1d implemented the same day (S1d still to verify on a test
+machine, below). Item S1 of
 `dsm-migration-gaps.md` (round 2).
 
 A NAS leaving a cloud-drive style service keeps PCs and phones in sync with Syncthing. rynas runs
@@ -131,7 +132,7 @@ API: `GET /v1/syncthing` (`SyncthingState`), `POST /v1/syncthing/folders/{id}/pa
 | S1a | catalogue entry with `/shares/<share>` mounts (list setting, rslave for encrypted shares), `STGUIAPIKEY`, adoption preview and task. Done 2026-11-24: entry 2.0.0 (`[share_set]`, migration from the single `/data` share), API in `../phase1/plan.md` "API v1: Syncthing adoption (S1a)"; the wizard picks the shares, adoption is API only for now |
 | S1b | rynasd client and event loop, `GET /v1/syncthing`, page. Done 2026-11-24: API and loop in `../phase1/plan.md` "API v1: Syncthing state (S1b)"; the page has the adoption dialog (candidates, a copied folder with typed volume lines, preview, user, stop and `.stignore` choices, task). Deviations: device stats also at every full read; a full read after any connection error too (a restart drops the long poll, and its new ids would never pass the old `since`); several installed stacks of the entry are supported (`?stack=`), the first by name is the default |
 | S1c | notifications and settings. Done 2026-11-24: codes in `../phase1/plan.md` "Event codes" (category `app`, source `syncthing`), evaluated every 30 s from the model; added `syncthing.device_seen` (quiet resolution), `syncthing.up` and `syncthing.folder_kept_paused` (S1d). The settings are in `<state>/syncthing/state.json`, not a configuration key: they render nothing and need no apply |
-| S1d | lock/unlock integration: pause before lock, resume after unlock and after the automatic unlock at boot; `containers_using` accepts an rslave bind of a share that follows the host |
+| S1d | lock/unlock integration: pause before lock, resume after unlock and after the automatic unlock at boot; `containers_using` accepts an rslave bind of a share that follows the host. Done 2026-11-24 (tests with a fake REST server and `docker inspect` JSON): the lock finds the share, refuses it while a running container holds a private copy (`rprivate`/`private`; `rslave`/`slave` binds do not count, nor are they listed for a restart after the unlock), then pauses the folders inside it that run (remembered first, per stack, in `<state>/syncthing/state.json`), waits until none scans or syncs, and locks; at most 20 s in all (not 30: the lock answers within the interface's 30 s request timeout), a silent Syncthing is skipped with a warning. The manual unlock and the automatic one (boot unit and rynasd start) resume, in the background, the remembered folders whose marker file is there; a missing marker leaves the folder paused with `syncthing.folder_kept_paused`. Every full read pauses the running folders of a locked share and resumes remembered ones of an unlocked share (Syncthing may start before the boot unlock, or rynasd may not watch it yet); a remembered folder found running (the user resumed it) is forgotten; a folder the user paused is never resumed |
 
 To verify on a test machine before S1d is called done: an rslave bind sees a gocryptfs mount made
 later on the host and loses it on unmount.

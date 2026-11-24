@@ -360,6 +360,7 @@ pub(super) async fn unlock(
         }
         audit(&w, "unlock", &sh.path);
         after_change(s, &sh, true);
+        crate::syncthing::live::after_unlock(&sh.path);
         // running containers that mount it were started while it was locked: they keep the
         // empty folder until they are restarted
         let containers = super::containers_using(&sh.path, true);
@@ -373,20 +374,32 @@ pub(super) async fn unlock(
     }
 }
 
+/// Running containers holding their own copy of the mount of `path` (a bind that does not
+/// follow the host's mounts): an unmount would succeed here while the plaintext stays
+/// readable in them.
+fn holders(path: &str) -> Res<()> {
+    let users = super::containers_using(path, true);
+    if users.is_empty() {
+        return Ok(());
+    }
+    Err(crypt_error(CryptError::Busy(format!("running containers use it: {}; stop them first", users.join(", ")))))
+}
+
 pub(super) async fn lock(State(st): State<SvcState>, h: HeaderMap, Path(name): Path<String>) -> Res<Json<ShareView>> {
     let (s, who) = (svc(&st)?, user(&h)?);
     s.ops.admins.require_admin(&who, "encrypted folders")?;
+    let (w, n) = (who.clone(), name.clone());
+    let path = blocking(&s, move |s| {
+        let sh = applied_share(s, &w, &n)?;
+        holders(&sh.path)?;
+        Ok(sh.path)
+    })
+    .await?;
+    // Syncthing folders inside it are paused (and resumed after the unlock) and left idle
+    crate::syncthing::live::before_lock(&path).await;
     let v = blocking(&s, move |s| {
         let sh = applied_share(s, &who, &name)?;
-        // a running container holds its own (rprivate) copy of the mount: the unmount would
-        // succeed here while the plaintext stays readable in the container
-        let users = super::containers_using(&sh.path, true);
-        if !users.is_empty() {
-            return Err(crypt_error(CryptError::Busy(format!(
-                "running containers use it: {}; stop them first",
-                users.join(", ")
-            ))));
-        }
+        holders(&sh.path)?;
         let sys = s.ops.config.system();
         // Samba keeps files of its clients open: their connections to this share end first
         if sh.smb.enabled && unit_running(s, SMBD) {
@@ -490,6 +503,8 @@ fn unlock_sealed(s: &Arc<Services>) -> Vec<String> {
             Ok(()) => {
                 tracing::info!(target: "rynas::audit", "encrypted folder {} unlocked at start", sh.path);
                 after_change(s, sh, true);
+                // at boot the integration may not run yet: its first full read does it
+                crate::syncthing::live::after_unlock(&sh.path);
                 done.push(sh.path.clone());
             }
             Err(e) => {

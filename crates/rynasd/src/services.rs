@@ -1280,7 +1280,9 @@ fn all_shares(s: &Services, owner: &str) -> Res<Vec<Share>> {
 }
 
 /// Containers that mount `path` or something inside it (when Docker is installed);
-/// `running`: only the running ones (they hold a copy of the mounts they started with).
+/// `running`: only the running ones that hold a copy of the mounts they started with (a
+/// bind with propagation `rslave`/`slave` follows the host's mounts instead: an unmount
+/// reaches it and an unlock shows up in it, so it is not counted).
 fn containers_using(path: &str, running: bool) -> Vec<String> {
     if !std::path::Path::new("/usr/bin/docker").exists() {
         return Vec::new();
@@ -1298,19 +1300,35 @@ fn containers_using(path: &str, running: bool) -> Vec<String> {
         return Vec::new();
     }
     let Ok(o) = rynas_tasks::Cmd::new("docker")
-        .args(["inspect", "-f", "{{.Name}}{{range .Mounts}} {{.Source}}{{end}}"])
+        .arg("inspect")
         .args(ids)
         .timeout(t)
         .run_blocking()
     else {
         return Vec::new();
     };
-    o.stdout
-        .lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let name = it.next()?.trim_start_matches('/').to_string();
-            it.any(|src| folders::is_within(src, path) || folders::is_within(path, src))
+    users_in_inspect(&o.stdout, path, running)
+}
+
+/// The containers of a `docker inspect` JSON array with a mount of `path` (or holding it, or
+/// inside it); `skip_followers`: binds with propagation `rslave`/`slave` do not count.
+fn users_in_inspect(json: &str, path: &str, skip_followers: bool) -> Vec<String> {
+    let Ok(Value::Array(list)) = serde_json::from_str::<Value>(json) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|c| {
+            let name = c.get("Name")?.as_str()?.trim_start_matches('/').to_string();
+            let mounts = c.get("Mounts")?.as_array()?;
+            mounts
+                .iter()
+                .any(|m| {
+                    let src = m.get("Source").and_then(Value::as_str).unwrap_or("");
+                    let prop = m.get("Propagation").and_then(Value::as_str).unwrap_or("");
+                    !src.is_empty()
+                        && (folders::is_within(src, path) || folders::is_within(path, src))
+                        && !(skip_followers && matches!(prop, "rslave" | "slave"))
+                })
                 .then_some(name)
         })
         .collect()
@@ -1818,4 +1836,33 @@ fn user_groups(s: &Services, owner: &str, name: &str) -> Res<Vec<String>> {
         }
     }
     Ok(g.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::users_in_inspect;
+
+    fn inspect(name: &str, source: &str, propagation: &str) -> serde_json::Value {
+        serde_json::json!({ "Name": format!("/{name}"), "Mounts": [
+            { "Type": "bind", "Source": "/vol1/docker/stacks/x/config", "Destination": "/config", "Propagation": "rprivate" },
+            { "Type": "bind", "Source": source, "Destination": "/shares/secret", "Propagation": propagation }
+        ]})
+    }
+
+    #[test]
+    fn lock_holders_skip_binds_that_follow_the_host() {
+        let all = serde_json::json!([
+            inspect("private", "/vol1/secret", "rprivate"),
+            inspect("follows", "/vol1/secret", "rslave"),
+            inspect("slave", "/vol1/secret/sub", "slave"),
+            inspect("volume-root", "/vol1", "rprivate"),
+            inspect("elsewhere", "/vol1/other", "rprivate"),
+        ])
+        .to_string();
+        // the lock: a private copy blocks it, a follower does not
+        assert_eq!(users_in_inspect(&all, "/vol1/secret", true), ["private", "volume-root"]);
+        // a share deletion counts every container that mounts it
+        assert_eq!(users_in_inspect(&all, "/vol1/secret", false), ["private", "follows", "slave", "volume-root"]);
+        assert!(users_in_inspect("not json", "/vol1/secret", true).is_empty());
+    }
 }

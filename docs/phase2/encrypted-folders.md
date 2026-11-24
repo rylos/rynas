@@ -137,7 +137,12 @@ systemd-run --unit=rynas-crypt-<place>-<name> --service-type=forking --quiet
   copy of the FUSE mount, so the host unmount would succeed while gocryptfs keeps serving
   the container. Then Samba connections to the share are closed (`smbcontrol smbd
   close-share`) and `umount <mount point>` runs outside the sandbox (`Outside`, never lazy);
-  a busy folder is refused. gocryptfs exits by itself once the last copy of its mount is
+  a busy folder is refused. A bind with propagation `rslave`/`slave` (`Mounts[].Propagation`
+  of `docker inspect`; the share set of a catalogue app sets it for encrypted shares) is no
+  copy: it follows the host's mount, the unmount reaches it, so it does not block the lock and
+  is not listed for a restart after the unlock. Before the unmount, the folders of the
+  installed Syncthing app inside the share are paused (`syncthing.md` §2 decision 6)
+  and resumed after the unlock. gocryptfs exits by itself once the last copy of its mount is
   gone: rynas waits up to 5 s for the unit to end, and a unit still running is an error
   ("still in use", state `in_use`), never a lock. A later lock (or the end of that other
   copy) finishes it. Stopping the unit is not used to lock: gocryptfs falls back to a lazy
@@ -217,7 +222,7 @@ whether that version is supported (2.5 or newer) and whether a TPM2 is usable.
 | POST | `/api/v1/crypt/folders/{volume}/{name}/reveal-recovery-key` | — | `RecoveryKey`, once within the hour, to its creator |
 | POST | `/api/v1/crypt/folders/{volume}/{name}/recovery-key` | `CryptRecoveryKeyRequest {password}` | `RecoveryKey`; 400 `crypt_wrong_password` |
 | POST | `/api/v1/shares/{share}/unlock` | `CryptUnlockRequest {password}` | `CryptUnlockResponse {share, containers}`; 400 `crypt_wrong_password`; 409 `crypt_busy` (`in_use` with containers) |
-| POST | `/api/v1/shares/{share}/lock` | — | `ShareView`; 409 `crypt_busy` (open files, running containers, still served elsewhere) |
+| POST | `/api/v1/shares/{share}/lock` | — | `ShareView`; 409 `crypt_busy` (open files, running containers with a private copy of the mount, still served elsewhere). Folders of the Syncthing app inside the share are paused first (at most 20 s) |
 | POST | `/api/v1/shares/{share}/crypt/password` | `CryptPasswordRequest {current, recovery, new_password}` | `CryptPasswordResponse {auto_unlock_off}`; 400 `crypt_wrong_password` |
 | PUT | `/api/v1/shares/{share}/crypt/auto-unlock` | `CryptAutoUnlockRequest {enabled, password}` | `ShareView` |
 | POST | `/v1/crypt/auto-unlock` (rynasd only, root peers) | — | unlocked paths |
