@@ -281,6 +281,63 @@ pub fn read_metas(root: &Path) -> Vec<Installed> {
         .unwrap_or_default()
 }
 
+/// The branch (`7.3`) and flavour (`synodeb`, `rt-amd64`) of a kernel release
+/// (`7.3.5-13-synodeb`, `6.12.48+deb13-rt-amd64`).
+fn kernel_line(release: &str) -> Option<(&str, &str)> {
+    let mut dots = release.match_indices('.');
+    dots.next()?;
+    let branch = match dots.next() {
+        Some((i, _)) => &release[..i],
+        None => release.split(['-', '+']).next()?,
+    };
+    let mut at = 0;
+    let flavour = release.split('-').enumerate().find_map(|(i, s)| {
+        let start = at;
+        at += s.len() + 1;
+        (i > 0 && !s.starts_with(|c: char| c.is_ascii_digit())).then(|| &release[start..])
+    })?;
+    Some((branch, flavour))
+}
+
+/// The newest kernel installed for a metapackage, as (package version, release): its own kernel,
+/// or a newer image of the same branch and flavour installed by name (`apt install linux-image-<release>`).
+pub fn newest_kernel(status: &str, meta: &Installed) -> (String, Option<String>) {
+    let mut best = (meta.version.clone(), meta.release.clone());
+    let Some(line) = meta.release.as_deref().and_then(kernel_line) else {
+        return best;
+    };
+    for stanza in status.split("\n\n") {
+        let (mut name, mut version, mut st) = (None, None, None);
+        for l in stanza.lines() {
+            if let Some(v) = l.strip_prefix("Package: ") {
+                name = Some(v.trim());
+            } else if let Some(v) = l.strip_prefix("Version: ") {
+                version = Some(v.trim());
+            } else if let Some(v) = l.strip_prefix("Status: ") {
+                st = Some(v.trim());
+            }
+        }
+        let (Some(name), Some(version), Some(st)) = (name, version, st) else { continue };
+        let Some(rel) = name.strip_prefix("linux-image-").filter(|r| r.starts_with(|c: char| c.is_ascii_digit())) else {
+            continue;
+        };
+        if st.split_whitespace().nth(2) == Some("installed")
+            && kernel_line(rel) == Some(line)
+            && compare_versions(version, &best.0).is_gt()
+        {
+            best = (version.to_string(), Some(rel.to_string()));
+        }
+    }
+    best
+}
+
+/// [`newest_kernel`] from the dpkg status below `root`.
+pub fn read_newest_kernel(root: &Path, meta: &Installed) -> (String, Option<String>) {
+    std::fs::read_to_string(root.join(DPKG_STATUS.trim_start_matches('/')))
+        .map(|t| newest_kernel(&t, meta))
+        .unwrap_or_else(|_| (meta.version.clone(), meta.release.clone()))
+}
+
 /// The `updates.kernel` domain. `module_kernels`: a hardware module ships the kernels (the
 /// default is then manual).
 pub struct KernelDomain {
@@ -376,6 +433,26 @@ Package: bash\nStatus: install ok installed\nVersion: 5.2\n";
         let manual = KernelPolicy { mode: KernelMode::Manual, ..Default::default() };
         assert_eq!(hold_plan(&m, &manual), (vec!["linux-image-synodeb-stable".into()], vec![]));
         assert_eq!(hold_plan(&m, &KernelPolicy::default()), (vec![], vec!["linux-headers-synodeb-stable".into()]));
+    }
+
+    #[test]
+    fn kernels_installed_by_name() {
+        assert_eq!(kernel_line("7.3.5-13-synodeb"), Some(("7.3", "synodeb")));
+        assert_eq!(kernel_line("6.12.48+deb13-rt-amd64"), Some(("6.12", "rt-amd64")));
+        assert_eq!(kernel_line("6.12.48+deb13-amd64"), Some(("6.12", "amd64")));
+        let meta = installed_metas(STATUS).into_iter().find(|m| m.name == "linux-image-synodeb-stable").unwrap();
+        assert_eq!(newest_kernel(STATUS, &meta), ("7.3.5-13".into(), Some("7.3.5-13-synodeb".into())));
+        let more = format!(
+            "{STATUS}\nPackage: linux-image-7.3.6-14-synodeb\nStatus: install ok installed\nVersion: 7.3.6-14\n\n\
+Package: linux-image-7.3.7-15-synodeb\nStatus: deinstall ok config-files\nVersion: 7.3.7-15\n\n\
+Package: linux-image-6.18.65-13-synodeb\nStatus: install ok installed\nVersion: 6.18.65-13\n\n\
+Package: linux-image-7.4.1-16-synodeb\nStatus: install ok installed\nVersion: 7.4.1-16\n"
+        );
+        assert_eq!(
+            newest_kernel(&more, &meta),
+            ("7.3.6-14".into(), Some("7.3.6-14-synodeb".into())),
+            "same branch and flavour only, installed only"
+        );
     }
 
     #[test]

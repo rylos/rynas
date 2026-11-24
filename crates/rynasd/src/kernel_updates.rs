@@ -54,7 +54,7 @@ use rynas_tasks::{Cmd, TaskCtx};
 use rynas_updates::apt::parse_simulation;
 use rynas_updates::kernel_policy::{
     Installed, apt_mark, auto_due, compare_versions, depends_meta, depends_release, hold_plan,
-    mode_name, notify_due, parse_feed, policy_candidate, read_metas, utc_ms,
+    mode_name, notify_due, parse_feed, policy_candidate, read_metas, read_newest_kernel, utc_ms,
 };
 use rynas_updates::{AUTO_KEY, KERNEL_KEY};
 use serde::{Deserialize, Serialize};
@@ -214,6 +214,14 @@ impl Updates {
         read_metas(std::path::Path::new("/"))
     }
 
+    /// The newest kernel installed for `meta`, as (package version, release).
+    fn newest_kernel(&self, meta: &Installed) -> (String, Option<String>) {
+        if self.dry {
+            return (meta.version.clone(), meta.release.clone());
+        }
+        read_newest_kernel(std::path::Path::new("/"), meta)
+    }
+
     /// Metapackages held now by the policy (none in mode `system`).
     pub(crate) fn kernel_held(&self) -> Vec<String> {
         if !self.kernel_policy().holds() {
@@ -294,10 +302,11 @@ impl Updates {
         };
         st.supported = true;
         let cs = &series[ci];
-        let installed = metas.iter().find(|m| m.name == cs.image).cloned();
-        let iv = installed.as_ref().map(|m| m.version.clone()).unwrap_or_default();
-        st.installed_version = installed.as_ref().map(|m| m.version.clone());
-        st.installed_release = installed.and_then(|m| m.release);
+        // the newest kernel of the series, also one installed by name past the metapackage
+        let installed = metas.iter().find(|m| m.name == cs.image).map(|m| self.newest_kernel(m));
+        let iv = installed.as_ref().map(|(v, _)| v.clone()).unwrap_or_default();
+        st.installed_version = installed.as_ref().map(|(v, _)| v.clone());
+        st.installed_release = installed.and_then(|(_, r)| r);
         let feed = self.read_feed(refresh).await;
         let branches: BTreeMap<String, Option<String>> = feed
             .as_ref()
