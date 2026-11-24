@@ -886,8 +886,7 @@ impl Space {
         for p in paths {
             match d.find(p) {
                 None => out.refused.push(RefusedPath { path: p.clone(), protected: None }),
-                Some((v, _, x)) if x.protected.is_some() => {
-                    let _ = v;
+                Some((_, _, x)) if x.protected.is_some() => {
                     out.refused.push(RefusedPath { path: p.clone(), protected: x.protected });
                 }
                 Some((v, s, _)) => {
@@ -1079,7 +1078,8 @@ impl Space {
             bins.extend(homes.into_iter().map(|h| (h.clone(), h, shares.smb.homes.recycle.retention_days)));
         }
         let now = (now_ms() / 1000) as i64;
-        let dry = self.env.run(Cmd::new("true")).is_ok_and(|o| o.is_empty()) && self.env.root() != Path::new("/");
+        // the system's files somewhere else than `/`: the dry system (and tests) touch no bin
+        let dry = self.env.root() != Path::new("/");
         for (name, path, days) in bins {
             if days == 0 || cancelled() {
                 continue;
@@ -1215,7 +1215,7 @@ impl Space {
         for v in &ov.volumes {
             let key = format!("volume:{}", v.volume);
             let Some(grown) = h.growth(&key, now, 7) else { continue };
-            let before = h.series.get(&key).and_then(|s| s.iter().rev().find(|(d, _)| *d <= model::day_of(now) - 7)).map(|x| x.1).unwrap_or(0);
+            let before = h.series.get(&key).and_then(|s| s.iter().rev().find(|(d, _)| *d <= model::day_of(now).saturating_sub(7))).map(|x| x.1).unwrap_or(0);
             if !settings.notify_growth || !model::growth_alarming(grown, before, &settings) {
                 continue;
             }

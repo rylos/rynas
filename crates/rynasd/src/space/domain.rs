@@ -31,7 +31,7 @@ pub fn journal_cap(s: &SpaceSettings, fs_bytes: u64) -> Option<u64> {
         Some(m) => Some((u64::from(m) << 20).max(JOURNAL_MIN_BYTES)),
         None => {
             let pct = if fs_bytes == 0 { JOURNAL_MAX_BYTES } else { fs_bytes / 100 * JOURNAL_MAX_PCT };
-            Some(pct.min(JOURNAL_MAX_BYTES).max(JOURNAL_MIN_BYTES))
+            Some(pct.clamp(JOURNAL_MIN_BYTES, JOURNAL_MAX_BYTES))
         }
     }
 }

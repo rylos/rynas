@@ -219,7 +219,7 @@ async fn scan_pin_preview_delete() {
     let (_, b) = call(&w, "admin", "GET", &format!("/v1/space/previews/{id}"), None).await;
     let p: SpacePreview = serde_json::from_slice(&b).unwrap();
     assert!(p.done);
-    assert_eq!(p.paths, [second.clone()]);
+    assert_eq!(p.paths, std::slice::from_ref(&second));
     assert_eq!(p.refused.len(), 2);
     assert_eq!(p.freed_bytes, Some(100));
 

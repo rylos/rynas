@@ -215,7 +215,7 @@ mod tests {
     fn thinning_goes_oldest_first_and_never_takes_protected() {
         let a = source("job:a", SourceKind::ShareJob, &[(50 * D, Some(Protection::Newest)), (40 * D, None), (10 * D, Some(Protection::Pinned)), (5 * D, None)]);
         let b = source("stack:b", SourceKind::AppStack, &[(45 * D, Some(Protection::Newest)), (20 * D, None)]);
-        let pc = source("pc:x", SourceKind::PcBackup, &[(60 * D, Some(Protection::NewestBackup)), (1 * D, None)]);
+        let pc = source("pc:x", SourceKind::PcBackup, &[(60 * D, Some(Protection::NewestBackup)), (D, None)]);
         let order = thin_order(&[a.clone(), b.clone(), pc], &SpaceSettings::default(), 60 * D);
         assert_eq!(order, ["/vol1/job:a/432000000", "/vol1/stack:b/1728000000", "/vol1/job:a/3456000000"]);
         // a budget of 2 snapshots on b... and 30 days on a puts their excess first
