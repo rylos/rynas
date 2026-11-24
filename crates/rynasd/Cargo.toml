@@ -58,6 +58,8 @@ rynas-backup.workspace = true
 rynas-dedup.workspace = true
 # checksums of the rynas-oans packages carried until there is an apt repository
 sha2.workspace = true
+# Syncthing's config.xml in the adoption (byte ranges for minimal edits); small, MIT/Apache
+roxmltree = "0.21.2"
 tempfile.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }

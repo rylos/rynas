@@ -4421,6 +4421,8 @@ task.apps.uninstall	Disinstallazione dell'app
 task.apps.proxy	Spostamento dell'app dietro il proxy
 task.apps.auto-update	Aggiornamento automatico dell'app
 task.apps.catalog-update	Controllo del catalogo delle app
+task.apps.share-set	Modifica delle cartelle condivise di un'app
+task.syncthing.adopt	Adozione di un Syncthing esistente
 apps.subtitle	App selezionate in container e i moduli che aggiungono funzioni a rynas
 apps.docker_first	Le app girano in container Docker: installa prima Docker, poi ogni app del catalogo si installa in pochi passaggi.
 apps.plg.docker_above	Il modulo Docker è in cima a questa pagina: installalo prima di qualsiasi app.
@@ -4567,6 +4569,8 @@ apps.w.on_volume_suggested	Su {vol} (consigliato): {path}
 apps.w.ssd_hint	Un database risponde molto più in fretta su un volume SSD.
 apps.w.shares_text	Cartelle che l'app legge o scrive, con l'accesso indicato. Nulla viene spostato o copiato.
 apps.w.no_share	Non collegata
+apps.w.share_set_text	Scegli quante cartelle condivise vuoi: ognuna compare nell'app al percorso indicato. L'elenco si può cambiare in seguito.
+apps.w.set_follows	Segue blocco e sblocco
 apps.w.no_share_fallback	Non collegata (usa {path} nella cartella dello stack)
 apps.w.no_shares_yet	Non ci sono ancora cartelle condivise.
 apps.w.to_shares	Creane una

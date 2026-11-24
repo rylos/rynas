@@ -125,6 +125,7 @@ const PACKAGE_KINDS: &[&str] = &[
     "docker.auto-update",
     "apps.auto-update",
     "apps.update",
+    "syncthing.adopt",
     "tailscale.install",
     "tailscale.uninstall",
     "ups.install",

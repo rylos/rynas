@@ -416,6 +416,63 @@ pub fn familiar(repo: &str) -> String {
         .to_string()
 }
 
+/// A mount of a container as `docker inspect` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectMount {
+    /// Host path (binds) or the volume's folder in the data root (volumes).
+    pub source: String,
+    /// Path inside the container.
+    pub destination: String,
+    /// `rslave`, `rprivate`… (empty for volumes).
+    pub propagation: String,
+    /// `bind`, `volume`, `tmpfs`…
+    pub kind: String,
+    pub rw: bool,
+}
+
+/// The mounts of one `docker inspect` object, or of the first object of the array the CLI
+/// prints. Entries without a source or destination (tmpfs) are left out.
+pub fn inspect_mounts(v: &serde_json::Value) -> Vec<InspectMount> {
+    let obj = v.as_array().and_then(|a| a.first()).unwrap_or(v);
+    let s = |m: &serde_json::Value, k: &str| m.get(k).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+    obj.get("Mounts")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let (source, destination) = (s(m, "Source"), s(m, "Destination"));
+            (!source.is_empty() && !destination.is_empty()).then(|| InspectMount {
+                source,
+                destination,
+                propagation: s(m, "Propagation"),
+                kind: s(m, "Type"),
+                rw: m.get("RW").and_then(serde_json::Value::as_bool).unwrap_or(true),
+            })
+        })
+        .collect()
+}
+
+/// The image and the command line (`Path` and `Args`, else `Config.Entrypoint` and
+/// `Config.Cmd`) of one `docker inspect` object, joined by spaces.
+pub fn inspect_image_and_command(v: &serde_json::Value) -> (String, String) {
+    let obj = v.as_array().and_then(|a| a.first()).unwrap_or(v);
+    let strs = |x: Option<&serde_json::Value>| -> Vec<String> {
+        match x {
+            Some(serde_json::Value::String(s)) => vec![s.clone()],
+            Some(serde_json::Value::Array(a)) => a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let image = obj.pointer("/Config/Image").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+    let mut cmd = strs(obj.get("Path"));
+    cmd.extend(strs(obj.get("Args")));
+    if cmd.is_empty() {
+        cmd = strs(obj.pointer("/Config/Entrypoint"));
+        cmd.extend(strs(obj.pointer("/Config/Cmd")));
+    }
+    (image, cmd.join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

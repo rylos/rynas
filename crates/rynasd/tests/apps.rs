@@ -852,6 +852,120 @@ async fn move_behind_the_proxy() {
     assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, error_codes::CONFLICT));
 }
 
+const ST_CONFIG: &str = r#"<configuration version="37">
+    <folder id="photos-1" label="Photos" path="/data/photos" type="sendreceive">
+        <device id="AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD" introducedBy=""></device>
+        <paused>false</paused>
+        <markerName>.stfolder</markerName>
+    </folder>
+    <folder id="docs" label="Docs" path="/data/docs" type="sendonly"><paused>false</paused></folder>
+    <folder id="far" label="Far" path="/elsewhere" type="sendreceive"></folder>
+    <device id="AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD" name="laptop"></device>
+    <gui enabled="true"><address>0.0.0.0:8384</address><apikey>SECRETKEYSECRETKEY</apikey><password>pwhash</password></gui>
+</configuration>
+"#;
+
+/// Share sets: an install with none, the installed list, a refused change; the older
+/// Syncthing layout found by the adoption preview and adopted (update in place, dry run).
+#[tokio::test]
+async fn share_set_and_syncthing_adoption_of_the_older_layout() {
+    let e = env();
+    let (s, b) = call(&e, "GET", "/v1/apps/catalog/syncthing", None).await;
+    let d: AppDetail = json_of(s, &b);
+    let ss = d.share_set.expect("share set");
+    assert_eq!((ss.env.as_str(), ss.target.as_str()), ("SYNC_SHARES", "/shares"));
+    // a share that is not in the configuration
+    let p = plan(&e, "syncthing", json!({"share_set": [{"share": "nope"}]})).await;
+    assert!(p.errors.iter().any(|x| x.field == "SYNC_SHARES" && x.message.contains("no share nope")), "{:?}", p.errors);
+    let (started, _) = install(&e, "syncthing", json!({"publish_lan": true})).await;
+    assert_eq!(started.stack, "syncthing");
+    let dir = e.stack("syncthing");
+    let envf = std::fs::read_to_string(dir.join(".env")).unwrap();
+    assert!(envf.contains("SYNC_SHARES=\n") && envf.contains("ST_API_KEY="), "{envf}");
+    let compose = std::fs::read_to_string(dir.join("compose.yaml")).unwrap();
+    assert!(compose.contains("STGUIAPIKEY: ${ST_API_KEY}") || compose.contains("STGUIAPIKEY: '${ST_API_KEY}'"), "{compose}");
+    assert!(!compose.contains("/shares/"), "{compose}");
+    let (s, b) = call(&e, "PUT", "/v1/apps/installed/syncthing/share-set", Some(json!({"items": [{"share": "nope"}]}))).await;
+    assert_eq!((s, err(&b).field.as_deref()), (StatusCode::BAD_REQUEST, Some("items")));
+    let (s, b) = call(&e, "PUT", "/v1/apps/installed/vaultwarden/share-set", Some(json!({"items": []}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{}", String::from_utf8_lossy(&b));
+    // an empty set again is fine (rewrites the same files, up)
+    let (s, b) = call(&e, "PUT", "/v1/apps/installed/syncthing/share-set", Some(json!({"items": []}))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t: TaskStarted = serde_json::from_slice(&b).unwrap();
+    let (info, log) = wait_task(&e, &t.task_id).await;
+    assert_eq!(info.status, TaskStatus::Ok, "{log}");
+    assert!(log.contains("shared folders none") && log.contains("up --detach"), "{log}");
+
+    // make it look like the older layout: version 1.0.0, one share at /data (the fallback)
+    let compose = compose.replace("version: 2.0.0", "version: 1.0.0");
+    std::fs::write(dir.join("compose.yaml"), compose).unwrap();
+    let old_env: String = envf
+        .lines()
+        .filter(|l| !l.starts_with("SYNC_SHARES=") && !l.starts_with("ST_API_KEY="))
+        .map(|l| format!("{l}\n"))
+        .chain(std::iter::once("SYNC_SHARE=./sync\n".to_string()))
+        .collect();
+    std::fs::write(dir.join(".env"), old_env).unwrap();
+    let home = dir.join("state/config");
+    std::fs::create_dir_all(&home).unwrap();
+    for f in ["cert.pem", "key.pem"] {
+        std::fs::write(home.join(f), "x").unwrap();
+    }
+    std::fs::create_dir_all(home.join("index-v2")).unwrap();
+    std::fs::write(home.join("config.xml"), ST_CONFIG).unwrap();
+    // photos: verified marker and a .stignore with other systems' patterns; docs: a marker
+    // folder without the file
+    let photos = dir.join("sync/photos");
+    std::fs::create_dir_all(photos.join(".stfolder")).unwrap();
+    std::fs::write(photos.join(".stfolder").join(rynasd::syncthing::config::marker_file_name("photos-1")), "").unwrap();
+    std::fs::write(photos.join(".stignore"), "@eaDir\n*.tmp\n").unwrap();
+    std::fs::create_dir_all(dir.join("sync/docs/.stfolder")).unwrap();
+
+    let (s, b) = call(&e, "POST", "/v1/syncthing/adopt/preview", None).await;
+    let pv: rynas_api_types::syncthing::SyncthingAdoptPreview = json_of(s, &b);
+    assert_eq!(pv.installed.as_deref(), Some("syncthing"));
+    let c = pv.candidates.iter().find(|c| c.source.kind == rynas_api_types::syncthing::AdoptSourceKind::App).expect("the older layout");
+    assert_eq!(c.source.id.as_deref(), Some("syncthing"));
+    let req = json!({"source": {"kind": "app", "id": "syncthing"}});
+    let (s, b) = call(&e, "POST", "/v1/syncthing/adopt/preview", Some(req.clone())).await;
+    let text = String::from_utf8_lossy(&b).to_string();
+    assert!(!text.contains("SECRETKEY") && !text.contains("pwhash") && !text.contains("BBBBBBB"), "{text}");
+    let pv: rynas_api_types::syncthing::SyncthingAdoptPreview = json_of(s, &b);
+    assert!(pv.ok, "{:?}", pv.problems);
+    assert_eq!(pv.files.database, rynas_api_types::syncthing::AdoptDatabase::V2);
+    assert_eq!(pv.devices[0].id_short, "AAAAAAA");
+    assert_eq!(pv.shares, ["sync"]);
+    let f = |id: &str| pv.folders.iter().find(|f| f.id == id).unwrap().clone();
+    use rynas_api_types::syncthing::{MarkerState, UnmappedReason};
+    let ph = f("photos-1");
+    assert_eq!((ph.new_path.as_deref(), ph.marker, ph.will_pause), (Some("/shares/sync/photos"), MarkerState::Verified, false));
+    assert_eq!(ph.stignore.as_ref().unwrap().after, "*.tmp\n(?d)#recycle\n");
+    let dc = f("docs");
+    assert_eq!((dc.marker, dc.will_pause), (MarkerState::Unverified, true));
+    let far = f("far");
+    assert_eq!((far.unmapped, far.will_pause), (Some(UnmappedReason::NoVolume), true));
+
+    let (s, b) = call(&e, "POST", "/v1/syncthing/adopt", Some(json!({"source": {"kind": "app", "id": "syncthing"}, "apply_stignore": true}))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t: TaskStarted = serde_json::from_slice(&b).unwrap();
+    let (info, log) = wait_task(&e, &t.task_id).await;
+    assert_eq!(info.status, TaskStatus::Ok, "{log}");
+    assert!(log.contains("from 1.0.0 to 2.0.0") && log.contains("dry system: not done"), "{log}");
+    assert!(!log.contains("SECRETKEY"), "{log}");
+    let envf = std::fs::read_to_string(dir.join(".env")).unwrap();
+    assert!(envf.contains("SYNC_SHARES=sync=./sync\n") && !envf.contains("SYNC_SHARE="), "{envf}");
+    let compose = std::fs::read_to_string(dir.join("compose.yaml")).unwrap();
+    assert!(compose.contains("target: /shares/sync") && compose.contains("source: ./sync"), "{compose}");
+    // the old home is never changed
+    assert_eq!(std::fs::read_to_string(home.join("config.xml")).unwrap(), ST_CONFIG);
+    // dry system: the .stignore is not written
+    assert_eq!(std::fs::read_to_string(photos.join(".stignore")).unwrap(), "@eaDir\n*.tmp\n");
+    let (s, b) = call(&e, "GET", "/v1/apps/installed/syncthing", None).await;
+    let i: InstalledAppDetail = json_of(s, &b);
+    assert_eq!(i.app.share_set.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["sync"]);
+}
+
 /// The `(method, path)` pairs of the `.route(…)` calls of a router's source: new routes
 /// are covered without editing this test.
 fn routes_of(src: &str) -> Vec<(String, String)> {
@@ -913,9 +1027,10 @@ async fn non_admins_get_403_on_every_route() {
         include_str!("../src/apps.rs"),
         include_str!("../src/tls.rs"),
         include_str!("../src/web_access/mod.rs"),
+        include_str!("../src/syncthing/mod.rs"),
     ] {
         let routes = routes_of(src);
-        assert!(routes.len() >= 4, "routes not found");
+        assert!(routes.len() >= 2, "routes not found");
         for (m, p) in routes {
             let (s, b) = call_as(&e, "bob", &m, &p, Some(json!({}))).await;
             assert_eq!(

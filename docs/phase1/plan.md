@@ -2022,3 +2022,26 @@ resolves it (`wol.wake_resumed`).
 **Downgrade**: rynasd before 0.8.26 cannot read a PC registry (`<state>/pc-agent/registry.json`)
 that holds a `Sleep` or `EnableWol` command (an unknown variant): wait until the PCs have taken
 their commands, or remove the `command` of those PCs, before going back.
+
+## API v1: Syncthing adoption (S1a)
+Module `rynasd::syncthing` (`config`: `config.xml` with roxmltree, minimal rewrite by byte
+ranges, volume table and share mapping, the `.stfolder` marker rule, `.stignore` cleaning),
+types in `rynas_api_types::syncthing`, design in `../phase2/syncthing.md` §3. Administrators
+only; rynas-web forwards both routes. The share set of the catalogue entry is
+`PUT /api/v1/apps/installed/{stack}/share-set` (`../phase2/docker-apps.md` §5.2, §6.2). No new
+error code. The API key, the GUI password and the keys of a home never appear in an answer or
+a log; device ids only as their first 7 characters.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | `/api/v1/syncthing/adopt/preview` | optional `SyncthingAdoptPreviewRequest` {source? `AdoptSourceRef` {kind app\|container\|service\|path, id?, path?}, volumes [{container, host}]} | `SyncthingAdoptPreview` {candidates [`AdoptCandidate` {source, name, home?, running, detail}], source?, home?, files {cert, key, config, https_cert, database none\|v2\|v1}, gui_address?, devices [{id_short, name}], folders [`AdoptFolder` {id, label, path, folder_type, devices, paused, marker_name, host_path?, share?, new_path?, unmapped? no_volume\|no_share\|bad_path, marker verified\|unverified\|missing\|unknown, will_pause, stignore? {before, after, removed, added}}], volumes, owners? {uid, gid, others, app_uid, app_gid}, shares, installed?, ok, problems}. Candidates, in order: the catalogue app below 2.0.0 (one share at `/data`), other containers whose image or command names Syncthing (home from the mounts: `/var/syncthing` → `<src>/config` when it holds `config.xml`, `/config`, or a mount with `config.xml` + `cert.pem`; volume table = the mounts), users' homes `~/.local/state/syncthing` or `~/.config/syncthing` (unit `syncthing@<user>` or a user unit; running = a `syncthing` process of that uid). A `path` source uses the request's volume table only. 404 for an unknown source; 400 `invalid_value` on `source.path` |
+| POST | `/api/v1/syncthing/adopt` | `SyncthingAdoptRequest` {source, volumes, stop_source, apply_stignore, stack?} | 202 (`syncthing.adopt`). 409 `conflict` when the preview is not `ok` (first problem), or the source runs without `stop_source` (field `stop_source`); `busy` for the stack. Task: `.stignore` proposals written when asked; older catalogue layout: update to 2.0.0 in place (its share becomes `/shares/<folder>`), wait for the REST interface, `PATCH /rest/config/folders/{id}` with the new path (and `paused` where the marker is not verified), rescan. Other sources: stop it (container: `docker update --restart=no` + `docker stop`; unit: `systemctl disable --now`, user units through `--user --machine=<user>@.host`), then install the app with the mapped shares and `start: false` (or, when 2.x is installed, stop it), copy `cert.pem`, `key.pem`, `https-*.pem`, `index-v2` / `index-v0.14.0.db` and the rewritten `config.xml` into `<config folder>/config` (a home there is kept as `config.before-adopt-<ms>`; owner the app's PUID:PGID, keys 0600), `up` (or the share set task), rescan every mapped folder left running. The old home is never changed |
+
+Mapping: a folder path goes through the volume table (longest container prefix; `~/` = the
+old user's home), then to the share whose path holds it (longest), at `/shares/<share>/<rest>`.
+Folders outside the table or every share keep their path in the copy and are paused. The
+marker is `<folder>/<markerName>/syncthing-folder-<first 3 bytes of sha256(id), hex>.txt`
+(Syncthing `lib/config/folderconfiguration.go`); a marker folder without that file (older
+Syncthing) counts as unverified: such folders are paused, never "fixed". The app runs as the
+`docker-apps` account like every catalogue app: `owners` shows who owns the synchronized files,
+and each share gets the account's ACL (share grants) instead of a per-app PUID.

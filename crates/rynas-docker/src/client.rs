@@ -183,6 +183,16 @@ impl Engine {
         Ok(self.patient().restart_container(id, Some(o)).await?)
     }
 
+    /// `docker inspect` of one container as JSON (the engine's field names: `Mounts`,
+    /// `Config`, `State`…), for [`crate::model::inspect_mounts`] and friends.
+    pub async fn inspect_json(&self, id: &str) -> Result<serde_json::Value, DockerError> {
+        let c = self
+            .docker
+            .inspect_container(id, None::<qp::InspectContainerOptions>)
+            .await?;
+        serde_json::to_value(c).map_err(|e| DockerError::Failed(format!("{id}: {e}")))
+    }
+
     /// Does an image (id or reference) exist locally?
     pub async fn image_exists(&self, image: &str) -> bool {
         self.docker.inspect_image(image).await.is_ok()

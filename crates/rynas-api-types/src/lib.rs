@@ -26,6 +26,7 @@ pub mod scheduler;
 mod services;
 pub mod snapshots;
 pub mod ssh;
+pub mod syncthing;
 pub mod storage;
 pub mod synology;
 pub mod tailscale;

@@ -1,6 +1,7 @@
 # Syncthing integrated (S1)
 
-Status: design, 2026-11-24. Item S1 of `dsm-migration-gaps.md` (round 2).
+Status: design, 2026-11-24; S1a implemented the same day. Item S1 of `dsm-migration-gaps.md`
+(round 2).
 
 A NAS leaving a cloud-drive style service keeps PCs and phones in sync with Syncthing. rynas runs
 Syncthing as a catalogue app and adds what Syncthing's own web interface lacks on a NAS: the
@@ -47,8 +48,8 @@ none reports conflicts. Syncthing 2.x facts used below (docs.syncthing.net, sour
 | # | Decision | Why |
 |---|---|---|
 | 1 | Official image `syncthing/syncthing` (already the catalogue entry), bridged ports, GUI behind the rynas proxy | same as today; the entry checks ports and proxies the GUI |
-| 2 | Each synchronized share mounted at `/shares/<share>` in the container; the list is a setting of the app, the compose file is rewritten and the container recreated when it changes | folder paths inside Syncthing stay the same when a share moves to another volume |
-| 3 | rynas sets `STGUIAPIKEY` from its own sealed secret | no key in the compose file, no `config.xml` read |
+| 2 | Each synchronized share mounted at `/shares/<share>` in the container; the list is a setting of the app (the entry's `[share_set]`, `PUT /api/v1/apps/installed/{stack}/share-set`), the compose file is rewritten and the container recreated when it changes | folder paths inside Syncthing stay the same when a share moves to another volume |
+| 3 | rynas sets `STGUIAPIKEY` from an app secret (`ST_API_KEY`, generated at install): it lives in the stack's `.env` (0600, root) like every catalogue secret, not in a sealed store | no key in the compose file, no `config.xml` read; whoever can read the stack folder as root can read it, as for every app's secrets |
 | 4 | Status from events, one long-poll per instance with a fixed mask, a full re-read at start, on a gap and after a Syncthing restart; device last seen from `/rest/stats/device` every 10 minutes | cheap, no `db/status` polling |
 | 5 | Versions = the share's snapshots; Syncthing versioning left off; the page warns when a synchronized share has no snapshot schedule | local edits are kept too |
 | 6 | Encrypted shares: bind with `propagation: rslave`; lock = pause the share's folders, wait for idle, lock; unlock = check the marker, resume only the folders rynas paused | Syncthing keeps running for the other folders; no plaintext copy stays in the container |
@@ -80,8 +81,11 @@ Preview steps, the same for every source:
 4. proposes `.stignore` changes: other systems' patterns (`#snapshot`, `@eaDir`,
    `.SynologyWorkingDirectory`, `@Recycle`, `.@__thumb`, `.streams`) out, `(?d)#recycle` in
    (rynas snapshots live outside the share);
-5. shows the user the app will run as (PUID/PGID: the owner of most synchronized files) and the
-   files with another owner, with the ownership remap of Users & Groups when ids changed.
+5. shows the owner of most synchronized files and how many top-level entries have another one.
+   S1a keeps the app on the `docker-apps` account like every catalogue app (the copied home is
+   chowned to it): each mapped share gets the account's read and write ACL (the share grants
+   of the install), so Syncthing can write files owned by others without a per-app PUID; the
+   ownership remap of Users & Groups stays the tool when ids changed.
 
 `POST /v1/syncthing/adopt` (task `syncthing.adopt`): the old instance is stopped first (two
 instances with one device id fight), its home copied into the app's config folder (owned by the
@@ -120,7 +124,7 @@ API: `GET /v1/syncthing` (`SyncthingState`), `POST /v1/syncthing/folders/{id}/pa
 
 | Phase | Content |
 |---|---|
-| S1a | catalogue entry with `/shares/<share>` mounts (list setting, rslave for encrypted shares), `STGUIAPIKEY`, adoption preview and task |
+| S1a | catalogue entry with `/shares/<share>` mounts (list setting, rslave for encrypted shares), `STGUIAPIKEY`, adoption preview and task. Done 2026-11-24: entry 2.0.0 (`[share_set]`, migration from the single `/data` share), API in `../phase1/plan.md` "API v1: Syncthing adoption (S1a)"; the wizard picks the shares, adoption is API only for now |
 | S1b | rynasd client and event loop, `GET /v1/syncthing`, page |
 | S1c | notifications and settings |
 | S1d | lock/unlock integration: pause before lock, resume after unlock and after the automatic unlock at boot; `containers_using` accepts an rslave bind of a share that follows the host |

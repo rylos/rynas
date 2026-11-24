@@ -71,6 +71,8 @@ pub(super) struct AppDetail {
     pub web: Option<rynas_api_types::apps::AppWeb>,
     pub folders: Vec<rynas_api_types::apps::AppFolder>,
     pub shares: Vec<rynas_api_types::apps::AppShare>,
+    #[serde(default)]
+    pub share_set: Option<rynas_api_types::apps::AppShareSet>,
     pub secrets: Vec<rynas_api_types::apps::AppSecret>,
     pub hardware: rynas_api_types::apps::AppHardware,
     pub overlays: Vec<rynas_api_types::apps::AppOverlay>,

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::TaskStatus;
-use rynas_api_types::apps::{AppInstallPlan, AppInstallRequest, AppInstallStarted, FieldErrorKind, FolderIntent, FolderSsd, PlanWarning, PlannedShareGrant, ShareAccess, ShareGrantAction};
+use rynas_api_types::apps::{AppInstallPlan, AppInstallRequest, AppInstallStarted, FieldErrorKind, FolderIntent, FolderSsd, PlanWarning, PlannedShareGrant, ShareAccess, ShareGrantAction, ShareSetChoice};
 use rynas_api_types::docker::{DockerSettingsState, valid_stack_name};
 use rynas_api_types::ShareView;
 
@@ -79,6 +79,8 @@ struct W {
     stack: RwSignal<String>,
     values: RwSignal<Values>,
     shares: RwSignal<BTreeMap<String, String>>,
+    /// Share names chosen for the entry's share set, in the order picked.
+    share_set: RwSignal<Vec<String>>,
     folders: RwSignal<BTreeMap<String, String>>,
     ports: RwSignal<BTreeMap<String, u16>>,
     /// `None`: the server's default (§7); `Some` once the administrator chose.
@@ -129,6 +131,7 @@ impl W {
             ports: self.ports.get_untracked(),
             publish_lan: self.publish.get_untracked(),
             start: true,
+            share_set: self.share_set.get_untracked().into_iter().map(|share| ShareSetChoice { share, follow: None }).collect(),
         }
     }
 
@@ -143,7 +146,9 @@ impl W {
             let Some(d) = d else { return false };
             match s {
                 Step::Options => field == "stack" || d.form.has(field),
-                Step::Folders => d.folders.iter().any(|f| f.env == field) || d.shares.iter().any(|f| f.env == field),
+                Step::Folders => {
+                    d.folders.iter().any(|f| f.env == field) || d.shares.iter().any(|f| f.env == field) || d.share_set.as_ref().is_some_and(|s| s.env == field) || field == "share_set"
+                }
                 Step::Network => d.card.ports.iter().any(|p| p.env == field),
                 Step::Access | Step::Review => false,
             }
@@ -234,6 +239,7 @@ pub fn wizard(id: String) -> AnyView {
         stack: RwSignal::new(id.clone()),
         values: RwSignal::new(Values::new()),
         shares: RwSignal::new(BTreeMap::new()),
+        share_set: RwSignal::new(Vec::new()),
         folders: RwSignal::new(BTreeMap::new()),
         ports: RwSignal::new(BTreeMap::new()),
         publish: RwSignal::new(None),
@@ -483,16 +489,57 @@ fn folders(w: W) -> AnyView {
             .into_any()
         })
         .collect_view();
+    let set_view = d.share_set.clone().map(|ss| {
+        let env = StoredValue::new(ss.env.clone());
+        let target = StoredValue::new(ss.target.trim_end_matches('/').to_string());
+        let err = Signal::derive(move || server.with(|s| s.get(&env.get_value()).or_else(|| s.get("share_set")).cloned()));
+        let rows = move || {
+            let list = w.shares_list.data.with(|l| l.as_ref().map(|l| l.iter().map(|s| (s.share.name.clone(), s.share.path.clone(), s.share.encrypted)).collect::<Vec<_>>()).unwrap_or_default());
+            list.into_iter()
+                .map(|(n, p, enc)| {
+                    let name = StoredValue::new(n.clone());
+                    view! {
+                        <label class="check">
+                            <input type="checkbox" prop:checked=move || w.share_set.with(|v| v.contains(&name.get_value()))
+                                on:change=move |ev| {
+                                    let on = event_target_checked(&ev);
+                                    let n = name.get_value();
+                                    w.share_set.update(|v| { v.retain(|x| *x != n); if on { v.push(n); } });
+                                } />
+                            <span>
+                                <span class="mono">{format!("{}/{n}", target.get_value())}</span>" "
+                                <span class="muted small">{p}</span>
+                                {enc.then(|| view! { " "<span class="chip">{tr("apps.w.set_follows")}</span> })}
+                            </span>
+                        </label>
+                    }
+                })
+                .collect_view()
+        };
+        view! {
+            <fieldset class="sf-group">
+                <legend class="mini-title">
+                    <span lang="en">{ss.label.clone()}</span>" "
+                    <span class="chip">{tr(if ss.access == ShareAccess::Rw { "rm.set.rw" } else { "perm.ro" })}</span>
+                </legend>
+                <p class="small muted">{tr("apps.w.share_set_text")}</p>
+                {move || w.shares_list.data.with(|l| l.as_ref().is_some_and(Vec::is_empty)).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("apps.w.no_shares_yet")}" "<a href="/shares">{tr("apps.w.to_shares")}</a> }.into_any()))}
+                <div class="app-share-set">{rows}</div>
+                <span class="field-help" lang="en">{ss.description.clone()}</span>
+                <span class="field-error" aria-live="polite">{move || err.get().map(|e| view! { <Icon icon=icons::CIRCLE_X size=12 />{ui::err_view(e)} })}</span>
+            </fieldset>
+        }
+    });
     let no_shares = Memo::new(move |_| w.shares_list.data.with(|l| l.as_ref().is_some_and(Vec::is_empty)));
-    let has_shares = !d.shares.is_empty();
+    let has_shares = !d.shares.is_empty() || d.share_set.is_some();
     view! {
         {ui::note(Tone::Info, icons::FOLDER, view! { {move || tf("apps.w.stack_dir", &[("path", &stack_dir.get())])} }.into_any())}
-        {if d.folders.is_empty() && d.shares.is_empty() {
+        {if d.folders.is_empty() && !has_shares {
             ui::empty_line("apps.w.no_folders")
         } else {
             view! {
                 {(!d.folders.is_empty()).then(|| view! { <fieldset class="sf-group"><legend class="mini-title">{tr("apps.d.folders")}</legend><p class="small muted">{tr("apps.w.folders_text")}</p><div class="form">{folder_rows}</div></fieldset> })}
-                {has_shares.then(|| view! {
+                {(!d.shares.is_empty()).then(|| view! {
                     <fieldset class="sf-group">
                         <legend class="mini-title">{tr("nav.shares")}</legend>
                         <p class="small muted">{tr("apps.w.shares_text")}</p>
@@ -500,6 +547,7 @@ fn folders(w: W) -> AnyView {
                         <div class="form">{share_rows}</div>
                     </fieldset>
                 })}
+                {set_view}
             }
             .into_any()
         }}

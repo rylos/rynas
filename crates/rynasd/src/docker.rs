@@ -660,6 +660,12 @@ impl DockerSvc {
         self.call(|e| async move { e.containers().await }).await
     }
 
+    /// `docker inspect` of one container, as the engine's JSON.
+    pub(crate) async fn inspect_json(&self, id: &str) -> Res<serde_json::Value> {
+        let id = id.to_string();
+        self.call(move |e| async move { e.inspect_json(&id).await }).await
+    }
+
     /// The stack folders in the stacks folder: names with a compose file, and those that
     /// are subvolumes.
     pub fn folders(&self) -> (BTreeSet<String>, BTreeSet<String>) {

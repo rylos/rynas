@@ -359,7 +359,11 @@ pub fn routes() -> Router<AppState> {
         .route("/apps/installed", get(forward))
         .route("/apps/installed/{stack}", get(forward))
         .route("/apps/installed/{stack}/update", get(forward).post(forward))
+        .route("/apps/installed/{stack}/share-set", put(forward))
         .route("/apps/installed/{stack}/{action}", post(forward))
+        // Syncthing adoption (docs/phase2/syncthing.md §3)
+        .route("/syncthing/adopt/preview", post(forward))
+        .route("/syncthing/adopt", post(forward))
         // web access (phase 2, W1): state and staging of the `web_access` key, the engine
         // configuration an apply would load, anti-drift now, route diagnostics, and the
         // timed confirmation of the interface's own route (with the Host and the local

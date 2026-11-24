@@ -236,6 +236,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::files::router(state.files))
         .merge(crate::removable::router(state.removable))
         .merge(crate::docker::router(state.docker))
+        .merge(crate::syncthing::router(state.apps.clone()))
         .merge(crate::apps::router(state.apps))
         .merge(crate::tls::router(state.tls, admins))
         .merge(crate::web_access::router(state.web_access))

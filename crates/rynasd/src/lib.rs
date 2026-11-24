@@ -53,6 +53,7 @@ pub mod services;
 pub mod snapshots;
 pub mod storage_ops;
 pub mod ssh;
+pub mod syncthing;
 pub mod system_power;
 pub mod system_tasks;
 pub mod tailscale;

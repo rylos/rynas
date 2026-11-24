@@ -35,7 +35,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use rynas_api_types::apps::*;
 use rynas_api_types::docker::ContainerState;
@@ -484,11 +484,11 @@ fn file_text(r: &RenderedStack, path: &str) -> String {
 }
 
 /// An installed app stack read from disk.
-struct OnDisk {
-    stack: String,
-    meta: XRynas,
-    compose: String,
-    env: String,
+pub(crate) struct OnDisk {
+    pub(crate) stack: String,
+    pub(crate) meta: XRynas,
+    pub(crate) compose: String,
+    pub(crate) env: String,
 }
 
 /// What an install needs after the plan accepted it.
@@ -597,7 +597,7 @@ impl AppsSvc {
     }
 
     /// Every stack of the stacks folder whose compose file has an `x-rynas` block.
-    fn on_disk(&self) -> Vec<OnDisk> {
+    pub(crate) fn on_disk(&self) -> Vec<OnDisk> {
         let Some(l) = self.docker.layout() else {
             return Vec::new();
         };
@@ -728,6 +728,7 @@ impl AppsSvc {
             web: m.web.as_ref().map(conv),
             folders: conv(&m.folders),
             shares: conv(&m.shares),
+            share_set: m.share_set.as_ref().map(conv),
             secrets: conv(&m.secrets),
             hardware: conv(&m.hardware),
             overlays: conv(&m.overlays),
@@ -807,7 +808,7 @@ impl AppsSvc {
     }
 
     /// The `docker-apps` (uid, gid), whatever `--dry-system` says.
-    fn apps_ids(&self) -> Option<(u32, u32)> {
+    pub(crate) fn apps_ids(&self) -> Option<(u32, u32)> {
         let root = &self.docker.root;
         match install::apps_ids(
             &read_text(root, "/etc/passwd"),
@@ -1011,6 +1012,27 @@ impl AppsSvc {
             })
             .collect();
         let card = self.card(app, &[], &cat);
+        let share_set = match (&m.share_set, req.share_set.is_empty()) {
+            (None, true) => Vec::new(),
+            (None, false) => {
+                errors.push(err("share_set", FieldErrorKind::UnknownValue, format!("{} has no share set", m.name)));
+                Vec::new()
+            }
+            (Some(ss), _) => match resolve_share_set(&self.applied_shares(), &req.share_set) {
+                Ok(items) => {
+                    for it in &items {
+                        if !it.follow && !rynas_docker::under(&root, &it.path).is_dir() {
+                            errors.push(err(&ss.env, FieldErrorKind::ShareMissing, format!("{} does not exist", it.path)));
+                        }
+                    }
+                    items
+                }
+                Err(e) => {
+                    errors.push(err(&ss.env, FieldErrorKind::UnknownValue, e));
+                    Vec::new()
+                }
+            },
+        };
         let request = rynas_apps::InstallRequest {
             stack: stack.clone(),
             form: req.form.clone(),
@@ -1018,6 +1040,7 @@ impl AppsSvc {
             folders: req.folders.clone(),
             ports: req.ports.clone(),
             secrets: BTreeMap::new(),
+            share_set,
         };
         let mut plan = AppInstallPlan {
             app: m.id.clone(),
@@ -1195,6 +1218,18 @@ impl AppsSvc {
             bind: env.get("RYNAS_BIND").cloned(),
             web_url: self.web.get().and_then(|w| w.stack_url(&d.stack)),
             snapshots: l.is_some_and(|l| snapshots::supported(&self.docker.root, l, &d.stack)),
+            share_set: entry
+                .and_then(|a| a.manifest.share_set.as_ref())
+                .and_then(|ss| env.get(&ss.env))
+                .and_then(|v| rynas_apps::render::decode_share_set(v).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|i| InstalledShareSetItem {
+                    name: i.name,
+                    path: i.path,
+                    follow: i.follow,
+                })
+                .collect(),
         }
     }
 
@@ -1390,7 +1425,7 @@ fn nocow_folder(s: &DockerSvc, host_path: &str, log: &dyn Fn(&str)) {
     }
 }
 
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     tokio::task::spawn_blocking(f)
@@ -1399,7 +1434,7 @@ async fn blocking<T: Send + 'static>(
 }
 
 /// `docker compose pull` / `up -d` of a rynas stack (logged only under `--dry-system`).
-async fn compose_run(
+pub(crate) async fn compose_run(
     s: &DockerSvc,
     ctx: &TaskCtx,
     stack: &str,
@@ -1422,11 +1457,11 @@ async fn compose_run(
     Ok(())
 }
 
-struct InstallJob {
+pub(crate) struct InstallJob {
     app: String,
     name: String,
     version: String,
-    stack: String,
+    pub(crate) stack: String,
     layout: Layout,
     request: rynas_apps::InstallRequest,
     bind: String,
@@ -1436,7 +1471,7 @@ struct InstallJob {
     share_grants: Vec<PlannedShareGrant>,
 }
 
-async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob) -> Result<(), String> {
+pub(crate) async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob) -> Result<(), String> {
     let s = &a.docker;
     let dir = j.layout.stack(&j.stack);
     ctx.log(&format!(
@@ -1573,25 +1608,81 @@ pub(crate) fn with_share_grant(cfg: &rynas_api_types::SharesConfig, path: &str, 
     Some(out)
 }
 
-/// The plan's lines for the shared folders of `request`.
+impl AppsSvc {
+    /// The shares of the applied configuration (not the staged one).
+    pub(crate) fn applied_shares(&self) -> Vec<rynas_api_types::Share> {
+        self.docker
+            .ops
+            .config
+            .applied(rynas_services::shares::SHARES_KEY)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_value::<rynas_api_types::SharesConfig>(v).ok())
+            .map(|c| c.shares)
+            .unwrap_or_default()
+    }
+}
+
+/// Share set choices → items: each must be a share of `shares` (by name); the item is named
+/// after the share and mounted from its path; `follow` defaults to the share being encrypted
+/// (its plaintext mount comes and goes while the container runs).
+pub(crate) fn resolve_share_set(
+    shares: &[rynas_api_types::Share],
+    choices: &[ShareSetChoice],
+) -> Result<Vec<rynas_apps::render::ShareSetItem>, String> {
+    let mut out: Vec<rynas_apps::render::ShareSetItem> = Vec::new();
+    for c in choices {
+        let s = shares
+            .iter()
+            .find(|s| s.name == c.share)
+            .ok_or_else(|| format!("no share {}", c.share))?;
+        if s.path.is_empty() {
+            return Err(format!("share {} has no folder yet", s.name));
+        }
+        if out.iter().any(|i| i.name == s.name) {
+            return Err(format!("share {} is chosen twice", s.name));
+        }
+        out.push(rynas_apps::render::ShareSetItem {
+            name: s.name.clone(),
+            path: s.path.trim_end_matches('/').to_string(),
+            follow: c.follow.unwrap_or(s.encrypted),
+        });
+    }
+    rynas_apps::render::check_share_set("share_set", &out).map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// The plan's lines for the shared folders of `request` (fixed shares and share set items).
 fn plan_share_grants(a: &AppsSvc, m: &rynas_apps::manifest::AppManifest, request: &rynas_apps::InstallRequest) -> Vec<PlannedShareGrant> {
-    let shares: Vec<rynas_api_types::Share> = a
-        .docker
-        .ops
-        .config
-        .applied(rynas_services::shares::SHARES_KEY)
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_value::<rynas_api_types::SharesConfig>(v).ok())
-        .map(|c| c.shares)
-        .unwrap_or_default();
-    m.shares
+    let shares = a.applied_shares();
+    let mut out: Vec<PlannedShareGrant> = m
+        .shares
         .iter()
         .filter_map(|s| {
             let path = request.shares.get(&s.env)?;
             let write = s.access == rynas_apps::manifest::Access::Rw;
             let (share, action) = share_grant_action(&shares, path, rynas_docker::APPS_USER, write);
             Some(PlannedShareGrant { env: s.env.clone(), path: path.clone(), share, write, action })
+        })
+        .collect();
+    out.extend(share_set_grants(&shares, m, &request.share_set));
+    out
+}
+
+/// The share grants of share set items (folders of the stack excluded).
+fn share_set_grants(
+    shares: &[rynas_api_types::Share],
+    m: &rynas_apps::manifest::AppManifest,
+    items: &[rynas_apps::render::ShareSetItem],
+) -> Vec<PlannedShareGrant> {
+    let Some(ss) = &m.share_set else { return Vec::new() };
+    let write = ss.access == rynas_apps::manifest::Access::Rw;
+    items
+        .iter()
+        .filter(|it| it.path.starts_with('/'))
+        .map(|it| {
+            let (share, action) = share_grant_action(shares, &it.path, rynas_docker::APPS_USER, write);
+            PlannedShareGrant { env: format!("{}/{}", ss.env, it.name), path: it.path.clone(), share, write, action }
         })
         .collect()
 }
@@ -1896,7 +1987,28 @@ async fn install_post(
     let a = asvc(&st)?;
     let who = admin(&a, &hd)?;
     let req = install_request(&body)?;
-    let p = a.prepare(&id, &req).await?;
+    let (job, mut started) = install_job(&a, &id, &req, &who).await?;
+    let stack = job.stack.clone();
+    let guard: OwnedBusy = mark_busy(&a.docker, &stack)?;
+    audit(&who, "install", &format!("{id} as {stack}"));
+    let a2 = a.clone();
+    started.task_id = a
+        .docker
+        .ops
+        .tasks
+        .spawn("apps.install", &who, move |ctx| async move {
+            let _guard = guard;
+            install_task(&a2, &ctx, job).await
+        })?;
+    Ok((StatusCode::ACCEPTED, Json(started)).into_response())
+}
+
+/// An install checked and rendered, with the plan's refusals as API errors: the job of the
+/// `apps.install` task and its answer (without the task id).
+pub(crate) async fn install_job(a: &AppsSvc, id: &str, req: &AppInstallRequest, who: &str) -> Res<(InstallJob, AppInstallStarted)> {
+    let id = id.to_string();
+    let who = who.to_string();
+    let p = a.prepare(&id, req).await?;
     if !p.docker_installed {
         return Err(not_installed());
     }
@@ -1975,8 +2087,6 @@ async fn install_post(
         })
         .collect();
     let stack = p.plan.stack.clone();
-    let guard: OwnedBusy = mark_busy(&a.docker, &stack)?;
-    audit(&who, "install", &format!("{id} as {stack}"));
     let job = InstallJob {
         app: id.clone(),
         name: m.name.clone(),
@@ -1990,25 +2100,13 @@ async fn install_post(
         who: who.clone(),
         share_grants: p.plan.share_grants.clone(),
     };
-    let a2 = a.clone();
-    let task_id = a
-        .docker
-        .ops
-        .tasks
-        .spawn("apps.install", &who, move |ctx| async move {
-            let _guard = guard;
-            install_task(&a2, &ctx, job).await
-        })?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(AppInstallStarted {
-            task_id,
-            stack_dir: layout.stack(&stack),
-            stack,
-            secrets: shown,
-        }),
-    )
-        .into_response())
+    let started = AppInstallStarted {
+        task_id: String::new(),
+        stack_dir: layout.stack(&stack),
+        stack,
+        secrets: shown,
+    };
+    Ok((job, started))
 }
 
 async fn installed_get(State(st): State<AppsState>, hd: HeaderMap) -> Res<Json<Vec<InstalledApp>>> {
@@ -2411,6 +2509,129 @@ async fn proxy_post(
     Ok(accepted(id))
 }
 
+/// A new share set of an installed app, rendered: what `apps.share-set` writes.
+pub(crate) struct ShareSetJob {
+    pub(crate) stack: String,
+    pub(crate) layout: Layout,
+    name: String,
+    old: (String, String),
+    new: (String, String),
+    folders: Vec<FolderPlan>,
+    grants: Vec<PlannedShareGrant>,
+    gid: u32,
+    /// The items now mounted.
+    pub(crate) items: Vec<rynas_apps::render::ShareSetItem>,
+}
+
+impl AppsSvc {
+    /// Renders an installed app with another share set (everything else as stored). 409 for
+    /// an app without a share set, or whose installed version differs from the catalogue's
+    /// (update it first: the render uses the catalogue entry).
+    pub(crate) async fn prepare_share_set(&self, stack: &str, items: Vec<rynas_apps::render::ShareSetItem>) -> Res<ShareSetJob> {
+        let (cat, _) = self.catalog().await;
+        let (l, d) = self.one_on_disk(stack)?;
+        let app = cat.get(&d.meta.app).ok_or_else(|| {
+            Error::not_found(format!("the app {} of stack {stack} is no longer in the catalog", d.meta.app))
+        })?;
+        let m = &app.manifest;
+        let Some(ss) = &m.share_set else {
+            return Err(conflict(format!("{} has no share set", m.name)));
+        };
+        if d.meta.version != m.version {
+            return Err(conflict(format!(
+                "{stack} is {} {} and the catalog has {}: update it first",
+                m.name, d.meta.version, m.version
+            )));
+        }
+        rynas_apps::render::check_share_set(&ss.env, &items).map_err(render_err)?;
+        let env = rynas_apps::render::parse_env(&d.env);
+        let ids = match (env.get("PUID").and_then(|v| v.parse().ok()), env.get("PGID").and_then(|v| v.parse().ok())) {
+            (Some(u), Some(g)) => (u, g),
+            _ => self.apps_ids().unwrap_or((PLACEHOLDER_ID, PLACEHOLDER_ID)),
+        };
+        let bind = env.get("RYNAS_BIND").cloned().unwrap_or_else(|| "127.0.0.1".into());
+        let provided = self.provided(&l, stack, &bind, ids);
+        let mut req = rynas_apps::render::request_from_env(app, stack, &env);
+        req.share_set = items.clone();
+        let r = rynas_apps::render::render(app, &cat.source, &provided, &req).map_err(render_err)?;
+        let grants = share_set_grants(&self.applied_shares(), m, &items);
+        Ok(ShareSetJob {
+            stack: stack.to_string(),
+            layout: l,
+            name: m.name.clone(),
+            old: (d.compose.clone(), d.env.clone()),
+            new: (file_text(&r, COMPOSE_FILE), file_text(&r, ".env")),
+            folders: r.folders.clone(),
+            grants,
+            gid: ids.1,
+            items,
+        })
+    }
+}
+
+/// Writes the new share set: files, folders of the stack, the apps' account into the shares,
+/// `up` (the container is recreated with the new binds). On a failure the previous files
+/// come back and the stack goes up as it was.
+pub(crate) async fn share_set_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, j: ShareSetJob) -> Result<(), String> {
+    let s = &a.docker;
+    let names: Vec<&str> = j.items.iter().map(|i| i.name.as_str()).collect();
+    ctx.log(&format!(
+        "{}: shared folders {}",
+        j.stack,
+        if names.is_empty() { "none".to_string() } else { names.join(", ") }
+    ));
+    let r = async {
+        write_stack(s, &j.layout, &j.stack, &j.new).await?;
+        let (s2, folders, log, n2) = (s.clone(), j.folders.clone(), ctx.clone(), j.stack.clone());
+        blocking(move || {
+            // added to what the install made
+            let made = make_folders(&s2, &folders, &|m| log.log(m))?;
+            record_made(&s2, &n2, made)
+        })
+        .await?;
+        grant_shares(a, ctx, who, &j.name, j.gid, &j.grants).await?;
+        ctx.progress(60);
+        compose_run(s, ctx, &j.stack, &j.layout, ComposeAction::Up).await
+    }
+    .await;
+    match r {
+        Ok(()) => {
+            s.changed();
+            ctx.progress(100);
+            Ok(())
+        }
+        Err(e) => {
+            ctx.log(&format!("{e}: putting the previous compose.yaml and .env back"));
+            write_stack(s, &j.layout, &j.stack, &j.old).await?;
+            compose_run(s, ctx, &j.stack, &j.layout, ComposeAction::Up).await?;
+            Err(e)
+        }
+    }
+}
+
+/// `PUT /v1/apps/installed/{stack}/share-set`: task `apps.share-set`.
+async fn share_set_put(
+    State(st): State<AppsState>,
+    hd: HeaderMap,
+    UrlPath(stack): UrlPath<String>,
+    body: Result<Json<ShareSetRequest>, JsonRejection>,
+) -> Res<Response> {
+    let a = asvc(&st)?;
+    let who = admin(&a, &hd)?;
+    let Json(req) = body?;
+    let items = resolve_share_set(&a.applied_shares(), &req.items).map_err(|e| Error::invalid("items", e))?;
+    let job = a.prepare_share_set(&stack, items).await?;
+    let guard = mark_busy(&a.docker, &stack)?;
+    let names: Vec<&str> = job.items.iter().map(|i| i.name.as_str()).collect();
+    audit(&who, "share-set", &format!("{stack} [{}]", names.join(", ")));
+    let a2 = a.clone();
+    let id = a.docker.ops.tasks.spawn("apps.share-set", &who.clone(), move |ctx| async move {
+        let _guard = guard;
+        share_set_task(&a2, &ctx, &who, job).await
+    })?;
+    Ok(accepted(id))
+}
+
 async fn catalog_source_get(
     State(st): State<AppsState>,
     hd: HeaderMap,
@@ -2477,6 +2698,7 @@ pub fn router(st: AppsState) -> Router {
         .route("/v1/apps/installed/{stack}/convert", post(convert_post))
         .route("/v1/apps/installed/{stack}/uninstall", post(uninstall_post))
         .route("/v1/apps/installed/{stack}/proxy", post(proxy_post))
+        .route("/v1/apps/installed/{stack}/share-set", put(share_set_put))
         .with_state(st)
 }
 

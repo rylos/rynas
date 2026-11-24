@@ -454,6 +454,48 @@ pub struct AppShare {
     pub fallback: Option<String>,
 }
 
+/// `[share_set]`: a list of shared folders the user chooses, each mounted at
+/// `<target>/<share>` of one service, changeable after install
+/// (`PUT /api/v1/apps/installed/{stack}/share-set`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AppShareSet {
+    /// The `.env` variable holding the list (`name=path` items joined by `;`).
+    pub env: String,
+    pub service: String,
+    /// Folder inside the container (`/shares`).
+    pub target: String,
+    pub label: String,
+    pub description: String,
+    pub access: ShareAccess,
+}
+
+/// One shared folder chosen for a share set, by its rynas share name. `follow`: the bind
+/// follows mounts made on the host later (propagation `rslave`); default: on for an
+/// encrypted share, off otherwise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShareSetChoice {
+    pub share: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow: Option<bool>,
+}
+
+/// `PUT /api/v1/apps/installed/{stack}/share-set`: the whole new list (empty: none).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShareSetRequest {
+    pub items: Vec<ShareSetChoice>,
+}
+
+/// One mounted share of an installed app's share set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InstalledShareSetItem {
+    /// Folder name inside the target (the share's name).
+    pub name: String,
+    /// Host path (or `./<folder>` of the stack).
+    pub path: String,
+    #[serde(default, skip_serializing_if = "not")]
+    pub follow: bool,
+}
+
 /// A generated secret (`[[secrets]]`): never its value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AppSecret {
@@ -540,6 +582,8 @@ pub struct AppDetail {
     pub web: Option<AppWeb>,
     pub folders: Vec<AppFolder>,
     pub shares: Vec<AppShare>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_set: Option<AppShareSet>,
     pub secrets: Vec<AppSecret>,
     pub hardware: AppHardware,
     pub overlays: Vec<AppOverlay>,
@@ -574,6 +618,9 @@ pub struct AppInstallRequest {
     pub publish_lan: Option<bool>,
     /// Bring the stack up after creating it (default true).
     pub start: bool,
+    /// The shares of the entry's `[share_set]` ([`AppDetail::share_set`]), by share name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub share_set: Vec<ShareSetChoice>,
 }
 
 impl Default for AppInstallRequest {
@@ -586,6 +633,7 @@ impl Default for AppInstallRequest {
             ports: BTreeMap::new(),
             publish_lan: None,
             start: true,
+            share_set: Vec::new(),
         }
     }
 }
@@ -822,6 +870,9 @@ pub struct InstalledApp {
     pub web_url: Option<String>,
     /// The stack folder is a btrfs subvolume: updates take a snapshot first.
     pub snapshots: bool,
+    /// The shares of the entry's `[share_set]` mounted now (read from `.env`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub share_set: Vec<InstalledShareSetItem>,
 }
 
 /// `GET /api/v1/apps/installed/{stack}`.
