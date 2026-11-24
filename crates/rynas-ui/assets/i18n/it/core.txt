@@ -2106,6 +2106,7 @@ svc.smb	SMB
 svc.nfs	NFS
 svc.running	In esecuzione
 svc.stopped	Fermo
+svc.nfs_idle	Parte con la prima esportazione
 svc.off	Disattivato
 svc.exports	Esportazioni NFS
 svc.no_exports	Nessuna cartella condivisa è esportata via NFS.

@@ -53,7 +53,16 @@ pub fn FileServices() -> impl IntoView {
                 </section>
                 <section class="card widget w-6">
                     <WidgetHead icon=icons::FOLDER_SYNC title="svc.nfs">
-                        {move || nfs.data.with(|s| s.as_ref().map(|s| view! { {running_pill(s.settings.enabled, s.running)}{s.pending.then(|| ui::status(Tone::Info, t("pending.change").to_string()))} }))}
+                        {move || nfs.data.with(|s| s.as_ref().map(|s| {
+                            // nfs-server runs only while a share is exported: on and idle is not a fault
+                            let exports = shares.data.with(|v| v.as_ref().is_some_and(|v| v.iter().any(|x| x.share.nfs.enabled)));
+                            let pill = if s.settings.enabled && !s.running && !exports {
+                                ui::status(Tone::Info, t("svc.nfs_idle").to_string())
+                            } else {
+                                running_pill(s.settings.enabled, s.running)
+                            };
+                            view! { {pill}{s.pending.then(|| ui::status(Tone::Info, t("pending.change").to_string()))} }
+                        }))}
                     </WidgetHead>
                     {move || nfs.gate(5).unwrap_or_else(|| {
                         let s = nfs.data.get_untracked().unwrap_or_default();

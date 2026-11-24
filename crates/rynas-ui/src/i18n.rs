@@ -2778,6 +2778,7 @@ dict! { BLOB, LENS;
     "svc.nfs" => "NFS";
     "svc.running" => "Running";
     "svc.stopped" => "Stopped";
+    "svc.nfs_idle" => "Starts with the first export";
     "svc.off" => "Off";
     "svc.exports" => "NFS exports";
     "svc.no_exports" => "No shared folder is exported over NFS.";

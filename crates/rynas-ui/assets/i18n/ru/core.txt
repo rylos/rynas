@@ -2138,6 +2138,7 @@ svc.smb	SMB
 svc.nfs	NFS
 svc.running	Выполняется
 svc.stopped	Остановлена
+svc.nfs_idle	Запустится с первым экспортом
 svc.off	Выключена
 svc.exports	Экспорты NFS
 svc.no_exports	Ни одна общая папка не экспортируется по NFS.
