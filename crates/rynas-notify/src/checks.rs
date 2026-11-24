@@ -907,7 +907,8 @@ pub fn device_renamed(user: &str, id: &str, old: &str, new: &str) -> NewEvent {
 
 /// A paired device revoked. `reason`: `user` (from the web interface), `self` (unpaired from
 /// the app), `account` (the account was removed or disabled), `inactive` (no refresh for 180
-/// days), `unclaimed` (approved, never picked up by the phone).
+/// days), `unclaimed` (approved, never picked up by the phone, or never refreshed after the
+/// pairing), `account_replaced` (the user name now belongs to another uid).
 pub fn device_revoked(user: &str, id: &str, device: &str, reason: &str) -> NewEvent {
     let (user, device) = (safe_word(user), safe_word(device));
     let mut e = oneshot(

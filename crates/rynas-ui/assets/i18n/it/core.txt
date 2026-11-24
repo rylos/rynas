@@ -6292,6 +6292,7 @@ err.reauth_required	Inserisci di nuovo la password per continuare.
 err.not_for_devices	Un dispositivo abbinato non può farlo: usa l'interfaccia web.
 err.device_revoked	Questo dispositivo è stato revocato: abbinalo di nuovo.
 err.refresh_invalid	Il dispositivo non ha potuto rinnovare l'accesso: abbinalo di nuovo.
+err.clock_skew	L'orologio del dispositivo differisce da quello del NAS di più di 2 minuti: imposta l'ora corretta e riprova.
 nav.devices	Dispositivi mobili
 dev.subtitle	Telefoni abbinati a questo NAS: rinominali, revocali, abbinane uno nuovo
 dev.pair	Abbina un dispositivo
@@ -6335,6 +6336,7 @@ nev.device.revoked.reason.self	disabbinato dall'app
 nev.device.revoked.reason.account	l'account è stato rimosso o disattivato
 nev.device.revoked.reason.inactive	nessun accesso da 180 giorni
 nev.device.revoked.reason.unclaimed	mai ritirato dal telefono
+nev.device.revoked.reason.account_replaced	l'account è stato sostituito da un altro con lo stesso nome
 nev.device.refresh_reuse.title	Dispositivo {device} di {user} revocato: un token è stato usato due volte
 nev.device.refresh_reuse.body	Un vecchio token di rinnovo del dispositivo mobile {device} ({user}) è tornato da {ip}: potrebbe esisterne una copia altrove. Il dispositivo è stato revocato; abbinalo di nuovo.
 nev.device.power.title	Alimentazione del sistema dal dispositivo {device}: {action}

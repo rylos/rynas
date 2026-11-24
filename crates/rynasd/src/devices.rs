@@ -9,8 +9,9 @@
 //! - `<state>/nas-sid`: this NAS' identity for the app (16 random bytes, b64u), made once.
 //! - The refresh check: the device's signature, the account (it exists, is not locked, PAM
 //!   account management accepts it, it may sign in), rotation with reuse detection.
-//! - Every 10 minutes: devices without a refresh for 180 days expire; devices of removed or
-//!   disabled accounts are revoked.
+//! - Every 10 minutes: devices without a refresh for 180 days expire; devices never refreshed
+//!   after their pairing (`unclaimed`), of removed or disabled accounts, or of a name that now
+//!   belongs to another uid (`account_replaced`) are revoked.
 //!
 //! Internal routes (rynas-web only, never public; the user in `x-rynas-user`):
 //!
@@ -20,7 +21,7 @@
 //! | GET | `/v1/devices/trust` | | `internal::Trust` (sid, base URLs, TLS pins) |
 //! | GET | `/v1/devices/live` | | `Vec<internal::Live>`: the live devices and their user's groups (rynas-web's sweep every 10 s ends the access tokens of the others and of users who lost the role) |
 //! | POST | `/v1/devices/register` | `internal::Register` | `Device` (the approving user owns it) |
-//! | POST | `/v1/devices/refresh` | `internal::RefreshCheck` | `internal::RefreshOk`; 401 `device_revoked` / `refresh_invalid` |
+//! | POST | `/v1/devices/refresh` | `internal::RefreshCheck` | `internal::RefreshOk`; 401 `device_revoked` / `refresh_invalid` (`field` set only for guesses: `internal::GUESS_*`), 400 `clock_skew` |
 //! | GET | `/v1/devices` | | `Vec<Device>`: the user's; administrators everyone's |
 //! | PATCH | `/v1/devices/{id}` | `DeviceRename` | `Device` (owner or administrator) |
 //! | DELETE | `/v1/devices/{id}?reason=user\|self` | | 204 (owner or administrator) |
@@ -44,10 +45,12 @@ use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
-use rynas_api_types::devices::internal::{Live, RefreshCheck, RefreshOk, Register, Sid, Trust};
+use rynas_api_types::devices::internal::{
+    GUESS_DEVICE_ID, GUESS_SIGNATURE, Live, RefreshCheck, RefreshOk, Register, Sid, Trust,
+};
 use rynas_api_types::devices::{
-    Device, DeviceRename, DeviceSelf, INACTIVE_EXPIRY_DAYS, PushRegistration, PushSubscription,
-    REFRESH_GRACE_S, clean_name, clean_text, push_language,
+    ACCESS_TTL_S, Device, DeviceRename, DeviceSelf, INACTIVE_EXPIRY_DAYS, PAIRING_TTL_S,
+    PushRegistration, PushSubscription, REFRESH_GRACE_S, clean_name, clean_text, push_language,
 };
 use rynas_api_types::notify::{
     FieldMatch, NotifyCategory, NotifyLanguage, NotifyRule, NotifySeverity, TargetConfig, TargetRequest,
@@ -57,7 +60,8 @@ use rynas_api_types::error_codes;
 use rynas_auth::Clock;
 use rynas_auth::backend::BoxFuture;
 use rynas_auth::device::{
-    b64u, b64u_decode, ct_eq_bytes, key_hash, new_id, p256_point, refresh_message, ts_ok, verify,
+    DELIVERY_GRACE_MS, b64u, b64u_decode, ct_eq_bytes, key_hash, new_id, p256_point,
+    refresh_message, ts_ok, verify,
 };
 use rynas_notify::Notifier;
 use rynas_notify::checks::{device_paired, device_refresh_reuse, device_renamed, device_revoked};
@@ -74,6 +78,11 @@ pub const CHECK_EVERY: Duration = Duration::from_secs(600);
 const DAY_MS: u64 = 86_400_000;
 /// Devices kept at most (a registration beyond is refused).
 pub const MAX_DEVICES: usize = 500;
+/// A device never refreshed this long after its approval is revoked (`unclaimed`): the
+/// code's lifetime, the tokens' wait for the phone's poll, and the first access token's
+/// lifetime are over, so nobody can hold a working token of it (rynas-web restarted before
+/// the phone picked them up, say).
+pub const UNCLAIMED_AFTER_MS: u64 = (PAIRING_TTL_S + ACCESS_TTL_S) * 1000 + DELIVERY_GRACE_MS;
 
 /// What the account behind a device is now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +98,9 @@ pub enum Account {
 
 /// A user's groups: `Ok(None)` when the user does not exist, `Err` when the lookup failed.
 pub type Lookup = fn(&str) -> Result<Option<Vec<String>>, String>;
+/// A user's numeric id: `Ok(None)` when the user does not exist, `Err` when the lookup failed
+/// ([`crate::groups::user_uid`]).
+pub type UidLookup = fn(&str) -> Result<Option<u32>, String>;
 
 /// The account check (blocking): PAM in production ([`crate::pam::account_state`]).
 pub type AccountCheck = Arc<dyn Fn(&str) -> Account + Send + Sync>;
@@ -129,6 +141,21 @@ struct Record {
     /// target of this device delivers to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     push: Option<PushSubscription>,
+    /// The owner's uid at the pairing (filled at the next refresh for older records): a
+    /// different uid under the same name is another account (removed, then made again), and
+    /// revokes the device (`account_replaced`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uid: Option<u32>,
+    /// The `files` rule of the device's target was made (with the target, or once by the
+    /// migration of targets older than that rule): never made again, so a rule the
+    /// administrator deleted stays deleted.
+    #[serde(default)]
+    files_rule_added: bool,
+    /// b64u(SHA-256) of the token replaced most recently: presented after its grace window
+    /// (an app that lost the answer and waited) it is refused with `refresh_invalid` and the
+    /// device stays; only an older token is a reuse.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    last_replaced: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -153,6 +180,7 @@ pub struct DevicesSvc {
     /// The user's groups: `Ok(None)` for a user that does not exist, `Err` when the lookup
     /// failed ([`crate::groups::user_groups_checked`]).
     lookup: Lookup,
+    uid_of: UidLookup,
     account: AccountCheck,
     trust: TrustProvider,
     clock: Arc<dyn Clock>,
@@ -227,6 +255,14 @@ fn refresh_invalid() -> Error {
         StatusCode::UNAUTHORIZED,
         error_codes::REFRESH_INVALID,
         "refresh refused".into(),
+    )
+}
+
+fn clock_skew() -> Error {
+    Error::new(
+        StatusCode::BAD_REQUEST,
+        error_codes::CLOCK_SKEW,
+        "the device's clock is more than 120 s away from the NAS'".into(),
     )
 }
 
@@ -347,6 +383,7 @@ impl DevicesSvc {
         notifier: Arc<dyn Notifier>,
         admins: AdminPolicy,
         lookup: Lookup,
+        uid_of: UidLookup,
         account: AccountCheck,
         trust: TrustProvider,
         clock: Arc<dyn Clock>,
@@ -372,6 +409,7 @@ impl DevicesSvc {
             notifier,
             admins,
             lookup,
+            uid_of,
             account,
             trust,
             clock,
@@ -381,10 +419,71 @@ impl DevicesSvc {
     }
 
     /// Ties the devices to the notification engine: `device` targets find their subscription
-    /// here, and subscriptions create and remove their targets.
+    /// here, and subscriptions create and remove their targets. Targets made before the
+    /// `files` rule existed get it once ([`DevicesSvc::add_missing_files_rules`]).
     pub fn bind_engine(self: &Arc<Self>, engine: rynas_notify::engine::Engine) {
         engine.set_push_directory(Arc::new(PushDir(Arc::downgrade(self))));
         let _ = self.engine.set(engine);
+        self.add_missing_files_rules();
+    }
+
+    /// One-time migration: each device with push whose record does not say its `files` rule
+    /// was made gets one, unless a rule already sends category `files` to its target; then
+    /// the record says so and it is never looked at again (blocking: the engine's database).
+    fn add_missing_files_rules(&self) {
+        let Some(e) = self.engine.get() else { return };
+        let todo: Vec<(String, String, String)> = self
+            .lock()
+            .devices
+            .iter()
+            .filter(|d| d.push.is_some() && !d.files_rule_added)
+            .map(|d| (d.id.clone(), d.name.clone(), d.user.clone()))
+            .collect();
+        if todo.is_empty() {
+            return;
+        }
+        let (Ok(targets), Ok(rules)) = (e.targets(), e.rules()) else {
+            tracing::warn!("devices: the notification targets could not be read: files rules checked at the next start");
+            return;
+        };
+        let mut done = Vec::new();
+        for (id, name, user) in todo {
+            let Some(t) = targets
+                .iter()
+                .find(|t| matches!(&t.config, TargetConfig::Device { device_id: d } if *d == id))
+            else {
+                // no target (yet): the next registration makes it with both rules
+                continue;
+            };
+            let has = rules
+                .iter()
+                .any(|r| r.targets.contains(&t.id) && r.categories.contains(&NotifyCategory::Files));
+            if !has {
+                if let Err(err) = e.create_rule(&files_rule(&id, &name, &user, t.id)) {
+                    tracing::warn!("devices: the files rule of {id}: {err}");
+                    continue;
+                }
+                audit(format_args!("files rule added to the notification target of {id}"));
+            }
+            done.push(id);
+        }
+        self.mark_files_rule(&done);
+    }
+
+    /// Records that the `files` rule of these devices' targets was made.
+    fn mark_files_rule(&self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut reg = self.lock();
+        let mut changed = false;
+        for d in reg.devices.iter_mut().filter(|d| ids.contains(&d.id)) {
+            changed |= !d.files_rule_added;
+            d.files_rule_added = true;
+        }
+        if changed && let Err(e) = self.save(&reg) {
+            tracing::error!("devices: {}", e.2);
+        }
     }
 
     /// The `device` target of `device_id` (owned by `user`), unless it exists, with two
@@ -431,10 +530,16 @@ impl DevicesSvc {
                     },
                     files_rule(device_id, name, user, t.id),
                 ];
-                for rule in &rules {
-                    if let Err(err) = e.create_rule(rule) {
-                        tracing::warn!("devices: the rule {} of {device_id}: {err}", rule.name);
+                let mut files_made = false;
+                for (i, rule) in rules.iter().enumerate() {
+                    match e.create_rule(rule) {
+                        Ok(_) => files_made |= i == 1,
+                        Err(err) => tracing::warn!("devices: the rule {} of {device_id}: {err}", rule.name),
                     }
+                }
+                // a failed one is made by the migration at the next start
+                if files_made {
+                    self.mark_files_rule(&[device_id.to_string()]);
                 }
             }
             Err(err) => tracing::warn!("devices: the notification target of {device_id}: {err}"),
@@ -645,6 +750,8 @@ impl DevicesSvc {
         }
         let name = clean_name(&r.name).ok_or_else(|| Error::invalid("name", "empty name"))?;
         let now = self.clock.now_ms();
+        // a failed lookup leaves it for the first refresh
+        let uid = (self.uid_of)(user).ok().flatten();
         let rec = Record {
             id: new_id("d_"),
             user: user.to_string(),
@@ -661,6 +768,9 @@ impl DevicesSvc {
             prev: Vec::new(),
             last_ts: 0,
             push: None,
+            uid,
+            files_rule_added: false,
+            last_replaced: String::new(),
         };
         let view = Self::view(&rec);
         {
@@ -764,26 +874,31 @@ impl DevicesSvc {
         gone.into_iter().map(|r| r.id).collect()
     }
 
-    /// The refresh of a device: signature, account, then the token with rotation, the grace
-    /// window and reuse detection.
+    /// The refresh of a device: signature, clock, account, then the token with rotation, the
+    /// grace window and reuse detection. Only an unknown device and a bad signature are
+    /// marked as guesses ([`GUESS_DEVICE_ID`], [`GUESS_SIGNATURE`]).
     pub fn refresh(&self, c: &RefreshCheck) -> Res<RefreshOk> {
         let now = self.clock.now_ms();
         let sid = self.sid()?;
         if !valid_sha(&c.refresh_sha) || !valid_sha(&c.new_refresh_sha) {
             return Err(refresh_invalid());
         }
-        let (user, key) = {
+        let (user, key, uid) = {
             let reg = self.lock();
             let r = reg
                 .devices
                 .iter()
                 .find(|d| d.id == c.device_id)
-                .ok_or_else(revoked)?;
-            (r.user.clone(), b64u_decode(&r.public_key).unwrap_or_default())
+                .ok_or_else(|| revoked().field(GUESS_DEVICE_ID))?;
+            (r.user.clone(), b64u_decode(&r.public_key).unwrap_or_default(), r.uid)
         };
         let msg = refresh_message(&sid, &c.device_id, c.ts, &c.refresh_sha);
-        if !ts_ok(c.ts, now) || !verify(&key, &msg, &c.sig) {
-            return Err(refresh_invalid());
+        if !verify(&key, &msg, &c.sig) {
+            return Err(refresh_invalid().field(GUESS_SIGNATURE));
+        }
+        // the device's own key signed a time far from ours: its clock (or ours) is wrong
+        if !ts_ok(c.ts, now) {
+            return Err(clock_skew());
         }
         match (self.account)(&user) {
             Account::Ok => {}
@@ -804,6 +919,22 @@ impl DevicesSvc {
                 return Err(unavailable("the account check failed"));
             }
         };
+        let now_uid = match (self.uid_of)(&user) {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                self.revoke_where("account", |d| d.user == user);
+                return Err(revoked());
+            }
+            Err(e) => {
+                tracing::warn!("devices: refresh of {}: {e}", c.device_id);
+                return Err(unavailable("the account check failed"));
+            }
+        };
+        // the name now belongs to another account (removed and made again)
+        if uid.is_some_and(|u| u != now_uid) {
+            self.revoke_where("account_replaced", |d| d.user == user && d.uid.is_some_and(|u| u != now_uid));
+            return Err(revoked());
+        }
         // the account may sign in to the web interface (today: administrators), by rynasd's
         // groups and by rynas-web's: a token is never rotated for an answer rynas-web drops
         let web_ok = c.admin_groups.is_empty() || groups.iter().any(|g| c.admin_groups.contains(g));
@@ -826,6 +957,15 @@ impl DevicesSvc {
                 .prev
                 .iter()
                 .any(|p| ct_eq_bytes(p.sha.as_bytes(), c.refresh_sha.as_bytes()));
+        // the token replaced most recently, after its window: an app that lost the answer and
+        // came back late, not a copy; refused, the device stays (the app pairs again)
+        if !current
+            && !previous
+            && !r.last_replaced.is_empty()
+            && ct_eq_bytes(r.last_replaced.as_bytes(), c.refresh_sha.as_bytes())
+        {
+            return Err(refresh_invalid());
+        }
         if !current && !previous {
             let rec = reg.devices.remove(i);
             if let Err(e) = self.save(&reg) {
@@ -850,6 +990,7 @@ impl DevicesSvc {
         // the replaced token stays good for the grace window (a lost answer, a second refresh
         // sent at the same time); every token of the window keeps its own end
         let replaced = std::mem::replace(&mut r.refresh_sha, c.new_refresh_sha.clone());
+        r.last_replaced = replaced.clone();
         r.prev.push(PrevToken {
             sha: replaced,
             until_ms: now + REFRESH_GRACE_S * 1000,
@@ -861,6 +1002,10 @@ impl DevicesSvc {
         r.last_refresh_ms = now;
         r.last_seen_ms = now;
         r.last_ip = clean_text(&c.ip);
+        // records from before the uid was kept get it now
+        if r.uid.is_none() {
+            r.uid = Some(now_uid);
+        }
         let view = Self::view(r);
         self.save(&reg)?;
         Ok(RefreshOk {
@@ -900,16 +1045,29 @@ impl DevicesSvc {
         })
     }
 
-    /// Expires devices without a refresh for [`INACTIVE_EXPIRY_DAYS`] and revokes the devices
-    /// of removed or disabled accounts (blocking: PAM). Returns the revoked ids.
+    /// Expires devices without a refresh for [`INACTIVE_EXPIRY_DAYS`], revokes devices never
+    /// refreshed [`UNCLAIMED_AFTER_MS`] after their approval, and the devices of removed or
+    /// disabled accounts or of a name that now belongs to another uid (blocking: PAM, NSS).
+    /// Returns the revoked ids.
     pub fn check(&self) -> Vec<String> {
         let now = self.clock.now_ms();
         let limit = INACTIVE_EXPIRY_DAYS * DAY_MS;
         let mut out = self.revoke_where("inactive", |d| now.saturating_sub(d.last_refresh_ms) >= limit);
+        out.extend(self.revoke_where("unclaimed", |d| {
+            d.last_ts == 0 && now.saturating_sub(d.created_ms) >= UNCLAIMED_AFTER_MS
+        }));
         let users: BTreeSet<String> = self.lock().devices.iter().map(|d| d.user.clone()).collect();
         for u in users {
             match (self.account)(&u) {
-                Account::Ok => {}
+                Account::Ok => match (self.uid_of)(&u) {
+                    Ok(Some(uid)) => {
+                        out.extend(self.revoke_where("account_replaced", |d| {
+                            d.user == u && d.uid.is_some_and(|x| x != uid)
+                        }));
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("devices: the uid of {u}: {e}: checked again later"),
+                },
                 Account::Gone | Account::Disabled => {
                     out.extend(self.revoke_where("account", |d| d.user == u));
                 }
@@ -1159,6 +1317,23 @@ mod tests {
         Ok(groups(u))
     }
 
+    thread_local! {
+        /// alice was removed and made again with another uid, on this test's thread.
+        static ALICE_REPLACED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn uid(u: &str) -> Result<Option<u32>, String> {
+        if LOOKUP_FAILS.with(|f| f.get()) {
+            return Err("nss: connection refused".into());
+        }
+        Ok(groups(u).map(|_| match u {
+            "alice" if ALICE_REPLACED.with(|f| f.get()) => 1500,
+            "alice" => 1000,
+            "bob" => 1001,
+            _ => 1002,
+        }))
+    }
+
     struct Rig {
         svc: Arc<DevicesSvc>,
         clock: Arc<ManualClock>,
@@ -1193,6 +1368,7 @@ mod tests {
             events.clone(),
             AdminPolicy::new(vec!["rynas-admin".into()], groups),
             lookup,
+            uid,
             account,
             trust,
             clock.clone(),
@@ -1202,7 +1378,11 @@ mod tests {
     }
 
     fn register(r: &Rig, user: &str, key: &Key, token: &str) -> Device {
-        r.svc
+        register_in(&r.svc, user, key, token)
+    }
+
+    fn register_in(svc: &DevicesSvc, user: &str, key: &Key, token: &str) -> Device {
+        svc
             .register(
                 user,
                 &Register {
@@ -1314,6 +1494,7 @@ mod tests {
             Arc::new(rynas_notify::NullNotifier),
             AdminPolicy::new(vec!["rynas-admin".into()], groups),
             lookup,
+            uid,
             Arc::new(|_: &str| Account::Ok),
             Arc::new(|| Box::pin(async { (Vec::new(), Vec::new()) })),
             Arc::new(ManualClock::new(T0)),
@@ -1356,6 +1537,7 @@ mod tests {
             Arc::new(rynas_notify::NullNotifier),
             AdminPolicy::new(vec!["rynas-admin".into()], groups),
             lookup,
+            uid,
             Arc::new(|_: &str| Account::Ok),
             r.svc.trust.clone(),
             r.clock.clone(),
@@ -1380,20 +1562,43 @@ mod tests {
         assert_eq!(ok.groups, vec!["rynas-admin".to_string()]);
         // R3 is current, R2 (never delivered) is dead: using it is a reuse
         assert!(!check(&r, &key, &d.id, "R3", "R4").unwrap().grace);
-        // bad signature: refused, nothing changes
+        // bad signature: refused, nothing changes; marked as a guess
         let other = Key::new();
         let e = check(&r, &other, &d.id, "R4", "R5").unwrap_err();
-        assert_eq!(e.1, error_codes::REFRESH_INVALID);
-        // the grace window is over: R3 is a reuse and the device goes
+        assert_eq!((e.1, e.3.as_deref()), (error_codes::REFRESH_INVALID, Some(GUESS_SIGNATURE)));
+        // the grace window is over: R3, the token replaced most recently, is refused and
+        // the device stays (an app that lost the answer and came back late)
         r.clock.advance_ms(61_000);
         r.events.take();
         let e = check(&r, &key, &d.id, "R3", "R9").unwrap_err();
-        assert_eq!((e.0, e.1), (StatusCode::UNAUTHORIZED, error_codes::DEVICE_REVOKED));
+        assert_eq!((e.0, e.1, e.3), (StatusCode::UNAUTHORIZED, error_codes::REFRESH_INVALID, None));
+        assert_eq!(r.svc.ids(), vec![d.id.clone()]);
+        assert!(r.events.take().is_empty());
+        // an older one (R2, replaced before R3) is a reuse and the device goes
+        let e = check(&r, &key, &d.id, "R2", "R9").unwrap_err();
+        assert_eq!((e.0, e.1, e.3), (StatusCode::UNAUTHORIZED, error_codes::DEVICE_REVOKED, None));
         assert!(r.svc.ids().is_empty());
         assert_eq!(r.events.take()[0].code, "device.refresh_reuse");
-        // unknown device
+        // unknown device: marked as a guess
         let e = check(&r, &key, &d.id, "R4", "R5").unwrap_err();
-        assert_eq!(e.1, error_codes::DEVICE_REVOKED);
+        assert_eq!((e.1, e.3.as_deref()), (error_codes::DEVICE_REVOKED, Some(GUESS_DEVICE_ID)));
+    }
+
+    #[test]
+    fn a_late_retry_of_the_last_token_keeps_the_device() {
+        let r = rig();
+        let key = Key::new();
+        let d = register(&r, "alice", &key, "R1");
+        check(&r, &key, &d.id, "R1", "R2").unwrap();
+        // the answer (R2) was lost and the app retries R1 two minutes later: refused, kept
+        r.clock.advance_ms(120_000);
+        assert_eq!(check(&r, &key, &d.id, "R1", "R3").unwrap_err().1, error_codes::REFRESH_INVALID);
+        assert_eq!(r.svc.ids(), vec![d.id.clone()]);
+        // the current token still works; after that rotation R1 is two tokens back: a reuse
+        check(&r, &key, &d.id, "R2", "R3").unwrap();
+        r.clock.advance_ms(61_000);
+        assert_eq!(check(&r, &key, &d.id, "R1", "R4").unwrap_err().1, error_codes::DEVICE_REVOKED);
+        assert!(r.svc.ids().is_empty());
     }
 
     #[test]
@@ -1416,7 +1621,9 @@ mod tests {
                 admin_groups: Vec::new(),
             })
             .unwrap_err();
-        assert_eq!(e.1, error_codes::REFRESH_INVALID);
+        // signed by the device, its clock 500 s behind: told so, not a guess, device kept
+        assert_eq!((e.0, e.1, e.3), (StatusCode::BAD_REQUEST, error_codes::CLOCK_SKEW, None));
+        assert_eq!(r.svc.ids(), vec![d.id.clone()]);
         // a user outside the administrators may not refresh (and keeps the device)
         let kb = Key::new();
         let db = register(&r, "bob", &kb, "B1");
@@ -1452,7 +1659,9 @@ mod tests {
         check(&r, &ka, &a.id, "A1", "A2").unwrap();
         r.clock.advance_ms(DAY_MS + 1);
         assert!(r.svc.check().is_empty());
-        let other = register(&r, "alice", &Key::new(), "O1");
+        let ko = Key::new();
+        let other = register(&r, "alice", &ko, "O1");
+        check(&r, &ko, &other.id, "O1", "O2").unwrap();
         r.clock.advance_ms(179 * DAY_MS);
         assert_eq!(r.svc.check(), vec![a.id.clone()]);
         assert_eq!(r.svc.ids(), vec![other.id.clone()]);
@@ -1593,5 +1802,134 @@ mod tests {
             .map(|s| s.parse().unwrap())
             .collect();
         assert_eq!(lan_urls(&a, 8443), vec!["https://192.168.1.10:8443".to_string()]);
+    }
+
+    #[test]
+    fn never_refreshed_devices_are_revoked_as_unclaimed() {
+        let r = rig();
+        let key = Key::new();
+        let picked = register(&r, "alice", &key, "P1");
+        let lost = register(&r, "alice", &Key::new(), "L1");
+        check(&r, &key, &picked.id, "P1", "P2").unwrap();
+        r.clock.advance_ms(UNCLAIMED_AFTER_MS - 2_000);
+        assert!(r.svc.check().is_empty(), "not yet");
+        r.clock.advance_ms(2_000);
+        r.events.take();
+        assert_eq!(r.svc.check(), vec![lost.id.clone()]);
+        assert_eq!(r.svc.ids(), vec![picked.id.clone()]);
+        let ev = r.events.take();
+        assert_eq!(ev[0].code, "device.revoked");
+        assert_eq!(ev[0].fields["reason"], "unclaimed");
+    }
+
+    #[test]
+    fn a_replaced_account_revokes_its_devices() {
+        let r = rig();
+        let key = Key::new();
+        let d = register(&r, "alice", &key, "R1");
+        assert_eq!(r.svc.lock().devices[0].uid, Some(1000), "kept at the pairing");
+        // a record from before the uid was kept: filled at the next refresh
+        r.svc.lock().devices[0].uid = None;
+        check(&r, &key, &d.id, "R1", "R2").unwrap();
+        assert_eq!(r.svc.lock().devices[0].uid, Some(1000));
+        // alice removed and made again (another uid): the refresh revokes
+        ALICE_REPLACED.with(|f| f.set(true));
+        r.events.take();
+        assert_eq!(check(&r, &key, &d.id, "R2", "R3").unwrap_err().1, error_codes::DEVICE_REVOKED);
+        assert!(r.svc.ids().is_empty());
+        assert_eq!(r.events.take()[0].fields["reason"], "account_replaced");
+        // the periodic check too; a device of the new account stays
+        ALICE_REPLACED.with(|f| f.set(false));
+        let old = register(&r, "alice", &Key::new(), "O1");
+        ALICE_REPLACED.with(|f| f.set(true));
+        let new = register(&r, "alice", &Key::new(), "N1");
+        assert_eq!(r.svc.check(), vec![old.id.clone()]);
+        assert_eq!(r.svc.ids(), vec![new.id]);
+    }
+
+    #[tokio::test]
+    async fn targets_older_than_the_files_rule_get_it_once() {
+        let r = rig();
+        let engine = rynas_notify::engine::Engine::open(rynas_notify::engine::EngineOptions::new(
+            r._dir.path().join("notify"),
+            "nas",
+        ))
+        .unwrap();
+        // two devices with push from before the flag: the first target has only the warnings
+        // rule (made before the files rule existed), the second has both already
+        let old = register(&r, "alice", &Key::new(), "A1");
+        let both = register(&r, "alice", &Key::new(), "B1");
+        let mut ids = Vec::new();
+        for d in [&old, &both] {
+            let t = engine
+                .create_target(&TargetRequest {
+                    name: target_name(&d.id, &d.name),
+                    enabled: true,
+                    language: NotifyLanguage::EN,
+                    config: TargetConfig::Device { device_id: d.id.clone() },
+                    secrets: Default::default(),
+                })
+                .unwrap();
+            engine
+                .create_rule(&NotifyRule {
+                    name: target_name(&d.id, &d.name),
+                    enabled: true,
+                    min_severity: NotifySeverity::Warning,
+                    targets: vec![t.id],
+                    ..Default::default()
+                })
+                .unwrap();
+            ids.push(t.id);
+        }
+        engine.create_rule(&files_rule(&both.id, &both.name, "alice", ids[1])).unwrap();
+        {
+            let mut reg = r.svc.lock();
+            for d in reg.devices.iter_mut() {
+                d.push = Some(sub());
+            }
+            r.svc.save(&reg).unwrap();
+        }
+        let files = |t: u64| {
+            engine
+                .rules()
+                .unwrap()
+                .into_iter()
+                .filter(|x| x.targets.contains(&t) && x.categories.contains(&NotifyCategory::Files))
+                .collect::<Vec<_>>()
+        };
+        r.svc.bind_engine(engine.clone());
+        assert_eq!(files(ids[0]).len(), 1, "added to the old target");
+        assert_eq!(files(ids[0])[0].fields[0].value, "alice");
+        assert_eq!(files(ids[1]).len(), 1, "not doubled on the other");
+        assert!(r.svc.lock().devices.iter().all(|d| d.files_rule_added));
+        // idempotent
+        r.svc.add_missing_files_rules();
+        assert_eq!((files(ids[0]).len(), files(ids[1]).len()), (1, 1));
+        // the administrator deletes it: a restart does not bring it back
+        engine.delete_rule(files(ids[0])[0].id).unwrap();
+        let again = DevicesSvc::new(
+            r._dir.path(),
+            Arc::new(rynas_notify::NullNotifier),
+            AdminPolicy::new(vec!["rynas-admin".into()], groups),
+            lookup,
+            uid,
+            Arc::new(|_: &str| Account::Ok),
+            r.svc.trust.clone(),
+            r.clock.clone(),
+        )
+        .unwrap();
+        again.bind_engine(engine.clone());
+        assert!(files(ids[0]).is_empty());
+        // a target made now comes with both rules and is marked
+        let d = register_in(&again, "alice", &Key::new(), "C1");
+        again.set_push("alice", &d.id, sub(), None).unwrap();
+        let t = engine
+            .targets()
+            .unwrap()
+            .into_iter()
+            .find(|t| matches!(&t.config, TargetConfig::Device { device_id } if *device_id == d.id))
+            .unwrap();
+        assert_eq!(files(t.id).len(), 1);
+        assert!(again.lock().devices.iter().find(|x| x.id == d.id).unwrap().files_rule_added);
     }
 }

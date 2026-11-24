@@ -18,7 +18,7 @@ by push (Web Push to its UnifiedPush endpoint, e.g. an ntfy server), never by po
 | Topic | Proposal | rynas |
 |---|---|---|
 | Times in responses | RFC 3339 strings | Unix milliseconds in `*_ms` fields, like every rynas API (`expires_ms`, `claimed_ms`, `created_ms`, `last_seen_ms`); `ts` in signed messages stays Unix seconds |
-| Error codes | names in the text | constants in `rynas_api_types::error_codes`: `pairing_invalid`, `pairing_rejected`, `pairing_expired`, `reauth_required`, `not_for_devices`, `device_revoked`, `refresh_invalid`, `rate_limited` (existing) |
+| Error codes | names in the text | constants in `rynas_api_types::error_codes`: `pairing_invalid`, `pairing_rejected`, `pairing_expired`, `reauth_required`, `not_for_devices`, `device_revoked`, `refresh_invalid`, `clock_skew`, `rate_limited` (existing) |
 | Who may pair | every user | the users who may sign in to the web interface today (administrators); other users when the login opens to them |
 | TLS pins (`p`, `tls_pins`) | leaf key hashes | the SPKI hash of rynas's local CA first, then the leaf's (current and staged); the app accepts a pin anywhere in the chain, so leaf renewals change nothing. Omitted for URLs with a publicly trusted certificate |
 | Storage | JSON under `/var/lib/rynas/devices/` | `<state>/devices/devices.json`, 0600, written atomically: metadata, public key, SHA-256 of the refresh token (current and previous, for the grace window), push subscription. Access tokens in memory only |
@@ -31,8 +31,8 @@ Public (no session):
 - `GET /api/v1/ping` → `{sid, name, version, api: 1}`. `sid`: 16 random bytes b64u, made once
   in `<state>/nas-sid`.
 - `POST /api/v1/devices/pairing/claim`, `POST /api/v1/devices/pairing/poll` (long poll ≤ 25 s),
-  `POST /api/v1/auth/device/refresh`: rate limited with the login limiter; failures logged for
-  fail2ban like login failures.
+  `POST /api/v1/auth/device/refresh`: rate limited by their own limiter (not the sign-in's),
+  guesses logged for their own fail2ban filter (§3 "Limiter").
 
 Session (cookie + CSRF for writes):
 
@@ -63,7 +63,10 @@ Bearer (device):
   also raises the security notification `device.power` (info).
 
 Signed messages, QR fields, compare code, rotation with reuse detection and the 60 s grace
-window: as in the proposal (§2-4 there). A refresh also checks that the Linux account still exists
+window: as in the proposal (§2-4 there), except that a grace refresh answers a **fresh** pair
+(below), and a signed `ts` more than 120 s away from the NAS' clock is answered 400
+`clock_skew` (a claim: only for a valid code with a valid signature, and the code stays
+usable; a refresh: only with the device's valid signature; the device stays). A refresh also checks that the Linux account still exists
 and may sign in (PAM account management through rynasd); a removed or disabled account revokes
 its devices. Devices without a refresh for 180 days expire. rynasd looks for both every 10
 minutes too, so a removed account loses its devices without waiting for their next refresh.
@@ -77,7 +80,9 @@ Details of the implementation:
   whichever answer the app keeps works. Each refresh must carry a `ts` strictly newer than the
   last accepted one (equal or older: `refresh_invalid`, the device stays), so a captured
   request cannot be replayed inside the window; the app signs again for every retry. After
-  the window an old token is a reuse and revokes the device.
+  the window, the token replaced **most recently** (with a valid signature) is answered
+  `refresh_invalid` and the device stays: an app that lost the answer and came back late is
+  not a thief; it has to pair again. Only an older token is a reuse and revokes the device.
 - Account check: only definite answers revoke (a user NSS cleanly reports as unknown, a `!`/`*`
   lock in `/etc/shadow`, `PAM_ACCT_EXPIRED`). Any other NSS or PAM failure refuses the refresh
   with 503 `backend_unavailable` and keeps the devices; the periodic check skips that user with
@@ -91,10 +96,25 @@ Details of the implementation:
   account gets the role back. Devices belong to system (PAM) accounts.
 - Approved but never picked up: the tokens wait in rynas-web's memory until the phone's poll
   takes them (once), at most 2 minutes past the pairing's expiry; then the device is revoked
-  (`unclaimed`).
-- Limiter: the public routes count failures per client address (`device@<ip>` in the login
-  limiter: a client guessing codes cannot lock out the others) and log
-  `authentication failure for device@<ip> from <ip>` for fail2ban.
+  (`unclaimed`). rynasd backs this up: a device never refreshed (`last_ts` 0) 22 minutes after
+  its approval (code lifetime 300 s + delivery grace 120 s + first access token 900 s:
+  `UNCLAIMED_AFTER_MS`) is revoked `unclaimed` by the 10-minute check (a restart of rynas-web
+  loses the waiting tokens). **The app refreshes once right after pairing**, before its first
+  access token runs out.
+- Replaced accounts: the owner's uid is kept with the device at the pairing (records from
+  before get it at their next successful refresh). A refresh or the 10-minute check that finds
+  the name under another uid (the account removed and made again) revokes the device
+  (`account_replaced`).
+- Limiter: the public routes have their own limiter (`AuthService::device_limiter`: own tables
+  per client address, the sign-in's delays): a client guessing codes cannot lock out the
+  others, nor the web sign-in from its address. Only guesses count: an unknown, used or expired
+  claim code, an unknown or used claim token, a signature of another key, an unknown device id
+  (rynasd marks the last two with `field` `device_id` / `sig` on its internal answer; rynas-web
+  drops the field). Not counted: a malformed body, a `ts` not newer (replay window), a role or
+  account refusal, 503, `clock_skew`, a reuse with a valid signature. Each guess logs
+  `device authentication failure from <ip>`, matched by
+  `packaging/fail2ban/filter.d/rynas-devices.conf` (jail `rynas-devices`), never by the
+  sign-in filter.
 
 ## 3a. Where things live (rynas-web and rynasd)
 
@@ -115,10 +135,13 @@ Bearer checks happen where `require_session` runs, without a round trip to rynas
   generates them and sends their SHA-256.
 - Revocation: a revoke through rynas-web ends the device's sessions at once and remembers the
   id: an access token issued while the revocation was on its way is dropped right after it is
-  made. Revocations rynasd makes on its own (expiry, removed accounts, reuse) and role changes
-  reach rynas-web within 10 s: it compares its device sessions with `GET /v1/devices/live`
-  (the live devices and their users' groups) and ends the sessions of devices not listed and
-  of users who lost the role (a failed group lookup decides nothing).
+  made (only revocations made through rynas-web — the web interface, the app's unpairing,
+  unclaimed pairings — are remembered). Revocations rynasd makes on its own (expiry, removed
+  or replaced accounts, unclaimed, reuse) and role changes reach rynas-web within 10 s: it
+  compares its device sessions with `GET /v1/devices/live` (the live devices and their users'
+  groups) and ends the sessions of devices not listed and of users who lost the role (a failed
+  group lookup decides nothing). Only sessions made before the list was asked for are judged
+  (a device approved or refreshed meanwhile is not in it yet), and nothing is remembered.
 - Password change: paired devices keep their access (they hold their own key, D-DEVICES); a
   security notification `device.password_kept` (info) lists them, so a device paired by
   someone else becomes visible.
@@ -159,8 +182,10 @@ As implemented (`rynas_notify::engine::webpush`, `crates/rynasd/src/devices.rs`)
 - Rules made with the target: `<device name> · <id tail>` (warning and above) and
   `<device name> · <id tail> · Files` (category `files`, field `user` = the device's owner, every
   severity). Both can be turned off or edited in the notification rules like any other. A target
-  made before these rules existed keeps only its first rule until the phone registers again
-  after its target is removed.
+  made before the `files` rule existed gets it once, when rynasd starts: unless a rule already
+  sends category `files` to the target; the device record then says so (`files_rule_added`),
+  as it does for a target made with both rules, and the rule is never made again (a rule the
+  administrator deleted stays deleted).
 - Fresh server key and salt per message (OS random source); the RFC 8291 Appendix A vector
   and a round trip are unit tests; an engine test delivers to a fake push service on
   loopback (`EngineOptions::push_loopback_http`, tests only) and decrypts what it received.
@@ -193,7 +218,7 @@ oneshot event (source `files`, key `files:job:<id>`, category `files`):
 
 Notifications (category security) and SSE (`notification` events): `device.paired` (notice),
 `device.renamed` (info), `device.revoked` (notice, `reason`: `user`, `self`, `account`,
-`inactive`, `unclaimed`), `device.refresh_reuse` (warning: the device was revoked),
+`account_replaced`, `inactive`, `unclaimed`), `device.refresh_reuse` (warning: the device was revoked),
 `device.power` (info: a restart, shutdown or cancellation asked from a device),
 `device.password_kept` (info: the user's password changed; lists the devices that keep access).
 

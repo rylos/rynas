@@ -1507,6 +1507,7 @@ fn main() -> std::io::Result<()> {
                 notifier.clone(),
                 ops.admins.clone(),
                 rynasd::groups::user_groups_checked,
+                rynasd::groups::user_uid,
                 account,
                 trust,
                 Arc::new(SystemClock),

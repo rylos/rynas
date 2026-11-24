@@ -10,8 +10,12 @@
 //! system accounts (PAM). No request of a paired device goes to rynasd for its token.
 //!
 //! Public routes (no session): `GET /ping`, `POST /devices/pairing/claim`,
-//! `POST /devices/pairing/poll` (long poll, at most 25 s), `POST /auth/device/refresh`; their
-//! failures count in the login limiter and are logged for fail2ban like failed logins.
+//! `POST /devices/pairing/poll` (long poll, at most 25 s), `POST /auth/device/refresh`; they
+//! have their own limiter ([`rynas_auth::AuthService::device_limiter`]: per client address,
+//! the sign-in's delays) and their own fail2ban line, `device authentication failure from
+//! IP` (filter `packaging/fail2ban/filter.d/rynas-devices.conf`). Only guesses count: an
+//! unknown claim code, an unknown or used claim token, a bad signature, an unknown device.
+//! A `ts` not newer, a role or account refusal, 503 and `clock_skew` count nothing.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -24,14 +28,16 @@ use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use rynas_api_types::devices::internal::{Live, RefreshCheck, RefreshOk, Register, Sid, Trust};
+use rynas_api_types::devices::internal::{
+    GUESS_DEVICE_ID, GUESS_SIGNATURE, Live, RefreshCheck, RefreshOk, Register, Sid, Trust,
+};
 use rynas_api_types::devices::{
     ACCESS_TTL_S, ClaimRequest, Device, DeviceRename, DeviceSelf, NasRef, PROTOCOL_VERSION,
     PairingApprove, PairingCreated, PairingState, PairingStatus, Ping, PollApproved, PollPending,
     PollRequest, REAUTH_WINDOW_S, RefreshRequest, RefreshResponse, clean_name,
 };
 use rynas_api_types::{UserInfo, error_codes};
-use rynas_auth::device::{PairingError, PollOutcome, b64u, sha_b64u};
+use rynas_auth::device::{ClaimError, PairingError, PollOutcome, b64u, sha_b64u};
 use rynas_auth::session::{DeviceRef, SessionData, SessionStore};
 use rynas_auth::{Identity, random_token};
 
@@ -54,8 +60,10 @@ pub struct DeviceHub {
     sid: Mutex<Option<String>>,
     seen: Mutex<HashMap<String, (u64, String)>>,
     poll_wait: Duration,
-    /// Devices revoked since rynas-web started: an access token issued while a revocation
-    /// was on its way is dropped right after it is made ([`DeviceHub::issue`]).
+    /// Devices revoked through rynas-web since it started (the web interface, the app's
+    /// unpairing, unclaimed pairings): an access token issued while such a revocation was on
+    /// its way is dropped right after it is made ([`DeviceHub::issue`]). rynasd's own
+    /// revocations only end sessions ([`apply_live`]).
     revoked: Mutex<std::collections::VecDeque<String>>,
 }
 
@@ -161,8 +169,9 @@ fn rate_limited(d: Duration) -> Response {
     r
 }
 
-/// The limiter's name for the device routes of a client: one per address, so a client
-/// guessing codes cannot lock out the others.
+/// The device limiter's name for a client: one per address, so a client guessing codes
+/// cannot lock out the others (the device limiter's tables are its own: the web sign-in from
+/// the same address is not affected).
 fn limiter_key(ip: IpAddr) -> String {
     format!("device@{}", rynas_auth::ratelimit::ip_key(ip))
 }
@@ -263,13 +272,13 @@ async fn claim(
 ) -> Response {
     let ip = client_ip(client);
     let key = limiter_key(ip);
-    let limiter = st.auth.limiter();
+    let limiter = st.auth.device_limiter();
     let _attempt = match limiter.begin(ip, &key) {
         Ok(a) => a,
         Err(d) => return rate_limited(d),
     };
+    // a body that does not parse tried no code: refused, not counted
     let Ok(Json(req)) = body else {
-        limiter.record_failure(ip, &key);
         return pairing_invalid();
     };
     let sid = match sid(&st).await {
@@ -277,16 +286,26 @@ async fn claim(
         Err(e) => return e.into_response(),
     };
     match st.auth.pairings().claim(&sid, &req, &ip.to_string()) {
-        Some(r) => {
+        Ok(r) => {
             limiter.record_success(ip, &key);
             tracing::info!(target: "rynas_auth", "pairing claimed from {ip}");
             Json(r).into_response()
         }
-        None => {
+        Err(ClaimError::Invalid) => {
             limiter.record_failure(ip, &key);
             pairing_invalid()
         }
+        Err(ClaimError::Malformed) => pairing_invalid(),
+        Err(ClaimError::ClockSkew) => clock_skew(),
     }
+}
+
+fn clock_skew() -> Response {
+    err(
+        StatusCode::BAD_REQUEST,
+        error_codes::CLOCK_SKEW,
+        "the device's clock is more than 120 s away from the NAS'",
+    )
 }
 
 async fn poll(
@@ -296,11 +315,10 @@ async fn poll(
 ) -> Response {
     let ip = client_ip(client);
     let key = limiter_key(ip);
-    if let Err(d) = st.auth.limiter().check(ip, &key) {
+    if let Err(d) = st.auth.device_limiter().check(ip, &key) {
         return rate_limited(d);
     }
     let Ok(Json(req)) = body else {
-        st.auth.limiter().record_failure(ip, &key);
         return pairing_invalid();
     };
     let deadline = tokio::time::Instant::now() + st.devices.poll_wait;
@@ -310,7 +328,7 @@ async fn poll(
         changed.as_mut().enable();
         match st.auth.pairings().poll(&req.claim_token) {
             PollOutcome::Unknown => {
-                st.auth.limiter().record_failure(ip, &key);
+                st.auth.device_limiter().record_failure(ip, &key);
                 return pairing_invalid();
             }
             PollOutcome::Rejected => {
@@ -345,7 +363,7 @@ async fn refresh(
 ) -> Response {
     let ip = client_ip(client);
     let key = limiter_key(ip);
-    let limiter = st.auth.limiter();
+    let limiter = st.auth.device_limiter();
     let _attempt = match limiter.begin(ip, &key) {
         Ok(a) => a,
         Err(d) => return rate_limited(d),
@@ -353,12 +371,11 @@ async fn refresh(
     let invalid = || {
         err(StatusCode::UNAUTHORIZED, error_codes::REFRESH_INVALID, "refresh refused")
     };
+    // malformed: nothing was tried, nothing counts
     let Ok(Json(req)) = body else {
-        limiter.record_failure(ip, &key);
         return invalid();
     };
     if req.refresh_token.is_empty() || req.refresh_token.len() > 128 || req.device_id.len() > 64 {
-        limiter.record_failure(ip, &key);
         return invalid();
     }
     let new_token = random_token();
@@ -377,12 +394,20 @@ async fn refresh(
         .await
     {
         Ok(ok) => ok,
-        Err(UpstreamError::Api(status, e))
+        Err(UpstreamError::Api(status, mut e))
             if e.code == error_codes::DEVICE_REVOKED || e.code == error_codes::REFRESH_INVALID =>
         {
-            limiter.record_failure(ip, &key);
+            // only an unknown device or a signature of another key is a guess (rynasd names
+            // the field); a `ts` not newer, a role, the account, a reuse count nothing
+            if matches!(e.field.as_deref(), Some(GUESS_DEVICE_ID | GUESS_SIGNATURE)) {
+                limiter.record_failure(ip, &key);
+            }
+            e.field = None;
             if e.code == error_codes::DEVICE_REVOKED {
-                st.devices.revoked(st.auth.sessions(), &req.device_id);
+                // rynasd revoked it (or never had it): nothing can refresh it again, so its
+                // sessions end without a permanent entry
+                st.auth.sessions().remove_device(&req.device_id);
+                st.devices.forget(&req.device_id);
             }
             return Error(status, e).into_response();
         }
@@ -746,33 +771,44 @@ pub async fn sweep(st: &AppState) {
                 None::<&()>,
             )
             .await;
-        if let Err(e) = r {
-            tracing::warn!("devices: unclaimed device {id} not revoked: {e:?}");
+        match r {
+            // revoked here: the access token made at the approval ends too
+            Ok(()) => st.devices.revoked(st.auth.sessions(), &id),
+            Err(e) => tracing::warn!("devices: unclaimed device {id} not revoked: {e:?}"),
         }
     }
+    // sessions made from now on may belong to devices this list does not know yet
+    let asked_ms = st.auth.pairings().now_ms();
     let live: Result<Vec<Live>, _> = st
         .rynasd
         .call(Method::GET, "/v1/devices/live", None, None::<&()>)
         .await;
     if let Ok(live) = live {
-        apply_live(&st.auth, &st.devices, &live);
+        apply_live(&st.auth, &st.devices, &live, asked_ms);
     }
 }
 
-/// rynasd's list of live devices: the sessions of devices not in it end (revoked), and those
-/// of devices whose user lost the role (they refresh, and rynasd refuses). A user whose groups
-/// could not be read keeps their sessions until the next sweep.
-pub fn apply_live(auth: &rynas_auth::AuthService, hub: &DeviceHub, live: &[Live]) {
+/// rynasd's list of live devices, asked at `asked_ms`: the sessions of devices not in it end
+/// (rynasd revoked them), and those of devices whose user lost the role (they refresh, and
+/// rynasd refuses). Only sessions made before `asked_ms` are judged: a device paired or
+/// refreshed while the list was on its way is not in it yet. Nothing is remembered: the
+/// permanent revoked list ([`DeviceHub::revoked`]) is for revocations made through rynas-web.
+/// A user whose groups could not be read keeps their sessions until the next sweep.
+pub fn apply_live(auth: &rynas_auth::AuthService, hub: &DeviceHub, live: &[Live], asked_ms: u64) {
     for id in auth.sessions().device_ids() {
         match live.iter().find(|l| l.id == id) {
-            None => hub.revoked(auth.sessions(), &id),
+            None => {
+                if auth.sessions().remove_device_before(&id, asked_ms) > 0 {
+                    hub.forget(&id);
+                }
+            }
             Some(Live { groups: Some(g), .. }) => {
                 let who = Identity {
                     username: String::new(),
                     groups: g.clone(),
                 };
                 if auth.role_of(&who).is_none() {
-                    auth.sessions().remove_device(&id);
+                    auth.sessions().remove_device_before(&id, asked_ms);
                 }
             }
             Some(Live { groups: None, .. }) => {}
@@ -783,6 +819,7 @@ pub fn apply_live(auth: &rynas_auth::AuthService, hub: &DeviceHub, live: &[Live]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rynas_auth::Clock;
 
     fn admin() -> UserInfo {
         UserInfo {
@@ -821,10 +858,11 @@ mod tests {
 
     #[test]
     fn the_sweep_ends_revoked_devices_and_lost_roles() {
+        let clock = std::sync::Arc::new(rynas_auth::ManualClock::new(1_000));
         let auth = rynas_auth::AuthService::with_clock(
             Vec::new(),
             rynas_auth::AuthConfig::default(),
-            std::sync::Arc::new(rynas_auth::ManualClock::new(1_000)),
+            clock.clone(),
         );
         let hub = DeviceHub::default();
         let s = auth.sessions();
@@ -832,16 +870,48 @@ mod tests {
         let demoted = hub.issue(s, admin(), &device("d_demoted")).unwrap();
         let unknown = hub.issue(s, admin(), &device("d_unknown")).unwrap();
         let fine = hub.issue(s, admin(), &device("d_fine")).unwrap();
+        clock.advance_ms(10);
         let live = [
             Live { id: "d_demoted".into(), groups: Some(vec!["users".into()]) },
             Live { id: "d_unknown".into(), groups: None },
             Live { id: "d_fine".into(), groups: Some(vec!["sudo".into()]) },
         ];
-        apply_live(&auth, &hub, &live);
-        assert!(s.get_bearer(&gone).is_none() && hub.issue(s, admin(), &device("d_gone")).is_none());
+        apply_live(&auth, &hub, &live, clock.now_ms());
+        assert!(s.get_bearer(&gone).is_none());
         assert!(s.get_bearer(&demoted).is_none());
         assert!(s.get_bearer(&unknown).is_some(), "a failed lookup decides nothing");
         assert!(s.get_bearer(&fine).is_some());
+        // rynasd's own revocations are not remembered: only rynas-web's are permanent
+        assert!(hub.issue(s, admin(), &device("d_gone")).is_some());
+    }
+
+    #[test]
+    fn a_device_paired_while_the_live_list_travels_keeps_its_session() {
+        let clock = std::sync::Arc::new(rynas_auth::ManualClock::new(1_000));
+        let auth = rynas_auth::AuthService::with_clock(
+            Vec::new(),
+            rynas_auth::AuthConfig::default(),
+            clock.clone(),
+        );
+        let hub = DeviceHub::default();
+        let s = auth.sessions();
+        let old = hub.issue(s, admin(), &device("d_old")).unwrap();
+        clock.advance_ms(5);
+        // the sweep asks rynasd for the list...
+        let asked = clock.now_ms();
+        clock.advance_ms(5);
+        // ...a phone is approved (or refreshes) meanwhile: not in the list yet
+        let new = hub.issue(s, admin(), &device("d_new")).unwrap();
+        let newer_of_old = hub.issue(s, admin(), &device("d_old")).unwrap();
+        apply_live(&auth, &hub, &[], asked);
+        assert!(s.get_bearer(&new).is_some(), "made after the list was asked for");
+        assert!(s.get_bearer(&newer_of_old).is_some());
+        assert!(s.get_bearer(&old).is_none(), "made before: judged");
+        // and nothing is remembered: the next sweep, with the device listed, keeps it
+        let later = clock.now_ms() + 1;
+        apply_live(&auth, &hub, &[Live { id: "d_new".into(), groups: Some(vec!["sudo".into()]) }], later);
+        assert!(s.get_bearer(&new).is_some());
+        assert!(hub.issue(s, admin(), &device("d_new")).is_some());
     }
 
     #[test]

@@ -7,7 +7,9 @@
 //! forgotten some time after the last failure.
 //!
 //! Every failure is logged as `authentication failure for USER from IP` (target `rynas_auth`),
-//! the shape fail2ban filters expect (see `packaging/fail2ban/`).
+//! the shape fail2ban filters expect (see `packaging/fail2ban/`). The mobile devices' public
+//! routes have their own limiter ([`FailureLog::Device`]): their own tables, the same delays,
+//! and their own line, `device authentication failure from IP`, for a filter of its own.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -167,11 +169,23 @@ impl<K: Hash + Eq + Clone> Table<K> {
     }
 }
 
+/// The line a failure writes; each has its own fail2ban filter (`packaging/fail2ban/`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FailureLog {
+    /// `authentication failure for USER from IP` (filter `rynas`): sign-ins.
+    #[default]
+    Login,
+    /// `device authentication failure from IP` (filter `rynas-devices`): the mobile devices'
+    /// public routes (claim, poll, refresh). Never matches the sign-in filter.
+    Device,
+}
+
 pub struct LoginLimiter {
     cfg: RateLimitConfig,
     clock: Arc<dyn Clock>,
     users: Table<String>,
     ips: Table<IpAddr>,
+    log: FailureLog,
 }
 
 /// `retry_after` of an attempt refused only because others are being checked.
@@ -214,11 +228,17 @@ fn user_key(user: &str) -> String {
 
 impl LoginLimiter {
     pub fn new(cfg: RateLimitConfig, clock: Arc<dyn Clock>) -> Self {
+        Self::with_log(cfg, clock, FailureLog::Login)
+    }
+
+    /// A limiter whose failures write the line `log`.
+    pub fn with_log(cfg: RateLimitConfig, clock: Arc<dyn Clock>, log: FailureLog) -> Self {
         Self {
             users: Table::new(cfg.free_per_user),
             ips: Table::new(cfg.free_per_ip),
             cfg,
             clock,
+            log,
         }
     }
 
@@ -273,19 +293,29 @@ impl LoginLimiter {
     pub fn record_failure(&self, ip: IpAddr, user: &str) {
         let now = self.clock.now_ms();
         if self.cfg.log_failures {
-            tracing::warn!(
-                target: "rynas_auth",
-                "authentication failure for {} from {}",
-                log_safe(user),
-                ip
-            );
+            match self.log {
+                FailureLog::Login => tracing::warn!(
+                    target: "rynas_auth",
+                    "authentication failure for {} from {}",
+                    log_safe(user),
+                    ip
+                ),
+                FailureLog::Device => {
+                    tracing::warn!(target: "rynas_auth", "device authentication failure from {ip}")
+                }
+            }
         }
         let a = self.ips.fail(&ip_key(ip), now, &self.cfg);
         let b = self.users.fail(&user_key(user), now, &self.cfg);
+        let what = match self.log {
+            FailureLog::Login => "login",
+            FailureLog::Device => "device authentication",
+        };
         if let Some(d) = a {
-            tracing::info!(target: "rynas_auth", "login from {ip} locked for {}s", d.as_secs());
+            tracing::info!(target: "rynas_auth", "{what} from {ip} locked for {}s", d.as_secs());
         }
-        if let Some(d) = b {
+        // the device routes' "user" is the client address again: one line is enough
+        if let Some(d) = b.filter(|_| self.log == FailureLog::Login) {
             tracing::info!(
                 target: "rynas_auth",
                 "login of {} locked for {}s",

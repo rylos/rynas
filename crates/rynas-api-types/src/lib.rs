@@ -450,9 +450,14 @@ pub mod error_codes {
     pub const NOT_FOR_DEVICES: &str = "not_for_devices";
     /// Mobile devices: the device is unknown or was revoked (401): the app forgets the pairing.
     pub const DEVICE_REVOKED: &str = "device_revoked";
-    /// Mobile devices: a refresh with a bad signature, an old timestamp or a refused account
-    /// (401).
+    /// Mobile devices: a refresh with a bad signature, a `ts` not newer than the last
+    /// accepted one, a refused account, or the token replaced most recently presented after
+    /// its grace window (401). The device stays.
     pub const REFRESH_INVALID: &str = "refresh_invalid";
+    /// Mobile devices: the signed `ts` of a claim or refresh is more than 120 s away from the
+    /// NAS' clock (400); the app tells the user to fix the phone's (or the NAS') time. Only
+    /// sent for a valid code or a valid device signature.
+    pub const CLOCK_SKEW: &str = "clock_skew";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -537,6 +542,7 @@ pub mod error_codes {
         NOT_FOR_DEVICES,
         DEVICE_REVOKED,
         REFRESH_INVALID,
+        CLOCK_SKEW,
     ];
 }
 

@@ -122,7 +122,8 @@ only goes to the debug log (A13).
 | 403 | `reauth_required` | the action needs a password (and TOTP) check in the last 10 minutes: `POST /auth/reauth` |
 | 403 | `not_for_devices` | a route refused to paired devices (the list is empty in v1) |
 | 401 | `device_revoked` | mobile devices: the device is unknown or revoked; the app forgets the pairing |
-| 401 | `refresh_invalid` | mobile devices: a refresh with a bad signature, an old timestamp or an account that may not sign in |
+| 401 | `refresh_invalid` | mobile devices: a refresh with a bad signature, a `ts` not newer than the last accepted one, an account that may not sign in, or the token replaced most recently after its grace window (the device stays) |
+| 400 | `clock_skew` | mobile devices: the signed `ts` of a claim (valid code and signature) or refresh (valid device signature) is more than 120 s from the NAS' clock |
 
 ## API v1 (steps 2–3)
 | Method | Path | Response |
@@ -2015,9 +2016,9 @@ Unix seconds.
 | Method | Path | Auth | Body | Response |
 |---|---|---|---|---|
 | GET | `/api/v1/ping` | none | — | `Ping` {sid, name, version, api: 1} |
-| POST | `/api/v1/devices/pairing/claim` | none (login limiter) | `ClaimRequest` {v, sid, code, public_key, device, ts, sig} | `ClaimResponse` {claim_token, compare_code, poll_after_ms, expires_ms}; 400 `pairing_invalid` |
-| POST | `/api/v1/devices/pairing/poll` | none (login limiter) | `PollRequest` {claim_token} | 202 `PollPending` (after at most 25 s), 200 `PollApproved` (once), 403 `pairing_rejected`, 410 `pairing_expired`, 400 `pairing_invalid` |
-| POST | `/api/v1/auth/device/refresh` | none (login limiter) | `RefreshRequest` {device_id, refresh_token, ts, sig} | `RefreshResponse` {access_token, access_expires_in, refresh_token}; 401 `device_revoked` / `refresh_invalid` |
+| POST | `/api/v1/devices/pairing/claim` | none (device limiter) | `ClaimRequest` {v, sid, code, public_key, device, ts, sig} | `ClaimResponse` {claim_token, compare_code, poll_after_ms, expires_ms}; 400 `pairing_invalid` / `clock_skew` |
+| POST | `/api/v1/devices/pairing/poll` | none (device limiter) | `PollRequest` {claim_token} | 202 `PollPending` (after at most 25 s), 200 `PollApproved` (once), 403 `pairing_rejected`, 410 `pairing_expired`, 400 `pairing_invalid` |
+| POST | `/api/v1/auth/device/refresh` | none (device limiter) | `RefreshRequest` {device_id, refresh_token, ts, sig} | `RefreshResponse` {access_token, access_expires_in, refresh_token}; 401 `device_revoked` / `refresh_invalid`, 400 `clock_skew` |
 | POST | `/api/v1/auth/reauth` | session | `ReauthRequest` {password, totp?} | 204; the login's errors |
 | POST | `/api/v1/devices/pairing` | session (recent check) | `{}` | `PairingCreated` {pairing_id, expires_ms, qr}; 403 `reauth_required`, 409 `conflict` (3 open) |
 | GET / DELETE | `/api/v1/devices/pairing/{id}` | session (owner) | — | `PairingStatus` {state, expires_ms, claim?} / 204 |
@@ -2032,6 +2033,12 @@ Every other route accepts `Authorization: Bearer <access token>` in place of the
 no CSRF, as the device's user and role (`require_session`; no excluded route in v1, list
 `NOT_FOR_DEVICES`). Writes of a device are logged to `rynas::audit` with the device's id and
 name. Internal rynasd routes (`/v1/devices/…`): `crates/rynasd/src/devices.rs`.
+
+The public routes have their own limiter (`AuthService::device_limiter`: per client address,
+the sign-in's delays, apart from the sign-in's tables) and log only guesses (unknown claim
+code or token, bad signature, unknown device) as `device authentication failure from IP`
+for the fail2ban filter `packaging/fail2ban/filter.d/rynas-devices.conf`; details in
+`../phase2/mobile-devices.md` §3.
 
 ## API v1: Wake-on-LAN
 Module `rynasd::wol` (`send`: magic packet, interface choice, sockets; `probe`: status

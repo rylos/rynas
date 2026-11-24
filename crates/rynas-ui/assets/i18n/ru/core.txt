@@ -6354,6 +6354,7 @@ err.reauth_required	Введите пароль ещё раз, чтобы про
 err.not_for_devices	Сопряжённому устройству это не разрешено: используйте веб-интерфейс.
 err.device_revoked	Это устройство отозвано: выполните сопряжение заново.
 err.refresh_invalid	Устройству не удалось продлить доступ: выполните сопряжение заново.
+err.clock_skew	Часы устройства и NAS расходятся больше чем на 2 минуты: установите правильное время и повторите попытку.
 nav.devices	Мобильные устройства
 dev.subtitle	Телефоны, сопряжённые с этим NAS: переименование, отзыв, новое сопряжение
 dev.pair	Сопрячь устройство
@@ -6397,6 +6398,7 @@ nev.device.revoked.reason.self	сопряжение снято в приложе
 nev.device.revoked.reason.account	учётная запись удалена или отключена
 nev.device.revoked.reason.inactive	нет входов 180 дней
 nev.device.revoked.reason.unclaimed	телефон так и не получил его
+nev.device.revoked.reason.account_replaced	учётная запись заменена другой с тем же именем
 nev.device.refresh_reuse.title	Устройство {device} пользователя {user} отозвано: токен использован дважды
 nev.device.refresh_reuse.body	Старый токен обновления мобильного устройства {device} ({user}) пришёл с адреса {ip}: где-то может быть его копия. Устройство отозвано; выполните сопряжение заново.
 nev.device.power.title	Питание системы с устройства {device}: {action}

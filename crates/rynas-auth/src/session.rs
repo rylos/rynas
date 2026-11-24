@@ -192,6 +192,19 @@ impl SessionStore {
         before - map.len()
     }
 
+    /// Ends the sessions of the device `id` made before `before_ms` (a newer one may come
+    /// from a refresh or a pairing the caller's information predates); returns how many.
+    pub fn remove_device_before(&self, id: &str, before_ms: u64) -> usize {
+        let mut map = self.lock();
+        let before = map.len();
+        map.retain(|_, s| {
+            s.device
+                .as_ref()
+                .is_none_or(|d| d.id != id || s.created_ms >= before_ms)
+        });
+        before - map.len()
+    }
+
     /// The devices with a live session.
     pub fn device_ids(&self) -> Vec<String> {
         let now = self.clock.now_ms();

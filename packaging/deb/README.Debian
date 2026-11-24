@@ -175,6 +175,15 @@ firewall too, install fail2ban and copy the examples:
     cp /usr/share/doc/rynas/examples/fail2ban/jail.d/rynas.conf /etc/fail2ban/jail.d/
     systemctl reload fail2ban
 
+The mobile devices' public routes (pairing claim and poll, token refresh)
+have their own limiter and log their guesses (an unknown pairing code or
+claim token, a bad signature, an unknown device) as "device authentication
+failure from IP", which the sign-in filter does not match. Their own jail:
+
+    cp /usr/share/doc/rynas/examples/fail2ban/filter.d/rynas-devices.conf /etc/fail2ban/filter.d/
+    cp /usr/share/doc/rynas/examples/fail2ban/jail.d/rynas-devices.conf /etc/fail2ban/jail.d/
+    systemctl reload fail2ban
+
 Removal
 -------
 "apt remove rynas" stops the services and keeps configuration and state.

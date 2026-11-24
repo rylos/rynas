@@ -72,6 +72,8 @@ pub struct AuthService {
     sessions: SessionStore,
     pairings: crate::device::Pairings,
     limiter: LoginLimiter,
+    /// The mobile devices' public routes: their own tables and log line.
+    device_limiter: LoginLimiter,
     policy: RolePolicy,
     failure_floor: Duration,
     host: String,
@@ -88,6 +90,11 @@ impl AuthService {
             backends,
             sessions: SessionStore::new(cfg.session, clock.clone()),
             pairings: crate::device::Pairings::new(clock.clone()),
+            device_limiter: LoginLimiter::with_log(
+                cfg.rate.clone(),
+                clock.clone(),
+                crate::ratelimit::FailureLog::Device,
+            ),
             limiter: LoginLimiter::new(cfg.rate, clock),
             policy: cfg.policy,
             failure_floor: cfg.failure_floor,
@@ -116,10 +123,17 @@ impl AuthService {
         &self.pairings
     }
 
-    /// The failed-login limiter: the mobile devices' public routes (claim, poll, refresh)
-    /// count their failures in it too, and log them in the same fail2ban format.
+    /// The failed-login limiter (sign-ins, re-authentication, the restore TUI's login).
     pub fn limiter(&self) -> &LoginLimiter {
         &self.limiter
+    }
+
+    /// The limiter of the mobile devices' public routes (claim, poll, refresh): its own
+    /// per-address tables, the same delays as the sign-in, and its own fail2ban line
+    /// (`device authentication failure from IP`): a phone guessing codes neither locks out
+    /// the web sign-in from its address nor is banned by the sign-in filter.
+    pub fn device_limiter(&self) -> &LoginLimiter {
+        &self.device_limiter
     }
 
     /// The password (and TOTP code) of the session's own user again: the session counts as

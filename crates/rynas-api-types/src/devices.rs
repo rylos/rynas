@@ -365,6 +365,14 @@ pub mod internal {
         pub admin_groups: Vec<String>,
     }
 
+    /// `ApiError::field` of a refresh refused for what only a guesser gets wrong: an unknown
+    /// device id (`device_revoked`) or a signature of another key (`refresh_invalid`).
+    /// rynas-web counts exactly these in the device limiter, and drops the field before
+    /// answering the phone. Every other refusal (a `ts` not newer, a role, the account, a
+    /// token reuse with a valid signature) comes without it and counts nothing.
+    pub const GUESS_DEVICE_ID: &str = "device_id";
+    pub const GUESS_SIGNATURE: &str = "sig";
+
     /// Answer of a refresh check: the device, its user's groups (rynas-web derives the role)
     /// and whether the previous token was accepted in its grace window.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

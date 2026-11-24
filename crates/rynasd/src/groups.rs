@@ -40,6 +40,14 @@ pub fn user_groups_checked(user: &str) -> Result<Option<Vec<String>>, String> {
     Ok(Some(names))
 }
 
+/// The uid of `user`: `Ok(None)` for a user NSS cleanly reports as unknown, `Err` when the
+/// lookup failed. The mobile devices tell a replaced account (same name, other uid) by it.
+pub fn user_uid(user: &str) -> Result<Option<u32>, String> {
+    User::from_name(user)
+        .map(|u| u.map(|u| u.uid.as_raw()))
+        .map_err(|e| format!("user lookup: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

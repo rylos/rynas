@@ -183,6 +183,19 @@ pub enum PairingError {
     WrongState(PairingState),
 }
 
+/// Why a claim was refused ([`Pairings::claim`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimError {
+    /// Another protocol version or NAS id, an oversized code, not a P-256 key: no secret was
+    /// tried, nothing counts against the client.
+    Malformed,
+    /// An unknown, used or expired code, or a signature of another key: a guess, counted.
+    Invalid,
+    /// A valid code signed by the claiming key, but its `ts` is more than
+    /// [`MAX_CLOCK_SKEW_S`] away from the NAS' clock: the phone's clock is wrong.
+    ClockSkew,
+}
+
 /// What the phone's poll finds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PollOutcome {
@@ -273,19 +286,21 @@ impl Pairings {
         })
     }
 
-    /// A phone's claim. `None` for anything wrong (unknown, used or expired code, another
-    /// NAS' id, an old timestamp, a bad key or signature): the caller answers one generic
-    /// error.
-    pub fn claim(&self, sid: &str, req: &ClaimRequest, ip: &str) -> Option<ClaimResponse> {
+    /// A phone's claim. [`ClaimError::Invalid`] (unknown, used or expired code, bad
+    /// signature) and [`ClaimError::Malformed`] (another version or NAS' id, a bad key) are
+    /// answered with one generic error; [`ClaimError::ClockSkew`] only to a phone that holds
+    /// a valid code and signed it, and the code stays usable.
+    pub fn claim(&self, sid: &str, req: &ClaimRequest, ip: &str) -> Result<ClaimResponse, ClaimError> {
         let now = self.clock.now_ms();
         if req.v != PROTOCOL_VERSION || !ct_eq_bytes(req.sid.as_bytes(), sid.as_bytes()) {
-            return None;
+            return Err(ClaimError::Malformed);
         }
-        if req.code.len() > 128 || !ts_ok(req.ts, now) {
-            return None;
+        if req.code.len() > 128 {
+            return Err(ClaimError::Malformed);
         }
-        let spki = b64u_decode(&req.public_key)?;
-        p256_point(&spki)?;
+        let spki = b64u_decode(&req.public_key)
+            .filter(|k| p256_point(k).is_some())
+            .ok_or(ClaimError::Malformed)?;
         let code_sha = sha256(req.code.as_bytes());
         let mut map = self.lock();
         // every pairing is compared, in constant time each
@@ -295,13 +310,18 @@ impl Pairings {
                 found = Some(id.clone());
             }
         }
-        let p = map.get_mut(&found?)?;
+        let p = found
+            .and_then(|id| map.get_mut(&id))
+            .ok_or(ClaimError::Invalid)?;
         if p.state_at(now) != PairingState::Waiting {
-            return None;
+            return Err(ClaimError::Invalid);
         }
         let msg = pair_message(sid, &req.code, &key_hash(&spki), req.ts);
         if !verify(&spki, &msg, &req.sig) {
-            return None;
+            return Err(ClaimError::Invalid);
+        }
+        if !ts_ok(req.ts, now) {
+            return Err(ClaimError::ClockSkew);
         }
         let compare = compare_code(&req.code, &spki);
         let token = random_token();
@@ -322,7 +342,7 @@ impl Pairings {
         let expires_ms = p.expires_ms;
         drop(map);
         self.changed.notify_waiters();
-        Some(ClaimResponse {
+        Ok(ClaimResponse {
             claim_token: token,
             compare_code: compare,
             poll_after_ms: 1500,
@@ -550,17 +570,21 @@ pub(crate) mod tests {
         assert!(ps.status(&id, "bob", "pam").is_none(), "only the owner sees it");
         let phone = Phone::new();
         let ts = (T0 / 1000) as i64;
-        // wrong NAS id, wrong code, old timestamp, bad signature: all refused alike
-        assert!(ps.claim("sid", &phone.claim("other", &code, ts), "1.2.3.4").is_none());
-        assert!(ps.claim("sid", &phone.claim("sid", "nope", ts), "1.2.3.4").is_none());
-        assert!(ps.claim("sid", &phone.claim("sid", &code, ts - 500), "1.2.3.4").is_none());
+        // wrong NAS id: malformed; wrong code, bad signature: a guess
+        let claim = |req: &ClaimRequest| ps.claim("sid", req, "1.2.3.4");
+        assert_eq!(claim(&phone.claim("other", &code, ts)).unwrap_err(), ClaimError::Malformed);
+        assert_eq!(claim(&phone.claim("sid", "nope", ts)).unwrap_err(), ClaimError::Invalid);
         let mut forged = phone.claim("sid", &code, ts);
         forged.public_key = b64u(&Phone::new().spki());
-        assert!(ps.claim("sid", &forged, "1.2.3.4").is_none());
-        let r = ps.claim("sid", &phone.claim("sid", &code, ts), "1.2.3.4").unwrap();
+        assert_eq!(claim(&forged).unwrap_err(), ClaimError::Invalid);
+        // the right code, signed, with the phone's clock 500 s off: told so, the code stays
+        assert_eq!(claim(&phone.claim("sid", &code, ts - 500)).unwrap_err(), ClaimError::ClockSkew);
+        // a skewed claim of a wrong code is still only a guess
+        assert_eq!(claim(&phone.claim("sid", "nope", ts + 500)).unwrap_err(), ClaimError::Invalid);
+        let r = claim(&phone.claim("sid", &code, ts)).unwrap();
         assert_eq!(r.compare_code, compare_code(&code, &phone.spki()));
         // single use
-        assert!(ps.claim("sid", &phone.claim("sid", &code, ts), "1.2.3.4").is_none());
+        assert_eq!(claim(&phone.claim("sid", &code, ts)).unwrap_err(), ClaimError::Invalid);
         let st = ps.status(&id, "alice", "pam").unwrap();
         assert_eq!(st.state, PairingState::Claimed);
         assert_eq!(st.claim.unwrap().device.model, "SM-S931B");
@@ -606,7 +630,7 @@ pub(crate) mod tests {
         let (_, code, _) = ps.create("carol", "pam").unwrap();
         clock.advance_ms(300_000);
         let ts = (clock.now_ms() / 1000) as i64;
-        assert!(ps.claim("s", &phone.claim("s", &code, ts), "ip").is_none());
+        assert_eq!(ps.claim("s", &phone.claim("s", &code, ts), "ip").unwrap_err(), ClaimError::Invalid);
         // approved but never picked up: an orphan
         let (id, code, _) = ps.create("dave", "pam").unwrap();
         ps.claim("s", &phone.claim("s", &code, ts), "ip").unwrap();

@@ -127,6 +127,7 @@ async fn rig() -> Rig {
         Arc::new(rynas_notify::NullNotifier),
         AdminPolicy::new(vec!["rynas-admin".into()], groups),
         |u: &str| Ok(groups(u)),
+        |u: &str| Ok(groups(u).map(|_| 1000)),
         account,
         trust,
         clock,
@@ -335,9 +336,15 @@ async fn pairing_tokens_rotation_reuse() {
     let r = public(app, "/api/v1/auth/device/refresh", phone.refresh(&sid, &dev.id, &ok.refresh_token, rig.ts())).await;
     assert_eq!(r.status, StatusCode::OK, "grace window: {}", String::from_utf8_lossy(&r.body));
     let r3: RefreshResponse = r.json();
-    // after the window, the replaced token is a reuse: the device is revoked
+    // after the window, the token replaced most recently (r2) is refused, the device stays
     rig.app.clock.advance_ms(61_000);
     let r = public(app, "/api/v1/auth/device/refresh", phone.refresh(&sid, &dev.id, &r2.refresh_token, rig.ts())).await;
+    assert_eq!((r.status, r.code()), (StatusCode::UNAUTHORIZED, error_codes::REFRESH_INVALID.to_string()));
+    assert_eq!(rig.svc.ids(), vec![dev.id.clone()]);
+    assert_eq!(bearer(app, Method::GET, "/api/v1/system", &r3.access_token, None).await.status, StatusCode::OK);
+    // an older one (the first token) is a reuse: the device is revoked
+    rig.app.clock.advance_ms(1_000);
+    let r = public(app, "/api/v1/auth/device/refresh", phone.refresh(&sid, &dev.id, &ok.refresh_token, rig.ts())).await;
     assert_eq!((r.status, r.code()), (StatusCode::UNAUTHORIZED, error_codes::DEVICE_REVOKED.to_string()));
     assert_eq!(bearer(app, Method::GET, "/api/v1/system", &r3.access_token, None).await.status, StatusCode::UNAUTHORIZED);
     let r = public(app, "/api/v1/auth/device/refresh", phone.refresh(&sid, &dev.id, &r3.refresh_token, rig.ts())).await;
@@ -457,6 +464,109 @@ async fn two_refreshes_at_once_keep_the_device() {
     let r = public(app, "/api/v1/auth/device/refresh", replay).await;
     assert_eq!(r.code(), error_codes::REFRESH_INVALID);
     assert_eq!(rig.svc.ids(), vec![ok.device_id.clone()]);
+}
+
+const REFRESH: &str = "/api/v1/auth/device/refresh";
+const CLAIM: &str = "/api/v1/devices/pairing/claim";
+
+#[tokio::test]
+async fn device_routes_have_their_own_limiter_and_count_only_guesses() {
+    // the test limiter: 3 free failures per name, 10 per address, then 4 s and more
+    let rig = rig().await;
+    let app = &rig.app;
+    let creds = app.login().await;
+    let phone = Phone::new();
+    let ok = pair(&rig, &creds, &phone).await;
+    let sid = rig.svc.sid().unwrap();
+    let ts = rig.ts();
+    let r = public(app, REFRESH, phone.refresh(&sid, &ok.device_id, &ok.refresh_token, ts)).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let mut token = r.json::<RefreshResponse>().refresh_token;
+
+    // refusals that are not guesses, many times over: none counts
+    let guest_phone = Phone::new();
+    let guest = rig
+        .svc
+        .register(
+            "guest",
+            &Register {
+                name: "Guest phone".into(),
+                device: DeviceInfo::default(),
+                public_key: b64u(&guest_phone.spki()),
+                ip: String::new(),
+                refresh_sha: sha_b64u("G1"),
+            },
+        )
+        .unwrap();
+    for i in 0..6 {
+        // a `ts` not newer than the last accepted one
+        let r = public(app, REFRESH, phone.refresh(&sid, &ok.device_id, &token, ts)).await;
+        assert_eq!((r.status, r.code()), (StatusCode::UNAUTHORIZED, error_codes::REFRESH_INVALID.to_string()));
+        assert!(r.json::<serde_json::Value>().get("field").is_none(), "no detail for the phone");
+        // the phone's clock 10 minutes behind: told so
+        let r = public(app, REFRESH, phone.refresh(&sid, &ok.device_id, &token, ts - 600)).await;
+        assert_eq!((r.status, r.code()), (StatusCode::BAD_REQUEST, error_codes::CLOCK_SKEW.to_string()));
+        // an account that may not sign in
+        let r = public(app, REFRESH, guest_phone.refresh(&sid, &guest.id, "G1", ts + i)).await;
+        assert_eq!(r.code(), error_codes::REFRESH_INVALID);
+        // a body that does not parse tried nothing
+        let r = public(app, CLAIM, json!({"v": 1})).await;
+        assert_eq!(r.code(), error_codes::PAIRING_INVALID);
+    }
+    // a valid code claimed with a skewed clock: told so, and the code still works
+    let p: PairingCreated = app.send(Method::POST, "/api/v1/devices/pairing", &creds, Some(json!({}))).await.json();
+    let code = qr_param(&p.qr, "c");
+    let other = Phone::new();
+    for _ in 0..5 {
+        let r = public(app, CLAIM, serde_json::to_value(other.claim(&sid, &code, rig.ts() + 300)).unwrap()).await;
+        assert_eq!((r.status, r.code()), (StatusCode::BAD_REQUEST, error_codes::CLOCK_SKEW.to_string()));
+    }
+    let r = public(app, CLAIM, serde_json::to_value(other.claim(&sid, &code, rig.ts())).unwrap()).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    // nothing was counted: the device refreshes
+    let r = public(app, REFRESH, phone.refresh(&sid, &ok.device_id, &token, ts + 10)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    token = r.json::<RefreshResponse>().refresh_token;
+
+    // failed sign-ins lock the address for the sign-in only
+    for i in 0..11 {
+        let r = app
+            .try_login(&rynas_api_types::LoginRequest {
+                username: format!("nobody{i}"),
+                password: "x".into(),
+                totp: None,
+            })
+            .await;
+        assert_ne!(r.status, StatusCode::OK);
+    }
+    let r = app.try_login(&rynas_api_types::LoginRequest { username: "admin".into(), password: "admin-pw".into(), totp: None }).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "the sign-in is locked");
+    let r = public(app, REFRESH, phone.refresh(&sid, &ok.device_id, &token, ts + 11)).await;
+    assert_eq!(r.status, StatusCode::OK, "the device routes are not");
+    token = r.json::<RefreshResponse>().refresh_token;
+    rig.app.clock.advance_ms(5_000);
+
+    // guesses count, in the device limiter only: a signature of another key, an unknown
+    // device, an unknown claim token, an unknown code
+    let thief = Phone::new();
+    let r = public(app, REFRESH, thief.refresh(&sid, &ok.device_id, &token, rig.ts())).await;
+    assert_eq!(r.code(), error_codes::REFRESH_INVALID);
+    assert!(r.json::<serde_json::Value>().get("field").is_none(), "the field is rynasd's, not the phone's");
+    let r = public(app, REFRESH, thief.refresh(&sid, "d_nope", "x", rig.ts())).await;
+    assert_eq!(r.code(), error_codes::DEVICE_REVOKED);
+    let r = public(app, "/api/v1/devices/pairing/poll", json!({"claim_token": "nope"})).await;
+    assert_eq!(r.code(), error_codes::PAIRING_INVALID);
+    let r = public(app, CLAIM, serde_json::to_value(thief.claim(&sid, "nope", rig.ts())).unwrap()).await;
+    assert_eq!(r.code(), error_codes::PAIRING_INVALID);
+    // the fifth attempt is refused before it is checked
+    let r = public(app, REFRESH, phone.refresh(&sid, &ok.device_id, &token, rig.ts() + 1)).await;
+    assert_eq!((r.status, r.code()), (StatusCode::TOO_MANY_REQUESTS, error_codes::RATE_LIMITED.to_string()));
+    // the web sign-in from the same address is not affected
+    app.login().await;
+    // the lock passes; the device was never touched
+    rig.app.clock.advance_ms(5_000);
+    let r = public(app, REFRESH, phone.refresh(&sid, &ok.device_id, &token, ts + 30)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
 }
 
 #[tokio::test]
