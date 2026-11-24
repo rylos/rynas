@@ -57,26 +57,41 @@ none reports conflicts. Syncthing 2.x facts used below (docs.syncthing.net, sour
 
 ## 3. Adoption of an existing instance
 
-`POST /v1/syncthing/adopt/preview` reads a folder holding a Syncthing home (official layout, the
-linuxserver `/config` layout, or a package's `var` folder), plus the old volume table (container
-path → host path, typed in or read from the old compose file):
+Adoption is generic: any Syncthing a user already runs becomes the rynas app without pairing
+the devices again. Sources, found by `POST /v1/syncthing/adopt/preview` in this order:
+
+| Source | How it is found | Volume table (container path → host path) |
+|---|---|---|
+| the rynas app with the older layout (one share at `/data`) | the installed catalogue app | from the app's compose file; the update moves each folder to `/shares/<share>` |
+| a container on this host (official image, linuxserver, any other) | `docker ps` / `inspect`: image or command `syncthing`; its home from the mounts (`/var/syncthing`, `/config`) | from the container's mounts, no typing |
+| a service on the host (`syncthing@<user>`, a user unit, a distribution package) | systemd units; home in `~/.local/state/syncthing` or `~/.config/syncthing` | none: folder paths are host paths already |
+| a folder copied from another machine (a DSM or QTS package, another NAS, a backup) | a path the user gives | typed in, or read from a compose file or `docker inspect` output found next to it |
+| nothing | — | fresh install with the shares chosen |
+
+Preview steps, the same for every source:
 
 1. finds `cert.pem`, `key.pem`, `config.xml`, the database (`index-v2`, or a 1.x
    `index-v0.14.0.db` that Syncthing migrates on its first 2.x start, slowly);
-2. lists the folders (id, label, old path, type, devices) and maps each old path to
-   `/shares/<share>/<rest>` through the volume table and the rynas shares; a folder without a
-   share stays unmapped and is shown;
+2. lists the folders (id, label, old path, type, devices) and maps each old path, through the
+   volume table, to a host path, then to `/shares/<share>/<rest>`; a folder outside every share
+   stays unmapped and is shown (make a share of it, or leave it paused);
 3. checks on the host that each mapped folder has `.stfolder` with the file of its id; a folder
-   without it is refused for that folder (paused after adoption) and never "fixed";
-4. proposes `.stignore` changes: DSM patterns (`#snapshot`, `@eaDir`, `.SynologyWorkingDirectory`)
-   out, `(?d)#recycle` in (rynas snapshots live outside the share);
-5. shows the PUID/PGID the app will run as (the owner of the shares, after an ownership remap)
-   and the files with another owner.
+   without it is paused after adoption and never "fixed";
+4. proposes `.stignore` changes: other systems' patterns (`#snapshot`, `@eaDir`,
+   `.SynologyWorkingDirectory`, `@Recycle`, `.@__thumb`, `.streams`) out, `(?d)#recycle` in
+   (rynas snapshots live outside the share);
+5. shows the user the app will run as (PUID/PGID: the owner of most synchronized files) and the
+   files with another owner, with the ownership remap of Users & Groups when ids changed.
 
-`POST /v1/syncthing/adopt` (task `syncthing.adopt`) copies the home into the app's config folder
-(owned by the app user), rewrites the folder paths in `config.xml` with Syncthing stopped,
-installs or reconfigures the app with the shares, starts it, and rescans every folder. The old
-instance must be stopped first (two instances with one device id would fight).
+`POST /v1/syncthing/adopt` (task `syncthing.adopt`): the old instance is stopped first (two
+instances with one device id fight), its home copied into the app's config folder (owned by the
+app user; the old one left untouched as a fallback), folder paths rewritten in `config.xml` with
+Syncthing stopped, the app installed or reconfigured with the shares, started, every folder
+rescanned. For the rynas app with the older layout the home stays where it is and the paths are
+changed with `PATCH /rest/config/folders/{id}` after the container is recreated.
+
+Test matrix: official image, linuxserver image, the old rynas layout, a host service, a copied
+DSM home, a 1.x database.
 
 ## 4. Page and API
 
