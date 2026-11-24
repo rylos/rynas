@@ -6,7 +6,7 @@
 //! through the setuid helper `unix_chkpwd`. Every other user is refused, which is safe.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use pam_client::conv_mock::Conversation;
 use pam_client::{Context, Flag};
@@ -16,10 +16,12 @@ use crate::groups::user_groups;
 
 pub const REALM: &str = "pam";
 
+/// PAM modules are not guaranteed to be thread-safe: one conversation at a time, logins and
+/// account checks alike.
+static PAM_LOCK: Mutex<()> = Mutex::new(());
+
 pub struct PamAuthenticator {
     service: String,
-    /// PAM modules are not guaranteed to be thread-safe: one conversation at a time.
-    lock: Arc<Mutex<()>>,
 }
 
 /// `preferred` if `/etc/pam.d/<preferred>` exists, else `login`.
@@ -36,7 +38,6 @@ impl PamAuthenticator {
     pub fn new(service: impl Into<String>) -> Self {
         Self {
             service: service.into(),
-            lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -57,6 +58,39 @@ fn pam_check(service: &str, user: &str, password: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `user` may still sign in, asked without a password (blocking): the account exists,
+/// its password is not locked (`!` in `/etc/shadow`), and PAM account management on `service`
+/// accepts it (expired accounts, `pam_access`, `pam_time`…). A paired mobile device's refresh
+/// and the devices' periodic check use it.
+pub fn account_state(service: &str, user: &str) -> crate::devices::Account {
+    use crate::devices::Account;
+    if user_groups(user).is_none() {
+        return Account::Gone;
+    }
+    if shadow_locked(user) {
+        return Account::Disabled;
+    }
+    let _g = PAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let conv = Conversation::new();
+    let ok = Context::new(service, Some(user), conv)
+        .and_then(|mut ctx| ctx.acct_mgmt(Flag::NONE))
+        .map_err(|e| tracing::debug!("PAM account check of {user}: {e}"))
+        .is_ok();
+    if ok { Account::Ok } else { Account::Disabled }
+}
+
+/// The password field of `user` in `/etc/shadow` starts with `!` (`passwd -l`, `usermod -L`).
+fn shadow_locked(user: &str) -> bool {
+    std::fs::read_to_string("/etc/shadow")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find(|l| l.split(':').next() == Some(user))
+                .map(|l| l.split(':').nth(1).unwrap_or("").starts_with('!'))
+        })
+        .unwrap_or(false)
+}
+
 impl Authenticator for PamAuthenticator {
     fn realm(&self) -> &str {
         REALM
@@ -68,10 +102,10 @@ impl Authenticator for PamAuthenticator {
         password: &'a str,
     ) -> BoxFuture<'a, Result<Identity, AuthError>> {
         Box::pin(async move {
-            let (service, lock) = (self.service.clone(), self.lock.clone());
+            let service = self.service.clone();
             let (user, pw) = (username.to_owned(), password.to_owned());
             tokio::task::spawn_blocking(move || {
-                let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                let _g = PAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
                 match pam_check(&service, &user, &pw) {
                     Ok(()) => user_groups(&user)
                         .map(|groups| Identity {

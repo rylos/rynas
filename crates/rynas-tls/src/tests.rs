@@ -223,3 +223,17 @@ fn issue_leaf_refuses_the_agents_reserved_names() {
     assert!(issue_agent_leaf(&ca, "NOTANID", T0).is_err());
     assert!(issue_agent_leaf(&ca, "0123456789ABCDEF0123456789ABCDEF", T0).is_err());
 }
+
+#[test]
+fn spki_pins_follow_the_key() {
+    let ca = generate_ca("nas", T0).unwrap();
+    let leaf = issue_leaf(&ca, &names("nas", &addrs()), T0).unwrap();
+    let ca_pin = spki_pin(&ca.chain).unwrap();
+    assert_eq!(ca_pin.len(), 43);
+    assert!(!ca_pin.contains('=') && !ca_pin.contains('+') && !ca_pin.contains('/'));
+    assert_ne!(ca_pin, spki_pin(&leaf.chain).unwrap());
+    // a chain's pin is its first certificate's
+    let chain = format!("{}{}", leaf.chain, ca.chain);
+    assert_eq!(spki_pin(&chain).unwrap(), spki_pin(&leaf.chain).unwrap());
+    assert!(spki_pin("garbage").is_err());
+}

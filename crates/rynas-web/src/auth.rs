@@ -119,8 +119,126 @@ pub fn renews_idle(path: &str, headers: &HeaderMap) -> bool {
     !(stream || background)
 }
 
-/// Middleware: a valid session for everything, the CSRF token for state-changing methods.
+/// The bearer access token of a paired device (`Authorization: Bearer …`).
+pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+}
+
+/// `path` relative to `/api/v1` (the middleware sees it with or without the prefix).
+fn api_path(path: &str) -> &str {
+    path.strip_prefix("/api/v1").unwrap_or(path)
+}
+
+/// Whether `list` (`(method, path prefix)` pairs, `"*"` for any method) refuses this request
+/// to a paired device. The production list is [`rynas_api_types::devices::NOT_FOR_DEVICES`].
+pub fn refused_to_devices(list: &[(&str, &str)], method: &Method, path: &str) -> bool {
+    let p = api_path(path);
+    list.iter().any(|(m, prefix)| {
+        (*m == "*" || m.eq_ignore_ascii_case(method.as_str()))
+            && (p == *prefix || p.starts_with(&format!("{}/", prefix.trim_end_matches('/'))))
+    })
+}
+
+/// A restart, shutdown or cancellation asked by a request: `restart`, `shutdown`, `cancel`.
+fn power_action(method: &Method, path: &str, body: &[u8]) -> Option<&'static str> {
+    if *method != Method::POST {
+        return None;
+    }
+    match api_path(path) {
+        "/system/power/cancel" => Some("cancel"),
+        "/system/power" => {
+            let r: rynas_api_types::power::SystemPowerRequest = serde_json::from_slice(body).ok()?;
+            Some(match r.action {
+                rynas_api_types::power::SystemPowerAction::Restart => "restart",
+                rynas_api_types::power::SystemPowerAction::Shutdown => "shutdown",
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A request with a device's access token: the device acts as its user (same role, no
+/// CSRF: a bearer is not ambient), except the routes of
+/// [`rynas_api_types::devices::NOT_FOR_DEVICES`]. Every write is written to the audit log
+/// with the device; a restart or shutdown also raises a security notification.
+async fn device_request(st: AppState, token: &str, mut req: Request, next: Next) -> Response {
+    let Some(s) = st.auth.sessions().get_bearer(token) else {
+        return unauthenticated().into_response();
+    };
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    if refused_to_devices(rynas_api_types::devices::NOT_FOR_DEVICES, &method, &path) {
+        return Error::new(
+            StatusCode::FORBIDDEN,
+            error_codes::NOT_FOR_DEVICES,
+            "not allowed from a paired device: use the web interface",
+        )
+        .into_response();
+    }
+    let Some(device) = s.device.clone() else {
+        return unauthenticated().into_response();
+    };
+    let ip = req
+        .extensions()
+        .get::<Client>()
+        .map(|c| c.ip)
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    st.devices.seen(&device.id, ip, st.auth.pairings().now_ms());
+    let write = !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS);
+    let mut power = None;
+    if write {
+        tracing::info!(
+            target: "rynas::audit",
+            "device {} ({}) of {} from {ip}: {method} {}",
+            device.id,
+            crate::auth::log_name(&device.name),
+            s.user.username,
+            api_path(&path)
+        );
+        if api_path(&path).starts_with("/system/power") {
+            let (parts, body) = req.into_parts();
+            let Ok(bytes) = axum::body::to_bytes(body, 64 << 10).await else {
+                return Error::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    error_codes::PAYLOAD_TOO_LARGE,
+                    "request body too large",
+                )
+                .into_response();
+            };
+            power = power_action(&method, &path, &bytes);
+            req = Request::from_parts(parts, axum::body::Body::from(bytes));
+        }
+    }
+    let user = s.user.username.clone();
+    req.extensions_mut().insert(CurrentSession(s));
+    let resp = next.run(req).await;
+    if let Some(action) = power.filter(|_| resp.status().is_success()) {
+        rynas_notify::Notifier::emit(&*st.notifier, rynas_notify::checks::device_power(
+            &user,
+            &device.id,
+            &device.name,
+            action,
+        ));
+    }
+    resp
+}
+
+/// A user-supplied name made safe for one log line.
+pub(crate) fn log_name(s: &str) -> String {
+    rynas_auth::log_safe(s)
+}
+
+/// Middleware: a valid session for everything, the CSRF token for state-changing methods;
+/// or a paired device's bearer access token ([`device_request`]).
 pub async fn require_session(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
+    if let Some(token) = bearer_token(req.headers()).map(str::to_string) {
+        return device_request(st, &token, req, next).await;
+    }
     let touch = renews_idle(req.uri().path(), req.headers());
     let Some(s) = session_token(req.headers()).and_then(|t| st.auth.sessions().get(t, touch))
     else {
@@ -201,9 +319,43 @@ pub async fn require_admin(req: Request, next: Next) -> Response {
 
 /// `/api/v1` fallback: 404 for a logged-in client, 401 otherwise.
 pub async fn fallback(State(st): State<AppState>, headers: HeaderMap) -> Error {
-    match session_token(&headers).and_then(|t| st.auth.sessions().get(t, false)) {
-        Some(_) => Error::not_found("no such API endpoint"),
-        None => unauthenticated(),
+    let signed_in = match bearer_token(&headers) {
+        Some(t) => st.auth.sessions().get_bearer(t).is_some(),
+        None => session_token(&headers)
+            .and_then(|t| st.auth.sessions().get(t, false))
+            .is_some(),
+    };
+    if signed_in {
+        Error::not_found("no such API endpoint")
+    } else {
+        unauthenticated()
+    }
+}
+
+/// `POST /api/v1/auth/reauth`: the user's password (and TOTP code) again; the session counts
+/// as freshly authenticated for the actions that need it (pairing a device). Same rate
+/// limit, delay and errors as a login.
+pub async fn reauth(
+    State(st): State<AppState>,
+    client: Option<Extension<Client>>,
+    Extension(CurrentSession(s)): Extension<CurrentSession>,
+    body: Result<Json<rynas_api_types::ReauthRequest>, JsonRejection>,
+) -> Response {
+    let Json(req) = match body {
+        Ok(b) => b,
+        Err(e) => return bad_json(e).into_response(),
+    };
+    let ip = client_ip(client);
+    match st.auth.reauth(ip, &s, &req.password, req.totp.as_deref()).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            let login = LoginRequest {
+                username: s.user.username.clone(),
+                password: String::new(),
+                totp: None,
+            };
+            login_failed(&st, &login, ip, e)
+        }
     }
 }
 
@@ -437,6 +589,8 @@ mod tests {
                 totp_enabled: false,
                 created_ms: 0,
                 last_seen_ms: 0,
+                auth_ms: 0,
+                device: None,
             }));
         }
         app.oneshot(req).await.unwrap().status()
@@ -464,6 +618,35 @@ mod tests {
             assert_eq!(status(true, Method::GET, p).await, StatusCode::OK);
         }
         assert!(is_admin(Role::Admin));
+    }
+
+    #[test]
+    fn the_device_refusal_list_matches_method_and_prefix() {
+        // empty in v1: a device acts as its user
+        assert!(rynas_api_types::devices::NOT_FOR_DEVICES.is_empty());
+        let list = [("*", "/updates"), ("POST", "/system/power")];
+        let r = |m: Method, p: &str| refused_to_devices(&list, &m, p);
+        assert!(r(Method::GET, "/updates"));
+        assert!(r(Method::POST, "/api/v1/updates/apply"));
+        assert!(!r(Method::GET, "/updatesx"));
+        assert!(r(Method::POST, "/system/power"));
+        assert!(r(Method::POST, "/system/power/cancel"));
+        assert!(!r(Method::GET, "/system/power"));
+        assert!(!refused_to_devices(rynas_api_types::devices::NOT_FOR_DEVICES, &Method::POST, "/system/power"));
+    }
+
+    #[test]
+    fn power_actions_from_requests() {
+        let body = br#"{"action":"shutdown","delay_min":1}"#;
+        assert_eq!(power_action(&Method::POST, "/system/power", body), Some("shutdown"));
+        assert_eq!(power_action(&Method::POST, "/api/v1/system/power/cancel", b""), Some("cancel"));
+        assert_eq!(power_action(&Method::GET, "/system/power", body), None);
+        assert_eq!(power_action(&Method::POST, "/system/power", b"{}"), None);
+        let mut h = HeaderMap::new();
+        h.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer abc"));
+        assert_eq!(bearer_token(&h), Some("abc"));
+        h.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic abc"));
+        assert_eq!(bearer_token(&h), None);
     }
 
     #[test]

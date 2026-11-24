@@ -13,6 +13,7 @@ pub mod backup;
 pub mod capacity;
 pub mod clock;
 pub mod dedup;
+pub mod devices;
 pub mod docker;
 pub mod network;
 pub mod notify;
@@ -434,6 +435,23 @@ pub mod error_codes {
     /// Processes: the system or rynas cannot do without this process or service (PID 1,
     /// kernel threads, rynasd, rynas-web, sshd, journald…): no signal, priority or restart (403).
     pub const PROCESS_PROTECTED: &str = "process_protected";
+    /// Mobile devices: an unknown, used, expired or badly signed pairing code or claim token
+    /// (400). Never more detail: no oracle for guessing.
+    pub const PAIRING_INVALID: &str = "pairing_invalid";
+    /// Mobile devices: the user rejected the claim (403, on the phone's poll).
+    pub const PAIRING_REJECTED: &str = "pairing_rejected";
+    /// Mobile devices: the pairing expired before it was approved (410, on the phone's poll).
+    pub const PAIRING_EXPIRED: &str = "pairing_expired";
+    /// The action needs a password or TOTP check in the last 10 minutes (403); the UI asks
+    /// for it (`POST /api/v1/auth/reauth`) and repeats the request.
+    pub const REAUTH_REQUIRED: &str = "reauth_required";
+    /// The route is refused to a paired device (403); the web interface may call it.
+    pub const NOT_FOR_DEVICES: &str = "not_for_devices";
+    /// Mobile devices: the device is unknown or was revoked (401): the app forgets the pairing.
+    pub const DEVICE_REVOKED: &str = "device_revoked";
+    /// Mobile devices: a refresh with a bad signature, an old timestamp or a refused account
+    /// (401).
+    pub const REFRESH_INVALID: &str = "refresh_invalid";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -511,6 +529,13 @@ pub mod error_codes {
         CRYPT_NOT_INSTALLED,
         SSH_LOCKOUT,
         PROCESS_PROTECTED,
+        PAIRING_INVALID,
+        PAIRING_REJECTED,
+        PAIRING_EXPIRED,
+        REAUTH_REQUIRED,
+        NOT_FOR_DEVICES,
+        DEVICE_REVOKED,
+        REFRESH_INVALID,
     ];
 }
 
@@ -529,6 +554,15 @@ pub struct LoginRequest {
     pub username: String,
     pub password: String,
     /// 6-digit TOTP code or a recovery code; required when the account has TOTP enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp: Option<String>,
+}
+
+/// `POST /api/v1/auth/reauth`: the signed-in user's password again (and TOTP code when the
+/// account has it), for actions that need a recent check (`reauth_required`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ReauthRequest {
+    pub password: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub totp: Option<String>,
 }

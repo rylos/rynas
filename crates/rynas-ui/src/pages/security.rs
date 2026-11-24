@@ -311,6 +311,15 @@ pub fn Security() -> impl IntoView {
                         {form_error(error)}
                     </div>
                 </section>
+                <section class="card widget w-12" style="--i:2">
+                    <WidgetHead icon=icons::SMARTPHONE title="nav.devices" />
+                    <div class="sec-body">
+                        <p class="muted">{tr("dev.sec_text")}</p>
+                        <div class="sec-actions">
+                            <a class="btn ghost" href="/security/devices">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
+                        </div>
+                    </div>
+                </section>
             </div>
         </div>
     }

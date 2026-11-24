@@ -6283,3 +6283,59 @@ nev.syncthing.down.body	L'app {stack} è in esecuzione ma la sua interfaccia non
 nev.syncthing.up.title	Syncthing risponde di nuovo
 nev.syncthing.folder_kept_paused.title	La cartella Syncthing {folder} resta in pausa
 nev.syncthing.folder_kept_paused.body	Dopo lo sblocco di {share} il marcatore della cartella (.stfolder) non è stato trovato: rynas non l'ha ripresa. Controlla la cartella, poi riprendila in Syncthing.
+err.pairing_invalid	Il codice di abbinamento non è più valido.
+err.pairing_rejected	L'abbinamento è stato rifiutato sul NAS.
+err.pairing_expired	L'abbinamento è scaduto prima dell'approvazione.
+err.reauth_required	Inserisci di nuovo la password per continuare.
+err.not_for_devices	Un dispositivo abbinato non può farlo: usa l'interfaccia web.
+err.device_revoked	Questo dispositivo è stato revocato: abbinalo di nuovo.
+err.refresh_invalid	Il dispositivo non ha potuto rinnovare l'accesso: abbinalo di nuovo.
+nav.devices	Dispositivi mobili
+dev.subtitle	Telefoni abbinati a questo NAS: rinominali, revocali, abbinane uno nuovo
+dev.pair	Abbina un dispositivo
+dev.list	Dispositivi abbinati
+dev.none	Nessun dispositivo abbinato
+dev.none_text	Abbina un telefono con l'app rynas: inquadra il codice QR mostrato qui, poi lo approvi.
+dev.col.name	Nome
+dev.col.model	Modello
+dev.col.user	Utente
+dev.col.address	Indirizzo
+dev.col.created	Abbinato il
+dev.this_one	questo dispositivo
+dev.rename	Rinomina
+dev.revoke	Revoca
+dev.revoke_title	Revocare {name}?
+dev.revoke_text	Il dispositivo perde subito l'accesso e per tornare va abbinato di nuovo.
+dev.reauth_text	Per abbinare un dispositivo serve un accesso recente: inserisci di nuovo la password.
+dev.continue	Continua
+dev.step_scan	Inquadra questo codice con l'app
+dev.step_scan_text	Nell'app sul telefono aggiungi un NAS e inquadra il codice. Vale una volta sola.
+dev.expires_in	Il codice scade tra {t}
+dev.step_compare	Confronta le cifre sui due schermi
+dev.waiting	In attesa del telefono…
+dev.compare_text	Un telefono ha usato il codice. Approva solo se mostra le stesse sei cifre.
+dev.compare_code	Cifre da confrontare
+dev.approve	Approva
+dev.reject	Rifiuta
+dev.paired	{name} è abbinato. L'app completa da sola.
+dev.expired	Il codice è scaduto. Ricomincia per averne uno nuovo.
+dev.rejected	L'abbinamento è stato rifiutato: il telefono lo sa.
+dev.failed	Non è stato possibile avviare l'abbinamento.
+dev.again	Ricomincia
+dev.sec_text	I telefoni abbinati all'app accedono con una chiave propria; revocane uno qui se lo perdi.
+nev.device.paired.title	Dispositivo {device} abbinato per {user}
+nev.device.paired.body	Il dispositivo mobile {device} è stato abbinato per {user} da {ip}.
+nev.device.renamed.title	Dispositivo {old} di {user} rinominato in {new}
+nev.device.revoked.title	Dispositivo {device} di {user} revocato
+nev.device.revoked.body	Il dispositivo mobile {device} di {user} non può più accedere ({reason}).
+nev.device.revoked.reason.user	revocato dall'interfaccia web
+nev.device.revoked.reason.self	disabbinato dall'app
+nev.device.revoked.reason.account	l'account è stato rimosso o disattivato
+nev.device.revoked.reason.inactive	nessun accesso da 180 giorni
+nev.device.revoked.reason.unclaimed	mai ritirato dal telefono
+nev.device.refresh_reuse.title	Dispositivo {device} di {user} revocato: un token è stato usato due volte
+nev.device.refresh_reuse.body	Un vecchio token di rinnovo del dispositivo mobile {device} ({user}) è tornato da {ip}: potrebbe esisterne una copia altrove. Il dispositivo è stato revocato; abbinalo di nuovo.
+nev.device.power.title	Alimentazione del sistema dal dispositivo {device}: {action}
+nev.device.power.action.restart	riavvio
+nev.device.power.action.shutdown	spegnimento
+nev.device.power.action.cancel	annullato

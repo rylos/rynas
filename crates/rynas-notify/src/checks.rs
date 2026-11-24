@@ -878,6 +878,88 @@ pub fn totp_changed(user: &str, enabled: bool) -> NewEvent {
     field(code(e, c), "user", user)
 }
 
+/// A mobile device paired by `user` (`docs/phase2/mobile-devices.md` §5).
+pub fn device_paired(user: &str, id: &str, device: &str, ip: &str) -> NewEvent {
+    let (user, device) = (safe_word(user), safe_word(device));
+    let mut e = oneshot(
+        Cat::Security,
+        Sev::Notice,
+        "devices",
+        format!("device:paired:{id}"),
+        format!("Device {device} paired for {user}"),
+    );
+    e.body = format!("The mobile device {device} was paired for {user} from {ip}.");
+    field(field(field(code(e, "device.paired"), "user", user), "device", device), "ip", ip)
+}
+
+/// A paired device renamed (from the web interface or from the app).
+pub fn device_renamed(user: &str, id: &str, old: &str, new: &str) -> NewEvent {
+    let (user, old, new) = (safe_word(user), safe_word(old), safe_word(new));
+    let e = oneshot(
+        Cat::Security,
+        Sev::Info,
+        "devices",
+        format!("device:renamed:{id}"),
+        format!("Device {old} of {user} renamed to {new}"),
+    );
+    field(field(field(code(e, "device.renamed"), "user", user), "old", old), "new", new)
+}
+
+/// A paired device revoked. `reason`: `user` (from the web interface), `self` (unpaired from
+/// the app), `account` (the account was removed or disabled), `inactive` (no refresh for 180
+/// days), `unclaimed` (approved, never picked up by the phone).
+pub fn device_revoked(user: &str, id: &str, device: &str, reason: &str) -> NewEvent {
+    let (user, device) = (safe_word(user), safe_word(device));
+    let mut e = oneshot(
+        Cat::Security,
+        Sev::Notice,
+        "devices",
+        format!("device:revoked:{id}"),
+        format!("Device {device} of {user} revoked"),
+    );
+    e.body = format!("The mobile device {device} of {user} can no longer sign in ({reason}).");
+    field(
+        field(field(code(e, "device.revoked"), "user", user), "device", device),
+        "reason",
+        reason,
+    )
+}
+
+/// A refresh token was used twice: someone else may hold a copy; the device was revoked.
+pub fn device_refresh_reuse(user: &str, id: &str, device: &str, ip: &str) -> NewEvent {
+    let (user, device) = (safe_word(user), safe_word(device));
+    let mut e = oneshot(
+        Cat::Security,
+        Sev::Warning,
+        "devices",
+        format!("device:refresh_reuse:{id}"),
+        format!("Device {device} of {user} revoked: a token was used twice"),
+    );
+    e.body = format!(
+        "An old refresh token of the mobile device {device} ({user}) came back from {ip}: a copy \
+         of it may exist elsewhere. The device was revoked; pair it again."
+    );
+    field(field(field(code(e, "device.refresh_reuse"), "user", user), "device", device), "ip", ip)
+}
+
+/// A restart, shutdown or its cancellation asked from a paired device. `action`: `restart`,
+/// `shutdown`, `cancel`.
+pub fn device_power(user: &str, id: &str, device: &str, action: &str) -> NewEvent {
+    let (user, device) = (safe_word(user), safe_word(device));
+    let e = oneshot(
+        Cat::Security,
+        Sev::Info,
+        "devices",
+        format!("device:power:{id}:{action}"),
+        format!("System power by device {device}: {action}"),
+    );
+    field(
+        field(field(code(e, "device.power"), "user", user), "device", device),
+        "action",
+        action,
+    )
+}
+
 /// A user name as it may appear in a title: printable, at most 64 characters (names in
 /// lockout events come from the login form).
 fn safe_word(s: &str) -> &str {

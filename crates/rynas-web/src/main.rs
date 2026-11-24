@@ -294,8 +294,10 @@ fn main() -> std::io::Result<()> {
             streams: Default::default(),
             ups: rynas_web::ups::UpsMonitor::new(&args.upsd),
             tls: tls.clone(),
+            devices: Default::default(),
         };
         state.ups.spawn();
+        rynas_web::devices::spawn_sweeper(state.clone());
         rynas_web::notify::spawn_hardware_watch(state.clone());
         let app = app::router(state, ui_dir.clone());
 

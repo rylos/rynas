@@ -412,6 +412,28 @@ impl TlsSvc {
         })
     }
 
+    /// The pins a paired mobile device keeps (SHA-256 of the SubjectPublicKeyInfo, b64u): the
+    /// local CA first (and the next one ahead of a rotation), then the leaf served on the
+    /// HTTPS port, local or imported. The app accepts a pin anywhere in the chain, so a renewed
+    /// leaf changes nothing. Empty before the first certificate (dry systems).
+    pub fn device_pins(&self) -> Vec<String> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let leaf = match self.active() {
+            Active::Imported => "imported",
+            Active::Local => "local",
+        };
+        let mut out: Vec<String> = Vec::new();
+        for stem in ["ca", "ca-next", leaf] {
+            if let Some(p) = self.read_pair(stem)
+                && let Ok(pin) = rynas_tls::spki_pin(&p.chain)
+                && !out.contains(&pin)
+            {
+                out.push(pin);
+            }
+        }
+        out
+    }
+
     /// Makes sure a valid pair is active and published: creates the local CA and leaf on the
     /// first start, re-issues the leaf when names are missing or it is about to expire, falls
     /// back to the local leaf when the imported pair is unreadable. `force_local` makes the

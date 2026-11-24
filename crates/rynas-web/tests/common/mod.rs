@@ -156,6 +156,7 @@ pub fn build_with_rynasd(
         // nothing listens there: "upsd down"
         ups: rynas_web::ups::UpsMonitor::new("127.0.0.1:9"),
         tls: None,
+        devices: Arc::new(rynas_web::devices::DeviceHub::with_poll_wait(Duration::from_millis(1500))),
     };
     let streams = state.streams.clone();
     TestApp {

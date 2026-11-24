@@ -4,6 +4,7 @@ pub mod apps;
 pub mod backup;
 pub mod config;
 pub mod dashboard;
+pub mod devices;
 pub mod docker;
 pub mod files;
 pub mod hardware;

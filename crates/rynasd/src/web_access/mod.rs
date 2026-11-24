@@ -684,6 +684,21 @@ impl WebAccessSvc {
             .unwrap_or_default()
     }
 
+    /// The web interface's base URLs on the administrator's own domains (`https://<name>[:port]`),
+    /// when the built-in proxy serves the interface (blocking: reads the host facts). The
+    /// mobile devices get them in the QR code, after the LAN and Tailscale ones.
+    pub fn ui_domain_urls(&self) -> Vec<String> {
+        let cfg = self.applied();
+        if cfg.settings.mode != ProxyMode::Builtin || !cfg.settings.ui.enabled || !self.installed() {
+            return Vec::new();
+        }
+        let r = resolve(&cfg, &self.facts());
+        r.ui.iter()
+            .filter(|n| !r.ui_local.contains(n))
+            .map(|n| url_of(n, cfg.settings.https_port, ""))
+            .collect()
+    }
+
     /// Web access serves apps: built-in mode and the engine installed.
     pub fn proxy_active(&self) -> bool {
         self.applied().settings.mode == ProxyMode::Builtin && self.installed()

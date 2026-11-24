@@ -116,6 +116,13 @@ only goes to the debug log (A13).
 | 409 | `stack_not_managed` | Docker: a stack outside the rynas stacks folder (Portainer's, untracked): no file edits, no compose actions |
 | 409 | `ssh_lockout` | SSH: the change would leave no administrator able to log in (`../phase2/ssh.md`) |
 | 403 | `process_protected` | Processes: the system or rynas needs this process or service (PID 1, kernel threads, rynasd, rynas-web, the main sshd, journald…): no signal, priority or restart |
+| 400 | `pairing_invalid` | mobile devices: unknown, used, expired or badly signed pairing code or claim token (no more detail) |
+| 403 | `pairing_rejected` | mobile devices: the user rejected the claim (the phone's poll) |
+| 410 | `pairing_expired` | mobile devices: the pairing expired before its approval (the phone's poll) |
+| 403 | `reauth_required` | the action needs a password (and TOTP) check in the last 10 minutes: `POST /auth/reauth` |
+| 403 | `not_for_devices` | a route refused to paired devices (the list is empty in v1) |
+| 401 | `device_revoked` | mobile devices: the device is unknown or revoked; the app forgets the pairing |
+| 401 | `refresh_invalid` | mobile devices: a refresh with a bad signature, an old timestamp or an account that may not sign in |
 
 ## API v1 (steps 2–3)
 | Method | Path | Response |
@@ -1021,6 +1028,11 @@ schema 2 added the `code` and `body_format` columns.
 | `dedup.ok` / `dedup.partial` / `dedup.failed` | `volume`, `reclaimed`, `shares` | Deduplication of {volume} done: {reclaimed} freed (info, oneshot) / covered only part of its folders (warning; body: the roots not covered) / failed (error; body: the error, not translated) |
 | `auth.lockout` | `user`, `ip`, `retry_after_s` | Login locked for {user} after failed attempts |
 | `auth.totp_enabled` / `auth.totp_disabled` | `user` | Two-factor authentication enabled / disabled for {user} |
+| `device.paired` | `user`, `device`, `ip` | Device {device} paired for {user} |
+| `device.renamed` | `user`, `old`, `new` | Device {old} of {user} renamed to {new} |
+| `device.revoked` | `user`, `device`, `reason` (`user`, `self`, `account`, `inactive`, `unclaimed`) | Device {device} of {user} revoked |
+| `device.refresh_reuse` | `user`, `device`, `ip` | Device {device} of {user} revoked: a token was used twice |
+| `device.power` | `user`, `device`, `action` (`restart`, `shutdown`, `cancel`) | System power by device {device}: {action} |
 | `power.shutdown` / `power.shutdown_skipped` | `rule`, `reasons` (skipped) | Scheduled shutdown {rule} (skipped) |
 | `net.confirmed` | `revision`, `interfaces` | Network change confirmed (revision {revision}) |
 | `net.rolled_back` / `net.rollback_unverified` | `reason`, `revision`, `problems` | Network change rolled back / rollback could not be verified |
@@ -1967,6 +1979,31 @@ method `btrbk` {snapshot_dir, subvolumes [{name, path, mount}], boot_copies? [{m
 bytes, files, signature, skipped?, stale?, error?}], agent? (sent by rynas-agent over HTTPS)}
 (written before every btrfs-method run by the agent, or by `rynas-agent manifest` from `btrbk.conf` on
 btrbk PCs; `captured` of each btrfs subvolume = sent). A reader refuses an unknown `format`.
+
+## API v1: mobile devices (M1, D-DEVICES)
+Design and protocol: `../phase2/mobile-devices.md` (pairing by QR code, device keys, tokens).
+Types in `rynas_api_types::devices`. Times are Unix ms (`*_ms`); `ts` in signed messages is
+Unix seconds.
+
+| Method | Path | Auth | Body | Response |
+|---|---|---|---|---|
+| GET | `/api/v1/ping` | none | — | `Ping` {sid, name, version, api: 1} |
+| POST | `/api/v1/devices/pairing/claim` | none (login limiter) | `ClaimRequest` {v, sid, code, public_key, device, ts, sig} | `ClaimResponse` {claim_token, compare_code, poll_after_ms, expires_ms}; 400 `pairing_invalid` |
+| POST | `/api/v1/devices/pairing/poll` | none (login limiter) | `PollRequest` {claim_token} | 202 `PollPending` (after at most 25 s), 200 `PollApproved` (once), 403 `pairing_rejected`, 410 `pairing_expired`, 400 `pairing_invalid` |
+| POST | `/api/v1/auth/device/refresh` | none (login limiter) | `RefreshRequest` {device_id, refresh_token, ts, sig} | `RefreshResponse` {access_token, access_expires_in, refresh_token}; 401 `device_revoked` / `refresh_invalid` |
+| POST | `/api/v1/auth/reauth` | session | `ReauthRequest` {password, totp?} | 204; the login's errors |
+| POST | `/api/v1/devices/pairing` | session (recent check) | `{}` | `PairingCreated` {pairing_id, expires_ms, qr}; 403 `reauth_required`, 409 `conflict` (3 open) |
+| GET / DELETE | `/api/v1/devices/pairing/{id}` | session (owner) | — | `PairingStatus` {state, expires_ms, claim?} / 204 |
+| POST | `/api/v1/devices/pairing/{id}/approve` | session (owner) | `PairingApprove` {name?} | `Device`; 409 `conflict` unless claimed |
+| POST | `/api/v1/devices/pairing/{id}/reject` | session (owner) | — | 204 |
+| GET | `/api/v1/devices` | session | — | `Vec<Device>` (own; administrators everyone's) |
+| PATCH / DELETE | `/api/v1/devices/{id}` | session (owner or administrator) | `DeviceRename` {name} | `Device` / 204 (revoked at once) |
+| GET / PATCH / DELETE | `/api/v1/devices/self` | bearer | `DeviceRename` | `DeviceSelf` (device + `tls_pins` + `endpoints`) / `Device` / 204 |
+
+Every other route accepts `Authorization: Bearer <access token>` in place of the cookie, with
+no CSRF, as the device's user and role (`require_session`; no excluded route in v1, list
+`NOT_FOR_DEVICES`). Writes of a device are logged to `rynas::audit` with the device's id and
+name. Internal rynasd routes (`/v1/devices/…`): `crates/rynasd/src/devices.rs`.
 
 ## API v1: Wake-on-LAN
 Module `rynasd::wol` (`send`: magic packet, interface choice, sockets; `probe`: status

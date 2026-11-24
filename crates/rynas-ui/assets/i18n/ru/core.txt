@@ -6345,3 +6345,59 @@ nev.syncthing.down.body	Приложение {stack} работает, но ег
 nev.syncthing.up.title	Syncthing снова отвечает
 nev.syncthing.folder_kept_paused.title	Папка Syncthing {folder} остаётся приостановленной
 nev.syncthing.folder_kept_paused.body	После разблокировки {share} маркер папки (.stfolder) не найден: rynas не возобновил её. Проверьте папку, затем возобновите её в Syncthing.
+err.pairing_invalid	Код сопряжения больше не действителен.
+err.pairing_rejected	Сопряжение отклонено на NAS.
+err.pairing_expired	Срок сопряжения истёк до подтверждения.
+err.reauth_required	Введите пароль ещё раз, чтобы продолжить.
+err.not_for_devices	Сопряжённому устройству это не разрешено: используйте веб-интерфейс.
+err.device_revoked	Это устройство отозвано: выполните сопряжение заново.
+err.refresh_invalid	Устройству не удалось продлить доступ: выполните сопряжение заново.
+nav.devices	Мобильные устройства
+dev.subtitle	Телефоны, сопряжённые с этим NAS: переименование, отзыв, новое сопряжение
+dev.pair	Сопрячь устройство
+dev.list	Сопряжённые устройства
+dev.none	Нет сопряжённых устройств
+dev.none_text	Сопрягите телефон с приложением rynas: оно сканирует показанный здесь QR-код, затем вы его подтверждаете.
+dev.col.name	Имя
+dev.col.model	Модель
+dev.col.user	Пользователь
+dev.col.address	Адрес
+dev.col.created	Сопряжено
+dev.this_one	это устройство
+dev.rename	Переименовать
+dev.revoke	Отозвать
+dev.revoke_title	Отозвать {name}?
+dev.revoke_text	Устройство сразу теряет доступ; чтобы вернуть его, нужно новое сопряжение.
+dev.reauth_text	Для сопряжения устройства нужен недавний вход: введите пароль ещё раз.
+dev.continue	Продолжить
+dev.step_scan	Отсканируйте этот код приложением
+dev.step_scan_text	В приложении на телефоне добавьте NAS и отсканируйте код. Он действует один раз.
+dev.expires_in	Код истекает через {t}
+dev.step_compare	Сравните цифры на обоих экранах
+dev.waiting	Ожидание телефона…
+dev.compare_text	Телефон использовал код. Подтверждайте, только если он показывает те же шесть цифр.
+dev.compare_code	Цифры для сравнения
+dev.approve	Подтвердить
+dev.reject	Отклонить
+dev.paired	{name} сопряжено. Приложение завершит настройку само.
+dev.expired	Срок кода истёк. Начните заново, чтобы получить новый.
+dev.rejected	Сопряжение отклонено: телефон получил об этом сообщение.
+dev.failed	Не удалось начать сопряжение.
+dev.again	Начать заново
+dev.sec_text	Телефоны, сопряжённые с приложением, входят со своим ключом; отзовите здесь потерянный.
+nev.device.paired.title	Устройство {device} сопряжено для {user}
+nev.device.paired.body	Мобильное устройство {device} сопряжено для {user} с адреса {ip}.
+nev.device.renamed.title	Устройство {old} пользователя {user} переименовано в {new}
+nev.device.revoked.title	Устройство {device} пользователя {user} отозвано
+nev.device.revoked.body	Мобильное устройство {device} пользователя {user} больше не может входить ({reason}).
+nev.device.revoked.reason.user	отозвано в веб-интерфейсе
+nev.device.revoked.reason.self	сопряжение снято в приложении
+nev.device.revoked.reason.account	учётная запись удалена или отключена
+nev.device.revoked.reason.inactive	нет входов 180 дней
+nev.device.revoked.reason.unclaimed	телефон так и не получил его
+nev.device.refresh_reuse.title	Устройство {device} пользователя {user} отозвано: токен использован дважды
+nev.device.refresh_reuse.body	Старый токен обновления мобильного устройства {device} ({user}) пришёл с адреса {ip}: где-то может быть его копия. Устройство отозвано; выполните сопряжение заново.
+nev.device.power.title	Питание системы с устройства {device}: {action}
+nev.device.power.action.restart	перезагрузка
+nev.device.power.action.shutdown	выключение
+nev.device.power.action.cancel	отменено

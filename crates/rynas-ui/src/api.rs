@@ -324,6 +324,11 @@ pub async fn put<B: Serialize, T: DeserializeOwned>(url: &str, body: &B) -> Resu
     json(send("PUT", url, Some(serde_json::to_string(body).unwrap_or_default())).await?).await
 }
 
+/// PATCH with a JSON body, JSON answer (a rename).
+pub async fn patch<B: Serialize, T: DeserializeOwned>(url: &str, body: &B) -> Result<T, ApiErr> {
+    json(send("PATCH", url, Some(serde_json::to_string(body).unwrap_or_default())).await?).await
+}
+
 /// POST to an endpoint that starts a background task (202 `TaskStarted`): the task id.
 /// Most callers want [`crate::tasks::run_task`], which also follows the task to its end.
 pub async fn start_task(url: &str, body: Option<String>) -> Result<String, ApiErr> {

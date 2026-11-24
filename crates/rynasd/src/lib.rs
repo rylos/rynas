@@ -19,6 +19,7 @@ pub mod cgroup;
 pub mod claims;
 pub mod clock;
 pub mod dedup;
+pub mod devices;
 pub mod docker;
 pub mod docker_adopt;
 pub mod docker_auto;

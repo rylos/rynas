@@ -44,6 +44,10 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/totp/enroll", post(auth::totp_enroll))
         .route("/auth/totp/confirm", post(auth::totp_confirm))
         .route("/auth/totp/disable", post(auth::totp_disable))
+        .route("/auth/reauth", post(auth::reauth))
+        // the user's paired mobile devices and pairings (rynasd lets administrators manage
+        // everyone's)
+        .merge(crate::devices::routes())
         // the file manager: every signed-in user, as their own Linux user
         .merge(crate::files::routes())
         // the user's own preferences of the interface (sidebar layout)
@@ -60,6 +64,8 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/session", get(auth::session))
         // the PC agents: their own token or code, checked by rynasd (no session)
         .merge(crate::pc_agent::routes())
+        // mobile devices: discovery, the phone's side of pairing, token refresh (no session)
+        .merge(crate::devices::public_routes())
         .merge(protected)
         // unknown endpoints: 401 without a session, so they do not reveal what exists
         .route("/{*rest}", any(auth::fallback))

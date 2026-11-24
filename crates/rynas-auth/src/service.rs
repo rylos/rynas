@@ -70,6 +70,7 @@ impl From<TotpError> for TotpOpError {
 pub struct AuthService {
     backends: Vec<Backend>,
     sessions: SessionStore,
+    pairings: crate::device::Pairings,
     limiter: LoginLimiter,
     policy: RolePolicy,
     failure_floor: Duration,
@@ -86,6 +87,7 @@ impl AuthService {
         Self {
             backends,
             sessions: SessionStore::new(cfg.session, clock.clone()),
+            pairings: crate::device::Pairings::new(clock.clone()),
             limiter: LoginLimiter::new(cfg.rate, clock),
             policy: cfg.policy,
             failure_floor: cfg.failure_floor,
@@ -95,6 +97,46 @@ impl AuthService {
 
     pub fn sessions(&self) -> &SessionStore {
         &self.sessions
+    }
+
+    /// The role of a user from their groups (a mobile device's refresh), `None` when the
+    /// account may not sign in.
+    pub fn role_of(&self, identity: &crate::Identity) -> Option<rynas_api_types::Role> {
+        self.policy.role(identity)
+    }
+
+    /// Mobile device pairings waiting for a phone or an approval.
+    pub fn pairings(&self) -> &crate::device::Pairings {
+        &self.pairings
+    }
+
+    /// The failed-login limiter: the mobile devices' public routes (claim, poll, refresh)
+    /// count their failures in it too, and log them in the same fail2ban format.
+    pub fn limiter(&self) -> &LoginLimiter {
+        &self.limiter
+    }
+
+    /// The password (and TOTP code) of the session's own user again: the session counts as
+    /// freshly authenticated ([`SessionData::auth_ms`]). The same rate limit, delay and
+    /// errors as a login.
+    pub async fn reauth(
+        &self,
+        ip: IpAddr,
+        s: &SessionData,
+        password: &str,
+        totp: Option<&str>,
+    ) -> Result<(), LoginError> {
+        let req = LoginRequest {
+            username: s.user.username.clone(),
+            password: password.to_string(),
+            totp: totp.map(str::to_string),
+        };
+        let (info, _) = self.verify(ip, &req, false).await?;
+        if info.realm != s.user.realm {
+            return Err(LoginError::InvalidCredentials);
+        }
+        self.sessions.mark_auth(&s.id);
+        Ok(())
     }
 
     /// Whether failed logins locked the account `user` itself (a login refused by the rate

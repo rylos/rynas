@@ -267,6 +267,7 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/snapshots") view=pages::snapshots::Snapshots />
                     <Route path=path!("/backup") view=pages::backup::BackupPage />
                     <Route path=path!("/security") view=pages::security::Security />
+                    <Route path=path!("/security/devices") view=pages::devices::Devices />
                     <Route path=path!("/files") view=pages::files::Files />
                     <Route path=path!("/files/*path") view=pages::files::Files />
                     <Route path=path!("/shares") view=pages::shares::Shares />
@@ -446,6 +447,9 @@ fn UserMenu() -> impl IntoView {
                     <div class="menu-sep"></div>
                     <a class="menu-item" role="menuitem" href="/security" on:click=move |_| open.set(false)>
                         <Icon icon=icons::SHIELD_CHECK size=16 />{tr("nav.security")}
+                    </a>
+                    <a class="menu-item" role="menuitem" href="/security/devices" on:click=move |_| open.set(false)>
+                        <Icon icon=icons::SMARTPHONE size=16 />{tr("nav.devices")}
                     </a>
                     <a class="menu-item" role="menuitem" href="/system" on:click=move |_| open.set(false)>
                         <Icon icon=icons::SETTINGS size=16 />{tr("bar.prefs")}

@@ -49,6 +49,8 @@ rynas-tasks.workspace = true
 rynas-services.workspace = true
 rynas-notify = { workspace = true, features = ["engine"] }
 tempfile.workspace = true
+# a software P-256 key: the phone of the mobile device tests
+ring.workspace = true
 
 # Debian package `rynas` (both daemons, the web interface, units, PAM service).
 # Build it with packaging/build-deb.sh, not with a bare `cargo deb`: the script builds in a

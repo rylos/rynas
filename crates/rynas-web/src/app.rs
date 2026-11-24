@@ -34,6 +34,8 @@ pub struct AppState {
     pub ups: Arc<crate::ups::UpsMonitor>,
     /// The HTTPS certificate (reloaded right after an import); `None` without HTTPS.
     pub tls: Option<Arc<crate::tls::CertReloader>>,
+    /// Paired mobile devices: NAS id, last seen ([`crate::devices`]).
+    pub devices: Arc<crate::devices::DeviceHub>,
 }
 
 pub fn router(state: AppState, ui_dir: PathBuf) -> Router {

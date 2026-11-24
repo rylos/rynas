@@ -78,4 +78,6 @@ tower = { version = "0.5.3", features = ["util"] }
 tokio = { workspace = true, features = ["io-util"] }
 tempfile.workspace = true
 rusqlite.workspace = true
+# a software P-256 key in the mobile device tests
+ring.workspace = true
 http-body-util.workspace = true

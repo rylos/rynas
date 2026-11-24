@@ -1482,6 +1482,40 @@ fn main() -> std::io::Result<()> {
             rynasd::web_access::imported::spawn_watch(web.clone());
             state.web_access = Some(web);
         }
+        // paired mobile devices: the store, the refresh checks, expiry and removed accounts
+        {
+            let (tls, ts, web) = (opened.tls.clone(), state.tailscale.clone(), opened.web_access.clone());
+            let port = args.web_tls_port;
+            let trust: rynasd::devices::TrustProvider = Arc::new(move || {
+                let (tls, ts, web) = (tls.clone(), ts.clone(), web.clone());
+                Box::pin(rynasd::devices::system_trust(tls, ts, web, port))
+            });
+            let account: rynasd::devices::AccountCheck = if args.dry_system {
+                // development: the system users, without PAM
+                Arc::new(|u: &str| match rynasd::groups::user_groups(u) {
+                    Some(_) => rynasd::devices::Account::Ok,
+                    None => rynasd::devices::Account::Gone,
+                })
+            } else {
+                let service = service.clone();
+                Arc::new(move |u: &str| rynasd::pam::account_state(&service, u))
+            };
+            match rynasd::devices::DevicesSvc::new(
+                &args.state_dir,
+                notifier.clone(),
+                ops.admins.clone(),
+                state.groups,
+                account,
+                trust,
+                Arc::new(SystemClock),
+            ) {
+                Ok(d) => {
+                    rynasd::devices::spawn_watch(d.clone());
+                    state.devices = Some(d);
+                }
+                Err(e) => tracing::error!("mobile devices: {e}"),
+            }
+        }
         state.ops = Some(ops);
         // arrays of rynas volumes left inactive after boot by a missing drive
         if !args.dry_system {

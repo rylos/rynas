@@ -55,6 +55,7 @@ fn entries() -> Vec<Entry> {
         .collect();
     v.extend([
         Entry { text: None, key: "nav.security", icon: icons::SHIELD_CHECK, action: Action::Go("/security"), hint: "" },
+        Entry { text: None, key: "nav.devices", icon: icons::SMARTPHONE, action: Action::Go("/security/devices"), hint: "" },
         Entry { text: None, key: "wa.title", icon: icons::SHIELD_CHECK, action: Action::Go("/network/web-access"), hint: "" },
         Entry { text: None, key: "ts.title", icon: icons::LINK, action: Action::Go("/network/remote-access"), hint: "" },
         Entry { text: None, key: "ssh.title", icon: icons::COMMAND, action: Action::Go("/services/ssh"), hint: "" },

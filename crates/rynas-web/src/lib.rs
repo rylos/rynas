@@ -4,6 +4,7 @@ pub mod api;
 pub mod app;
 pub mod auth;
 pub mod conn;
+pub mod devices;
 pub mod error;
 pub mod events;
 pub mod files;

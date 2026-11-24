@@ -320,6 +320,17 @@ fn first_der(pem: &str) -> Result<CertificateDer<'static>, TlsError> {
     Ok(chain_der(pem)?.remove(0))
 }
 
+/// The pin of the first certificate of a PEM text: SHA-256 of its DER SubjectPublicKeyInfo,
+/// base64url without padding (what the mobile app compares anywhere in the served chain).
+pub fn spki_pin(pem: &str) -> Result<String, TlsError> {
+    use base64::Engine;
+    let der = first_der(pem)?;
+    let (_, cert) = X509Certificate::from_der(der.as_ref())
+        .map_err(|_| TlsError::cert("not an X.509 certificate"))?;
+    let digest = Sha256::digest(cert.public_key().raw);
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest))
+}
+
 /// The private key of a PEM text (PKCS#8, SEC1 or PKCS#1; never encrypted).
 pub fn key_der(pem: &str) -> Result<PrivateKeyDer<'static>, TlsError> {
     if pem.len() > MAX_PEM {

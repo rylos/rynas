@@ -103,6 +103,8 @@ pub struct DaemonState {
     pub processes: crate::processes::ProcHandle,
     /// Preferences of the web interface per user ([`crate::ui_prefs`]); `None` answers 503.
     pub ui_prefs: crate::ui_prefs::PrefsState,
+    /// Paired mobile devices ([`crate::devices`]); `None` answers 503.
+    pub devices: crate::devices::DevState,
 }
 
 impl DaemonState {
@@ -155,6 +157,7 @@ impl DaemonState {
             dedup: None,
             processes: None,
             ui_prefs: None,
+            devices: None,
         }
     }
 }
@@ -252,6 +255,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::dedup::router(state.dedup))
         .merge(crate::processes::router(state.processes))
         .merge(crate::ui_prefs::router(state.ui_prefs))
+        .merge(crate::devices::router(state.devices))
         .fallback(|| async { Error::not_found("no such endpoint") })
         // 405, query string and path rejections: ApiError bodies too
         .layer(axum::middleware::from_fn(crate::error::json_errors))

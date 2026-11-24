@@ -9,9 +9,12 @@
 //! - [`backend`]: the [`backend::Authenticator`] and [`backend::TotpBackend`] traits, so that
 //!   PAM (in the root daemon `rynasd`) can be swapped for a fake in tests;
 //! - [`service`]: the login flow that ties everything together;
+//! - [`device`]: mobile devices: the signatures of the pairing protocol and the pairings
+//!   waiting for a phone;
 //! - [`ipc`]: the internal protocol between `rynas-web` and `rynasd`.
 
 pub mod backend;
+pub mod device;
 pub mod ipc;
 pub mod ratelimit;
 pub mod realm;

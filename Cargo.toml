@@ -105,6 +105,8 @@ argon2 = "0.6.0"
 totp-rs = { version = "6.0.0", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
 subtle = "2.6.1"
+# ECDSA P-256 signatures of the mobile devices (rynas-auth::device): already in the tree for rustls
+ring = "0.17.14"
 toml = "1.2.0"
 nix = { version = "0.31.3", features = ["user", "fs"] }
 # configuration store and tasks (rynas-config, rynas-tasks). System libsqlite3 and libzstd
