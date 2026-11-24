@@ -1288,7 +1288,7 @@ mod tests {
         let no_docker = |id: &str| id != "docker" && id != "syncthing";
         // services → down skips Syncthing and Docker (not installed): after them, after apps
         assert!(b.move_entry("services", 1, &no_docker));
-        assert_eq!(flat(&b)[2], ["users", "syncthing", "docker", "apps", "services"]);
+        assert_eq!(flat(&b)[2], ["users", "security", "syncthing", "docker", "apps", "services"]);
     }
 
     #[test]
@@ -1336,7 +1336,7 @@ mod tests {
         let rows = b.rows(true, &all);
         assert_eq!(rows.iter().filter(|r| matches!(r, Row::Sep(_))).count(), 4);
         // a group with nothing on screen has no separator
-        let only_docker_group = |id: &str| !["users", "services", "syncthing", "docker", "apps"].contains(&id);
+        let only_docker_group = |id: &str| !["users", "security", "services", "syncthing", "docker", "apps"].contains(&id);
         assert_eq!(b.rows(false, &only_docker_group).iter().filter(|r| matches!(r, Row::Sep(_))).count(), 2);
         assert_eq!(b.group_number(b.keys[3], &only_docker_group), 3);
     }

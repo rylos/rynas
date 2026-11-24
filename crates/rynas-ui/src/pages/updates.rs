@@ -630,7 +630,7 @@ fn kernel_card(kernel: Remote<KernelStatus>) -> AnyView {
         .into_any()
     };
     view! {
-        <section class="card widget w-6">
+        <section class="card widget w-6" id="kernel">
             <WidgetHead icon=icons::CPU title="upd.kernel">
                 <button class="icon-btn sm" aria-label=tr("upd.refresh_kernel") title=tr("upd.refresh_kernel") disabled=move || refreshing.get() on:click=refresh>
                     <Icon icon=icons::REFRESH_CW size=16 />

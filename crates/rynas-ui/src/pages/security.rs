@@ -302,7 +302,7 @@ pub fn Security() -> impl IntoView {
                         {kv_row("sec.idle", field(|s| tf("sec.idle_min", &[("n", &(s.idle_timeout_s / 60).to_string())])), "tnum")}
                     </dl>
                 </section>
-                <section class="card widget w-8" style="--i:1">
+                <section class="card widget w-8" style="--i:1" id="totp">
                     <WidgetHead icon=icons::KEY title="sec.totp">
                         <Status tone=tone text=state />
                     </WidgetHead>

@@ -46,7 +46,7 @@ pub fn is_admin() -> bool {
     crate::auth::auth().session.with(|s| s.as_ref().is_some_and(|s| s.user.role == rynas_api_types::Role::Admin))
 }
 
-pub const NAV: [NavItem; 15] = [
+pub const NAV: [NavItem; 16] = [
     NavItem { id: "dashboard", path: "/", key: "nav.dashboard", icon: icons::LAYOUT_DASHBOARD },
     NavItem { id: "storage", path: "/storage", key: "nav.storage", icon: icons::HARD_DRIVE },
     NavItem { id: "files", path: "/files", key: "nav.files", icon: icons::FOLDER },
@@ -54,6 +54,7 @@ pub const NAV: [NavItem; 15] = [
     NavItem { id: "snapshots", path: "/snapshots", key: "nav.snapshots", icon: icons::CAMERA },
     NavItem { id: "backup", path: "/backup", key: "nav.backup", icon: icons::ARCHIVE_RESTORE },
     NavItem { id: "users", path: "/users", key: "nav.users", icon: icons::USERS },
+    NavItem { id: "security", path: "/security", key: "nav.security", icon: icons::SHIELD_CHECK },
     NavItem { id: "services", path: "/services", key: "nav.services", icon: icons::SERVER },
     NavItem { id: "syncthing", path: "/syncthing", key: "nav.syncthing", icon: icons::FOLDER_SYNC },
     NavItem { id: "docker", path: "/docker", key: "nav.docker", icon: icons::CONTAINER },
@@ -247,6 +248,7 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/") view=pages::dashboard::Dashboard />
                     <Route path=path!("/storage") view=pages::storage::Storage />
                     <Route path=path!("/storage/disks") view=pages::storage::disks::Disks />
+                    <Route path=path!("/storage/space") view=pages::storage::space::SpacePage />
                     <Route path=path!("/storage/create") view=pages::storage::wizard::CreateVolume />
                     <Route path=path!("/storage/volumes/:name") view=pages::storage::volume::VolumePage />
                     <Route path=path!("/network") view=pages::network::Network />

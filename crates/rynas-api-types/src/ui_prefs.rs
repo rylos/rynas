@@ -29,7 +29,7 @@ pub const PIN_PATH_MAX: usize = 256;
 pub const SIDEBAR_DEFAULT: &[&[&str]] = &[
     &["dashboard"],
     &["storage", "files", "shares", "snapshots", "backup"],
-    &["users", "services", "syncthing", "docker", "apps"],
+    &["users", "security", "services", "syncthing", "docker", "apps"],
     &["network", "wake", "hardware", "system"],
 ];
 
@@ -474,10 +474,26 @@ mod tests {
                 &["network", "wake", "hardware", "system"],
                 &["dashboard"],
                 &["backup", "storage", "files", "shares", "snapshots"],
-                &["users", "services", "syncthing", "docker", "apps"],
+                &["users", "security", "services", "syncthing", "docker", "apps"],
             ])
         );
         assert_eq!(m.hidden, ["files"]);
+    }
+
+    #[test]
+    fn merge_brings_security_next_to_users() {
+        // a layout saved before "security" was a sidebar entry, with users moved to the end
+        let saved = SidebarLayout {
+            version: 1,
+            groups: ids(&[&["dashboard"], &["storage", "files", "shares", "snapshots", "backup"], &["services", "syncthing", "docker", "apps", "users"], &["network", "wake", "hardware", "system"]]),
+            hidden: vec!["security".into()],
+            known: builtin_ids().filter(|i| *i != "security").map(String::from).collect(),
+            pins: vec![],
+        };
+        let m = merge(Some(&saved));
+        assert_eq!(m.validate(), Ok(()));
+        assert_eq!(m.groups[2], ["services", "syncthing", "docker", "apps", "users", "security"]);
+        assert!(m.hidden.is_empty(), "a new entry is shown even if a hidden list names it");
     }
 
     #[test]
@@ -494,7 +510,7 @@ mod tests {
         let m = merge(Some(&saved));
         assert_eq!(m.validate(), Ok(()));
         assert_eq!(m.groups[1][0], "storage");
-        assert_eq!(m.groups[2], ["users", "services", "syncthing", "docker", "apps"]);
+        assert_eq!(m.groups[2], ["users", "security", "services", "syncthing", "docker", "apps"]);
         // new entries are shown even if a hidden list names them
         assert!(m.hidden.is_empty());
     }

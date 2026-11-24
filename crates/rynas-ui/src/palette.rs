@@ -9,9 +9,78 @@ use crate::icons::{self, Icon};
 use crate::prefs::{Density, ThemePref, use_ui};
 use crate::shell::NAV;
 
+/// Inner tabs and sections of pages the palette reaches directly: the trail of i18n keys
+/// shown as "Page › Section", the address (`?tab=<n>` opens a tab, `#<id>` scrolls to a
+/// card) and the icon.
+pub const DEEP: &[(&[&str], &str, &str)] = &[
+    (&["nav.storage", "sp.tab"], "/storage/space", icons::LAYERS),
+    (&["nav.storage", "sto.disks"], "/storage/disks", icons::HARD_DRIVE),
+    (&["nav.storage", "sto.create"], "/storage/create", icons::PLUS),
+    (&["nav.snapshots", "snap.tab.jobs"], "/snapshots?tab=1", icons::CAMERA),
+    (&["nav.snapshots", "snap.tab.replication"], "/snapshots?tab=2", icons::CAMERA),
+    (&["nav.snapshots", "snap.tab.system"], "/snapshots?tab=3", icons::CAMERA),
+    (&["nav.backup", "bk.tab.pcs"], "/backup?tab=1", icons::ARCHIVE_RESTORE),
+    (&["nav.backup", "bk.tab.agent"], "/backup?tab=2", icons::ARCHIVE_RESTORE),
+    (&["nav.security", "sec.totp"], "/security#totp", icons::KEY),
+    (&["nav.security", "nav.devices"], "/security/devices", icons::SMARTPHONE),
+    (&["nav.services", "ssh.title"], "/services/ssh", icons::COMMAND),
+    (&["nav.docker", "dk.tab.containers"], "/docker?tab=1", icons::CONTAINER),
+    (&["nav.docker", "dk.tab.stacks"], "/docker?tab=2", icons::CONTAINER),
+    (&["nav.docker", "dk.tab.images"], "/docker?tab=3", icons::CONTAINER),
+    (&["nav.network", "wa.title"], "/network/web-access", icons::SHIELD_CHECK),
+    (&["nav.network", "ts.title"], "/network/remote-access", icons::LINK),
+    (&["nav.system", "upd.title"], "/system/updates", icons::DOWNLOAD),
+    (&["nav.system", "upd.title", "upd.kernel"], "/system/updates#kernel", icons::CPU),
+    (&["nav.system", "mem.title"], "/system/memory", icons::MEMORY_STICK),
+    (&["nav.system", "proc.title"], "/system/processes", icons::ACTIVITY),
+    (&["nav.system", "cfg.title"], "/system/configuration", icons::HISTORY),
+    (&["nav.system", "sch.title"], "/system/scheduler", icons::CALENDAR_CLOCK),
+    (&["nav.system", "sv.title"], "/system/schedule", icons::CALENDAR_CLOCK),
+    (&["nav.system", "nt.settings_title"], "/system/notifications", icons::BELL_RING),
+];
+
+/// "Storage › Space" for an entry of [`DEEP`].
+pub fn trail_text(keys: &[&'static str]) -> String {
+    keys.iter().map(|k| t(k)).collect::<Vec<_>>().join(" › ")
+}
+
+#[cfg(test)]
+mod deep_tests {
+    use super::*;
+
+    #[test]
+    fn deep_links_have_texts_and_known_pages() {
+        for (keys, path, _) in DEEP {
+            for k in *keys {
+                assert!(crate::i18n::try_t(k).is_some(), "{k}");
+            }
+            let page = path.split(['?', '#']).next().unwrap();
+            assert!(page.starts_with('/') && !page.ends_with('/'), "{path}");
+            // the first key names the page's own navigation entry
+            assert!(NAV.iter().any(|n| n.key == keys[0] && page.starts_with(n.path)), "{path}");
+        }
+        assert_eq!(trail_text(&["nav.storage", "sp.tab"]), "Storage › Space");
+    }
+}
+
+/// Scrolls the element `id` into view once the page has drawn it (a few tries).
+fn scroll_to(id: String) {
+    leptos::task::spawn_local(async move {
+        for _ in 0..20 {
+            crate::api::sleep(100).await;
+            if let Some(el) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id(&id)) {
+                el.scroll_into_view();
+                return;
+            }
+        }
+    });
+}
+
 #[derive(Clone)]
 enum Action {
     Go(&'static str),
+    /// An entry of [`DEEP`] (its index).
+    Deep(usize),
     /// A pinned page of the sidebar (its address).
     Open(String),
     EditSidebar,
@@ -39,13 +108,23 @@ struct Entry {
 
 impl Entry {
     fn label(&self) -> String {
+        if let Action::Deep(i) = self.action {
+            return trail_text(DEEP[i].0);
+        }
         self.text.clone().unwrap_or_else(|| t(self.key).to_string())
     }
 }
 
 /// The icon of the page at `route` in the palette, if it lists it.
 pub fn page_icon(route: &str) -> Option<&'static str> {
-    entries().into_iter().find(|e| matches!(e.action, Action::Go(p) if p == route)).map(|e| e.icon)
+    entries()
+        .into_iter()
+        .find(|e| match e.action {
+            Action::Go(p) => p == route,
+            Action::Deep(i) => DEEP[i].1 == route,
+            _ => false,
+        })
+        .map(|e| e.icon)
 }
 
 fn entries() -> Vec<Entry> {
@@ -53,19 +132,9 @@ fn entries() -> Vec<Entry> {
         .iter()
         .map(|n| Entry { text: None, key: n.key, icon: n.icon, action: Action::Go(n.path), hint: "" })
         .collect();
+    // inner tabs and sections ("Storage › Space"), after the pages
+    v.extend(DEEP.iter().enumerate().map(|(i, d)| Entry { text: None, key: "", icon: d.2, action: Action::Deep(i), hint: "" }));
     v.extend([
-        Entry { text: None, key: "nav.security", icon: icons::SHIELD_CHECK, action: Action::Go("/security"), hint: "" },
-        Entry { text: None, key: "nav.devices", icon: icons::SMARTPHONE, action: Action::Go("/security/devices"), hint: "" },
-        Entry { text: None, key: "wa.title", icon: icons::SHIELD_CHECK, action: Action::Go("/network/web-access"), hint: "" },
-        Entry { text: None, key: "ts.title", icon: icons::LINK, action: Action::Go("/network/remote-access"), hint: "" },
-        Entry { text: None, key: "ssh.title", icon: icons::COMMAND, action: Action::Go("/services/ssh"), hint: "" },
-        Entry { text: None, key: "mem.title", icon: icons::MEMORY_STICK, action: Action::Go("/system/memory"), hint: "" },
-        Entry { text: None, key: "proc.title", icon: icons::ACTIVITY, action: Action::Go("/system/processes"), hint: "" },
-        Entry { text: None, key: "cfg.title", icon: icons::HISTORY, action: Action::Go("/system/configuration"), hint: "" },
-        Entry { text: None, key: "sch.title", icon: icons::CALENDAR_CLOCK, action: Action::Go("/system/scheduler"), hint: "" },
-        Entry { text: None, key: "sv.title", icon: icons::CALENDAR_CLOCK, action: Action::Go("/system/schedule"), hint: "" },
-        Entry { text: None, key: "upd.title", icon: icons::DOWNLOAD, action: Action::Go("/system/updates"), hint: "" },
-        Entry { text: None, key: "nt.settings_title", icon: icons::BELL_RING, action: Action::Go("/system/notifications"), hint: "" },
         Entry { text: None, key: "nt.center", icon: icons::BELL, action: Action::Go("/notifications"), hint: "" },
         Entry { text: None, key: "bar.logout", icon: icons::LOG_OUT, action: Action::SignOut, hint: "" },
         Entry { text: None, key: "pal.edit_layout", icon: icons::SETTINGS, action: Action::EditLayout, hint: "" },
@@ -149,11 +218,16 @@ pub fn Palette() -> impl IntoView {
         let mut r: Vec<(i32, usize)> = all.with(|es| {
             es.iter()
                 .enumerate()
-                .filter(|(_, e)| !matches!(e.action, Action::Go(p) if !crate::shell::nav_shown(p)))
+                .filter(|(_, e)| match e.action {
+                    Action::Go(p) => crate::shell::nav_shown(p),
+                    // a section of a page that does not exist now (Docker not installed)
+                    Action::Deep(i) => crate::shell::nav_shown(&format!("/{}", DEEP[i].1.trim_start_matches('/').split(['/', '?', '#']).next().unwrap_or(""))),
+                    _ => true,
+                })
                 .filter_map(|(i, e)| {
                     let label = e.label();
                     let extra = match e.action {
-                        Action::Go(_) | Action::Open(_) => t("pal.go").to_string(),
+                        Action::Go(_) | Action::Open(_) | Action::Deep(_) => t("pal.go").to_string(),
                         // a language is also found by its English name and code ("italian", "it")
                         Action::Lang(l) => format!("language {} {}", l.english(), l.code()),
                         _ => String::new(),
@@ -190,6 +264,13 @@ pub fn Palette() -> impl IntoView {
         ui.palette_open.set(false);
         match e.action {
             Action::Go(p) => navigate(p, Default::default()),
+            Action::Deep(i) => match DEEP[i].1.split_once('#') {
+                Some((page, id)) => {
+                    navigate(page, Default::default());
+                    scroll_to(id.to_string());
+                }
+                None => navigate(DEEP[i].1, Default::default()),
+            },
             Action::Open(p) => navigate(&p, Default::default()),
             Action::EditSidebar => {
                 nav.open_editor(ui);
@@ -326,7 +407,7 @@ pub fn Palette() -> impl IntoView {
                             .enumerate()
                             .map(|(pos, idx)| {
                                 let e = all.with_untracked(|es| es[idx].clone());
-                                let is_page = matches!(e.action, Action::Go(_) | Action::Open(_));
+                                let is_page = matches!(e.action, Action::Go(_) | Action::Open(_) | Action::Deep(_));
                                 let header = (last_group != Some(is_page)).then(|| {
                                     last_group = Some(is_page);
                                     view! { <li class="pal-group" role="presentation">{t(if is_page { "pal.pages" } else { "col.actions" })}</li> }
