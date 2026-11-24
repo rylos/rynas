@@ -282,12 +282,12 @@ async fn pairing_tokens_rotation_reuse() {
             Method::POST,
             &format!("/api/v1/devices/pairing/{}/approve", p.pairing_id),
             &creds,
-            Some(json!({"name": "  Telefono Marco "})),
+            Some(json!({"name": "  Ann's phone "})),
         )
         .await;
     assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
     let dev: Device = r.json();
-    assert_eq!((dev.name.as_str(), dev.user.as_str()), ("Telefono Marco", "admin"));
+    assert_eq!((dev.name.as_str(), dev.user.as_str()), ("Ann's phone", "admin"));
     let (status, body) = waiting.await.unwrap();
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let ok: PollApproved = serde_json::from_slice(&body).unwrap();

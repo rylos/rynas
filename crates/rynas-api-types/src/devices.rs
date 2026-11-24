@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn names_are_cleaned() {
-        assert_eq!(clean_name("  Phone\n of Marco "), Some("Phone of Marco".into()));
+        assert_eq!(clean_name("  Phone\n of Ann "), Some("Phone of Ann".into()));
         assert_eq!(clean_name(" \t "), None);
         assert_eq!(clean_name(&"x".repeat(80)).unwrap().chars().count(), MAX_NAME);
         assert_eq!(clean_text("SM-S931B\u{7}"), "SM-S931B");
