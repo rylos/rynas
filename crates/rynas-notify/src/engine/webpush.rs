@@ -24,6 +24,9 @@ pub const TTL_S: u32 = 86_400;
 /// Where a `device` target's subscription comes from (rynasd's device store).
 pub trait PushDirectory: Send + Sync {
     fn subscription(&self, device_id: &str) -> Option<PushSubscription>;
+    /// The account the device belongs to (`None`: no such device). Personal events (category
+    /// `files`) go only to the devices of their `user`.
+    fn owner(&self, device_id: &str) -> Option<String>;
     /// The push service answered 404 or 410: the subscription no longer exists.
     fn gone(&self, device_id: &str);
 }

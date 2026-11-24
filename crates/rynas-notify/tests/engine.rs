@@ -1010,13 +1010,23 @@ fn b64u(s: &str) -> Vec<u8> {
 
 #[derive(Default)]
 struct Directory {
+    /// Every device's subscription, unless it has one in `subs`.
     sub: Mutex<Option<rynas_api_types::devices::PushSubscription>>,
+    subs: Mutex<BTreeMap<String, rynas_api_types::devices::PushSubscription>>,
+    /// device id → its user
+    owners: Mutex<BTreeMap<String, String>>,
     gone: Mutex<Vec<String>>,
 }
 
 impl rynas_notify::engine::webpush::PushDirectory for Directory {
-    fn subscription(&self, _device_id: &str) -> Option<rynas_api_types::devices::PushSubscription> {
+    fn subscription(&self, device_id: &str) -> Option<rynas_api_types::devices::PushSubscription> {
+        if let Some(s) = self.subs.lock().unwrap().get(device_id) {
+            return Some(s.clone());
+        }
         self.sub.lock().unwrap().clone()
+    }
+    fn owner(&self, device_id: &str) -> Option<String> {
+        self.owners.lock().unwrap().get(device_id).cloned()
     }
     fn gone(&self, device_id: &str) {
         self.gone.lock().unwrap().push(device_id.to_string());
@@ -1102,4 +1112,94 @@ async fn device_targets_push_encrypted_messages() {
     e.advance(2 * 3_600_000);
     assert_eq!(e.engine.deliver_due().await.unwrap(), 0);
     assert_eq!(push.reqs.lock().unwrap().len(), 1, "no retry after a 410");
+}
+
+/// A file transfer's end as rynasd's file manager emits it.
+fn files_job(code: &str, sev: NotifySeverity, user: &str, job: u64, state: &str) -> NewEvent {
+    let mut ev = event::oneshot(NotifyCategory::Files, sev, "files", format!("files:job:{job}"), "Copy finished");
+    ev.body = "Film.mkv → /Video · 45.8 GiB in 7 min".into();
+    ev.code = code.into();
+    for (k, v) in [("job_id", job.to_string()), ("state", state.into()), ("user", user.into()), ("kind", "copy".into())] {
+        ev.fields.insert(k.into(), v);
+    }
+    ev
+}
+
+#[tokio::test]
+async fn files_jobs_reach_only_their_owners_devices() {
+    use rynas_api_types::devices::{PushPayload, PushSubscription};
+    use rynas_notify::engine::webpush;
+    let push = fake_push().await;
+    let e = env_with(|o| o.push_loopback_http = true);
+    let dir = Arc::new(Directory::default());
+    for (id, user) in [("d_0a", "alice"), ("d_0b", "bob")] {
+        dir.owners.lock().unwrap().insert(id.into(), user.into());
+        dir.subs.lock().unwrap().insert(
+            id.into(),
+            PushSubscription { endpoint: format!("{}/up-{user}", push.url), p256dh: UA_PUBLIC.into(), auth: UA_AUTH.into() },
+        );
+    }
+    e.engine.set_push_directory(dir.clone());
+    let ta = e.engine.create_target(&device_target("d_0a")).unwrap();
+    let tb = e.engine.create_target(&TargetRequest { name: "Phone".into(), ..device_target("d_0b") }).unwrap();
+    // the devices' default rules: warnings and above, and each owner's own transfers
+    e.engine.create_rule(&NotifyRule { min_severity: NotifySeverity::Warning, ..rule(vec![ta.id, tb.id]) }).unwrap();
+    for (user, t) in [("alice", ta.id), ("bob", tb.id)] {
+        e.engine
+            .create_rule(&NotifyRule {
+                name: format!("files {user}"),
+                categories: vec![NotifyCategory::Files],
+                fields: vec![FieldMatch { field: "user".into(), value: user.into(), regex: false }],
+                ..rule(vec![t])
+            })
+            .unwrap();
+    }
+    // an administrator's rule naming the category for both devices: still each owner's only
+    e.engine
+        .create_rule(&NotifyRule { name: "all files".into(), categories: vec![NotifyCategory::Files], ..rule(vec![ta.id, tb.id]) })
+        .unwrap();
+    let delivered = || {
+        let reqs = std::mem::take(&mut *push.reqs.lock().unwrap());
+        let secret: [u8; 32] = b64u(UA_SECRET).try_into().unwrap();
+        reqs.iter()
+            .map(|(line, _, body)| {
+                let plain = webpush::decrypt(&secret, &b64u(UA_AUTH), body).unwrap();
+                assert!(plain.len() <= rynas_api_types::devices::PUSH_MAX_PAYLOAD);
+                let p: PushPayload = serde_json::from_slice(&plain).unwrap();
+                (line.split(' ').nth(1).unwrap().to_string(), p)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    e.engine.ingest(files_job("files.job_done", NotifySeverity::Info, "alice", 7, "done"), false).unwrap().unwrap();
+    e.engine.deliver_due().await.unwrap();
+    let got = delivered();
+    assert_eq!(got.len(), 1, "{got:?}");
+    let (path, p) = &got[0];
+    assert_eq!(path, "/up-alice");
+    assert_eq!((p.job_id.as_str(), p.state.as_str(), p.user.as_str()), ("7", "done", "alice"));
+    assert_eq!((p.category.as_str(), p.title.as_str()), ("files", "Copy finished"));
+
+    // an error: the warning rule does not take it to alice's phone, bob's rules take it to his
+    e.engine.ingest(files_job("files.job_failed", NotifySeverity::Error, "bob", 8, "canceled"), false).unwrap().unwrap();
+    e.engine.deliver_due().await.unwrap();
+    let got = delivered();
+    assert_eq!(got.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), vec!["/up-bob"]);
+    assert_eq!((got[0].1.job_id.as_str(), got[0].1.state.as_str(), got[0].1.user.as_str()), ("8", "canceled", "bob"));
+
+    // nobody's (no user field), or a user without a device: no push
+    let mut orphan = files_job("files.job_done", NotifySeverity::Info, "carol", 9, "done");
+    e.engine.ingest(orphan.clone(), false).unwrap();
+    orphan.fields.remove("user");
+    orphan.key = Some("files:job:10".into());
+    e.engine.ingest(orphan, false).unwrap();
+    e.engine.deliver_due().await.unwrap();
+    assert!(delivered().is_empty());
+
+    // other events carry no job fields
+    e.engine.ingest(disk_failing(NotifySeverity::Critical), false).unwrap();
+    e.engine.deliver_due().await.unwrap();
+    let got = delivered();
+    assert_eq!(got.len(), 2);
+    assert!(got.iter().all(|(_, p)| p.job_id.is_empty() && p.state.is_empty() && p.user.is_empty()));
 }

@@ -375,6 +375,22 @@ impl Engine {
         self.0.push.get().map(|p| p.as_ref())
     }
 
+    /// Whether a personal event (an opt-in category: a user's file transfers) may go to the
+    /// target whose stored `config` this is: a `device` target only when its device belongs to
+    /// the event's `user`; every other kind when a rule names the category (checked by the
+    /// matcher).
+    fn personal_ok(&self, config: &str, n: &Notification) -> bool {
+        let Ok(TargetConfig::Device { device_id }) = serde_json::from_str::<TargetConfig>(config) else {
+            return !config.contains("\"kind\":\"device\"");
+        };
+        let user = n.fields.get("user").map(String::as_str).unwrap_or("");
+        !user.is_empty()
+            && self
+                .push_dir()
+                .and_then(|d| d.owner(&device_id))
+                .is_some_and(|owner| owner == user)
+    }
+
     /// The host was renamed: later messages name it with `name`.
     pub fn set_hostname(&self, name: &str) {
         self.0.tpl.set_hostname(name);
@@ -668,6 +684,9 @@ impl Engine {
                     .optional()?;
                 let Some((1, config)) = target else { continue };
                 if config.contains("\"kind\":\"ui\"") {
+                    continue;
+                }
+                if n.category.opt_in() && !self.personal_ok(&config, n) {
                     continue;
                 }
                 let next = match (quiet, &group) {

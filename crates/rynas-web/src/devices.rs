@@ -688,7 +688,7 @@ async fn self_delete(
 async fn push_put(
     State(st): State<AppState>,
     Extension(CurrentSession(s)): Extension<CurrentSession>,
-    body: Result<Json<rynas_api_types::devices::PushSubscription>, JsonRejection>,
+    body: Result<Json<rynas_api_types::devices::PushRegistration>, JsonRejection>,
 ) -> Result<Json<Device>, Error> {
     let id = current_device(&s).ok_or_else(device_only)?.to_string();
     let Json(sub) = body?;

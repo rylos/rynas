@@ -964,7 +964,9 @@ Model (types in `rynas_api_types::notify`):
   window ends, `critical` never waits), targets, group_window_s (events for the same target
   within the window go out as one message), repeat_interval_s (reminders while a condition is
   firing, unacknowledged and not silenced; 0 or 5 min–30 days)}. Each target receives an event
-  once even when several rules match.
+  once even when several rules match. Category `files` (a user's own file transfers) is
+  opt-in: only rules that name it select its events, and a `device` target receives them only
+  when its device belongs to the event's `user` (`../phase2/mobile-devices.md` §4a).
 - **Outbox** (SQLite, survives restarts): one row per (event, target), `next_ms` = now, end of
   the grouping window or end of quiet hours; the delivery loop groups due rows per target and
   group key (at most 50 events per message), rate limits per target (token bucket, 10 per
@@ -1034,6 +1036,7 @@ schema 2 added the `code` and `body_format` columns.
 | `device.refresh_reuse` | `user`, `device`, `ip` | Device {device} of {user} revoked: a token was used twice |
 | `device.power` | `user`, `device`, `action` (`restart`, `shutdown`, `cancel`) | System power by device {device}: {action} |
 | `device.password_kept` | `user`, `n`, `devices` | Password of {user} changed: {n} paired devices keep access |
+| `files.job_done` / `files.job_failed` | `job_id`, `state` (`done`, `failed`, `canceled`), `user`, `kind`, `op`, `name` or `count`, `dest`, `size`, `minutes`, `error` (failed) | Copy finished / Copy failed (per kind; category `files`; only transfers longer than 30 s; body "Film.mkv → /Video · 45.8 GiB in 7 min", or the first error, not translated) |
 | `power.shutdown` / `power.shutdown_skipped` | `rule`, `reasons` (skipped) | Scheduled shutdown {rule} (skipped) |
 | `net.confirmed` | `revision`, `interfaces` | Network change confirmed (revision {revision}) |
 | `net.rolled_back` / `net.rollback_unverified` | `reason`, `revision`, `problems` | Network change rolled back / rollback could not be verified |
@@ -2021,7 +2024,7 @@ Unix seconds.
 | GET | `/api/v1/devices` | session | — | `Vec<Device>` (own; administrators everyone's) |
 | PATCH / DELETE | `/api/v1/devices/{id}` | session (owner or administrator) | `DeviceRename` {name} | `Device` / 204 (revoked at once) |
 | GET / PATCH / DELETE | `/api/v1/devices/self` | bearer | `DeviceRename` | `DeviceSelf` (device + `tls_pins` + `endpoints`) / `Device` / 204 |
-| PUT / DELETE | `/api/v1/devices/self/push` | bearer | `PushSubscription` {endpoint, p256dh, auth} | `Device` (`push: true`) / 204; makes / removes the device's `device` notification target and its rule (warning and above) |
+| PUT / DELETE | `/api/v1/devices/self/push` | bearer | `PushRegistration` {endpoint, p256dh, auth, lang?} | `Device` (`push: true`) / 204; makes / removes the device's `device` notification target and its rules (warning and above; the owner's file transfers); `lang` `en`/`it`/`ru` (else `en`) sets the target's language on creation and changes it later, without `lang` an existing target keeps its language |
 
 Every other route accepts `Authorization: Bearer <access token>` in place of the cookie, with
 no CSRF, as the device's user and role (`require_session`; no excluded route in v1, list

@@ -125,7 +125,7 @@ fn app_full(dir: &Path, list: &[(&str, &Path)], admin: bool, drives: Option<Arc<
         AdminPolicy::new(vec!["rynas-admin".into()], |_| Some(Vec::new()))
     };
     let ops = Arc::new(ops);
-    let mut files = Files::new(ops.clone(), worker, &dir.join("state/files"), &dir.join("cache"));
+    let mut files = Files::new(ops.clone(), worker, &dir.join("state/files"), &dir.join("cache"), Arc::new(rynas_notify::NullNotifier));
     if let Some(d) = drives {
         files = files.with_drives(d);
     }

@@ -1308,7 +1308,7 @@ fn main() -> std::io::Result<()> {
                 Err(e) => tracing::info!("file manager workers share rynasd's cgroup: {e}"),
             }
         }
-        let files = rynasd::files::Files::new(ops.clone(), worker, &args.state_dir.join("files"), &cache);
+        let files = rynasd::files::Files::new(ops.clone(), worker, &args.state_dir.join("files"), &cache, notifier.clone());
         // removable drives: read below --hw-root; --dry-system only logs the actions
         {
             if args.removable_demo && args.dry_system && args.hw_root != Path::new("/") {

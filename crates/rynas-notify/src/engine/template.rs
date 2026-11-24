@@ -39,7 +39,7 @@ struct Dict {
     test_title: &'static str,
     test_body: &'static str,
     severity: [&'static str; 5],
-    category: [&'static str; 9],
+    category: [&'static str; 10],
 }
 
 /// The source texts; every other language has them in its `notify.txt` (`notify.<field>`,
@@ -54,6 +54,7 @@ const EN: Dict = Dict {
     severity: ["Info", "Notice", "Warning", "Error", "Critical"],
     category: [
         "Storage", "Hardware", "UPS", "System", "Security", "Updates", "Backup", "Apps", "Tasks",
+        "Files",
     ],
 };
 
@@ -133,7 +134,7 @@ pub fn notify_source() -> Vec<(String, &'static str)> {
         ("notify.test_body".to_string(), EN.test_body),
     ];
     v.extend((0..5).map(|i| (format!("notify.severity.{}", severity_key(i)), EN.severity[i])));
-    v.extend((0..9).map(|i| (format!("notify.category.{}", category_key(i)), EN.category[i])));
+    v.extend((0..EN.category.len()).map(|i| (format!("notify.category.{}", category_key(i)), EN.category[i])));
     v
 }
 

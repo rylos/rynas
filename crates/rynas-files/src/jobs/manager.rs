@@ -236,6 +236,10 @@ pub trait Hooks: Send + Sync {
     fn pc_roots(&self) -> Vec<crate::confine::PcRoot> {
         Vec::new()
     }
+    /// A job that ran longer than [`super::notice::NOTIFY_AFTER`] ended as done, failed, or
+    /// canceled with errors: its notification (`files.job_*`, [`super::notice`]). Called with
+    /// the job table locked: hand the event on, never wait.
+    fn job_finished(&self, _event: rynas_api_types::notify::NewEvent) {}
 }
 
 /// No tasks (tests).
@@ -265,6 +269,8 @@ struct Job {
     task: Option<Box<dyn JobTask>>,
     last_pct: Option<u8>,
     proc: Proc,
+    /// Set when the job starts: its end is told through [`Hooks::job_finished`].
+    hooks: Option<Arc<dyn Hooks>>,
 }
 
 impl Job {
@@ -293,6 +299,11 @@ impl Job {
             }
             if let Some(task) = self.task.take() {
                 task.finished(state, &self.view.msg);
+            }
+            if let (Some(hooks), Some(start)) = (self.hooks.take(), self.start_instant)
+                && let Some(ev) = super::notice::finished_event(&self.view, &self.owner, start.elapsed())
+            {
+                hooks.job_finished(ev);
             }
         }
     }
@@ -535,6 +546,7 @@ impl Manager {
             task: None,
             last_pct: None,
             proc: Proc::default(),
+            hooks: None,
         };
         {
             let mut list = self.inner.jobs.lock().unwrap();
@@ -748,6 +760,7 @@ impl Manager {
         job.view.started = Some(now_ms());
         job.start_instant = Some(Instant::now());
         job.task = self.inner.cfg.hooks.job_started(kind_of(job.spec.op), &job.owner);
+        job.hooks = Some(self.inner.cfg.hooks.clone());
         job.view.task_id = job.task.as_ref().map(|t| t.id());
         if let Some(t) = &job.task {
             t.log(&describe_job(&job.view));
@@ -1165,6 +1178,7 @@ fn interrupted(e: JournalEntry, cleaning: bool, journal: &Path) -> Job {
         task: None,
         last_pct: None,
         proc: Proc::default(),
+        hooks: None,
     };
     job.set_state(State::Failed, journal);
     job

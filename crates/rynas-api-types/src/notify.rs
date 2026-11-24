@@ -30,10 +30,14 @@ pub enum NotifyCategory {
     Backup,
     App,
     Task,
+    /// A user's own file transfers (`files.job_*`): selected only by rules that name this
+    /// category, and delivered to `device` targets only when the device belongs to the
+    /// event's `user` (docs/phase2/mobile-devices.md §4).
+    Files,
 }
 
 impl NotifyCategory {
-    pub const ALL: [NotifyCategory; 9] = [
+    pub const ALL: [NotifyCategory; 10] = [
         Self::Storage,
         Self::Hardware,
         Self::Ups,
@@ -43,6 +47,7 @@ impl NotifyCategory {
         Self::Backup,
         Self::App,
         Self::Task,
+        Self::Files,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -56,11 +61,18 @@ impl NotifyCategory {
             Self::Backup => "backup",
             Self::App => "app",
             Self::Task => "task",
+            Self::Files => "files",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|c| c.as_str() == s)
+    }
+
+    /// Events of this category reach a rule only when the rule names it (personal events, not
+    /// for the administrators' catch-all rules).
+    pub fn opt_in(self) -> bool {
+        self == Self::Files
     }
 }
 

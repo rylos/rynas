@@ -19,3 +19,4 @@ notify.category.update	Обновления
 notify.category.backup	Резервное копирование
 notify.category.app	Приложения
 notify.category.task	Задачи
+notify.category.files	Файлы

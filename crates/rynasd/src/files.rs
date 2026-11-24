@@ -135,8 +135,15 @@ impl Files {
 }
 
 impl Files {
-    /// `state` = `/var/lib/rynas/files`, `cache` = `/var/cache/rynas/files`.
-    pub fn new(ops: Arc<Ops>, worker: PathBuf, state: &Path, cache: &Path) -> Self {
+    /// `state` = `/var/lib/rynas/files`, `cache` = `/var/cache/rynas/files`; `notifier` gets
+    /// the notifications of the transfers that ran long (`files.job_*`).
+    pub fn new(
+        ops: Arc<Ops>,
+        worker: PathBuf,
+        state: &Path,
+        cache: &Path,
+        notifier: Arc<dyn rynas_notify::Notifier>,
+    ) -> Self {
         rynas_files::store::init(state);
         rynas_files::conns::set_ssh(Box::new(WorkerSsh { worker: worker.clone() }));
         let manager_cell: Arc<OnceLock<Manager>> = Arc::new(OnceLock::new());
@@ -145,6 +152,7 @@ impl Files {
             handle: tokio::runtime::Handle::current(),
             manager: manager_cell.clone(),
             ops: ops.clone(),
+            notifier,
         });
         let manager = Manager::new(JobsConfig { worker: worker.clone(), journal: state.join("journal"), hooks });
         let _ = manager_cell.set(manager.clone());
@@ -965,6 +973,8 @@ struct TaskHooks {
     manager: Arc<OnceLock<Manager>>,
     /// The PC backups (`Hooks::pc_roots`).
     ops: Arc<Ops>,
+    /// `files.job_*` of the jobs that ran long (`Hooks::job_finished`).
+    notifier: Arc<dyn rynas_notify::Notifier>,
 }
 
 enum Msg {
@@ -999,6 +1009,11 @@ impl JobTask for Task {
 impl Hooks for TaskHooks {
     fn pc_roots(&self) -> Vec<rynas_files::confine::PcRoot> {
         pc_roots(&self.ops)
+    }
+
+    fn job_finished(&self, event: rynas_api_types::notify::NewEvent) {
+        // the engine queues it without waiting (the job table is locked here)
+        self.notifier.emit(event);
     }
 
     fn job_started(&self, kind: &str, owner: &str) -> Option<Box<dyn JobTask>> {

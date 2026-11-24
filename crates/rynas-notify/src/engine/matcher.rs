@@ -132,6 +132,11 @@ impl Compiled {
     /// Whether the event (as stored) is selected by the rule's conditions.
     pub fn matches(&self, n: &Notification) -> bool {
         let r = &self.rule;
+        // personal events (a user's file transfers) only through a rule that names their
+        // category, whatever its other conditions or `invert`
+        if n.category.opt_in() && !r.categories.contains(&n.category) {
+            return false;
+        }
         let mut conds: Vec<bool> = Vec::new();
         if r.min_severity > NotifySeverity::Info {
             conds.push(n.severity >= r.min_severity);
@@ -164,7 +169,7 @@ pub fn validate(r: &NotifyRule) -> Result<(), String> {
     if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
         return Err("name: 1 to 100 printable characters".into());
     }
-    if r.categories.len() > 9 || r.fields.len() > 16 || r.quiet_hours.len() > 14 {
+    if r.categories.len() > rynas_api_types::notify::NotifyCategory::ALL.len() || r.fields.len() > 16 || r.quiet_hours.len() > 14 {
         return Err("too many conditions".into());
     }
     for f in &r.fields {
@@ -276,6 +281,30 @@ mod tests {
             NotifyCategory::App,
             "synodeb:x"
         )));
+    }
+
+    #[test]
+    fn files_events_need_a_rule_that_names_them() {
+        let files = ev(NotifySeverity::Error, NotifyCategory::Files, "files");
+        // catch-all, severity, inverted and source rules never select them
+        let mut r = rule();
+        assert!(!Compiled::new(r.clone()).unwrap().matches(&files));
+        r.min_severity = NotifySeverity::Warning;
+        assert!(!Compiled::new(r.clone()).unwrap().matches(&files));
+        r.categories = vec![NotifyCategory::Storage];
+        r.invert = true;
+        assert!(!Compiled::new(r.clone()).unwrap().matches(&files));
+        // a rule naming the category does, with its other conditions
+        let mut r = rule();
+        r.categories = vec![NotifyCategory::Files];
+        r.fields = vec![FieldMatch { field: "disk".into(), value: "sda".into(), regex: false }];
+        assert!(Compiled::new(r.clone()).unwrap().matches(&files));
+        r.fields[0].value = "sdb".into();
+        assert!(!Compiled::new(r).unwrap().matches(&files));
+        // every category fits in one rule
+        let mut r = rule();
+        r.categories = NotifyCategory::ALL.to_vec();
+        assert!(validate(&r).is_ok());
     }
 
     #[test]

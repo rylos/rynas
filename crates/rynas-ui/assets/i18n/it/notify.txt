@@ -19,3 +19,4 @@ notify.category.update	Aggiornamenti
 notify.category.backup	Backup
 notify.category.app	App
 notify.category.task	Attività
+notify.category.files	File

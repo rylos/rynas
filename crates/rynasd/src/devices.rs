@@ -46,10 +46,12 @@ use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use rynas_api_types::devices::internal::{Live, RefreshCheck, RefreshOk, Register, Sid, Trust};
 use rynas_api_types::devices::{
-    Device, DeviceRename, DeviceSelf, INACTIVE_EXPIRY_DAYS, PushSubscription, REFRESH_GRACE_S,
-    clean_name, clean_text,
+    Device, DeviceRename, DeviceSelf, INACTIVE_EXPIRY_DAYS, PushRegistration, PushSubscription,
+    REFRESH_GRACE_S, clean_name, clean_text, push_language,
 };
-use rynas_api_types::notify::{NotifyLanguage, NotifyRule, NotifySeverity, TargetConfig, TargetRequest};
+use rynas_api_types::notify::{
+    FieldMatch, NotifyCategory, NotifyLanguage, NotifyRule, NotifySeverity, TargetConfig, TargetRequest,
+};
 use rynas_notify::engine::webpush::{PushDirectory, parse_subscription};
 use rynas_api_types::error_codes;
 use rynas_auth::Clock;
@@ -173,6 +175,12 @@ impl PushDirectory for PushDir {
             .and_then(|d| d.push.clone())
     }
 
+    fn owner(&self, device_id: &str) -> Option<String> {
+        let svc = self.0.upgrade()?;
+        let reg = svc.lock();
+        reg.devices.iter().find(|d| d.id == device_id).map(|d| d.user.clone())
+    }
+
     fn gone(&self, device_id: &str) {
         let Some(svc) = self.0.upgrade() else { return };
         let id = device_id.to_string();
@@ -186,6 +194,20 @@ impl PushDirectory for PushDir {
 fn target_name(device_id: &str, name: &str) -> String {
     let tail = &device_id[device_id.len().saturating_sub(6)..];
     format!("{name} · {tail}")
+}
+
+/// The rule that brings `user`'s own file transfers (`files.job_*`, category `files`) to the
+/// device's target `target`: every severity, only events whose `user` is the owner (the
+/// engine also refuses other users' events for a device target).
+fn files_rule(device_id: &str, name: &str, user: &str, target: u64) -> NotifyRule {
+    NotifyRule {
+        name: format!("{} · Files", target_name(device_id, name)),
+        enabled: true,
+        categories: vec![NotifyCategory::Files],
+        fields: vec![FieldMatch { field: "user".into(), value: user.into(), regex: false }],
+        targets: vec![target],
+        ..Default::default()
+    }
 }
 
 fn audit(msg: std::fmt::Arguments) {
@@ -365,19 +387,33 @@ impl DevicesSvc {
         let _ = self.engine.set(engine);
     }
 
-    /// The `device` target of `device_id`, with a rule for warnings and above, unless it
-    /// exists (blocking: the engine's database).
-    fn ensure_target(&self, device_id: &str, name: &str) {
+    /// The `device` target of `device_id` (owned by `user`), unless it exists, with two
+    /// rules: warnings and above, and the owner's own file transfers (category `files`, field
+    /// `user`). A target made now speaks `lang` (English without one); an existing target
+    /// takes `lang` when one is given and differs (blocking: the engine's database).
+    fn ensure_target(&self, device_id: &str, name: &str, user: &str, lang: Option<NotifyLanguage>) {
         let Some(e) = self.engine.get() else { return };
         let targets = e.targets().unwrap_or_default();
         let mine = |c: &TargetConfig| matches!(c, TargetConfig::Device { device_id: d } if d == device_id);
-        if targets.iter().any(|t| mine(&t.config)) {
+        if let Some(t) = targets.iter().find(|t| mine(&t.config)) {
+            if let Some(l) = lang.filter(|l| *l != t.language) {
+                let req = TargetRequest {
+                    name: t.name.clone(),
+                    enabled: t.enabled,
+                    language: l,
+                    config: t.config.clone(),
+                    secrets: Default::default(),
+                };
+                if let Err(err) = e.update_target(t.id, &req) {
+                    tracing::warn!("devices: the language of the notification target of {device_id}: {err}");
+                }
+            }
             return;
         }
         let req = TargetRequest {
             name: target_name(device_id, name),
             enabled: true,
-            language: NotifyLanguage::default(),
+            language: lang.unwrap_or_default(),
             config: TargetConfig::Device {
                 device_id: device_id.to_string(),
             },
@@ -385,15 +421,20 @@ impl DevicesSvc {
         };
         match e.create_target(&req) {
             Ok(t) => {
-                let rule = NotifyRule {
-                    name: target_name(device_id, name),
-                    enabled: true,
-                    min_severity: NotifySeverity::Warning,
-                    targets: vec![t.id],
-                    ..Default::default()
-                };
-                if let Err(err) = e.create_rule(&rule) {
-                    tracing::warn!("devices: the rule of {device_id}: {err}");
+                let rules = [
+                    NotifyRule {
+                        name: target_name(device_id, name),
+                        enabled: true,
+                        min_severity: NotifySeverity::Warning,
+                        targets: vec![t.id],
+                        ..Default::default()
+                    },
+                    files_rule(device_id, name, user, t.id),
+                ];
+                for rule in &rules {
+                    if let Err(err) = e.create_rule(rule) {
+                        tracing::warn!("devices: the rule {} of {device_id}: {err}", rule.name);
+                    }
                 }
             }
             Err(err) => tracing::warn!("devices: the notification target of {device_id}: {err}"),
@@ -449,8 +490,9 @@ impl DevicesSvc {
         }
     }
 
-    /// `PUT …/self/push`: the device's subscription, and its notification target.
-    pub fn set_push(&self, who: &str, id: &str, sub: PushSubscription) -> Res<Device> {
+    /// `PUT …/self/push`: the device's subscription, and its notification target in `lang`
+    /// (`en`, `it`, `ru`, anything else English; `None` keeps an existing target's language).
+    pub fn set_push(&self, who: &str, id: &str, sub: PushSubscription, lang: Option<&str>) -> Res<Device> {
         if let Err(m) = parse_subscription(&sub) {
             let field = m.split(':').next().unwrap_or("endpoint");
             return Err(Error::invalid(field, m));
@@ -459,6 +501,7 @@ impl DevicesSvc {
             endpoint: sub.endpoint.trim().to_string(),
             ..sub
         };
+        let lang = lang.and_then(|l| NotifyLanguage::new(push_language(l)));
         let view = {
             let mut reg = self.lock();
             let r = reg
@@ -473,7 +516,7 @@ impl DevicesSvc {
         };
         // the endpoint is a capability: never in the log
         audit(format_args!("{who} registered push for {id} ({})", view.name));
-        self.ensure_target(id, &view.name);
+        self.ensure_target(id, &view.name, &view.user, lang);
         Ok(view)
     }
 
@@ -958,12 +1001,12 @@ async fn push_put(
     State(st): State<DevState>,
     h: HeaderMap,
     UrlPath(id): UrlPath<String>,
-    body: Result<Json<PushSubscription>, JsonRejection>,
+    body: Result<Json<PushRegistration>, JsonRejection>,
 ) -> Res<Json<Device>> {
     let s = svc(&st)?;
     let who = user(&h)?;
-    let Json(sub) = body?;
-    Ok(Json(blocking(move || s.set_push(&who, &id, sub)).await?))
+    let Json(reg) = body?;
+    Ok(Json(blocking(move || s.set_push(&who, &id, reg.subscription, reg.lang.as_deref())).await?))
 }
 
 async fn push_delete(
@@ -1459,39 +1502,88 @@ mod tests {
         // checked: https, a point on the curve, 16 bytes of auth; only the owner
         let mut bad = sub();
         bad.endpoint = "http://ntfy.example.org/up".into();
-        let e = r.svc.set_push("alice", &d.id, bad).unwrap_err();
+        let e = r.svc.set_push("alice", &d.id, bad, None).unwrap_err();
         assert_eq!((e.1, e.3.as_deref()), (error_codes::INVALID_VALUE, Some("endpoint")));
         let mut bad = sub();
         bad.auth = "AAAA".into();
-        assert_eq!(r.svc.set_push("alice", &d.id, bad).unwrap_err().3.as_deref(), Some("auth"));
-        assert_eq!(r.svc.set_push("bob", &d.id, sub()).unwrap_err().0, StatusCode::NOT_FOUND);
-        assert!(r.svc.set_push("alice", &d.id, sub()).unwrap().push);
+        assert_eq!(r.svc.set_push("alice", &d.id, bad, None).unwrap_err().3.as_deref(), Some("auth"));
+        assert_eq!(r.svc.set_push("bob", &d.id, sub(), None).unwrap_err().0, StatusCode::NOT_FOUND);
+        assert!(r.svc.set_push("alice", &d.id, sub(), None).unwrap().push);
         let t = device_targets();
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].name, format!("Phone · {}", &d.id[d.id.len() - 6..]));
+        assert_eq!(t[0].language, NotifyLanguage::EN);
+        // two rules: warnings and above, and the owner's own file transfers
         let rules = engine.rules().unwrap();
-        assert_eq!(rules.len(), 1);
+        assert_eq!(rules.len(), 2);
         assert_eq!((rules[0].min_severity, rules[0].targets.clone()), (NotifySeverity::Warning, vec![t[0].id]));
-        // the engine finds the subscription by the device id
+        assert_eq!(rules[1].categories, vec![NotifyCategory::Files]);
+        assert_eq!((rules[1].fields[0].field.as_str(), rules[1].fields[0].value.as_str()), ("user", "alice"));
+        assert_eq!((rules[1].min_severity, rules[1].targets.clone()), (NotifySeverity::Info, vec![t[0].id]));
+        // the engine finds the subscription and the owner by the device id
         let dir = PushDir(Arc::downgrade(&r.svc));
         assert_eq!(dir.subscription(&d.id).unwrap().endpoint, "https://ntfy.example.org/upXYZ?up=1");
+        assert_eq!(dir.owner(&d.id).as_deref(), Some("alice"));
+        assert_eq!(dir.owner("d_00"), None);
         // a second registration keeps one target; a rename follows
-        r.svc.set_push("alice", &d.id, sub()).unwrap();
+        r.svc.set_push("alice", &d.id, sub(), None).unwrap();
         r.svc.rename("alice", &d.id, "Pixel").unwrap();
         let t = device_targets();
         assert_eq!(t.len(), 1);
         assert!(t[0].name.starts_with("Pixel · "));
-        // unregistered: target and rule gone
+        assert_eq!(engine.rules().unwrap().len(), 2);
+        // unregistered: target and rules gone
         r.svc.clear_push("alice", &d.id).unwrap();
         assert!(device_targets().is_empty() && engine.rules().unwrap().is_empty());
         assert!(!r.svc.list("alice")[0].push);
         // gone at the push service, or the device revoked: the same
-        r.svc.set_push("alice", &d.id, sub()).unwrap();
+        r.svc.set_push("alice", &d.id, sub(), None).unwrap();
         r.svc.push_gone(&d.id);
         assert!(device_targets().is_empty() && dir.subscription(&d.id).is_none());
-        r.svc.set_push("alice", &d.id, sub()).unwrap();
+        r.svc.set_push("alice", &d.id, sub(), None).unwrap();
         r.svc.revoke("alice", &d.id, "user").unwrap();
         assert!(device_targets().is_empty() && engine.rules().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn push_registrations_set_the_target_language() {
+        let r = rig();
+        let engine = rynas_notify::engine::Engine::open(rynas_notify::engine::EngineOptions::new(
+            r._dir.path().join("notify"),
+            "nas",
+        ))
+        .unwrap();
+        r.svc.bind_engine(engine.clone());
+        let lang = || {
+            engine
+                .targets()
+                .unwrap()
+                .into_iter()
+                .find(|t| matches!(t.config, TargetConfig::Device { .. }))
+                .map(|t| t.language.as_str().to_string())
+        };
+        // created in the language asked for
+        let d = register(&r, "alice", &Key::new(), "A1");
+        r.svc.set_push("alice", &d.id, sub(), Some("it")).unwrap();
+        assert_eq!(lang().as_deref(), Some("it"));
+        // without lang: kept; another lang: changed; an unknown one: English
+        r.svc.set_push("alice", &d.id, sub(), None).unwrap();
+        assert_eq!(lang().as_deref(), Some("it"));
+        r.svc.set_push("alice", &d.id, sub(), Some("RU")).unwrap();
+        assert_eq!(lang().as_deref(), Some("ru"));
+        r.svc.set_push("alice", &d.id, sub(), Some("de")).unwrap();
+        assert_eq!(lang().as_deref(), Some("en"));
+        let devices = engine.targets().unwrap().into_iter().filter(|t| matches!(t.config, TargetConfig::Device { .. })).count();
+        assert_eq!(devices, 1, "still one target");
+        // the request body: the subscription's fields and an optional lang
+        let reg: PushRegistration = serde_json::from_value(serde_json::json!({
+            "endpoint": "https://ntfy.example.org/up", "p256dh": "x", "auth": "y", "lang": "it"
+        }))
+        .unwrap();
+        assert_eq!((reg.subscription.endpoint.as_str(), reg.lang.as_deref()), ("https://ntfy.example.org/up", Some("it")));
+        let reg: PushRegistration =
+            serde_json::from_value(serde_json::json!({"endpoint": "e", "p256dh": "x", "auth": "y"})).unwrap();
+        assert_eq!(reg.lang, None);
     }
 
     #[test]

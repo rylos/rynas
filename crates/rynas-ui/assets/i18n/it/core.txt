@@ -2372,6 +2372,7 @@ nt.cat.update	Aggiornamenti
 nt.cat.backup	Backup
 nt.cat.app	App
 nt.cat.task	Attività
+nt.cat.files	File
 nt.source	Origine
 nt.key	Chiave
 nt.key_help	Termina con * per silenziare tutte le chiavi che iniziano così.
@@ -6339,6 +6340,29 @@ nev.device.power.title	Alimentazione del sistema dal dispositivo {device}: {acti
 nev.device.power.action.restart	riavvio
 nev.device.power.action.shutdown	spegnimento
 nev.device.power.action.cancel	annullato
+nev.files.job_done.title	{kind}
+nev.files.job_done.kind.copy	Copia completata
+nev.files.job_done.kind.move	Spostamento completato
+nev.files.job_done.kind.delete	Eliminazione completata
+nev.files.job_done.kind.compress	Compressione completata
+nev.files.job_done.kind.extract	Estrazione completata
+nev.files.job_done.kind.sync	Sincronizzazione completata
+nev.files.job_done.body	{name} {op} {dest} · {size} in {minutes} min
+nev.files.job_done.body_2	{count} elementi {op} {dest} · {size} in {minutes} min
+nev.files.job_done.op.copy	→
+nev.files.job_done.op.move	→
+nev.files.job_done.op.delete	da
+nev.files.job_done.op.compress	→
+nev.files.job_done.op.extract	→
+nev.files.job_done.op.sync	→
+nev.files.job_failed.title	{kind}
+nev.files.job_failed.kind.copy	Copia non riuscita
+nev.files.job_failed.kind.move	Spostamento non riuscito
+nev.files.job_failed.kind.delete	Eliminazione non riuscita
+nev.files.job_failed.kind.compress	Compressione non riuscita
+nev.files.job_failed.kind.extract	Estrazione non riuscita
+nev.files.job_failed.kind.sync	Sincronizzazione non riuscita
+nev.files.job_failed.body	{error}
 nt.kind.device	Dispositivo mobile
 nt.device_summary	Push al telefono abbinato
 nev.device.password_kept.title	Password di {user} cambiata: {n} dispositivi abbinati mantengono l'accesso

@@ -218,6 +218,15 @@ async fn gotify(http: &reqwest::Client, d: &Dest<'_>, msg: &Message) -> Result<(
     check(json_body(req, &body).send().await).await
 }
 
+/// A field of a file transfer's event for the push payload (`job_id`, `state`, `user`);
+/// empty (left out of the JSON) for every other event.
+fn field_of(e: &super::template::EventCtx, name: &str) -> String {
+    if e.category != rynas_api_types::notify::NotifyCategory::Files.as_str() {
+        return String::new();
+    }
+    e.fields.get(name).cloned().unwrap_or_default()
+}
+
 /// A paired device: one push message per event (the app posts each as a notification and
 /// dedupes by id). A subscription the push service no longer knows (404/410) is dropped and
 /// the message counts as handled.
@@ -245,6 +254,10 @@ async fn device(
             category: e.category.into(),
             source: e.source.clone(),
             ts_ms: e.ts_ms,
+            // a file transfer's job, end and owner (`files.job_*`)
+            job_id: field_of(e, "job_id"),
+            state: field_of(e, "state"),
+            user: field_of(e, "user"),
         })
         .collect();
     if payloads.is_empty() {

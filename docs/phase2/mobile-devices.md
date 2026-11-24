@@ -51,8 +51,11 @@ Session (cookie + CSRF for writes):
 Bearer (device):
 
 - `GET|PATCH|DELETE /api/v1/devices/self` (`GET` adds `tls_pins` and `endpoints`).
-- `PUT /api/v1/devices/self/push` `{endpoint, p256dh, auth}` (https endpoint only, p256dh 65-byte
-  uncompressed point, auth 16 bytes), `DELETE /api/v1/devices/self/push`.
+- `PUT /api/v1/devices/self/push` `{endpoint, p256dh, auth, lang?}` (https endpoint only, p256dh
+  65-byte uncompressed point, auth 16 bytes; `lang` `en`, `it` or `ru`, anything else is `en`),
+  `DELETE /api/v1/devices/self/push`. The device's notification target is made in `lang`
+  (English without it); a later `PUT` with another `lang` changes the target's language, one
+  without `lang` keeps it.
 - Every other route a web session may call, as the device's user with that user's role (no
   excluded route in v1: the `not_for_devices` list is empty). SSE, downloads with Range,
   thumbnails and uploads accept the bearer too. Every write of a device is written to the audit
@@ -126,14 +129,15 @@ Bearer checks happen where `require_session` runs, without a round trip to rynas
 
 - rynas-notify gets the target kind `device`: one target per device with a push subscription,
   created and removed with it, named after the device, selectable in rules like the others;
-  default rule: severity warning and above.
+  default rules: severity warning and above, and the owner's own file transfers (below).
 - Delivery: RFC 8291 encryption (`aes128gcm`, one record, rs 4096, padding delimiter 0x02),
   built from the `p256`, `hkdf`, `aes-gcm` crates already in the workspace and checked against
   the RFC 8291 test vector; `POST <endpoint>` with `Content-Encoding: aes128gcm`, `TTL: 86400`,
   `Urgency: high` for error and critical, `normal` otherwise. 404 or 410 drops the subscription;
   other failures follow the engine's retry like every target.
 - Payload (UTF-8 JSON, at most 3 KiB, the body shortened to fit):
-  `{v: 1, id, title, body, severity, category, source, ts_ms}`.
+  `{v: 1, id, title, body, severity, category, source, ts_ms}`, plus `job_id`, `state` and
+  `user` for a file transfer's events (category `files`; left out otherwise).
 - No VAPID in v1 (ntfy does not need it); added if a distributor requires it.
 
 As implemented (`rynas_notify::engine::webpush`, `crates/rynasd/src/devices.rs`):
@@ -150,9 +154,40 @@ As implemented (`rynas_notify::engine::webpush`, `crates/rynasd/src/devices.rs`)
 - One push message per event of a delivery (the app dedupes by `id`); a test message from the
   notification settings is pushed like an event. A 404/410 counts as handled (no retry);
   other HTTP answers and network errors follow the engine's retry.
+- Target language: the `lang` of `PUT …/self/push` (see §3); titles and bodies come from the
+  event codes in that language (`nev.<code>.*`, like every target).
+- Rules made with the target: `<device name> · <id tail>` (warning and above) and
+  `<device name> · <id tail> · Files` (category `files`, field `user` = the device's owner, every
+  severity). Both can be turned off or edited in the notification rules like any other. A target
+  made before these rules existed keeps only its first rule until the phone registers again
+  after its target is removed.
 - Fresh server key and salt per message (OS random source); the RFC 8291 Appendix A vector
   and a round trip are unit tests; an engine test delivers to a fake push service on
   loopback (`EngineOptions::push_loopback_http`, tests only) and decrypts what it received.
+
+## 4a. File transfer notifications
+
+A transfer of Files (copy, move, delete, compress, extract, sync; never the clean-up after a
+restart) that ran longer than 30 s and ended as done, failed, or canceled after errors raises a
+oneshot event (source `files`, key `files:job:<id>`, category `files`):
+
+- `files.job_done` (info) or `files.job_failed` (error; a cancel after errors counts as failed
+  with `state` `canceled`; a clean cancel raises nothing).
+- Fields: `job_id`, `state` (`done`, `failed`, `canceled`), `user` (the job's owner), `kind`
+  (`copy`, `move`, `delete`, `compress`, `extract`, `sync`), `op` (= `kind`: the joining word of
+  the body, "→" or "from" for a deletion), `name` (one item) or `count` (several), `dest` (the
+  destination; for a deletion the folder of the first item), `size` (`human_bytes`), `minutes`
+  (rounded up), `error` (failures: the first error, else the job's message).
+- English text: title "Copy finished" / "Copy failed" (per kind), body "Film.mkv → /Video ·
+  45.8 GiB in 7 min" or "3 items → /Video · …", the error for failures. Each target renders
+  `nev.files.job_*.title`/`body` in its own language (`{kind}` and `{op}` read as closed sets).
+- Routing: category `files` is opt-in. A rule selects these events only when it names the
+  category (catch-all and severity rules never do, whatever `invert` says), so email, Telegram,
+  webhook, ntfy… targets get them only from a rule an administrator adds. A `device` target gets
+  them only when its device belongs to the event's `user` (`PushDirectory::owner`), whatever the
+  rules say: another user's phone never receives them.
+- Built in `rynas_files::jobs::notice`, emitted through `Hooks::job_finished` of the job manager
+  (rynasd hands it to the engine without waiting).
 
 ## 5. Events
 

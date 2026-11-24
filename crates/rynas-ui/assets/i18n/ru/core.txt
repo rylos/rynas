@@ -2404,6 +2404,7 @@ nt.cat.update	Обновления
 nt.cat.backup	Резервное копирование
 nt.cat.app	Приложения
 nt.cat.task	Задачи
+nt.cat.files	Файлы
 nt.source	Источник
 nt.key	Ключ
 nt.key_help	Добавьте в конце *, чтобы заглушить все ключи, начинающиеся с этого.
@@ -6401,6 +6402,29 @@ nev.device.power.title	Питание системы с устройства {de
 nev.device.power.action.restart	перезагрузка
 nev.device.power.action.shutdown	выключение
 nev.device.power.action.cancel	отменено
+nev.files.job_done.title	{kind}
+nev.files.job_done.kind.copy	Копирование завершено
+nev.files.job_done.kind.move	Перемещение завершено
+nev.files.job_done.kind.delete	Удаление завершено
+nev.files.job_done.kind.compress	Сжатие завершено
+nev.files.job_done.kind.extract	Распаковка завершена
+nev.files.job_done.kind.sync	Синхронизация завершена
+nev.files.job_done.body	{name} {op} {dest} · {size} за {minutes} мин
+nev.files.job_done.body_2	Элементов: {count} {op} {dest} · {size} за {minutes} мин
+nev.files.job_done.op.copy	→
+nev.files.job_done.op.move	→
+nev.files.job_done.op.delete	из
+nev.files.job_done.op.compress	→
+nev.files.job_done.op.extract	→
+nev.files.job_done.op.sync	→
+nev.files.job_failed.title	{kind}
+nev.files.job_failed.kind.copy	Не удалось скопировать
+nev.files.job_failed.kind.move	Не удалось переместить
+nev.files.job_failed.kind.delete	Не удалось удалить
+nev.files.job_failed.kind.compress	Не удалось сжать
+nev.files.job_failed.kind.extract	Не удалось распаковать
+nev.files.job_failed.kind.sync	Не удалось синхронизировать
+nev.files.job_failed.body	{error}
 nt.kind.device	Мобильное устройство
 nt.device_summary	Push на сопряжённый телефон
 nev.device.password_kept.title	Пароль {user} изменён: сопряжённые устройства ({n}) сохраняют доступ

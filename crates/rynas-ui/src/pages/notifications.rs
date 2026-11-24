@@ -63,6 +63,7 @@ pub fn category_key(c: NotifyCategory) -> &'static str {
         NotifyCategory::Backup => "nt.cat.backup",
         NotifyCategory::App => "nt.cat.app",
         NotifyCategory::Task => "nt.cat.task",
+        NotifyCategory::Files => "nt.cat.files",
     }
 }
 
@@ -84,6 +85,7 @@ const CAT_FILTER: &[(&str, &str)] = &[
     ("backup", "nt.cat.backup"),
     ("app", "nt.cat.app"),
     ("task", "nt.cat.task"),
+    ("files", "nt.cat.files"),
 ];
 const ACK_FILTER: &[(&str, &str)] = &[("false", "nt.f.unacked"), ("", "nt.f.all"), ("true", "nt.f.acked")];
 

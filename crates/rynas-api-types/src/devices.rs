@@ -247,6 +247,35 @@ pub struct PushPayload {
     pub category: String,
     pub source: String,
     pub ts_ms: u64,
+    /// A file transfer's events (`files.job_*`): the job, how it ended (`done`, `failed`,
+    /// `canceled`) and its owner; absent otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub job_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user: String,
+}
+
+/// `PUT /api/v1/devices/self/push` (bearer): the subscription and, optionally, the language
+/// of the device's notification target (`en`, `it`, `ru`; anything else is English). Without
+/// `lang` a new target is English and an existing one keeps its language.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PushRegistration {
+    #[serde(flatten)]
+    pub subscription: PushSubscription,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+}
+
+/// The languages a device may ask for its notifications.
+pub const PUSH_LANGUAGES: [&str; 3] = ["en", "it", "ru"];
+
+/// The language code of a `lang` sent with a push registration: one of [`PUSH_LANGUAGES`],
+/// English for anything else.
+pub fn push_language(lang: &str) -> &'static str {
+    let l = lang.trim().to_ascii_lowercase();
+    PUSH_LANGUAGES.into_iter().find(|c| *c == l).unwrap_or("en")
 }
 
 /// The name of a device as stored: trimmed, control characters dropped, 1-[`MAX_NAME`]
