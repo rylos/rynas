@@ -35,3 +35,28 @@ Phase A comes first because a certificate renewal date drives the migration.
 
 Status on 2026-11-18 (release 0.8.21): phases A to D and the encrypted folder are done; still
 open are the photo album import and the firewall; the degraded btrfs boot is done after 0.8.21.
+
+## Round 2: what still makes DSM feel better (2026-11-24)
+
+The same household NAS (a DS923+: Ryzen R1600 with AVX2, no iGPU, 24 GB of RAM) was checked again
+area by area against the DSM services in use. Already covered: Hyper Backup and Snapshot
+Replication, UPS, notifications (Telegram, webhook, ntfy, Gotify, SMTP), SMB for media players,
+the Task Scheduler, Tailscale, ABB (rynas-agent, Linux), no VMs in use. Snapshots before
+updates with rollback already exist: apps and stacks (D1, `snapshot_before_update`, rollback on a
+failed health check) and the system (`DPkg::Pre-Invoke` restore point, system rollback).
+
+Chosen items, each to start with its own research note as usual:
+
+| Id | Item | Shape | Effort |
+|---|---|---|---|
+| S1 | Syncthing integrated | catalogue app that adopts a running Syncthing container (config, device ID, folders kept; folder paths remapped to the new places), a page with folders, devices and last contact (REST API with the key from `config.xml`), notifications for `.sync-conflict-*` files, a device unseen for N days and a folder in error; versions come from the share's snapshots (no Syncthing versioning); a folder on an encrypted share is paused while the share is locked and resumed when it is unlocked (`PATCH /rest/config/folders/{id}` `{"paused": …}`), `.stfolder` stays as the second guard | M-L |
+| S2 | Security check | a page like a security advisor: exposed ports and services, SSH password login and root login, administrators without 2FA, pending security updates, certificates near expiry, shares writable by everyone, guest access, default ports open to the Internet through the proxy; each finding with its fix in one click when rynas owns the setting, a link otherwise; a weekly run with a notification | M |
+| S3 | Public file links | links from the File manager to a file or folder, with expiry, password and download limit, served by rynas-web on the web access domain; list and revoke; audit line per download | M |
+| S4 | Ransomware guard | per share, compare the last two snapshots (btrfs `find-new` / send stream metadata): many files changed or renamed with new extensions, or many rewritten files with high entropy → warning, retention of older snapshots frozen until cleared | M |
+| S5 | Home Assistant sensors | MQTT publisher with Home Assistant discovery (prefix `homeassistant`): volumes, disks (SMART, temperature), UPS, backups (last result), updates, CPU and memory; broker address and credentials sealed like the other secrets | S-M |
+| S6 | Single sign-on for apps | forward auth in Caddy per route, with an OIDC gateway (oauth2-proxy or tinyauth) in front of pocket-id (pocket-id is an OIDC provider only), group checks per route | M |
+| S7 | Torrent client | qBittorrent in the catalogue (WebUI, download folder on a share) | S |
+| S8 | Frigate page | after a test with the real cameras: storage and retention on a NOCOW share, detector choice (OpenVINO on the R1600 CPU, a Hailo or Coral when there are more cameras), events from MQTT into notifications | M |
+
+Not chosen for now: Photos album import, contacts and calendar, office, cloud sync, a log page,
+search, a storage report, event scripts, static sites, mobile apps, a Windows agent.
