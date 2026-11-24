@@ -521,8 +521,12 @@ fn plan_sync(a: &AppsSvc, req: &SyncthingAdoptPreviewRequest, containers: Vec<Re
         p.folders.push(af);
     }
     p.shares = used.into_iter().collect();
-    let app = a.apps_ids().unwrap_or((65534, 65534));
-    p.owners = config::owner_tally(&owners_of(a, &roots)).map(|((uid, gid), others)| AdoptOwners { uid, gid, others, app_uid: app.0, app_gid: app.1 });
+    let passwd = std::fs::read_to_string(real(a, "/etc/passwd")).unwrap_or_default();
+    p.owners = config::owner_tally(&owners_of(a, &roots)).map(|((uid, gid), others)| AdoptOwners { uid, gid, others, user: user_of_uid(&passwd, uid) });
+    let installed_run_as = installed.map(|d| rynas_apps::render::parse_env(&d.env)).and_then(|e| e.get(rynas_apps::manifest::RUN_AS_ENV).filter(|u| !u.is_empty()).cloned());
+    let (run_as, run_as_problems) = propose_run_as(src.kind, req.run_as.as_deref(), p.owners.as_ref(), installed.map(|d| (d.stack.as_str(), installed_run_as.as_deref())), &passwd);
+    p.run_as = run_as;
+    problems.extend(run_as_problems);
     if r.candidate.running {
         problems.push(format!("{INFO}the source runs now: the adoption stops it first (stop_source)"));
     }
@@ -532,6 +536,63 @@ fn plan_sync(a: &AppsSvc, req: &SyncthingAdoptPreviewRequest, containers: Vec<Re
     p.ok = p.files.config && p.files.cert && p.files.key && !problems.iter().any(|m| !m.starts_with(INFO));
     p.problems = problems;
     Ok(Planned { preview: p, resolved: Some(r), config_xml: xml })
+}
+
+/// The NAS user with `uid`, when there is one ([`crate::apps::nas_users`]).
+fn user_of_uid(passwd: &str, uid: u32) -> Option<String> {
+    crate::apps::nas_users(passwd).into_iter().find(|u| u.1 == uid).map(|u| u.0)
+}
+
+/// Who the adopted app runs as, and the preview lines about it: the request's choice, else
+/// the NAS user owning most synchronized files. The older catalogue layout keeps the apps'
+/// account; an installed app keeps its user (changing it is not supported).
+fn propose_run_as(
+    kind: AdoptSourceKind,
+    asked: Option<&str>,
+    owners: Option<&AdoptOwners>,
+    installed: Option<(&str, Option<&str>)>,
+    passwd: &str,
+) -> (Option<String>, Vec<String>) {
+    let mut problems = Vec::new();
+    if kind == AdoptSourceKind::App {
+        if asked.is_some() {
+            problems.push("the older layout is updated in place and keeps the apps' account: run_as is not supported there".into());
+        } else {
+            problems.push(format!("{INFO}the older layout keeps running as the apps' account; to run it as a NAS user, uninstall it and install again"));
+        }
+        return (None, problems);
+    }
+    let run_as = match (asked, owners) {
+        (Some(u), _) => {
+            if let Err(e) = crate::apps::nas_user_ids(passwd, u) {
+                problems.push(format!("run_as: {e}"));
+            }
+            Some(u.to_string())
+        }
+        (None, Some(o)) => match &o.user {
+            Some(u) => Some(u.clone()),
+            None => {
+                problems.push(format!(
+                    "the synchronized files belong to uid {}, which is no NAS user: give a NAS user that uid (Users & Groups, ownership remap) or choose run_as",
+                    o.uid
+                ));
+                None
+            }
+        },
+        (None, None) => {
+            problems.push(format!("{INFO}no synchronized folder on this NAS yet: the app runs as the apps' account unless run_as names a NAS user"));
+            None
+        }
+    };
+    if let Some((stack, current)) = installed
+        && current != run_as.as_deref()
+    {
+        problems.push(format!(
+            "the installed app {stack} runs as {}: changing the user is not supported, uninstall it and install again",
+            current.unwrap_or("the apps' account")
+        ));
+    }
+    (run_as, problems)
 }
 
 async fn preview_post(State(st): State<AppsState>, hd: HeaderMap, body: axum::body::Bytes) -> Res<Json<SyncthingAdoptPreview>> {
@@ -574,7 +635,7 @@ fn other_stacks(a: &AppsSvc, stack: &str) -> Vec<String> {
 }
 
 fn preview_request(req: &SyncthingAdoptRequest) -> SyncthingAdoptPreviewRequest {
-    SyncthingAdoptPreviewRequest { source: Some(req.source.clone()), volumes: req.volumes.clone() }
+    SyncthingAdoptPreviewRequest { source: Some(req.source.clone()), volumes: req.volumes.clone(), run_as: req.run_as.clone() }
 }
 
 async fn adopt_post(State(st): State<AppsState>, hd: HeaderMap, body: Result<Json<SyncthingAdoptRequest>, JsonRejection>) -> Res<Response> {
@@ -1015,7 +1076,7 @@ async fn adopt_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, stack: &str, req
             Target::Existing { job: Box::new(job), owner, dest }
         }
         None => {
-            let ireq = AppInstallRequest { stack: Some(stack.to_string()), share_set: choices, start: false, ..Default::default() };
+            let ireq = AppInstallRequest { stack: Some(stack.to_string()), share_set: choices, start: false, run_as: p.run_as.clone(), ..Default::default() };
             let (job, _) = crate::apps::install_job(a, APP_ID, &ireq, who).await.map_err(|e| e.2)?;
             Target::New { job: Box::new(job), dest: format!("{}/state/{HOME_IN_CONFIG}", layout.stack(stack)) }
         }
@@ -1233,6 +1294,35 @@ mod tests {
         let j = serde_json::to_string(&p).unwrap();
         assert!(!j.contains("TOPSECRETKEY") && !j.contains("hash") && !j.contains("BBBBBBB"), "{j}");
         assert!(j.contains("AAAAAAA"));
+    }
+
+    #[test]
+    fn run_as_is_the_owner_of_the_files() {
+        let passwd = "root:x:0:0::/root:/bin/sh\nann:x:1026:100::/home/ann:/bin/sh\nbob:x:1027:100::/home/bob:/bin/sh\n";
+        let own = |uid| AdoptOwners { uid, gid: 100, others: 0, user: user_of_uid(passwd, uid) };
+        let blocking = |v: &[String]| v.iter().filter(|m| !m.starts_with(INFO)).count();
+        assert_eq!(own(1026).user.as_deref(), Some("ann"));
+        assert_eq!(own(0).user, None, "root is no NAS user");
+        // the owner of most files, or the request's choice
+        let (r, pr) = propose_run_as(AdoptSourceKind::Container, None, Some(&own(1026)), None, passwd);
+        assert_eq!((r.as_deref(), blocking(&pr)), (Some("ann"), 0));
+        let (r, pr) = propose_run_as(AdoptSourceKind::Path, Some("bob"), Some(&own(1026)), None, passwd);
+        assert_eq!((r.as_deref(), blocking(&pr)), (Some("bob"), 0));
+        // a uid without a NAS user: a problem with the remap hint
+        let (r, pr) = propose_run_as(AdoptSourceKind::Service, None, Some(&own(2001)), None, passwd);
+        assert_eq!(r, None);
+        assert!(pr.iter().any(|m| m.contains("uid 2001") && m.contains("ownership remap")), "{pr:?}");
+        // a bad choice
+        let (_, pr) = propose_run_as(AdoptSourceKind::Path, Some("root"), None, None, passwd);
+        assert_eq!(blocking(&pr), 1);
+        // the installed app keeps its user
+        let (_, pr) = propose_run_as(AdoptSourceKind::Container, None, Some(&own(1026)), Some(("syncthing", None)), passwd);
+        assert!(pr.iter().any(|m| m.contains("changing the user is not supported")), "{pr:?}");
+        let (_, pr) = propose_run_as(AdoptSourceKind::Container, None, Some(&own(1026)), Some(("syncthing", Some("ann"))), passwd);
+        assert_eq!(blocking(&pr), 0);
+        // the older layout keeps the apps' account
+        let (r, pr) = propose_run_as(AdoptSourceKind::App, None, Some(&own(1026)), Some(("syncthing", None)), passwd);
+        assert_eq!((r, blocking(&pr)), (None, 0));
     }
 
     #[test]

@@ -466,6 +466,7 @@ impl CatalogApp {
             ports: self.tests.ports.clone(),
             secrets: BTreeMap::new(),
             share_set: self.tests.share_set.clone(),
+            run_as: None,
         }
     }
 }

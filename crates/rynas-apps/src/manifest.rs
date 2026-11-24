@@ -103,6 +103,11 @@ pub struct AppManifest {
     /// A list of shares the user chooses, each mounted at `<target>/<name>` of one service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_set: Option<ShareSet>,
+    /// `"user"`: the installer may choose a NAS user the app runs as (`PUID`/`PGID` of that
+    /// user instead of the `docker-apps` account), for apps whose files belong to a person
+    /// (a sync tool writing files that arrive from that person's devices).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<RunAs>,
     #[serde(default)]
     pub secrets: Vec<Secret>,
     #[serde(default)]
@@ -391,6 +396,26 @@ pub struct ShareSet {
     pub access: Access,
 }
 
+/// Who an app may run as besides the `docker-apps` account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunAs {
+    /// A NAS user chosen at install.
+    User,
+}
+
+/// The `.env` variable keeping the NAS user an app runs as ([`AppManifest::run_as`]).
+pub const RUN_AS_ENV: &str = "RYNAS_RUN_AS";
+
+/// An account name a NAS user can have: `[a-z_][a-z0-9_.-]*`, at most 32 characters.
+pub fn is_user_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 32
+        && (b[0].is_ascii_lowercase() || b[0] == b'_')
+        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"_.-".contains(c))
+}
+
 /// An absolute container path made of `[A-Za-z0-9._-]` segments, without `.`/`..`.
 pub(crate) fn is_container_dir(s: &str) -> bool {
     match s.strip_prefix('/') {
@@ -634,6 +659,12 @@ impl AppManifest {
             }
         }
 
+        if self.run_as.is_some() && (self.manager || !self.security.docker_socket.is_empty()) {
+            err("run_as is not allowed for an app with the Docker socket".into());
+        }
+        if envs.contains(RUN_AS_ENV) {
+            err(format!("`{RUN_AS_ENV}` is kept by rynas and cannot be declared"));
+        }
         if let Some(ss) = &self.share_set {
             let e = ss.env.as_str();
             if !is_env_name(e) {

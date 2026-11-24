@@ -49,6 +49,7 @@ none reports conflicts. Syncthing 2.x facts used below (docs.syncthing.net, sour
 |---|---|---|
 | 1 | Official image `syncthing/syncthing` (already the catalogue entry), bridged ports, GUI behind the rynas proxy | same as today; the entry checks ports and proxies the GUI |
 | 2 | Each synchronized share mounted at `/shares/<share>` in the container; the list is a setting of the app (the entry's `[share_set]`, `PUT /api/v1/apps/installed/{stack}/share-set`), the compose file is rewritten and the container recreated when it changes | folder paths inside Syncthing stay the same when a share moves to another volume |
+| 2b | Syncthing runs as a chosen NAS user (`run_as = "user"` in the entry), by default the owner of the synchronized files, not as `docker-apps`; the shares are granted to that user | files from the PCs and phones belong to their owner, as with the package on the old system; no group ACL needed on every file |
 | 3 | rynas sets `STGUIAPIKEY` from an app secret (`ST_API_KEY`, generated at install): it lives in the stack's `.env` (0600, root) like every catalogue secret, not in a sealed store | no key in the compose file, no `config.xml` read; whoever can read the stack folder as root can read it, as for every app's secrets |
 | 4 | Status from events, one long-poll per instance with a fixed mask, a full re-read at start, on a gap and after a Syncthing restart; device last seen from `/rest/stats/device` every 10 minutes | cheap, no `db/status` polling |
 | 5 | Versions = the share's snapshots; Syncthing versioning left off; the page warns when a synchronized share has no snapshot schedule | local edits are kept too |
@@ -81,11 +82,14 @@ Preview steps, the same for every source:
 4. proposes `.stignore` changes: other systems' patterns (`#snapshot`, `@eaDir`,
    `.SynologyWorkingDirectory`, `@Recycle`, `.@__thumb`, `.streams`) out, `(?d)#recycle` in
    (rynas snapshots live outside the share);
-5. shows the owner of most synchronized files and how many top-level entries have another one.
-   S1a keeps the app on the `docker-apps` account like every catalogue app (the copied home is
-   chowned to it): each mapped share gets the account's read and write ACL (the share grants
-   of the install), so Syncthing can write files owned by others without a per-app PUID; the
-   ownership remap of Users & Groups stays the tool when ids changed.
+5. proposes the user the app runs as: the NAS user owning most synchronized files (shown with
+   how many top-level entries have another owner); the request's `run_as` overrides it. A uid
+   that no NAS user has is a problem: give a NAS user that uid (the ownership remap of Users &
+   Groups) or choose another user. The copied home is chowned to that user (keys 0600), each
+   mapped share gets that user's read and write access (share grants with a user subject),
+   and files arriving from the devices belong to them, as on the old system. An installed app
+   keeps its user (changing it is not supported yet: uninstall and install again); the older
+   catalogue layout, updated in place, keeps the apps' account.
 
 `POST /v1/syncthing/adopt` (task `syncthing.adopt`): the old instance is stopped first (two
 instances with one device id fight), its home copied into the app's config folder (owned by the

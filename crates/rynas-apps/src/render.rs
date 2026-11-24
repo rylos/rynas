@@ -99,6 +99,11 @@ pub struct InstallRequest {
     /// The shares of the entry's `[share_set]`, in order (empty: none mounted).
     #[serde(default)]
     pub share_set: Vec<ShareSetItem>,
+    /// The NAS user the app runs as (entries with `run_as`); `None`: the `docker-apps`
+    /// account. The caller puts that user's uid and primary gid in [`Provided`]; the render
+    /// keeps the name in `.env` ([`crate::manifest::RUN_AS_ENV`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<String>,
 }
 
 /// One share of a `[share_set]`: mounted at `<target>/<name>` of the set's service.
@@ -415,9 +420,22 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
     if m.share_set.is_none() && !req.share_set.is_empty() {
         return Err(RenderError::UnknownValue("share_set".into()));
     }
+    match (&req.run_as, m.run_as) {
+        (Some(_), None) => return Err(RenderError::UnknownValue("run_as".into())),
+        (Some(u), Some(_)) if !crate::manifest::is_user_name(u) => {
+            return Err(RenderError::InvalidValue { field: "run_as".into(), reason: format!("`{u}` is not a user name") });
+        }
+        (Some(_), Some(_)) if provided.puid == 0 || provided.pgid == 0 => {
+            return Err(RenderError::InvalidValue { field: "run_as".into(), reason: "an app never runs as root".into() });
+        }
+        _ => {}
+    }
     let form_values = app.form.resolve(&req.form)?;
 
     let mut env: Vec<(String, String)> = provided.vars().into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+    if let Some(u) = &req.run_as {
+        env.push((crate::manifest::RUN_AS_ENV.to_owned(), u.clone()));
+    }
     let mut folders = Vec::new();
     for p in &m.ports {
         let port = match req.ports.get(&p.env) {
@@ -582,6 +600,9 @@ pub fn request_from_env(app: &CatalogApp, stack: &str, env: &BTreeMap<String, St
         if let Some(v) = env.get(&s.env) {
             req.secrets.insert(s.env.clone(), v.clone());
         }
+    }
+    if m.run_as.is_some() {
+        req.run_as = env.get(crate::manifest::RUN_AS_ENV).filter(|u| !u.is_empty()).cloned();
     }
     if let Some(ss) = &m.share_set
         && let Some(v) = env.get(&ss.env)

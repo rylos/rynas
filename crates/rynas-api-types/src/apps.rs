@@ -584,6 +584,10 @@ pub struct AppDetail {
     pub shares: Vec<AppShare>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_set: Option<AppShareSet>,
+    /// The installer may choose a NAS user the app runs as (`run_as = "user"`), instead of
+    /// the apps' account: [`AppInstallRequest::run_as`], [`AppInstallPlan::run_as_choices`].
+    #[serde(default, skip_serializing_if = "not")]
+    pub run_as: bool,
     pub secrets: Vec<AppSecret>,
     pub hardware: AppHardware,
     pub overlays: Vec<AppOverlay>,
@@ -621,6 +625,11 @@ pub struct AppInstallRequest {
     /// The shares of the entry's `[share_set]` ([`AppDetail::share_set`]), by share name.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub share_set: Vec<ShareSetChoice>,
+    /// The NAS user the app runs as (entries with [`AppDetail::run_as`]): a regular account,
+    /// never root, a system account or the apps' account. `None`: the apps' account. It
+    /// cannot change after install.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<String>,
 }
 
 impl Default for AppInstallRequest {
@@ -634,6 +643,7 @@ impl Default for AppInstallRequest {
             publish_lan: None,
             start: true,
             share_set: Vec::new(),
+            run_as: None,
         }
     }
 }
@@ -780,6 +790,12 @@ pub struct AppInstallPlan {
     /// folder chosen for the app.
     #[serde(default)]
     pub share_grants: Vec<PlannedShareGrant>,
+    /// The NAS user the app will run as (the request's `run_as`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<String>,
+    /// The NAS users it may run as (entries with [`AppDetail::run_as`]), sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_as_choices: Vec<String>,
 }
 
 /// How the apps' account gets into a shared folder chosen at install.
@@ -812,6 +828,9 @@ pub struct PlannedShareGrant {
     /// The app writes there (`access = "rw"`); otherwise it only reads.
     pub write: bool,
     pub action: ShareGrantAction,
+    /// Who gets in: the NAS user the app runs as; `None`: the apps' group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 /// A generated secret the entry marks `show`: in the install answer only, once.
@@ -870,6 +889,9 @@ pub struct InstalledApp {
     pub web_url: Option<String>,
     /// The stack folder is a btrfs subvolume: updates take a snapshot first.
     pub snapshots: bool,
+    /// The NAS user the app runs as; `None`: the apps' account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<String>,
     /// The shares of the entry's `[share_set]` mounted now (read from `.env`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub share_set: Vec<InstalledShareSetItem>,

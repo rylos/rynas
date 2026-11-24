@@ -852,6 +852,37 @@ async fn move_behind_the_proxy() {
     assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, error_codes::CONFLICT));
 }
 
+/// An entry with `run_as`: plans offer the NAS users, refuse root, system accounts and the
+/// apps' account, and an install writes the user's ids and name.
+#[tokio::test]
+async fn run_as_a_nas_user() {
+    let e = env();
+    std::fs::create_dir_all(e.root().join("etc")).unwrap();
+    std::fs::write(
+        e.root().join("etc/passwd"),
+        "root:x:0:0::/root:/bin/sh\ndaemon:x:1:1::/usr/sbin:/usr/sbin/nologin\nann:x:1026:100::/home/ann:/bin/sh\n",
+    )
+    .unwrap();
+    let p = plan(&e, "syncthing", json!({})).await;
+    assert_eq!(p.run_as_choices, ["ann"]);
+    for bad in ["root", "daemon", "zed", "docker-apps"] {
+        let p = plan(&e, "syncthing", json!({"run_as": bad})).await;
+        assert!(p.errors.iter().any(|x| x.field == "run_as"), "{bad}: {:?}", p.errors);
+    }
+    let p = plan(&e, "vaultwarden", json!({"form": {"DOMAIN": "https://vault.example.lan"}, "run_as": "ann"})).await;
+    assert!(p.errors.iter().any(|x| x.field == "run_as" && x.kind == FieldErrorKind::UnknownValue), "{:?}", p.errors);
+    let p = plan(&e, "syncthing", json!({"run_as": "ann"})).await;
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    assert_eq!(p.run_as.as_deref(), Some("ann"));
+    assert!(p.env.contains("PUID=1026\n") && p.env.contains("PGID=100\n") && p.env.contains("RYNAS_RUN_AS=ann\n"), "{}", p.env);
+    assert!(p.folders.iter().any(|f| f.env == "CONFIG_FOLDER" && f.owner == "1026:100"), "{:?}", p.folders);
+    let (_, log) = install(&e, "syncthing", json!({"run_as": "ann", "publish_lan": true})).await;
+    assert!(log.contains("the app runs as ann (1026:100)"), "{log}");
+    let (s, b) = call(&e, "GET", "/v1/apps/installed/syncthing", None).await;
+    let i: InstalledAppDetail = json_of(s, &b);
+    assert_eq!(i.app.run_as.as_deref(), Some("ann"));
+}
+
 const ST_CONFIG: &str = r#"<configuration version="37">
     <folder id="photos-1" label="Photos" path="/data/photos" type="sendreceive">
         <device id="AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD" introducedBy=""></device>

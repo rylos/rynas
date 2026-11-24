@@ -426,6 +426,41 @@ fn uninstall_targets(
     (trees, empties, kept)
 }
 
+/// The uid range of NAS users (Debian's `UID_MIN`..`UID_MAX`; system accounts sit below it,
+/// `nobody` above).
+const NAS_UIDS: std::ops::RangeInclusive<u32> = 1000..=59999;
+
+/// The NAS users of `passwd` an app may run as: `(name, uid, primary gid)`, regular uids
+/// only, never root, a system account or the apps' account; sorted by name.
+pub(crate) fn nas_users(passwd: &str) -> Vec<(String, u32, u32)> {
+    let mut v: Vec<(String, u32, u32)> = passwd
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            let (uid, gid) = (f.get(2)?.parse::<u32>().ok()?, f.get(3)?.parse::<u32>().ok()?);
+            let ok = NAS_UIDS.contains(&uid) && gid != 0 && f[0] != rynas_docker::APPS_USER && rynas_apps::manifest::is_user_name(f[0]);
+            ok.then(|| (f[0].to_string(), uid, gid))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// `(uid, gid)` of the NAS user `name` an app may run as ([`nas_users`]), or why not.
+pub(crate) fn nas_user_ids(passwd: &str, name: &str) -> Result<(u32, u32), String> {
+    if name == "root" {
+        return Err("an app never runs as root".into());
+    }
+    if name == rynas_docker::APPS_USER {
+        return Err(format!("{name} is the apps' own account: choose a NAS user, or none"));
+    }
+    let line = passwd.lines().find(|l| l.split(':').next() == Some(name)).ok_or_else(|| format!("no user {name}"))?;
+    match nas_users(line).into_iter().next() {
+        Some((_, uid, gid)) => Ok((uid, gid)),
+        None => Err(format!("{name} is a system account, not a NAS user")),
+    }
+}
+
 fn field_error(e: &RenderError) -> FieldError {
     let (field, kind) = match e {
         RenderError::InvalidValue { field, .. } => (field.clone(), FieldErrorKind::InvalidValue),
@@ -729,6 +764,7 @@ impl AppsSvc {
             folders: conv(&m.folders),
             shares: conv(&m.shares),
             share_set: m.share_set.as_ref().map(conv),
+            run_as: m.run_as.is_some(),
             secrets: conv(&m.secrets),
             hardware: conv(&m.hardware),
             overlays: conv(&m.overlays),
@@ -808,6 +844,28 @@ impl AppsSvc {
     }
 
     /// The `docker-apps` (uid, gid), whatever `--dry-system` says.
+    /// `(uid, gid)` of the NAS user an app with `run_as` runs as ([`nas_user_ids`]).
+    pub(crate) fn run_as_ids(&self, name: &str) -> Result<(u32, u32), String> {
+        nas_user_ids(&read_text(&self.docker.root, "/etc/passwd"), name)
+    }
+
+    /// The NAS users an app may run as, sorted by name.
+    pub(crate) fn run_as_choices(&self) -> Vec<String> {
+        nas_users(&read_text(&self.docker.root, "/etc/passwd")).into_iter().map(|u| u.0).collect()
+    }
+
+    /// The ids an installed stack runs as: its `run_as` user's (looked up again, so the files
+    /// keep belonging to that user), else the `PUID`/`PGID` stored, else the apps' account.
+    pub(crate) fn stack_ids(&self, env: &BTreeMap<String, String>) -> Res<(u32, u32)> {
+        if let Some(u) = env.get(rynas_apps::manifest::RUN_AS_ENV).filter(|u| !u.is_empty()) {
+            return self.run_as_ids(u).map_err(|e| Error::invalid("run_as", e));
+        }
+        Ok(match (env.get("PUID").and_then(|v| v.parse().ok()), env.get("PGID").and_then(|v| v.parse().ok())) {
+            (Some(u), Some(g)) => (u, g),
+            _ => self.apps_ids().unwrap_or((PLACEHOLDER_ID, PLACEHOLDER_ID)),
+        })
+    }
+
     pub(crate) fn apps_ids(&self) -> Option<(u32, u32)> {
         let root = &self.docker.root;
         match install::apps_ids(
@@ -1041,7 +1099,18 @@ impl AppsSvc {
             ports: req.ports.clone(),
             secrets: BTreeMap::new(),
             share_set,
+            run_as: req.run_as.clone().filter(|u| !u.is_empty()),
         };
+        // the NAS user the app runs as (entries with run_as)
+        let mut run_as_ids = None;
+        match (&request.run_as, m.run_as) {
+            (Some(_), None) => errors.push(err("run_as", FieldErrorKind::UnknownValue, format!("{} always runs as the apps' account", m.name))),
+            (Some(u), Some(_)) => match self.run_as_ids(u) {
+                Ok(ids) => run_as_ids = Some(ids),
+                Err(e) => errors.push(err("run_as", FieldErrorKind::InvalidValue, e)),
+            },
+            _ => {}
+        }
         let mut plan = AppInstallPlan {
             app: m.id.clone(),
             version: m.version.to_string(),
@@ -1063,11 +1132,15 @@ impl AppsSvc {
             ..Default::default()
         };
         plan.share_grants = plan_share_grants(self, m, &request);
+        if m.run_as.is_some() {
+            plan.run_as_choices = self.run_as_choices();
+        }
+        plan.run_as = request.run_as.clone();
         let mut rendered = None;
         if plan.errors.is_empty()
             && let Some(l) = &layout
         {
-            let ids = self.apps_ids().unwrap_or((PLACEHOLDER_ID, PLACEHOLDER_ID));
+            let ids = run_as_ids.or_else(|| self.apps_ids()).unwrap_or((PLACEHOLDER_ID, PLACEHOLDER_ID));
             let provided = self.provided(l, &stack, &bind, ids);
             match rynas_apps::render::render(app, &cat.source, &provided, &request) {
                 Ok(r) => {
@@ -1218,6 +1291,7 @@ impl AppsSvc {
             bind: env.get("RYNAS_BIND").cloned(),
             web_url: self.web.get().and_then(|w| w.stack_url(&d.stack)),
             snapshots: l.is_some_and(|l| snapshots::supported(&self.docker.root, l, &d.stack)),
+            run_as: env.get(rynas_apps::manifest::RUN_AS_ENV).filter(|u| !u.is_empty()).cloned(),
             share_set: entry
                 .and_then(|a| a.manifest.share_set.as_ref())
                 .and_then(|ss| env.get(&ss.env))
@@ -1479,16 +1553,21 @@ pub(crate) async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob)
         j.name, j.version, j.app, j.stack
     ));
     s.ensure_apps_account(ctx).await?;
-    let ids = match a.apps_ids() {
-        Some(ids) => ids,
-        None if s.dry => {
+    let ids = match (&j.request.run_as, a.apps_ids()) {
+        (Some(u), _) => {
+            let ids = a.run_as_ids(u)?;
+            ctx.log(&format!("the app runs as {u} ({}:{})", ids.0, ids.1));
+            ids
+        }
+        (None, Some(ids)) => ids,
+        (None, None) if s.dry => {
             ctx.log(&format!(
                 "the {} account does not exist (dry system): using {PLACEHOLDER_ID}:{PLACEHOLDER_ID}",
                 rynas_docker::APPS_USER
             ));
             (PLACEHOLDER_ID, PLACEHOLDER_ID)
         }
-        None => {
+        (None, None) => {
             return Err(format!(
                 "the {} account could not be created",
                 rynas_docker::APPS_USER
@@ -1533,7 +1612,7 @@ pub(crate) async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob)
     .await
     .map_err(keep)?;
     // the apps' account into the chosen shared folders, before the app starts reading them
-    grant_shares(a, ctx, &j.who, &j.name, ids.1, &j.share_grants)
+    grant_shares(a, ctx, &j.who, &j.name, ids, &j.share_grants)
         .await
         .map_err(keep)?;
     s.changed();
@@ -1561,11 +1640,41 @@ pub(crate) async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob)
 // shared folders: the apps' account gets in
 // ---------------------------------------------------------------------------------------------
 
-/// What the apps' group `group` needs on `path`, a folder an app is installed with: from the
-/// rynas share with that folder and its permission matrix. A matrix that names nobody
-/// leaves the folder's permissions alone (adding the group would shut everybody else out),
-/// so only the files get it then; an explicit deny is respected.
-pub(crate) fn share_grant_action(shares: &[rynas_api_types::Share], path: &str, group: &str, write: bool) -> (Option<String>, ShareGrantAction) {
+/// Who gets into the shares of an app: the apps' group (`docker-apps`), or the NAS user an
+/// app with `run_as` runs as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GrantSubject {
+    Group(String),
+    User(String),
+}
+
+impl GrantSubject {
+    /// The subject of an install request: its `run_as` user, else the apps' group.
+    pub(crate) fn of(run_as: Option<&str>) -> Self {
+        match run_as {
+            Some(u) => Self::User(u.to_string()),
+            None => Self::Group(rynas_docker::APPS_USER.to_string()),
+        }
+    }
+
+    fn kind_name(&self) -> (rynas_api_types::PrincipalKind, &str) {
+        match self {
+            Self::Group(n) => (rynas_api_types::PrincipalKind::Group, n),
+            Self::User(n) => (rynas_api_types::PrincipalKind::User, n),
+        }
+    }
+
+    fn name(&self) -> &str {
+        self.kind_name().1
+    }
+}
+
+/// What `subject` needs on `path`, a folder an app is installed with: from the rynas share
+/// with that folder and its permission matrix. A matrix that names nobody leaves the
+/// folder's permissions alone (adding an entry would shut everybody else out), so only the
+/// files get it then; an explicit deny is respected (for a group, also a deny of the user
+/// with the same name).
+pub(crate) fn share_grant_action(shares: &[rynas_api_types::Share], path: &str, subject: &GrantSubject, write: bool) -> (Option<String>, ShareGrantAction) {
     use rynas_api_types::{Access, PrincipalKind};
     let norm = |p: &str| p.trim_end_matches('/').to_string();
     let Some(s) = shares.iter().find(|s| norm(&s.path) == norm(path)) else {
@@ -1575,8 +1684,9 @@ pub(crate) fn share_grant_action(shares: &[rynas_api_types::Share], path: &str, 
     if s.permissions.is_empty() {
         return (name, ShareGrantAction::Files);
     }
-    let entry = s.permissions.iter().find(|p| p.kind == PrincipalKind::Group && p.name == group);
-    let user_deny = s.permissions.iter().any(|p| p.kind == PrincipalKind::User && p.name == group && p.access == Access::Deny);
+    let (kind, who) = subject.kind_name();
+    let entry = s.permissions.iter().find(|p| p.kind == kind && p.name == who);
+    let user_deny = s.permissions.iter().any(|p| p.kind == PrincipalKind::User && p.name == who && p.access == Access::Deny);
     let action = match entry.map(|p| p.access) {
         _ if user_deny => ShareGrantAction::Denied,
         Some(Access::Deny) => ShareGrantAction::Denied,
@@ -1588,22 +1698,23 @@ pub(crate) fn share_grant_action(shares: &[rynas_api_types::Share], path: &str, 
     (name, action)
 }
 
-/// The share document with the apps' group let into the share at `path` (add or raise, as
+/// The share document with `subject` let into the share at `path` (add or raise, as
 /// [`share_grant_action`] says now); `None` when nothing changes.
-pub(crate) fn with_share_grant(cfg: &rynas_api_types::SharesConfig, path: &str, group: &str, write: bool) -> Option<rynas_api_types::SharesConfig> {
-    use rynas_api_types::{Access, Permission, PrincipalKind};
-    let (Some(share), action) = share_grant_action(&cfg.shares, path, group, write) else {
+pub(crate) fn with_share_grant(cfg: &rynas_api_types::SharesConfig, path: &str, subject: &GrantSubject, write: bool) -> Option<rynas_api_types::SharesConfig> {
+    use rynas_api_types::{Access, Permission};
+    let (Some(share), action) = share_grant_action(&cfg.shares, path, subject, write) else {
         return None;
     };
     if !matches!(action, ShareGrantAction::Add | ShareGrantAction::Raise) {
         return None;
     }
     let access = if write { Access::Rw } else { Access::Ro };
+    let (kind, who) = subject.kind_name();
     let mut out = cfg.clone();
     let s = out.shares.iter_mut().find(|s| s.name == share)?;
-    match s.permissions.iter_mut().find(|p| p.kind == PrincipalKind::Group && p.name == group) {
+    match s.permissions.iter_mut().find(|p| p.kind == kind && p.name == who) {
         Some(p) => p.access = access,
-        None => s.permissions.push(Permission { kind: PrincipalKind::Group, name: group.to_string(), access }),
+        None => s.permissions.push(Permission { kind, name: who.to_string(), access }),
     }
     Some(out)
 }
@@ -1655,34 +1766,40 @@ pub(crate) fn resolve_share_set(
 /// The plan's lines for the shared folders of `request` (fixed shares and share set items).
 fn plan_share_grants(a: &AppsSvc, m: &rynas_apps::manifest::AppManifest, request: &rynas_apps::InstallRequest) -> Vec<PlannedShareGrant> {
     let shares = a.applied_shares();
+    let subject = GrantSubject::of(request.run_as.as_deref());
     let mut out: Vec<PlannedShareGrant> = m
         .shares
         .iter()
         .filter_map(|s| {
             let path = request.shares.get(&s.env)?;
             let write = s.access == rynas_apps::manifest::Access::Rw;
-            let (share, action) = share_grant_action(&shares, path, rynas_docker::APPS_USER, write);
-            Some(PlannedShareGrant { env: s.env.clone(), path: path.clone(), share, write, action })
+            let (share, action) = share_grant_action(&shares, path, &subject, write);
+            Some(PlannedShareGrant { env: s.env.clone(), path: path.clone(), share, write, action, user: request.run_as.clone() })
         })
         .collect();
-    out.extend(share_set_grants(&shares, m, &request.share_set));
+    out.extend(share_set_grants(&shares, m, &request.share_set, &subject));
     out
 }
 
-/// The share grants of share set items (folders of the stack excluded).
+/// The share grants of share set items (folders of the stack excluded) for `subject`.
 fn share_set_grants(
     shares: &[rynas_api_types::Share],
     m: &rynas_apps::manifest::AppManifest,
     items: &[rynas_apps::render::ShareSetItem],
+    subject: &GrantSubject,
 ) -> Vec<PlannedShareGrant> {
     let Some(ss) = &m.share_set else { return Vec::new() };
     let write = ss.access == rynas_apps::manifest::Access::Rw;
+    let user = match subject {
+        GrantSubject::User(u) => Some(u.clone()),
+        GrantSubject::Group(_) => None,
+    };
     items
         .iter()
         .filter(|it| it.path.starts_with('/'))
         .map(|it| {
-            let (share, action) = share_grant_action(shares, &it.path, rynas_docker::APPS_USER, write);
-            PlannedShareGrant { env: format!("{}/{}", ss.env, it.name), path: it.path.clone(), share, write, action }
+            let (share, action) = share_grant_action(shares, &it.path, subject, write);
+            PlannedShareGrant { env: format!("{}/{}", ss.env, it.name), path: it.path.clone(), share, write, action, user: user.clone() }
         })
         .collect()
 }
@@ -1691,21 +1808,19 @@ fn share_set_grants(
 /// first (an apply of `shares`, which also writes the folder's own ACL), then the files and
 /// folders already there ([`rynas_services::idremap::grant`]). Trouble with single files is
 /// logged; the app is installed anyway.
-async fn grant_shares(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, app: &str, gid: u32, grants: &[PlannedShareGrant]) -> Result<(), String> {
+/// `ids` are the app's (uid, gid): the gid is the subject of the file ACLs for the apps'
+/// group, the uid for a grant to the NAS user the app runs as ([`PlannedShareGrant::user`]).
+async fn grant_shares(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, app: &str, ids: (u32, u32), grants: &[PlannedShareGrant]) -> Result<(), String> {
     for g in grants {
+        let subject = GrantSubject::of(g.user.as_deref());
+        let sname = subject.name().to_string();
         if g.action == ShareGrantAction::Denied {
-            ctx.log(&format!(
-                "warning: {} denies {}: the app cannot use {}",
-                g.share.as_deref().unwrap_or(&g.path),
-                rynas_docker::APPS_USER,
-                g.path
-            ));
+            ctx.log(&format!("warning: {} denies {sname}: the app cannot use {}", g.share.as_deref().unwrap_or(&g.path), g.path));
             continue;
         }
-        let (cfg, log, path, write, who2) = (a.docker.ops.config.clone(), ctx.clone(), g.path.clone(), g.write, who.to_string());
+        let (cfg, log, path, write, who2, sub2) = (a.docker.ops.config.clone(), ctx.clone(), g.path.clone(), g.write, who.to_string(), subject.clone());
         let what = format!(
-            "{} gets {} access to {} for {app}",
-            rynas_docker::APPS_USER,
+            "{sname} gets {} access to {} for {app}",
             if g.write { "read and write" } else { "read" },
             g.share.as_deref().unwrap_or(&g.path)
         );
@@ -1713,7 +1828,7 @@ async fn grant_shares(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, app: &str, gid
             cfg.apply_update(&who2, rynas_services::shares::SHARES_KEY, &what, &|l| log.log(l), |cur| {
                 let Some(cur) = cur else { return Ok(None) };
                 let doc: rynas_api_types::SharesConfig = serde_json::from_value(cur).map_err(|e| e.to_string())?;
-                with_share_grant(&doc, &path, rynas_docker::APPS_USER, write)
+                with_share_grant(&doc, &path, &sub2, write)
                     .map(|d| serde_json::to_value(d).map_err(|e| e.to_string()))
                     .transpose()
             })
@@ -1722,16 +1837,19 @@ async fn grant_shares(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, app: &str, gid
         })
         .await?;
         let (dry, root, path, log, write) = (a.docker.dry, a.docker.root.clone(), g.path.clone(), ctx.clone(), g.write);
+        let (id, user) = match subject {
+            GrantSubject::User(_) => (ids.0, true),
+            GrantSubject::Group(_) => (ids.1, false),
+        };
         let cancel = ctx.clone();
         blocking(move || {
             use rynas_services::idremap::{self, DryRemap, GroupGrant, HostRemap, RemapFs};
             let fs: &dyn RemapFs = if dry { &DryRemap } else { &HostRemap };
             let real = rynas_docker::under(&root, &path);
-            let c = idremap::grant(fs, &[real], GroupGrant { gid, write }, &|| cancel.is_cancelled());
+            let c = idremap::grant(fs, &[real], GroupGrant { gid: id, user, write }, &|| cancel.is_cancelled());
             log.log(&format!(
-                "{path}: {} access for {} on {} of {} entries",
+                "{path}: {} access for {sname} on {} of {} entries",
                 if write { "read and write" } else { "read" },
-                rynas_docker::APPS_USER,
                 c.acl_entries,
                 c.scanned
             ));
@@ -2228,13 +2346,7 @@ impl AppsSvc {
             .get(&d.meta.app)
             .ok_or_else(|| Error::not_found("no such app"))?;
         let env = rynas_apps::render::parse_env(&d.env);
-        let ids = match (
-            env.get("PUID").and_then(|v| v.parse().ok()),
-            env.get("PGID").and_then(|v| v.parse().ok()),
-        ) {
-            (Some(u), Some(g)) => (u, g),
-            _ => self.apps_ids().unwrap_or((PLACEHOLDER_ID, PLACEHOLDER_ID)),
-        };
+        let ids = self.stack_ids(&env)?;
         let bind = env
             .get("RYNAS_BIND")
             .cloned()
@@ -2526,7 +2638,8 @@ pub(crate) struct ShareSetJob {
     new: (String, String),
     folders: Vec<FolderPlan>,
     grants: Vec<PlannedShareGrant>,
-    gid: u32,
+    /// The app's (uid, gid).
+    ids: (u32, u32),
     /// The items now mounted.
     pub(crate) items: Vec<rynas_apps::render::ShareSetItem>,
 }
@@ -2553,16 +2666,14 @@ impl AppsSvc {
         }
         rynas_apps::render::check_share_set(&ss.env, &items).map_err(render_err)?;
         let env = rynas_apps::render::parse_env(&d.env);
-        let ids = match (env.get("PUID").and_then(|v| v.parse().ok()), env.get("PGID").and_then(|v| v.parse().ok())) {
-            (Some(u), Some(g)) => (u, g),
-            _ => self.apps_ids().unwrap_or((PLACEHOLDER_ID, PLACEHOLDER_ID)),
-        };
+        let ids = self.stack_ids(&env)?;
         let bind = env.get("RYNAS_BIND").cloned().unwrap_or_else(|| "127.0.0.1".into());
         let provided = self.provided(&l, stack, &bind, ids);
         let mut req = rynas_apps::render::request_from_env(app, stack, &env);
         req.share_set = items.clone();
         let r = rynas_apps::render::render(app, &cat.source, &provided, &req).map_err(render_err)?;
-        let grants = share_set_grants(&self.applied_shares(), m, &items);
+        let subject = GrantSubject::of(req.run_as.as_deref());
+        let grants = share_set_grants(&self.applied_shares(), m, &items, &subject);
         Ok(ShareSetJob {
             stack: stack.to_string(),
             layout: l,
@@ -2571,7 +2682,7 @@ impl AppsSvc {
             new: (file_text(&r, COMPOSE_FILE), file_text(&r, ".env")),
             folders: r.folders.clone(),
             grants,
-            gid: ids.1,
+            ids,
             items,
         })
     }
@@ -2597,7 +2708,7 @@ pub(crate) async fn share_set_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, j
             record_made(&s2, &n2, made)
         })
         .await?;
-        grant_shares(a, ctx, who, &j.name, j.gid, &j.grants).await?;
+        grant_shares(a, ctx, who, &j.name, j.ids, &j.grants).await?;
         ctx.progress(60);
         compose_run(s, ctx, &j.stack, &j.layout, ComposeAction::Up).await
     }
@@ -2757,7 +2868,8 @@ mod tests {
             share("No", "/srv/v1/No", vec![me.clone(), p(PrincipalKind::Group, "docker-apps", Access::Deny)]),
             share("NoUser", "/srv/v1/NoUser", vec![me.clone(), p(PrincipalKind::User, "docker-apps", Access::Deny)]),
         ];
-        let act = |path, write| share_grant_action(&shares, path, "docker-apps", write);
+        let g = GrantSubject::Group("docker-apps".into());
+        let act = |path, write| share_grant_action(&shares, path, &g, write);
         assert_eq!(act("/srv/v1/Photos/", false), (Some("Photos".into()), ShareGrantAction::Add));
         // permissions left to the folder: adding the group would shut the others out
         assert_eq!(act("/srv/v1/Open", true), (Some("Open".into()), ShareGrantAction::Files));
@@ -2768,14 +2880,58 @@ mod tests {
         assert_eq!(act("/srv/v1/NoUser", false).1, ShareGrantAction::Denied);
         // the document: the entry added or raised, nothing else touched; no change → None
         let cfg = SharesConfig { shares, ..Default::default() };
-        let added = with_share_grant(&cfg, "/srv/v1/Photos", "docker-apps", false).unwrap();
+        let added = with_share_grant(&cfg, "/srv/v1/Photos", &g, false).unwrap();
         assert_eq!(added.shares[0].permissions, vec![me.clone(), p(PrincipalKind::Group, "docker-apps", Access::Ro)]);
         assert_eq!(added.shares[1..], cfg.shares[1..]);
-        let raised = with_share_grant(&cfg, "/srv/v1/Ro", "docker-apps", true).unwrap();
+        let raised = with_share_grant(&cfg, "/srv/v1/Ro", &g, true).unwrap();
         assert_eq!(raised.shares[2].permissions[1].access, Access::Rw);
         for (path, write) in [("/srv/v1/Ro", false), ("/srv/v1/No", true), ("/srv/v1/Open", true), ("/srv/v1/plain", false)] {
-            assert!(with_share_grant(&cfg, path, "docker-apps", write).is_none(), "{path}");
+            assert!(with_share_grant(&cfg, path, &g, write).is_none(), "{path}");
         }
+    }
+
+    #[test]
+    fn a_run_as_user_gets_into_a_chosen_share() {
+        use rynas_api_types::{Access, Permission, PrincipalKind, Share, SharesConfig};
+        let p = |kind, name: &str, access| Permission { kind, name: name.into(), access };
+        let share = |name: &str, path: &str, perms: Vec<Permission>| Share { name: name.into(), path: path.into(), permissions: perms, ..Default::default() };
+        let shares = vec![
+            share("Mine", "/srv/v1/Mine", vec![p(PrincipalKind::User, "ann", Access::Rw)]),
+            share("Ro", "/srv/v1/Ro", vec![p(PrincipalKind::User, "ann", Access::Ro)]),
+            share("Other", "/srv/v1/Other", vec![p(PrincipalKind::User, "bob", Access::Rw), p(PrincipalKind::Group, "ann", Access::Rw)]),
+            share("No", "/srv/v1/No", vec![p(PrincipalKind::User, "ann", Access::Deny)]),
+        ];
+        let ann = GrantSubject::User("ann".into());
+        let act = |path| share_grant_action(&shares, path, &ann, true).1;
+        assert_eq!(act("/srv/v1/Mine"), ShareGrantAction::Ok);
+        assert_eq!(act("/srv/v1/Ro"), ShareGrantAction::Raise);
+        // a group named like the user is not the user
+        assert_eq!(act("/srv/v1/Other"), ShareGrantAction::Add);
+        assert_eq!(act("/srv/v1/No"), ShareGrantAction::Denied);
+        let cfg = SharesConfig { shares, ..Default::default() };
+        let added = with_share_grant(&cfg, "/srv/v1/Other", &ann, true).unwrap();
+        assert_eq!(added.shares[2].permissions.last(), Some(&p(PrincipalKind::User, "ann", Access::Rw)));
+        assert_eq!(with_share_grant(&cfg, "/srv/v1/Ro", &ann, true).unwrap().shares[1].permissions[0].access, Access::Rw);
+        assert!(with_share_grant(&cfg, "/srv/v1/Mine", &ann, true).is_none());
+        assert_eq!(GrantSubject::of(None), GrantSubject::Group(rynas_docker::APPS_USER.into()));
+    }
+
+    #[test]
+    fn run_as_only_nas_users() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\n\
+            daemon:x:1:1::/usr/sbin:/usr/sbin/nologin\n\
+            docker-apps:x:1500:1500::/nonexistent:/usr/sbin/nologin\n\
+            ann:x:1026:100::/home/ann:/bin/bash\n\
+            bob:x:1027:1027::/home/bob:/usr/sbin/nologin\n\
+            nobody:x:65534:65534::/nonexistent:/usr/sbin/nologin\n\
+            sys:x:999:999::/:/usr/sbin/nologin\n";
+        assert_eq!(nas_user_ids(passwd, "ann"), Ok((1026, 100)));
+        assert_eq!(nas_user_ids(passwd, "bob"), Ok((1027, 1027)));
+        for (u, why) in [("root", "root"), ("docker-apps", "apps' own account"), ("daemon", "system account"), ("sys", "system account"), ("nobody", "system account"), ("zed", "no user")] {
+            let e = nas_user_ids(passwd, u).unwrap_err();
+            assert!(e.contains(why), "{u}: {e}");
+        }
+        assert_eq!(nas_users(passwd).into_iter().map(|u| u.0).collect::<Vec<_>>(), ["ann", "bob"]);
     }
 
     #[test]

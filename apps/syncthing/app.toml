@@ -14,6 +14,8 @@ categories = ["sync", "files"]
 min_rynas = "0.1.0"
 arch = ["amd64", "arm64"]
 main_service = "syncthing"
+# runs as the NAS user who owns the synchronized files (files from the devices are theirs)
+run_as = "user"
 
 [resources]
 ram_min_mb = 128

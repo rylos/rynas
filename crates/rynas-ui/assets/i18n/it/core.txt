@@ -4571,6 +4571,15 @@ apps.w.shares_text	Cartelle che l'app legge o scrive, con l'accesso indicato. Nu
 apps.w.no_share	Non collegata
 apps.w.share_set_text	Scegli quante cartelle condivise vuoi: ognuna compare nell'app al percorso indicato. L'elenco si può cambiare in seguito.
 apps.w.set_follows	Segue blocco e sblocco
+apps.w.run_as	Gira come
+apps.w.run_as_text	L'utente del NAS con cui gira l'app: i file che scrive, come quelli che arrivano dai tuoi dispositivi, appartengono a questo utente. Non si può cambiare dopo l'installazione.
+apps.w.run_as_apps	L'account delle app (docker-apps)
+apps.grant.user.ok	La condivisione fa già entrare {user} ({access}); file e cartelle che non lo hanno lo ricevono
+apps.grant.user.add	{user} viene aggiunto ai permessi della condivisione con accesso in {access}, anche sui file già presenti
+apps.grant.user.raise	L'accesso di {user} a questa condivisione passa da lettura a lettura e scrittura, anche sui file già presenti
+apps.grant.user.files	I suoi permessi non sono gestiti da rynas: {user} riceve accesso in {access} su file e cartelle
+apps.grant.user.denied_short	La condivisione nega l'accesso a {user}: non cambia nulla
+apps.grant.user.denied	{share} nega l'accesso a {user}: l'app non potrà usare questa cartella. Cambia i permessi della condivisione o scegli un'altra cartella.
 apps.w.no_share_fallback	Non collegata (usa {path} nella cartella dello stack)
 apps.w.no_shares_yet	Non ci sono ancora cartelle condivise.
 apps.w.to_shares	Creane una

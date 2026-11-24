@@ -233,7 +233,11 @@ pub struct RemapOpts<'a> {
 /// Access for one group, added to the ACLs of a tree ([`grant_acl`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupGrant {
+    /// The group id, or the user id when `user` is set.
     pub gid: u32,
+    /// The entry names a user (`ACL_USER`) instead of a group: an app that runs as a chosen
+    /// NAS user gets its own entry.
+    pub user: bool,
     /// Read and write; otherwise read (folders also get `x`, to be entered).
     pub write: bool,
 }
@@ -273,9 +277,10 @@ pub fn grant_acl(raw: Option<&[u8]>, access: Option<&[u8]>, mode: u32, dir: bool
     };
     let want: u16 = 4 | if g.write { 2 } else { 0 } | if dir { 1 } else { 0 };
     let before = ents.clone();
-    match ents.iter_mut().find(|e| e.0 == ACL_GROUP && e.2 == g.gid) {
+    let tag = if g.user { ACL_USER } else { ACL_GROUP };
+    match ents.iter_mut().find(|e| e.0 == tag && e.2 == g.gid) {
         Some(e) => e.1 |= want,
-        None => ents.push((ACL_GROUP, want, g.gid)),
+        None => ents.push((tag, want, g.gid)),
     }
     match ents.iter_mut().find(|e| e.0 == ACL_MASK) {
         Some(m) => m.1 |= want,
@@ -1002,7 +1007,7 @@ mod tests {
 
     #[test]
     fn a_group_grant_only_adds_and_starts_from_the_mode() {
-        let g = GroupGrant { gid: 986, write: false };
+        let g = GroupGrant { gid: 986, user: false, write: false };
         let u = ACL_UNDEFINED_ID;
         // a 0600 file without ACL: base entries from the mode, the group, a mask that lets it read
         assert_eq!(grant_acl(None, None, 0o600, false, g), Some(acl(&[(ACL_USER_OBJ, 6, u), (ACL_GROUP_OBJ, 0, u), (ACL_GROUP, 4, 986), (ACL_MASK, 4, u), (ACL_OTHER, 0, u)])));
@@ -1013,7 +1018,10 @@ mod tests {
         let has = acl(&[(ACL_USER_OBJ, 7, u), (ACL_GROUP_OBJ, 0, u), (ACL_GROUP, 7, 986), (ACL_MASK, 7, u), (ACL_OTHER, 0, u)]);
         assert_eq!(grant_acl(Some(&has), None, 0o770, true, g), None);
         // read and write on a folder: rwx; its missing default starts from the access ACL
-        let rw = GroupGrant { gid: 986, write: true };
+        // a user subject gets an ACL_USER entry, the same way
+        let ug = GroupGrant { gid: 1026, user: true, write: true };
+        assert_eq!(grant_acl(None, None, 0o640, false, ug), Some(acl(&[(ACL_USER_OBJ, 6, u), (ACL_USER, 6, 1026), (ACL_GROUP_OBJ, 4, u), (ACL_MASK, 6, u), (ACL_OTHER, 0, u)])));
+        let rw = GroupGrant { gid: 986, user: false, write: true };
         let dir = acl(&[(ACL_USER_OBJ, 7, u), (ACL_USER, 5, 1000), (ACL_GROUP_OBJ, 0, u), (ACL_MASK, 5, u), (ACL_OTHER, 0, u)]);
         assert_eq!(grant_acl(None, Some(&dir), 0o750, true, rw), Some(acl(&[(ACL_USER_OBJ, 7, u), (ACL_USER, 5, 1000), (ACL_GROUP_OBJ, 0, u), (ACL_GROUP, 7, 986), (ACL_MASK, 7, u), (ACL_OTHER, 0, u)])));
         // an unknown format is left alone
@@ -1546,7 +1554,7 @@ mod tests {
         }
         let fake = Fake { real_acls: true, ..Default::default() };
         let root = t.path().to_path_buf();
-        let c = grant(&fake, std::slice::from_ref(&root), GroupGrant { gid: 54400, write: false }, &|| false);
+        let c = grant(&fake, std::slice::from_ref(&root), GroupGrant { gid: 54400, user: false, write: false }, &|| false);
         assert!(c.acl_entries > 0 && c.errors == 0, "{c:?}");
         let out = std::process::Command::new("getfacl").args(["-R", "-n", "-p"]).arg(&root).output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
@@ -1554,7 +1562,7 @@ mod tests {
         // the earlier entry stays as it was
         assert!(text.contains("group:54321:r--"), "{text}");
         // a second pass writes nothing
-        assert_eq!(grant(&fake, std::slice::from_ref(&root), GroupGrant { gid: 54400, write: false }, &|| false).acl_entries, 0);
+        assert_eq!(grant(&fake, std::slice::from_ref(&root), GroupGrant { gid: 54400, user: false, write: false }, &|| false).acl_entries, 0);
     }
 
     #[test]

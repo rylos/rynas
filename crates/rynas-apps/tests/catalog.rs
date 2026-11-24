@@ -503,6 +503,42 @@ fn lint_checks_share_sets_and_long_binds() {
     CatalogApp::load(&dst).unwrap_or_else(|e| panic!("{e}"));
 }
 
+#[test]
+fn run_as_a_chosen_user() {
+    let c = catalog();
+    let st = c.get("syncthing").unwrap();
+    assert_eq!(st.manifest.run_as, Some(rynas_apps::manifest::RunAs::User));
+    // the caller puts the user's ids in Provided; the name is kept in .env
+    let mut p = Provided::example("syncthing");
+    (p.puid, p.pgid) = (1026, 100);
+    let mut req = st.test_request();
+    req.run_as = Some("ann".into());
+    let r = render::render(st, "rynas", &p, &req).unwrap();
+    check_rendered(st, &r);
+    assert_eq!((r.env["RYNAS_RUN_AS"].as_str(), r.env["PUID"].as_str(), r.env["PGID"].as_str()), ("ann", "1026", "100"));
+    // the app's own folders are made for that user
+    assert_eq!(r.folders.iter().find(|f| f.env == "CONFIG_FOLDER").unwrap().owner, (1026, 100));
+    // updates keep it
+    let compose_text = String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap();
+    let env_text = String::from_utf8(r.file(".env").unwrap().contents.clone()).unwrap();
+    let again = plan::prepare_update(st, "rynas", &p, "syncthing", &compose_text, &env_text, &BTreeMap::new()).unwrap();
+    assert_eq!(again.env["RYNAS_RUN_AS"], "ann");
+    assert_eq!(render::request_from_env(st, "syncthing", &render::parse_env(&env_text)).run_as.as_deref(), Some("ann"));
+    // refusals: an entry without run_as, a bad name, root
+    let vw = c.get("vaultwarden").unwrap();
+    let mut vreq = vw.test_request();
+    vreq.run_as = Some("ann".into());
+    assert_eq!(render::render(vw, "rynas", &Provided::example("vaultwarden"), &vreq), Err(RenderError::UnknownValue("run_as".into())));
+    req.run_as = Some("Bad Name".into());
+    assert!(matches!(render::render(st, "rynas", &p, &req), Err(RenderError::InvalidValue { field, .. }) if field == "run_as"));
+    req.run_as = Some("ann".into());
+    (p.puid, p.pgid) = (0, 0);
+    assert!(matches!(render::render(st, "rynas", &p, &req), Err(RenderError::InvalidValue { field, .. }) if field == "run_as"));
+    // without a choice: the docker-apps ids of Provided, nothing kept
+    let r = render::render(st, "rynas", &Provided::example("syncthing"), &st.test_request()).unwrap();
+    assert!(!r.env.contains_key("RYNAS_RUN_AS"));
+}
+
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).unwrap();
     for e in fs::read_dir(src).unwrap() {

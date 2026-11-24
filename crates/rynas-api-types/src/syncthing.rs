@@ -58,6 +58,9 @@ pub struct SyncthingAdoptPreviewRequest {
     pub source: Option<AdoptSourceRef>,
     /// Lines added to (and overriding) the volume table read from the source.
     pub volumes: Vec<AdoptVolume>,
+    /// The NAS user the app will run as, instead of the proposal
+    /// ([`SyncthingAdoptPreview::run_as`]).
+    pub run_as: Option<String>,
 }
 
 /// An instance found on this NAS.
@@ -186,10 +189,9 @@ pub struct AdoptOwners {
     pub gid: u32,
     /// Top-level entries with another owner.
     pub others: u32,
-    /// The account the app runs as (`docker-apps`): it gets read and write access to each
-    /// share (ACL), whoever owns the files.
-    pub app_uid: u32,
-    pub app_gid: u32,
+    /// The NAS user with that uid, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 /// `POST /api/v1/syncthing/adopt/preview`.
@@ -211,6 +213,11 @@ pub struct SyncthingAdoptPreview {
     pub volumes: Vec<AdoptVolume>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owners: Option<AdoptOwners>,
+    /// The NAS user the app will run as: the request's `run_as`, else the user owning most
+    /// synchronized files (`owners.user`), else the installed app's; `None`: the apps'
+    /// account. Files arriving from the devices belong to this user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<String>,
     /// The shares the app will mount (each at `/shares/<share>`).
     pub shares: Vec<String>,
     /// The catalogue app installed now (stack), if any.
@@ -238,4 +245,7 @@ pub struct SyncthingAdoptRequest {
     /// Stack name of a new install (default `syncthing`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
+    /// The NAS user the app runs as, instead of the preview's proposal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<String>,
 }

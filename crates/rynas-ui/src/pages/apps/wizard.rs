@@ -81,6 +81,10 @@ struct W {
     shares: RwSignal<BTreeMap<String, String>>,
     /// Share names chosen for the entry's share set, in the order picked.
     share_set: RwSignal<Vec<String>>,
+    /// The NAS user the app runs as (entries with `run_as`): `None` until the administrator
+    /// chose (then the signed-in user when the server lists them), `Some(None)` for the apps'
+    /// account.
+    run_as: RwSignal<Option<Option<String>>>,
     folders: RwSignal<BTreeMap<String, String>>,
     ports: RwSignal<BTreeMap<String, u16>>,
     /// `None`: the server's default (§7); `Some` once the administrator chose.
@@ -132,6 +136,22 @@ impl W {
             publish_lan: self.publish.get_untracked(),
             start: true,
             share_set: self.share_set.get_untracked().into_iter().map(|share| ShareSetChoice { share, follow: None }).collect(),
+            run_as: self.run_as_value(),
+        }
+    }
+
+    /// The `run_as` of the request: the choice, else the signed-in user when the plan lists
+    /// them among the NAS users.
+    fn run_as_value(self) -> Option<String> {
+        if !self.detail.data.with_untracked(|d| d.as_ref().is_some_and(|d| d.run_as)) {
+            return None;
+        }
+        match self.run_as.get_untracked() {
+            Some(choice) => choice,
+            None => {
+                let me = crate::auth::auth().session.with_untracked(|s| s.as_ref().map(|s| s.user.username.clone()))?;
+                self.plan.with_untracked(|p| p.as_ref().is_some_and(|p| p.run_as_choices.contains(&me))).then_some(me)
+            }
         }
     }
 
@@ -147,7 +167,7 @@ impl W {
             match s {
                 Step::Options => field == "stack" || d.form.has(field),
                 Step::Folders => {
-                    d.folders.iter().any(|f| f.env == field) || d.shares.iter().any(|f| f.env == field) || d.share_set.as_ref().is_some_and(|s| s.env == field) || field == "share_set"
+                    d.folders.iter().any(|f| f.env == field) || d.shares.iter().any(|f| f.env == field) || d.share_set.as_ref().is_some_and(|s| s.env == field) || field == "share_set" || field == "run_as"
                 }
                 Step::Network => d.card.ports.iter().any(|p| p.env == field),
                 Step::Access | Step::Review => false,
@@ -240,6 +260,7 @@ pub fn wizard(id: String) -> AnyView {
         values: RwSignal::new(Values::new()),
         shares: RwSignal::new(BTreeMap::new()),
         share_set: RwSignal::new(Vec::new()),
+        run_as: RwSignal::new(None),
         folders: RwSignal::new(BTreeMap::new()),
         ports: RwSignal::new(BTreeMap::new()),
         publish: RwSignal::new(None),
@@ -489,6 +510,37 @@ fn folders(w: W) -> AnyView {
             .into_any()
         })
         .collect_view();
+    let run_as_view = d.run_as.then(|| {
+        let fid = crate::form::fid();
+        let err = Signal::derive(move || server.with(|s| s.get("run_as").cloned()));
+        let options = move || {
+            let choices = w.plan.with(|p| p.as_ref().map(|p| p.run_as_choices.clone()).unwrap_or_default());
+            let cur = w.run_as.get().map(Option::unwrap_or_default).unwrap_or_else(|| w.run_as_value().unwrap_or_default());
+            let mut v = vec![view! { <option value="" selected=cur.is_empty()>{tr("apps.w.run_as_apps")}</option> }.into_any()];
+            for u in choices {
+                let (sel, label) = (cur == u, u.clone());
+                v.push(view! { <option value=u selected=sel>{label}</option> }.into_any());
+            }
+            v
+        };
+        view! {
+            <fieldset class="sf-group">
+                <legend class="mini-title">{tr("apps.w.run_as")}</legend>
+                <div class="form">
+                    <div class="field">
+                        <label class="field-label" for=fid.clone()>{tr("apps.w.run_as")}</label>
+                        <select id=fid class="input" on:change=move |ev| {
+                            let v = event_target_value(&ev);
+                            w.run_as.set(Some((!v.is_empty()).then_some(v)));
+                            w.replan(None);
+                        }>{options}</select>
+                        <span class="field-help">{tr("apps.w.run_as_text")}</span>
+                        <span class="field-error" aria-live="polite">{move || err.get().map(|e| view! { <Icon icon=icons::CIRCLE_X size=12 />{ui::err_view(e)} })}</span>
+                    </div>
+                </div>
+            </fieldset>
+        }
+    });
     let set_view = d.share_set.clone().map(|ss| {
         let env = StoredValue::new(ss.env.clone());
         let target = StoredValue::new(ss.target.trim_end_matches('/').to_string());
@@ -534,6 +586,7 @@ fn folders(w: W) -> AnyView {
     let has_shares = !d.shares.is_empty() || d.share_set.is_some();
     view! {
         {ui::note(Tone::Info, icons::FOLDER, view! { {move || tf("apps.w.stack_dir", &[("path", &stack_dir.get())])} }.into_any())}
+        {run_as_view}
         {if d.folders.is_empty() && !has_shares {
             ui::empty_line("apps.w.no_folders")
         } else {
@@ -700,7 +753,14 @@ fn review(w: W) -> AnyView {
             {has_errors.then(|| ui::note(Tone::Err, icons::CIRCLE_X, view! { {tr("apps.w.errors")}<ul class="small app-list">{errors}</ul> }.into_any()))}
             {p.port_conflicts.iter().filter(|c| !c.relocatable).map(|c| ui::note(Tone::Err, icons::CIRCLE_X, ui::text(tf("apps.w.port_fixed_used", &[("port", &c.port.to_string())])))).collect_view()}
             {p.warnings.iter().map(|w| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t(warning_key(*w)).to_string()))).collect_view()}
-            {p.share_grants.iter().filter(|g| g.action == ShareGrantAction::Denied).map(|g| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(tf("apps.grant.denied", &[("share", g.share.as_deref().unwrap_or(&g.path))])))).collect_view()}
+            {p.share_grants.iter().filter(|g| g.action == ShareGrantAction::Denied).map(|g| {
+                let share = g.share.as_deref().unwrap_or(&g.path);
+                let text = match &g.user {
+                    Some(u) => tf("apps.grant.user.denied", &[("share", share), ("user", u)]),
+                    None => tf("apps.grant.denied", &[("share", share)]),
+                };
+                ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(text))
+            }).collect_view()}
             {(!matches!(p.ram, rynas_api_types::apps::RamGate::Ok)).then(|| view! { <div class="chips">{ram_pill(p.ram)}</div> })}
             {notes_view(&p.notes)}
             <dl class="kvs">
@@ -741,14 +801,19 @@ fn review(w: W) -> AnyView {
 /// What the install does so the apps' account can use a chosen shared folder.
 fn grant_text(g: &PlannedShareGrant) -> String {
     let access = t(if g.write { "apps.grant.rw" } else { "apps.grant.read" }).to_string();
-    let key = match g.action {
-        ShareGrantAction::Ok => "apps.grant.ok",
-        ShareGrantAction::Add => "apps.grant.add",
-        ShareGrantAction::Raise => "apps.grant.raise",
-        ShareGrantAction::Files => "apps.grant.files",
-        ShareGrantAction::Denied => "apps.grant.denied_short",
+    let key = match (g.action, g.user.is_some()) {
+        (ShareGrantAction::Ok, false) => "apps.grant.ok",
+        (ShareGrantAction::Add, false) => "apps.grant.add",
+        (ShareGrantAction::Raise, false) => "apps.grant.raise",
+        (ShareGrantAction::Files, false) => "apps.grant.files",
+        (ShareGrantAction::Denied, false) => "apps.grant.denied_short",
+        (ShareGrantAction::Ok, true) => "apps.grant.user.ok",
+        (ShareGrantAction::Add, true) => "apps.grant.user.add",
+        (ShareGrantAction::Raise, true) => "apps.grant.user.raise",
+        (ShareGrantAction::Files, true) => "apps.grant.user.files",
+        (ShareGrantAction::Denied, true) => "apps.grant.user.denied_short",
     };
-    tf(key, &[("access", &access)])
+    tf(key, &[("access", &access), ("user", g.user.as_deref().unwrap_or_default())])
 }
 
 // ------------------------------------------------------------------ install
