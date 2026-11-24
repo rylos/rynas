@@ -237,12 +237,28 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
             let close = Callback::new(move |_| rollback.set(None));
             let id = s.id.clone();
             let id2 = s.id.clone();
+            // what else the rollback touches (Syncthing folders paused, containers restarted)
+            let pv = RwSignal::new(None::<RollbackPreview>);
+            let pv_url = format!("/api/v1/snapshots/{}/preview-rollback", api::encode(&s.id));
+            spawn_local(async move {
+                if let Ok(p) = api::get::<RollbackPreview>(&pv_url).await {
+                    let _ = pv.try_set(Some(p));
+                }
+            });
+            let around = move || {
+                pv.get().map(|p| {
+                    view! {
+                        {(!p.syncthing_folders.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(tf("snap.rollback_syncthing", &[("folders", &p.syncthing_folders.join(", "))]))))}
+                        {(!p.restart_containers.is_empty()).then(|| ui::note(Tone::Info, icons::INFO, ui::text(tf("snap.rollback_restart", &[("list", &p.restart_containers.join(", "))]))))}
+                    }
+                })
+            };
             confirm(Confirm {
                 title: tf("snap.rollback_title", &[("id", &s.id)]),
                 text: t("snap.rollback_text").to_string(),
                 action: "snap.rollback",
                 danger: true,
-                extra: Some(view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("snap.rollback_nfs")}</p> }.into_any()),
+                extra: Some(view! { {around}<p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("snap.rollback_nfs")}</p> }.into_any()),
                 typed: Signal::stored(Some(id.clone())),
                 busy,
                 error,

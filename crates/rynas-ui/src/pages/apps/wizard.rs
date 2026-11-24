@@ -799,7 +799,7 @@ fn review(w: W) -> AnyView {
 }
 
 /// What the install does so the apps' account can use a chosen shared folder.
-fn grant_text(g: &PlannedShareGrant) -> String {
+pub(crate) fn grant_text(g: &PlannedShareGrant) -> String {
     let access = t(if g.write { "apps.grant.rw" } else { "apps.grant.read" }).to_string();
     let key = match (g.action, g.user.is_some()) {
         (ShareGrantAction::Ok, false) => "apps.grant.ok",

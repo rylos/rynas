@@ -507,11 +507,13 @@ fn ask_dialog(q: Ask, stack: String, ask: RwSignal<Option<Ask>>, close_drawer: C
         }
         Ask::Uninstall => {
             let del = RwSignal::new(false);
+            let grants_off = RwSignal::new(false);
             let url = inst_url(&stack, "/uninstall");
             let s2 = stack.clone();
+            let added = d.data.with_untracked(|x| x.as_ref().map(|x| x.app.added_grants.clone()).unwrap_or_default());
             let go = Callback::new(move |_| {
                 let dd = del.get_untracked();
-                let body = AppUninstallRequest { delete_data: dd, confirm: dd.then(|| s2.clone()) };
+                let body = AppUninstallRequest { delete_data: dd, confirm: dd.then(|| s2.clone()), remove_grants: grants_off.get_untracked() };
                 launch(url.clone(), serde_json::to_string(&body).ok(), busy, error, Callback::new(move |_| { ask.set(None); close_drawer.run(()); }));
             });
             let typed = stack.clone();
@@ -521,9 +523,30 @@ fn ask_dialog(q: Ask, stack: String, ask: RwSignal<Option<Ask>>, close_drawer: C
                     <span>{tr("apps.un.delete")}</span>
                 </label>
                 {move || del.get().then(|| ui::note(Tone::Err, icons::TRIANGLE_ALERT, ui::text(t("apps.un.delete_text").to_string())))}
+                {(!added.is_empty()).then(|| {
+                    let rows = added.iter().map(|g| {
+                        let who = match g.kind {
+                            rynas_api_types::PrincipalKind::User => tf("apps.un.grant_user", &[("name", &g.name)]),
+                            rynas_api_types::PrincipalKind::Group => tf("apps.un.grant_group", &[("name", &g.name)]),
+                        };
+                        let access = t(match g.access {
+                            rynas_api_types::Access::Rw => "perm.rw",
+                            rynas_api_types::Access::Ro => "perm.ro",
+                            rynas_api_types::Access::Deny => "perm.deny",
+                        });
+                        view! { <li><strong>{g.share.clone()}</strong>": "{who}" ("{access}")"</li> }
+                    }).collect_view();
+                    view! {
+                        <label class="check">
+                            <input type="checkbox" prop:checked=move || grants_off.get() on:change=move |ev| grants_off.set(event_target_checked(&ev)) />
+                            <span>{tr("apps.un.grants")}</span>
+                        </label>
+                        <ul class="small app-list">{rows}</ul>
+                        <p class="small muted">{tr("apps.un.grants_text")}</p>
+                    }
+                })}
             }
             .into_any();
-            let _ = d;
             ui::confirm(Confirm {
                 extra: Some(extra),
                 typed: Signal::derive(move || del.get().then(|| typed.clone())),

@@ -13,7 +13,7 @@
 
 mod catalog;
 mod installed;
-mod wizard;
+pub(crate) mod wizard;
 
 use leptos::prelude::*;
 use rynas_api_types::apps::{AppAntifeature, AppCard, AppCatalog, AppCategory, InstalledApp, RamGate};

@@ -3051,6 +3051,8 @@ snap.rollback_system	Riporta il sistema alla versione precedente (serve un riavv
 snap.rollback_title	Tornare allo snapshot {id}?
 snap.rollback_text	L'intera cartella condivisa torna a questo snapshot. Il contenuto attuale viene conservato, rinominato <cartella>.rynas-rollback-<ora>, finché non lo elimini.
 snap.rollback_nfs	I client NFS devono rimontare la cartella dopo l'operazione.
+snap.rollback_syncthing	Le cartelle di Syncthing in questa cartella condivisa vengono messe in pausa e restano in pausa dopo il ritorno alla versione precedente: {folders}. Controlla i file, poi riprendile in Syncthing; riprenderle invia lo stato ripristinato a tutti i dispositivi, eliminazioni comprese.
+snap.rollback_restart	Questi container vengono fermati per il ritorno alla versione precedente e riavviati dopo: {list}.
 snap.rolled_back	Tornato allo snapshot {id}
 snap.root_title	Riportare il sistema a {id}?
 snap.root_text	Al prossimo riavvio il sistema parte da questo punto di ripristino: pacchetti, kernel e impostazioni tornano a quel momento. Cartelle condivise e volumi dati non vengono toccati.
@@ -5176,6 +5178,10 @@ apps.un.title	Disinstallare {name}?
 apps.un.text	I container vengono rimossi. La cartella dello stack, i dati e gli snapshot restano sul disco, così l'app si può riavviare in seguito.
 apps.un.delete	Elimina anche i dati
 apps.un.delete_text	Elimina la cartella dello stack, i suoi snapshot e le cartelle che l'app ha messo altrove. Le cartelle condivise non vengono mai toccate.
+apps.un.grants	Rimuovi anche i permessi delle cartelle condivise aggiunti dall'app
+apps.un.grants_text	Disattivato: le voci restano e continuano a far entrare questo account nelle cartelle condivise, anche via SMB e NFS.
+apps.un.grant_user	utente {name}
+apps.un.grant_group	gruppo {name}
 apps.rb.text	L'app torna allo snapshot del {when}: file, dati nella cartella dello stack e versioni delle immagini. Prima viene creato uno snapshot dello stato attuale.
 apps.upd.app_version	Versione dell'app
 apps.upd.pkg_version	Pacchetto del catalogo
@@ -6192,7 +6198,8 @@ stg.errors_more	…e altri {n}
 stg.conflicts	Copie in conflitto: {n}
 stg.conflicts_gone	Le copie in conflitto viste sono già state rimosse.
 stg.conflicts_help	Due dispositivi hanno modificato lo stesso file: Syncthing li ha tenuti entrambi. Tieni la versione giusta ed elimina le copie.
-stg.shared_with	Condivisa con {n} dispositivi
+stg.shared_with.one	Condivisa con {n} dispositivo
+stg.shared_with.other	Condivisa con {n} dispositivi
 stg.dev_offline	Non connesso
 stg.dev_in_sync	Sincronizzato
 stg.dev_pct	{pct}, mancano {size}
@@ -6220,6 +6227,22 @@ stg.conflicts_alert	Avvisa per nuove copie in conflitto
 stg.conflicts_alert_help	Le copie in conflitto di una cartella sono raggruppate su 10 minuti in una notifica.
 stg.days_invalid	Un numero di giorni da 0 a {max}.
 stg.on	Attivo
+stg.days.one	{n} giorno senza connessione
+stg.days.other	{n} giorni senza connessione
+stg.ss.title	Cartelle condivise sincronizzate
+stg.ss.text	Ogni cartella condivisa qui è montata nell'app in /shares/<nome>; le cartelle di Syncthing stanno al loro interno.
+stg.ss.none	Nessuna cartella condivisa è ancora sincronizzata.
+stg.ss.add	Aggiungi
+stg.ss.add_label	Cartella condivisa da aggiungere
+stg.ss.remove	Rimuovi
+stg.ss.follows	segue lo sblocco
+stg.ss.add_title	Sincronizzare {share}?
+stg.ss.add_text	L'app viene riavviata con {share} montata in /shares/{share}.
+stg.ss.remove_title	Smettere di sincronizzare {share}?
+stg.ss.remove_text	L'app viene riavviata senza {share}: le cartelle di Syncthing al suo interno si fermano (mostrano un errore finché non torna). Non viene eliminato nulla, né sul NAS né sui dispositivi.
+stg.ss.removed	Non più montate: {list}
+stg.ss.apply	Applica
+stg.ss.done	Cartelle condivise di Syncthing modificate
 stg.off	Disattivato
 stg.ad.title	Adozione di un'istanza Syncthing esistente
 stg.ad.text	L'app Syncthing riprende identità, configurazione e database di un'istanza che girava altrove: i dispositivi restano abbinati e le cartelle non vengono risincronizzate da zero. La vecchia istanza viene spenta e i suoi file restano intatti.
@@ -6261,12 +6284,24 @@ stg.um.bad_path	Percorso non utilizzabile: resta in pausa
 stg.ad.will_pause	in pausa dopo l'adozione
 stg.ad.run_as_help	I file che arrivano dai dispositivi appartengono a questo utente del NAS.
 stg.ad.apps_account	L'account delle app
-stg.ad.owners	La maggior parte dei file sincronizzati appartiene a {user}; {n} elementi di primo livello hanno un altro proprietario.
+stg.ad.owners.one	La maggior parte dei file sincronizzati appartiene a {user}; {n} elemento di primo livello ha un altro proprietario.
+stg.ad.owners.other	La maggior parte dei file sincronizzati appartiene a {user}; {n} elementi di primo livello hanno un altro proprietario.
 stg.ad.uid	uid {uid} (nessun utente del NAS)
 stg.ad.stop	Spegni la vecchia istanza
 stg.ad.stop_help	È in esecuzione: due istanze con la stessa identità non devono mai girare insieme. Viene fermata e il suo avvio automatico disattivato.
 stg.ad.stignore	Pulisci i modelli da ignorare
-stg.ad.stignore_help	Toglie da .stignore i modelli di altri sistemi e ignora il cestino.
+stg.ad.stignore_help	Toglie da .stignore i modelli di altri sistemi e ignora il cestino. Un modello resta finché la cartella contiene cartelle di quel tipo. Le modifiche vengono annullate se l'adozione non riesce.
+stg.ad.grants	Permessi delle cartelle condivise
+stg.ad.grants_help	Ogni voce fa entrare questo account nella cartella condivisa anche via SMB e NFS.
+stg.grant.also	Questo apre {share} a {who} anche via SMB e NFS.
+stg.grant.apps	l'account delle app (docker-apps)
+stg.ad.compose	Questo container fa parte del progetto compose {project} ({dir}). rynas rimuove il container dopo l'adozione; rimuovi il progetto dallo strumento che lo gestisce, altrimenti avvia una seconda istanza con lo stesso ID dispositivo.
+stg.ad.compose_nodir	Questo container fa parte del progetto compose {project}. rynas rimuove il container dopo l'adozione; rimuovi il progetto dallo strumento che lo gestisce, altrimenti avvia una seconda istanza con lo stesso ID dispositivo.
+stg.ad.gui_tls	La vecchia istanza serviva la propria interfaccia in HTTPS: la copia lo disattiva, e il proxy di rynas serve l'interfaccia in HTTPS.
+stg.ad.listen	La vecchia istanza attende i dispositivi su altri indirizzi: {list}. L'app pubblica solo la porta 22000, quindi devono tornare al valore predefinito.
+stg.ad.reset_listen	Riporta al predefinito gli indirizzi di ascolto della sincronizzazione
+stg.ad.reset_listen_help	I dispositivi che chiamavano un indirizzo fisso ritrovano il NAS con la scoperta o con la porta predefinita.
+stg.ad.kept	resta: la cartella contiene cartelle di quel tipo
 stg.ad.stignore_changes	Modifiche a .stignore
 stg.ad.go	Adotta
 stg.ad.done	Syncthing adottato
@@ -6285,6 +6320,10 @@ nev.syncthing.down.body	L'app {stack} è in esecuzione ma la sua interfaccia non
 nev.syncthing.up.title	Syncthing risponde di nuovo
 nev.syncthing.folder_kept_paused.title	La cartella Syncthing {folder} resta in pausa
 nev.syncthing.folder_kept_paused.body	Dopo lo sblocco di {share} il marcatore della cartella (.stfolder) non è stato trovato: rynas non l'ha ripresa. Controlla la cartella, poi riprendila in Syncthing.
+nev.syncthing.duplicate_stopped.title	È stato fermato un secondo Syncthing con l'ID dispositivo di {stack}
+nev.syncthing.duplicate_stopped.body	{what} usava la cartella home del Syncthing adottato come {stack} ({home}) o il suo ID dispositivo: due istanze con lo stesso ID dispositivo non devono mai essere in esecuzione. rynas l'ha fermato e ne ha disattivato il riavvio; rimuovilo.
+nev.syncthing.compose_leftover.title	Rimuovi il progetto compose {project}
+nev.syncthing.compose_leftover.body	Il Syncthing adottato come {stack} veniva da un container del progetto compose {project} ({dir}). rynas ha rimosso il container; rimuovi il progetto dallo strumento che lo gestisce, altrimenti un compose up lì avvia una seconda istanza con lo stesso ID dispositivo.
 err.pairing_invalid	Il codice di abbinamento non è più valido.
 err.pairing_rejected	L'abbinamento è stato rifiutato sul NAS.
 err.pairing_expired	L'abbinamento è scaduto prima dell'approvazione.

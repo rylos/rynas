@@ -12,10 +12,11 @@
 //! Adding devices and folders stays in Syncthing's own interface ("Open Syncthing").
 
 mod adopt;
+mod shares;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::apps::InstalledAppDetail;
+use rynas_api_types::apps::{InstalledApp, InstalledAppDetail, PlannedShareGrant, ShareGrantAction};
 use rynas_api_types::syncthing::{MAX_UNSEEN_DAYS, SyncthingDevice, SyncthingFolder, SyncthingSettings, SyncthingState};
 
 use crate::api;
@@ -48,6 +49,10 @@ struct Page {
     open: RwSignal<Option<String>>,
     adopt: RwSignal<bool>,
     settings: RwSignal<bool>,
+    /// The installed app as Apps knows it (share set), read with `open`.
+    app: RwSignal<Option<InstalledApp>>,
+    /// Bumped to read the app again (after a share set change).
+    app_gen: RwSignal<u32>,
 }
 
 impl Page {
@@ -89,18 +94,31 @@ impl Page {
 pub fn SyncthingPage() -> impl IntoView {
     let st = Remote::<SyncthingState>::new(state_url(None));
     crate::live::poll(POLL, move || st.reload());
-    let pg = Page { st, busy: RwSignal::new(None), folds: Folds::new(), open: RwSignal::new(None), adopt: RwSignal::new(false), settings: RwSignal::new(false) };
-    // the app's address, read again only when the installed stack changes
+    let pg = Page {
+        st,
+        busy: RwSignal::new(None),
+        folds: Folds::new(),
+        open: RwSignal::new(None),
+        adopt: RwSignal::new(false),
+        settings: RwSignal::new(false),
+        app: RwSignal::new(None),
+        app_gen: RwSignal::new(0),
+    };
+    // the app's address and share set, read again only when the installed stack changes
+    // (or after a change of the share set)
     let stack = Memo::new(move |_| st.data.with(|s| s.as_ref().and_then(|s| s.installed.as_ref().map(|i| i.stack.clone()))));
     Effect::new(move |_| {
+        pg.app_gen.track();
         let Some(stack) = stack.get() else {
             pg.open.set(None);
+            pg.app.set(None);
             return;
         };
         spawn_local(async move {
             let url = format!("/api/v1/apps/installed/{}", api::encode(&stack));
             if let Ok(d) = api::get::<InstalledAppDetail>(&url).await {
                 let _ = pg.open.try_set(super::apps::open_href(&d.app));
+                let _ = pg.app.try_set(Some(d.app));
             }
         });
     });
@@ -132,6 +150,18 @@ fn content(pg: Page) -> AnyView {
         let notes = if up { share_notes(&s) } else { None };
         let folders = up.then(|| folders_card(pg, &s));
         let devices = up.then(|| devices_card(&s));
+        let set_card = move || {
+            pg.app.get().filter(|a| a.stack == inst.stack).map(|a| {
+                shares::card(
+                    a.stack.clone(),
+                    a.share_set.clone(),
+                    Callback::new(move |_| {
+                        pg.app_gen.update(|g| *g += 1);
+                        pg.st.reload();
+                    }),
+                )
+            })
+        };
         let settings = settings_card(pg, &s.settings);
         view! {
             <div class="grid">
@@ -142,6 +172,7 @@ fn content(pg: Page) -> AnyView {
                 </section>
                 {notes}
                 {folders}
+                {set_card}
                 {devices}
                 {settings}
             </div>
@@ -247,6 +278,37 @@ fn share_notes(s: &SyncthingState) -> Option<AnyView> {
                     <a href="/snapshots">{tr("stg.to_snapshots")}</a>
                 }.into_any())).collect_view()}
             </div>
+        }
+        .into_any(),
+    )
+}
+
+/// The share permission entries a change adds or raises (adoption, share set change): what
+/// each does, and that it also opens the share over SMB and NFS. `None` when there are none.
+pub(super) fn grants_view(grants: &[PlannedShareGrant]) -> Option<AnyView> {
+    let changing: Vec<&PlannedShareGrant> = grants.iter().filter(|g| matches!(g.action, ShareGrantAction::Add | ShareGrantAction::Raise | ShareGrantAction::Denied)).collect();
+    if changing.is_empty() {
+        return None;
+    }
+    let rows = changing
+        .into_iter()
+        .map(|g| {
+            let share = g.share.clone().unwrap_or_else(|| g.path.clone());
+            let who = g.user.clone().unwrap_or_else(|| t("stg.grant.apps").to_string());
+            let also = (g.action != ShareGrantAction::Denied).then(|| tf("stg.grant.also", &[("share", &share), ("who", &who)]));
+            view! {
+                <li>
+                    <strong>{share.clone()}</strong>": "{super::apps::wizard::grant_text(g)}
+                    {also.map(|a| view! { <span class="cell-sub">{a}</span> })}
+                </li>
+            }
+        })
+        .collect_view();
+    Some(
+        view! {
+            <h4 class="mini-title">{tr("stg.ad.grants")}</h4>
+            <ul class="small app-list">{rows}</ul>
+            <p class="small muted">{tr("stg.ad.grants_help")}</p>
         }
         .into_any(),
     )
@@ -384,7 +446,7 @@ fn folder_view(pg: Page, f: SyncthingFolder) -> AnyView {
                 view! { <li class="stg-dev"><span>{c.name.clone()}" "<span class="muted mono">{c.id_short.clone()}</span></span>{ui::status(tone, text)}</li> }
             })
             .collect_view();
-        sub_fold(pg.folds, format!("{id}:devices"), tf("stg.shared_with", &[("n", &i18n::count(f.completion.len() as u64))]), false, view! { <ul class="plain-list small stg-lines">{rows}</ul> }.into_any())
+        sub_fold(pg.folds, format!("{id}:devices"), i18n::tn("stg.shared_with", f.completion.len() as u64, &[]), false, view! { <ul class="plain-list small stg-lines">{rows}</ul> }.into_any())
     });
     let paused = f.paused;
     let locked = f.locked;
@@ -480,7 +542,7 @@ fn devices_card(s: &SyncthingState) -> AnyView {
 // ------------------------------------------------------------------ settings
 
 fn settings_card(pg: Page, set: &SyncthingSettings) -> AnyView {
-    let days = if set.device_unseen_days == 0 { t("stg.off").to_string() } else { tf("pcb.age.d", &[("n", &i18n::count(set.device_unseen_days as u64))]) };
+    let days = if set.device_unseen_days == 0 { t("stg.off").to_string() } else { i18n::tn("stg.days", set.device_unseen_days as u64, &[]) };
     let conflicts = t(if set.conflicts_alert { "stg.on" } else { "stg.off" }).to_string();
     view! {
         <section class="card widget w-12">

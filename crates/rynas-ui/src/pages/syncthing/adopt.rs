@@ -8,12 +8,12 @@ use leptos::task::spawn_local;
 use rynas_api_types::UserView;
 use rynas_api_types::syncthing::{
     AdoptCandidate, AdoptDatabase, AdoptFolder, AdoptSourceKind, AdoptSourceRef, AdoptVolume, MarkerState, SyncthingAdoptPreview,
-    SyncthingAdoptPreviewRequest, SyncthingAdoptRequest, UnmappedReason,
+    SyncthingAdoptPreviewRequest, SyncthingAdoptRequest, RUN_AS_APPS, UnmappedReason,
 };
 
 use crate::api;
 use crate::form::{In, SaveBar, form_error, save_bar_with, spinner, switch, text_field};
-use crate::i18n::{t, tf, tr};
+use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::tasks::{self, tasks};
 use crate::toast::toast;
@@ -47,6 +47,8 @@ struct Adopt {
     run_as: RwSignal<Option<String>>,
     stop_source: RwSignal<bool>,
     stignore: RwSignal<bool>,
+    /// Set custom sync listen addresses back to `default`.
+    reset_listen: RwSignal<bool>,
     checking: RwSignal<bool>,
     busy: RwSignal<bool>,
     error: RwSignal<Option<String>>,
@@ -85,8 +87,9 @@ impl Adopt {
             let _ = self.checking.try_set(false);
             match r {
                 Ok(p) => {
+                    // the proposal, once; from then on the choice stays (the apps' account too)
                     if self.run_as.get_untracked().is_none() {
-                        let _ = self.run_as.try_set(p.run_as.clone());
+                        let _ = self.run_as.try_set(p.run_as.clone().or_else(|| Some(RUN_AS_APPS.to_string())));
                     }
                     let _ = self.preview.try_set(Some(p));
                 }
@@ -105,6 +108,7 @@ impl Adopt {
         self.preview.set(None);
         self.run_as.set(None);
         self.stop_source.set(false);
+        self.reset_listen.set(false);
         self.error.set(None);
         if !path {
             self.check();
@@ -116,7 +120,11 @@ impl Adopt {
     }
 
     fn can_adopt(self) -> bool {
-        self.preview.with(|p| p.as_ref().is_some_and(|p| p.ok)) && (!self.running() || self.stop_source.get()) && !self.checking.get()
+        let listen = self.preview.with(|p| p.as_ref().is_some_and(|p| !p.listen_addresses.is_empty()));
+        self.preview.with(|p| p.as_ref().is_some_and(|p| p.ok))
+            && (!self.running() || self.stop_source.get())
+            && (!listen || self.reset_listen.get())
+            && !self.checking.get()
     }
 }
 
@@ -133,6 +141,7 @@ pub(super) fn dialog(close: Callback<()>, done: Callback<()>) -> AnyView {
         run_as: RwSignal::new(None),
         stop_source: RwSignal::new(false),
         stignore: RwSignal::new(false),
+        reset_listen: RwSignal::new(false),
         checking: RwSignal::new(false),
         busy: RwSignal::new(false),
         error: RwSignal::new(None),
@@ -166,6 +175,7 @@ pub(super) fn dialog(close: Callback<()>, done: Callback<()>) -> AnyView {
             apply_stignore: a.stignore.get_untracked(),
             stack: None,
             run_as: a.run_as.get_untracked(),
+            reset_listen: a.reset_listen.get_untracked(),
         };
         a.busy.set(true);
         a.error.set(None);
@@ -384,16 +394,18 @@ fn preview_view(a: Adopt, p: SyncthingAdoptPreview, users: Remote<Vec<UserView>>
     let files = &p.files;
     let id_files = files.cert && files.key && files.config;
     let rows = p.folders.iter().map(folder_row).collect::<Vec<_>>();
-    let changes: Vec<(String, Vec<String>, Vec<String>)> =
-        p.folders.iter().filter_map(|f| f.stignore.as_ref().map(|s| (f.label.clone(), s.removed.clone(), s.added.clone()))).collect();
+    let changes: Vec<(String, rynas_api_types::syncthing::StignoreProposal)> =
+        p.folders.iter().filter_map(|f| f.stignore.as_ref().map(|s| (f.label.clone(), s.clone()))).collect();
     let stignore = (!changes.is_empty()).then(|| {
         let list = changes
             .into_iter()
-            .map(|(label, removed, added)| {
+            .map(|(label, s)| {
+                let (removed, added, kept) = (s.removed, s.added, s.kept);
                 let lines = removed
                     .into_iter()
                     .map(|l| view! { <li class="diff-old mono">"− "{l}</li> }.into_any())
                     .chain(added.into_iter().map(|l| view! { <li class="diff-new mono">"+ "{l}</li> }.into_any()))
+                    .chain(kept.into_iter().map(|l| view! { <li><span class="mono">"  "{l}</span>" "<span class="muted">{tr("stg.ad.kept")}</span></li> }.into_any()))
                     .collect_view();
                 view! { <li><strong>{label}</strong><ul class="plain-list small stg-lines">{lines}</ul></li> }
             })
@@ -409,32 +421,50 @@ fn preview_view(a: Adopt, p: SyncthingAdoptPreview, users: Remote<Vec<UserView>>
         let names: Vec<String> = users.data.with(|u| u.as_ref().map(|u| u.iter().map(|x| x.user.name.clone()).collect()).unwrap_or_default());
         let mut names = names;
         if let Some(cur) = a.run_as.get()
+            && cur != RUN_AS_APPS
             && !names.contains(&cur)
         {
             names.insert(0, cur);
         }
         let help = owners.as_ref().map(|o| {
             let who = o.user.clone().unwrap_or_else(|| tf("stg.ad.uid", &[("uid", &o.uid.to_string())]));
-            tf("stg.ad.owners", &[("user", &who), ("n", &o.others.to_string())])
+            i18n::tn("stg.ad.owners", o.others as u64, &[("user", &who)])
         });
         view! {
             <div class="field">
                 <label class="field-label" for=id.clone()>{tr("sch.f.user")}</label>
                 <select id=id class="input" disabled=move || a.checking.get() on:change=move |ev| {
-                    let v = event_target_value(&ev);
-                    a.run_as.set((!v.is_empty()).then_some(v));
+                    a.run_as.set(Some(event_target_value(&ev)));
                     a.check();
                 }>
-                    <option value="" selected=move || a.run_as.with(Option::is_none)>{tr("stg.ad.apps_account")}</option>
+                    <option value=RUN_AS_APPS selected=move || a.run_as.with(|r| r.as_deref().is_none_or(|r| r == RUN_AS_APPS))>{tr("stg.ad.apps_account")}</option>
                     {names.into_iter().map(|n| { let (v, val) = (n.clone(), n.clone()); view! { <option value=val selected=move || a.run_as.with(|r| r.as_deref() == Some(v.as_str()))>{n}</option> } }).collect_view()}
                 </select>
                 <span class="field-help">{tr("stg.ad.run_as_help")}{help.map(|h| view! { " "{h} })}</span>
             </div>
         }
     };
+    let compose = p.compose.clone().map(|c| {
+        let text = match &c.working_dir {
+            Some(dir) => tf("stg.ad.compose", &[("project", &c.project), ("dir", dir)]),
+            None => tf("stg.ad.compose_nodir", &[("project", &c.project)]),
+        };
+        ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(text))
+    });
+    let tls = p.gui_tls_off.then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("stg.ad.gui_tls").to_string())));
+    let listen = (!p.listen_addresses.is_empty()).then(|| {
+        let text = tf("stg.ad.listen", &[("list", &p.listen_addresses.join(", "))]);
+        view! {
+            {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(text))}
+            {switch("stg.ad.reset_listen", Some("stg.ad.reset_listen_help"), a.reset_listen.into(), Callback::new(move |v| a.reset_listen.set(v)))}
+        }
+    });
+    let grants = super::grants_view(&p.grants);
     view! {
         <h3 class="sec-head">{tr("stg.ad.preview")}</h3>
         {problems}
+        {compose}
+        {tls}
         <dl class="kvs">
             {p.home.clone().map(|h| ui::kv("users.home", ui::breakable(&h, "mono")))}
             {ui::kv_text("stg.ad.identity", t(if id_files { "stg.ad.identity_ok" } else { "stg.ad.identity_missing" }).to_string(), "")}
@@ -447,8 +477,10 @@ fn preview_view(a: Adopt, p: SyncthingAdoptPreview, users: Remote<Vec<UserView>>
         } else {
             ui::table("", &["stg.ad.col.folder", "stg.ad.col.from", "stg.ad.col.to", "stg.ad.col.state"], rows)
         }}
+        {grants}
         <div class="form">
             {run_as}
+            {listen}
             {running.then(|| switch("stg.ad.stop", Some("stg.ad.stop_help"), a.stop_source.into(), Callback::new(move |v| a.stop_source.set(v))))}
             {stignore}
         </div>
