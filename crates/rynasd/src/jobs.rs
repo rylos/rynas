@@ -203,8 +203,9 @@ pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>
                 .into_iter()
                 .find(|j| j.name == *job)
                 .ok_or_else(|| not_found(format!("applied snapshot job {job}")))?;
-            // targets that follow the snapshots transfer inside rynasd
-            if j.replicas.iter().any(|r| r.enabled && r.after_snapshots) {
+            // targets that follow the snapshots transfer inside rynasd; pinned snapshots
+            // need rynas's own pruning after the run (spawn_snapshot)
+            if j.replicas.iter().any(|r| r.enabled && r.after_snapshots) || !pinned_of(&j).is_empty() {
                 return Ok(None);
             }
             let dir = j.snapshot_dir.clone();
@@ -322,6 +323,39 @@ async fn next_line(feed: &mut Option<JournalFeed>) -> Option<String> {
     }
 }
 
+/// The pinned snapshots (Storage > Space) of a job: absolute paths in its snapshot folder.
+fn pinned_of(j: &SnapshotsJobRef) -> std::collections::BTreeSet<String> {
+    let dir = std::path::Path::new(&j.snapshot_dir);
+    crate::space::pins::get()
+        .map(|p| p.all())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| std::path::Path::new(p).parent() == Some(dir))
+        .collect()
+}
+
+type SnapshotsJobRef = rynas_api_types::snapshots::SnapshotJob;
+
+/// Deletes what the job's retention would delete now, except the pinned snapshots (under
+/// the job's lock, never the newest); the names deleted.
+fn prune_except(
+    state_dir: &std::path::Path,
+    j: &SnapshotsJobRef,
+    pinned: &std::collections::BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    let dir = std::path::Path::new(&j.snapshot_dir);
+    let mut gone = Vec::new();
+    for n in crate::snapshots::would_prune(state_dir, j)? {
+        if pinned.contains(&dir.join(&n).display().to_string()) {
+            continue;
+        }
+        if rynas_btrfs::scan::delete(dir, &j.name, &n, &rynas_btrfs::scan::lock_path(&j.name)).is_ok() {
+            gone.push(n);
+        }
+    }
+    Ok(gone)
+}
+
 /// Task `snapshot.run`: `btrbk -c /etc/rynas/btrbk/<job>.conf run --format=raw`, with a
 /// summary of what it created and deleted.
 pub async fn spawn_snapshot(p: &Arc<Protection>, job: &str, user: &str) -> Res<String> {
@@ -346,8 +380,13 @@ pub async fn spawn_snapshot(p: &Arc<Protection>, job: &str, user: &str) -> Res<S
             tokio::task::spawn_blocking(move || host.host().ensure_dir(&dir))
                 .await
                 .map_err(|e| e.to_string())??;
-            // `run`, or `snapshot` when the job has replica targets (they transfer after)
-            let cmd = rynas_btrfs::replication::snapshot_cmd(&j, SNAPSHOT_TIMEOUT);
+            // `run`, or `snapshot` when the job has replica targets (they transfer after);
+            // with pinned snapshots btrbk deletes none and rynas prunes the rest below
+            let pinned = pinned_of(&j);
+            let mut cmd = rynas_btrfs::replication::snapshot_cmd(&j, SNAPSHOT_TIMEOUT);
+            if !pinned.is_empty() {
+                cmd = cmd.arg("--preserve-snapshots");
+            }
             ctx.log(&format!("$ {}", cmd.display()));
             let out = cmd
                 .run(Some(ctx.token()), None)
@@ -369,11 +408,22 @@ pub async fn spawn_snapshot(p: &Arc<Protection>, job: &str, user: &str) -> Res<S
             if !out.success() {
                 return Err(format!("btrbk exited with code {:?}", out.code));
             }
+            let mut deleted = r.deleted.len();
+            if !pinned.is_empty() {
+                let (sd, j2) = (p.state_dir.clone(), j.clone());
+                let gone = tokio::task::spawn_blocking(move || prune_except(&sd, &j2, &pinned))
+                    .await
+                    .map_err(|e| e.to_string())??;
+                for n in &gone {
+                    ctx.log(&format!("deleted {n} (retention; pinned snapshots kept)"));
+                }
+                deleted += gone.len();
+            }
             ctx.log(&format!(
                 "snapshot job {}: {} created, {} deleted",
                 j.name,
                 r.created.len(),
-                r.deleted.len()
+                deleted
             ));
             // targets that follow the snapshots: their failures notify on their own and
             // never fail the snapshot run

@@ -540,6 +540,35 @@ async fn preview_retention(
     ))
 }
 
+/// Names `btrbk prune` would delete now with `job`'s retention: a dry run of the job's
+/// configuration without its lock line (used after a run with `--preserve-snapshots`, when
+/// pinned snapshots must stay and rynas deletes the rest itself).
+pub(crate) fn would_prune(state_dir: &FsPath, job: &SnapshotJob) -> Result<Vec<String>, String> {
+    let conf: String = render_conf(job)
+        .map_err(|e| e.to_string())?
+        .lines()
+        .filter(|l| !l.starts_with("lockfile"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let dir = state_dir.join("tmp");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = tempfile_in(&dir, &conf).map_err(|e| e.to_string())?;
+    let out = Cmd::new("btrbk")
+        .arg("-c")
+        .arg(&file)
+        .args(["prune", "-n", "--format=raw"])
+        .env_clear()
+        .timeout(std::time::Duration::from_secs(60))
+        .output_blocking();
+    let _ = std::fs::remove_file(&file);
+    let out = out.map_err(|e| format!("btrbk: {e}"))?;
+    let r = parse_report(&out.stdout);
+    if !out.success() || !r.errors.is_empty() {
+        return Err(format!("btrbk prune: {} {}", r.errors.join("; "), out.stderr.trim()));
+    }
+    Ok(r.deleted)
+}
+
 /// A private file with `text` (mode 0600, unique name).
 fn tempfile_in(dir: &FsPath, text: &str) -> std::io::Result<PathBuf> {
     use std::io::Write;
@@ -597,7 +626,9 @@ fn sources(c: &SnapshotsConfig) -> Vec<Located> {
             system: false,
         })
         .collect();
-    if c.system.enabled {
+    // restore points stay listed (and deletable) while new ones are off: turning them off
+    // must not hide the space the old ones hold
+    {
         v.push(Located {
             job: c.system.prefix.clone(),
             share: None,
@@ -661,6 +692,7 @@ async fn list(
                         uuid: s.info.as_ref().and_then(|i| i.uuid.clone()),
                         parent_uuid: s.info.as_ref().and_then(|i| i.parent_uuid.clone()),
                         received_uuid: s.info.as_ref().and_then(|i| i.received_uuid.clone()),
+                        pinned: crate::space::pins::is_pinned(&s.path),
                         deletion: s.deletion,
                     }
                 }));
@@ -1004,6 +1036,9 @@ async fn snapshot_delete(
                 error_codes::CONFLICT,
                 format!("{i} is kept: {}", scan::refusal(s.deletion)),
             ));
+        }
+        if crate::space::pins::is_pinned(&s.path) {
+            return Err(conflict(error_codes::CONFLICT, format!("{i} is pinned: unpin it first")));
         }
         Ok(l)
     })

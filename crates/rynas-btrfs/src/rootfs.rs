@@ -629,6 +629,8 @@ impl RootOps for HostRoot {
                 prefix: &self.prefix,
                 keep: self.keep,
                 reasons: Some(&self.reasons),
+                // take_always never prunes
+                pinned: None,
             },
             reason,
             now_s,

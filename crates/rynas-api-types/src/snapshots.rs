@@ -236,6 +236,9 @@ pub struct SnapshotInfo {
     /// `reason` as a code; `other` for free text, shown as it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<RestorePointReason>,
+    /// Pinned in Space (`POST /api/v1/space/pin`): nothing removes it, not even the retention.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
 }
 
 /// Why a system restore point was taken ([`SnapshotInfo::reason_code`]).

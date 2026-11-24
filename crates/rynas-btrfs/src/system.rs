@@ -51,6 +51,9 @@ pub struct SystemSnapshot<'a> {
     pub keep: u32,
     /// Reasons log; `None`: not recorded.
     pub reasons: Option<&'a Path>,
+    /// Absolute paths of pinned snapshots (Storage > Space): the retention never deletes
+    /// them, and they do not count against `keep`.
+    pub pinned: Option<&'a std::collections::BTreeSet<String>>,
 }
 
 /// Takes a restore point now (`now_s`) for `reason`.
@@ -130,9 +133,10 @@ fn take_with(
         return Ok(Taken::Created { name, pruned });
     }
     let all = scan::scan(s.snapshot_dir, s.prefix)?;
+    let pinned = |x: &scan::Snapshot| s.pinned.is_some_and(|p| p.contains(&x.path.display().to_string()));
     let ro: Vec<_> = all
         .iter()
-        .filter(|x| x.info.as_ref().is_some_and(|i| i.readonly))
+        .filter(|x| x.info.as_ref().is_some_and(|i| i.readonly) && !pinned(x))
         .collect();
     for old in ro.iter().skip(s.keep.max(1) as usize) {
         if old.name != name && ioctl::destroy_subvolume(&dir, &old.name).is_ok() {
@@ -248,6 +252,7 @@ mod tests {
             prefix: "rootfs",
             keep: 3,
             reasons: None,
+            pinned: None,
         };
         assert!(matches!(take(&s, "apt", 0), Err(SnapError::Refused(_))));
     }

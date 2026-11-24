@@ -835,12 +835,15 @@ fn snapshot_system(a: SnapshotAction) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let reasons = system::reasons_path(&state_dir);
+    // pinned restore points (Storage > Space) are never pruned
+    let pinned = rynasd::space::pins::read(&rynasd::space::pins::file(&state_dir));
     let s = SystemSnapshot {
         subvolume: &subvolume,
         snapshot_dir: &snapshot_dir,
         prefix: &prefix,
         keep,
         reasons: Some(&reasons),
+        pinned: Some(&pinned),
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
