@@ -954,7 +954,7 @@ Model (types in `rynas_api_types::notify`):
 - **Target** {smtp (lettre; STARTTLS, TLS or none; auth), ntfy (title/priority as URL
   parameters, Bearer token or basic auth), telegram (bot API), gotify (`X-Gotify-Key`),
   webhook (GET/POST/PUT, header and body templates, default JSON body), ui (the notification
-  center: no external delivery)}. A default `Web interface` target exists. Secrets are
+  center: no external delivery), device (Web Push to a paired phone, RFC 8291 `aes128gcm`; made and removed with the phone's push subscription, `../phase2/mobile-devices.md` §4)}. A default `Web interface` target exists. Secrets are
   write-only (`secrets: {name: value|null}`; the answer lists the names that are set), sealed in
   the database with an age X25519 key (`notify/secret.key`, root 0600), redacted from error
   messages, never logged; HTTP errors are reported without their URL (Telegram tokens live in it).
@@ -1999,6 +1999,7 @@ Unix seconds.
 | GET | `/api/v1/devices` | session | — | `Vec<Device>` (own; administrators everyone's) |
 | PATCH / DELETE | `/api/v1/devices/{id}` | session (owner or administrator) | `DeviceRename` {name} | `Device` / 204 (revoked at once) |
 | GET / PATCH / DELETE | `/api/v1/devices/self` | bearer | `DeviceRename` | `DeviceSelf` (device + `tls_pins` + `endpoints`) / `Device` / 204 |
+| PUT / DELETE | `/api/v1/devices/self/push` | bearer | `PushSubscription` {endpoint, p256dh, auth} | `Device` (`push: true`) / 204; makes / removes the device's `device` notification target and its rule (warning and above) |
 
 Every other route accepts `Authorization: Bearer <access token>` in place of the cookie, with
 no CSRF, as the device's user and role (`require_session`; no excluded route in v1, list

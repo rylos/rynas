@@ -192,6 +192,7 @@ pub fn routes() -> Router<AppState> {
         .route("/devices/pairing/{id}/reject", post(pairing_reject))
         .route("/devices", get(list))
         .route("/devices/self", get(self_get).patch(self_patch).delete(self_delete))
+        .route("/devices/self/push", axum::routing::put(push_put).delete(push_delete))
         .route("/devices/{id}", axum::routing::patch(rename).delete(revoke))
 }
 
@@ -635,6 +636,46 @@ async fn self_delete(
 ) -> Result<StatusCode, Error> {
     let id = current_device(&s).ok_or_else(device_only)?.to_string();
     revoke_device(&st, &s, &id, "self").await
+}
+
+/// `PUT /devices/self/push`: the device's Web Push subscription (rynasd checks it and makes
+/// the device's notification target).
+async fn push_put(
+    State(st): State<AppState>,
+    Extension(CurrentSession(s)): Extension<CurrentSession>,
+    body: Result<Json<rynas_api_types::devices::PushSubscription>, JsonRejection>,
+) -> Result<Json<Device>, Error> {
+    let id = current_device(&s).ok_or_else(device_only)?.to_string();
+    let Json(sub) = body?;
+    let mut d: Device = st
+        .rynasd
+        .call(
+            Method::PUT,
+            &format!("/v1/devices/{}/push", enc(&id)),
+            Some(&s.user.username),
+            Some(&sub),
+        )
+        .await?;
+    st.devices.merge(&mut d);
+    d.current = true;
+    Ok(Json(d))
+}
+
+async fn push_delete(
+    State(st): State<AppState>,
+    Extension(CurrentSession(s)): Extension<CurrentSession>,
+) -> Result<StatusCode, Error> {
+    let id = current_device(&s).ok_or_else(device_only)?.to_string();
+    let () = st
+        .rynasd
+        .call(
+            Method::DELETE,
+            &format!("/v1/devices/{}/push", enc(&id)),
+            Some(&s.user.username),
+            None::<&()>,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Every [`SWEEP_EVERY`]: finished pairings dropped (devices approved and never picked up

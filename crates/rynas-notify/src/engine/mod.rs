@@ -24,6 +24,7 @@ mod db;
 pub mod matcher;
 pub mod secrets;
 pub mod template;
+pub mod webpush;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
@@ -76,6 +77,8 @@ pub struct EngineOptions {
     pub imports: Vec<crate::ImportedSettings>,
     /// Events waiting for ingestion (then [`Notifier::emit`] drops them).
     pub queue: usize,
+    /// Tests only: `device` targets may push to `http://127.0.0.1…` (a fake push service).
+    pub push_loopback_http: bool,
 }
 
 impl EngineOptions {
@@ -93,6 +96,7 @@ impl EngineOptions {
             tick: Duration::from_secs(60),
             imports: Vec::new(),
             queue: 256,
+            push_loopback_http: false,
         }
     }
 }
@@ -176,6 +180,8 @@ struct Inner {
     /// Events per source in the current minute: (minute, count). At most 256 sources.
     sources: Mutex<HashMap<String, (u64, u32)>>,
     last_purge: Mutex<u64>,
+    /// The paired devices' push subscriptions (rynasd's device store), for `device` targets.
+    push: std::sync::OnceLock<Arc<dyn webpush::PushDirectory>>,
 }
 
 impl Notifier for Engine {
@@ -339,6 +345,7 @@ impl Engine {
             buckets: Mutex::new(HashMap::new()),
             sources: Mutex::new(HashMap::new()),
             last_purge: Mutex::new(0),
+            push: std::sync::OnceLock::new(),
         }));
         e.reload_rules().map_err(std::io::Error::other)?;
         for imp in e.0.o.imports.clone() {
@@ -357,6 +364,15 @@ impl Engine {
 
     fn now(&self) -> u64 {
         (self.0.o.clock)()
+    }
+
+    /// Where `device` targets find their push subscription (set once, by rynasd).
+    pub fn set_push_directory(&self, dir: Arc<dyn webpush::PushDirectory>) {
+        let _ = self.0.push.set(dir);
+    }
+
+    fn push_dir(&self) -> Option<&dyn webpush::PushDirectory> {
+        self.0.push.get().map(|p| p.as_ref())
     }
 
     /// The host was renamed: later messages name it with `name`.
@@ -839,6 +855,8 @@ impl Engine {
                 config: &g.config,
                 language: g.language,
                 secrets: &g.secrets,
+                push: self.push_dir(),
+                push_loopback_http: self.0.o.push_loopback_http,
             };
             let r = channels::send(self.http(), &self.0.tpl, &dest, &msg).await;
             if r.is_ok() {
@@ -1371,6 +1389,17 @@ impl Engine {
                 }
             }
             TargetConfig::Ui {} => {}
+            TargetConfig::Device { device_id } => {
+                let ok = device_id.starts_with("d_")
+                    && device_id.len() <= 64
+                    && device_id[2..].bytes().all(|b| b.is_ascii_hexdigit());
+                if !ok {
+                    return bad("device: not a device id");
+                }
+                if !req.secrets.is_empty() {
+                    return bad("device: no secrets (the subscription is in the device store)");
+                }
+            }
         }
         if req.secrets.len() > 16 {
             return bad("at most 16 secrets");
@@ -1566,6 +1595,8 @@ impl Engine {
             config: &view.config,
             language: view.language,
             secrets: &secrets,
+            push: self.push_dir(),
+            push_loopback_http: self.0.o.push_loopback_http,
         };
         let started = std::time::Instant::now();
         let r = channels::send(self.http(), &self.0.tpl, &dest, &msg).await;

@@ -941,3 +941,155 @@ async fn retention_keeps_open_conditions() {
         .unwrap();
     assert_eq!((n.id, n.count), (open.id, 2));
 }
+
+// ------------------------------------------------------------------- push to mobile devices
+
+/// Requests a fake push service received: line, headers (lower-case names), raw body.
+type PushRequests = Arc<Mutex<Vec<(String, Vec<(String, String)>, Vec<u8>)>>>;
+
+/// A fake push service: keeps each request's line, headers and raw body.
+struct FakePush {
+    url: String,
+    reqs: PushRequests,
+    status: Arc<AtomicU16>,
+}
+
+async fn fake_push() -> FakePush {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let reqs: PushRequests = Arc::default();
+    let status = Arc::new(AtomicU16::new(201));
+    let (r, s) = (reqs.clone(), status.clone());
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = l.accept().await {
+            let (r, s) = (r.clone(), s.clone());
+            tokio::spawn(async move {
+                let mut rd = BufReader::new(sock);
+                let mut line = String::new();
+                rd.read_line(&mut line).await.unwrap();
+                let mut headers = Vec::new();
+                loop {
+                    let mut h = String::new();
+                    rd.read_line(&mut h).await.unwrap();
+                    let h = h.trim_end().to_string();
+                    if h.is_empty() {
+                        break;
+                    }
+                    let (k, v) = h.split_once(':').unwrap();
+                    headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+                }
+                let len: usize = headers
+                    .iter()
+                    .find(|(k, _)| k == "content-length")
+                    .map(|(_, v)| v.parse().unwrap())
+                    .unwrap_or(0);
+                let mut body = vec![0; len];
+                rd.read_exact(&mut body).await.unwrap();
+                r.lock().unwrap().push((line.trim_end().to_string(), headers, body));
+                let code = s.load(Ordering::SeqCst);
+                let resp = format!("HTTP/1.1 {code} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                rd.into_inner().write_all(resp.as_bytes()).await.unwrap();
+            });
+        }
+    });
+    FakePush { url, reqs, status }
+}
+
+/// The user agent's keys of RFC 8291 Appendix A.
+const UA_SECRET: &str = "q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94";
+const UA_PUBLIC: &str = "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
+const UA_AUTH: &str = "BTBZMqHH6r4Tts7J_aSIgg";
+
+fn b64u(s: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).unwrap()
+}
+
+#[derive(Default)]
+struct Directory {
+    sub: Mutex<Option<rynas_api_types::devices::PushSubscription>>,
+    gone: Mutex<Vec<String>>,
+}
+
+impl rynas_notify::engine::webpush::PushDirectory for Directory {
+    fn subscription(&self, _device_id: &str) -> Option<rynas_api_types::devices::PushSubscription> {
+        self.sub.lock().unwrap().clone()
+    }
+    fn gone(&self, device_id: &str) {
+        self.gone.lock().unwrap().push(device_id.to_string());
+        *self.sub.lock().unwrap() = None;
+    }
+}
+
+fn device_target(id: &str) -> TargetRequest {
+    TargetRequest {
+        name: "Pixel".into(),
+        enabled: true,
+        language: NotifyLanguage::EN,
+        config: TargetConfig::Device {
+            device_id: id.into(),
+        },
+        secrets: BTreeMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn device_targets_push_encrypted_messages() {
+    use rynas_api_types::devices::{PushPayload, PushSubscription};
+    use rynas_notify::engine::webpush;
+    let push = fake_push().await;
+    let e = env_with(|o| o.push_loopback_http = true);
+    let dir = Arc::new(Directory::default());
+    *dir.sub.lock().unwrap() = Some(PushSubscription {
+        endpoint: format!("{}/upXYZ?up=1", push.url),
+        p256dh: UA_PUBLIC.into(),
+        auth: UA_AUTH.into(),
+    });
+    e.engine.set_push_directory(dir.clone());
+    // a device target has no secrets and names a device id
+    let mut bad = device_target("d_00ff");
+    bad.secrets.insert("token".into(), Some("x".into()));
+    assert!(matches!(e.engine.create_target(&bad), Err(NotifyError::Invalid(_))));
+    assert!(matches!(e.engine.create_target(&device_target("x/../y")), Err(NotifyError::Invalid(_))));
+    let t = e.engine.create_target(&device_target("d_00ff")).unwrap();
+    assert_eq!(t.config.kind(), "device");
+    e.engine
+        .create_rule(&NotifyRule {
+            min_severity: NotifySeverity::Warning,
+            ..rule(vec![t.id])
+        })
+        .unwrap();
+
+    let n = e.engine.ingest(disk_failing(NotifySeverity::Critical), false).unwrap().unwrap();
+    assert_eq!(e.engine.deliver_due().await.unwrap(), 1);
+    let reqs = std::mem::take(&mut *push.reqs.lock().unwrap());
+    assert_eq!(reqs.len(), 1);
+    let (line, headers, body) = &reqs[0];
+    assert!(line.starts_with("POST /upXYZ?up=1 "), "{line}");
+    let h = |k: &str| headers.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+    assert_eq!(h("content-encoding"), Some("aes128gcm"));
+    assert_eq!(h("ttl"), Some("86400"));
+    assert_eq!(h("urgency"), Some("high"));
+    let secret: [u8; 32] = b64u(UA_SECRET).try_into().unwrap();
+    let plain = webpush::decrypt(&secret, &b64u(UA_AUTH), body).unwrap();
+    let p: PushPayload = serde_json::from_slice(&plain).unwrap();
+    assert_eq!((p.v, p.id, p.title.as_str()), (1, n.id, "Disk sda failing"));
+    assert_eq!((p.severity.as_str(), p.category.as_str(), p.source.as_str()), ("critical", "storage", "storage"));
+    assert!(plain.len() <= rynas_api_types::devices::PUSH_MAX_PAYLOAD);
+
+    // a test message goes out with normal urgency
+    let r = e.engine.test_target(t.id, "admin").await.unwrap();
+    assert!(r.ok, "{:?}", r.error);
+    let reqs = std::mem::take(&mut *push.reqs.lock().unwrap());
+    assert_eq!(reqs[0].1.iter().find(|(n, _)| n == "urgency").map(|(_, v)| v.as_str()), Some("normal"));
+
+    // the push service forgot the subscription: dropped, the message counts as handled
+    push.status.store(410, Ordering::SeqCst);
+    let warn = event::oneshot(NotifyCategory::System, NotifySeverity::Warning, "test", "t:1", "Fan noisy");
+    e.engine.ingest(warn, false).unwrap();
+    e.engine.deliver_due().await.unwrap();
+    assert_eq!(*dir.gone.lock().unwrap(), vec!["d_00ff".to_string()]);
+    e.advance(2 * 3_600_000);
+    assert_eq!(e.engine.deliver_due().await.unwrap(), 0);
+    assert_eq!(push.reqs.lock().unwrap().len(), 1, "no retry after a 410");
+}

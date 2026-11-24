@@ -473,6 +473,10 @@ const SECURITY: &[(&str, &str)] = &[("starttls", "nt.sec.starttls"), ("tls", "nt
 const METHODS: &[(&str, &str)] = &[("post", "nt.m.post"), ("put", "nt.m.put"), ("get", "nt.m.get")];
 
 fn kind_key(kind: &str) -> &'static str {
+    if kind == "device" {
+        // made with a phone's push subscription, never chosen by hand: not in KINDS
+        return "nt.kind.device";
+    }
     KINDS.iter().find(|(k, _)| *k == kind).map(|(_, l)| *l).unwrap_or("nt.kind.ui")
 }
 
@@ -499,6 +503,8 @@ pub struct SecretEdit {
 /// A target as the editor holds it (flat text fields for every kind).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TargetDraft {
+    /// A `device` target's device (kept as it is: such targets follow a phone).
+    pub device_id: String,
     pub id: Option<u64>,
     pub name: String,
     pub enabled: bool,
@@ -584,6 +590,7 @@ impl TargetDraft {
                 d.body = body.clone().unwrap_or_default();
             }
             TargetConfig::Ui {} => {}
+            TargetConfig::Device { device_id } => d.device_id = device_id.clone(),
         }
         d.kind = t.config.kind().into();
         d.secrets = t.secrets.iter().map(|n| SecretEdit { name: n.clone(), set: true, ..Default::default() }).collect();
@@ -668,6 +675,7 @@ impl TargetDraft {
                     body: (!self.body.trim().is_empty()).then(|| self.body.clone()),
                 }
             }
+            "device" if !self.device_id.is_empty() => TargetConfig::Device { device_id: self.device_id.clone() },
             _ => TargetConfig::Ui {},
         })
     }
@@ -710,6 +718,7 @@ fn target_summary(c: &TargetConfig) -> String {
         TargetConfig::Gotify { server } => server.clone(),
         TargetConfig::Webhook { url, .. } => url.clone(),
         TargetConfig::Ui {} => String::new(),
+        TargetConfig::Device { .. } => t("nt.device_summary").to_string(),
     }
 }
 

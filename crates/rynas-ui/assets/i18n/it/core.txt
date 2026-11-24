@@ -6339,3 +6339,5 @@ nev.device.power.title	Alimentazione del sistema dal dispositivo {device}: {acti
 nev.device.power.action.restart	riavvio
 nev.device.power.action.shutdown	spegnimento
 nev.device.power.action.cancel	annullato
+nt.kind.device	Dispositivo mobile
+nt.device_summary	Push al telefono abbinato

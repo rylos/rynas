@@ -1510,6 +1510,8 @@ fn main() -> std::io::Result<()> {
                 Arc::new(SystemClock),
             ) {
                 Ok(d) => {
+                    // push to the devices: `device` targets of the notification engine
+                    d.bind_engine(engine.clone());
                     rynasd::devices::spawn_watch(d.clone());
                     state.devices = Some(d);
                 }

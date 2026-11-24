@@ -3160,6 +3160,8 @@ dict! { BLOB, LENS;
     "nt.kind.gotify" => "Gotify";
     "nt.kind.webhook" => "Webhook";
     "nt.kind.ui" => "Web interface";
+    "nt.kind.device" => "Mobile device";
+    "nt.device_summary" => "Push to the paired phone";
     "nt.kind.ui_help" => "Events are always listed in the notification center: as a rule target this means no external delivery.";
     "nt.sec.starttls" => "STARTTLS (port 587)";
     "nt.sec.tls" => "TLS (port 465)";

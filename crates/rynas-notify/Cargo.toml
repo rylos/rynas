@@ -14,6 +14,7 @@ default = ["engine"]
 engine = [
     "dep:rusqlite", "dep:minijinja", "dep:age", "dep:lettre", "dep:reqwest", "dep:regex-lite",
     "dep:tokio", "dep:sha2", "dep:jiff", "dep:rynas-tz",
+    "dep:p256", "dep:hkdf", "dep:sha2-hkdf", "dep:aes-gcm", "dep:getrandom", "dep:base64",
 ]
 
 [dependencies]
@@ -37,6 +38,15 @@ lettre = { version = "0.11.23", optional = true, default-features = false, featu
 reqwest = { version = "0.13.5", optional = true, default-features = false, features = [
     "native-tls-no-alpn",
 ] }
+
+# Web Push to paired mobile devices (RFC 8291 `aes128gcm`): the versions already in the tree
+# (age, hpke); hkdf 0.12 goes with sha2 0.10
+p256 = { version = "0.13.2", optional = true, default-features = false, features = ["ecdh", "pkcs8"] }
+hkdf = { version = "0.12.4", optional = true }
+sha2-hkdf = { package = "sha2", version = "0.10.9", optional = true }
+aes-gcm = { version = "0.10.3", optional = true, default-features = false, features = ["aes", "alloc"] }
+getrandom = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

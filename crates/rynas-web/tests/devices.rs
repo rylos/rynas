@@ -432,6 +432,38 @@ async fn expired_codes_reauth_and_refused_accounts() {
     assert!(list.iter().any(|x| x.user == "guest"));
 }
 
+#[tokio::test]
+async fn push_registration() {
+    let rig = rig().await;
+    let app = &rig.app;
+    let creds = app.login().await;
+    let ok = pair(&rig, &creds, &Phone::new()).await;
+    let sub = json!({
+        "endpoint": "https://ntfy.example.org/upXYZ?up=1",
+        "p256dh": "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+        "auth": "BTBZMqHH6r4Tts7J_aSIgg",
+    });
+    let r = bearer(app, Method::PUT, "/api/v1/devices/self/push", &ok.access_token, Some(sub.clone())).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    assert!(r.json::<Device>().push);
+    let list: Vec<Device> = app.get("/api/v1/devices", &creds).await.json();
+    assert!(list[0].push);
+    // plain http is refused, with the field
+    let mut http = sub.clone();
+    http["endpoint"] = json!("http://ntfy.example.org/up");
+    let r = bearer(app, Method::PUT, "/api/v1/devices/self/push", &ok.access_token, Some(http)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let e: rynas_api_types::ApiError = r.json();
+    assert_eq!((e.code.as_str(), e.field.as_deref()), (error_codes::INVALID_VALUE, Some("endpoint")));
+    // a web session has no push subscription of its own
+    let r = app.send(Method::PUT, "/api/v1/devices/self/push", &creds, Some(sub)).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    let r = bearer(app, Method::DELETE, "/api/v1/devices/self/push", &ok.access_token, None).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT);
+    let list: Vec<Device> = app.get("/api/v1/devices", &creds).await.json();
+    assert!(!list[0].push);
+}
+
 /// rynas-web with a fake rynasd that records each request (path and body) and answers `{}`.
 async fn recording_rig() -> (TestApp, Arc<Mutex<Vec<(Method, String, String)>>>, TempDir) {
     let dir = tempfile::tempdir().unwrap();

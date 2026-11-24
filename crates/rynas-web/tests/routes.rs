@@ -47,6 +47,7 @@ const INTERNAL: &[(&str, &str)] = &[
     ("/v1/devices/register", "rynas-web's pairing approval"),
     ("/v1/devices/refresh", "rynas-web's /auth/device/refresh, after its rate limit"),
     ("/v1/devices/{id}/self", "rynas-web's /devices/self (the device from its bearer token)"),
+    ("/v1/devices/{id}/push", "rynas-web's /devices/self/push (the device from its bearer token)"),
 ];
 
 /// One `.route(...)` of rynasd: its path and the methods it answers.

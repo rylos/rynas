@@ -220,6 +220,35 @@ pub struct DeviceRename {
     pub name: String,
 }
 
+/// `PUT /api/v1/devices/self/push` (bearer): the device's Web Push subscription (its
+/// UnifiedPush endpoint). `endpoint` https only; `p256dh` the 65-byte uncompressed P-256
+/// point, `auth` 16 bytes, both b64u.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PushSubscription {
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+}
+
+/// Largest push payload (plaintext JSON, before encryption); the body is shortened to fit.
+pub const PUSH_MAX_PAYLOAD: usize = 3072;
+/// Longest endpoint URL accepted.
+pub const PUSH_MAX_ENDPOINT: usize = 2048;
+
+/// The plaintext of a push message: the app posts it as a notification and dedupes by `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PushPayload {
+    pub v: u32,
+    /// The notification's id.
+    pub id: u64,
+    pub title: String,
+    pub body: String,
+    pub severity: String,
+    pub category: String,
+    pub source: String,
+    pub ts_ms: u64,
+}
+
 /// The name of a device as stored: trimmed, control characters dropped, 1-[`MAX_NAME`]
 /// characters; `None` when nothing is left.
 pub fn clean_name(raw: &str) -> Option<String> {

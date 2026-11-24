@@ -1,6 +1,6 @@
 # Mobile devices: pairing, device tokens, push (M1)
 
-Status: M1a implemented 2026-11-24 (pairing, tokens, management, UI); M1b push follows. The protocol comes from the Android app's project
+Status: M1a (pairing, tokens, management, UI) and M1b (push) implemented 2026-11-24. The protocol comes from the Android app's project
 (`rynas-apk/docs/pairing-protocol.md` v1, background in its `research-security-architecture.md`
 §1-3); this document records how rynas implements it and where it differs.
 
@@ -117,6 +117,24 @@ Bearer checks happen where `require_session` runs, without a round trip to rynas
 - Payload (UTF-8 JSON, at most 3 KiB, the body shortened to fit):
   `{v: 1, id, title, body, severity, category, source, ts_ms}`.
 - No VAPID in v1 (ntfy does not need it); added if a distributor requires it.
+
+As implemented (`rynas_notify::engine::webpush`, `crates/rynasd/src/devices.rs`):
+
+- The subscription lives in the device record (`push`), not in the engine: the target's
+  config is only `{kind: "device", device_id}`, no secrets; the engine asks rynasd's device
+  store through the `PushDirectory` trait at each delivery. `PUT …/self/push` validates the
+  subscription (https endpoint without user info, at most 2048 characters; `p256dh` a point
+  on the curve; `auth` 16 bytes; 400 `invalid_value` with `field`), stores it, and creates the
+  target and its rule once, both named `<device name> · <last 6 characters of the id>` (names
+  are unique in the engine); a rename of the device renames the target; `DELETE …/self/push`,
+  a revocation or a 404/410 of the push service remove the target from every rule (a rule
+  left without targets goes) and then the target. The endpoint is never logged.
+- One push message per event of a delivery (the app dedupes by `id`); a test message from the
+  notification settings is pushed like an event. A 404/410 counts as handled (no retry);
+  other HTTP answers and network errors follow the engine's retry.
+- Fresh server key and salt per message (OS random source); the RFC 8291 Appendix A vector
+  and a round trip are unit tests; an engine test delivers to a fake push service on
+  loopback (`EngineOptions::push_loopback_http`, tests only) and decrypts what it received.
 
 ## 5. Events
 

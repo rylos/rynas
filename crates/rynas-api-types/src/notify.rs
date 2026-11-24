@@ -428,6 +428,10 @@ pub enum TargetConfig {
     /// The notification center of the web interface: every event is listed there anyway;
     /// as a rule target it means "no external delivery".
     Ui {},
+    /// A paired mobile device: Web Push (RFC 8291) to its push subscription, which the device
+    /// store keeps (`docs/phase2/mobile-devices.md` §4). Created and removed with the
+    /// subscription; never made by hand.
+    Device { device_id: String },
 }
 
 impl TargetConfig {
@@ -439,6 +443,7 @@ impl TargetConfig {
             Self::Gotify { .. } => "gotify",
             Self::Webhook { .. } => "webhook",
             Self::Ui {} => "ui",
+            Self::Device { .. } => "device",
         }
     }
 }

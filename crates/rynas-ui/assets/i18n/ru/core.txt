@@ -6401,3 +6401,5 @@ nev.device.power.title	Питание системы с устройства {de
 nev.device.power.action.restart	перезагрузка
 nev.device.power.action.shutdown	выключение
 nev.device.power.action.cancel	отменено
+nt.kind.device	Мобильное устройство
+nt.device_summary	Push на сопряжённый телефон

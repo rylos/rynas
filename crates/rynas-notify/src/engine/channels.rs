@@ -27,6 +27,10 @@ pub struct Dest<'a> {
     pub config: &'a TargetConfig,
     pub language: NotifyLanguage,
     pub secrets: &'a BTreeMap<String, String>,
+    /// The paired devices' push subscriptions (`device` targets).
+    pub push: Option<&'a dyn super::webpush::PushDirectory>,
+    /// Tests only ([`super::EngineOptions::push_loopback_http`]).
+    pub push_loopback_http: bool,
 }
 
 pub fn http_client() -> reqwest::Client {
@@ -52,6 +56,7 @@ pub async fn send(
         TargetConfig::Gotify { .. } => gotify(http, d, msg).await,
         TargetConfig::Webhook { .. } => webhook(http, tpl, d, msg).await,
         TargetConfig::Ui {} => Ok(()),
+        TargetConfig::Device { device_id } => device(http, d, msg, device_id).await,
     };
     r.map_err(|e| {
         let mut e = redact(&e, d.secrets);
@@ -211,6 +216,59 @@ async fn gotify(http: &reqwest::Client, d: &Dest<'_>, msg: &Message) -> Result<(
         .post(url(server, "message")?)
         .header("X-Gotify-Key", token);
     check(json_body(req, &body).send().await).await
+}
+
+/// A paired device: one push message per event (the app posts each as a notification and
+/// dedupes by id). A subscription the push service no longer knows (404/410) is dropped and
+/// the message counts as handled.
+async fn device(
+    http: &reqwest::Client,
+    d: &Dest<'_>,
+    msg: &Message,
+    device_id: &str,
+) -> Result<(), String> {
+    use super::webpush;
+    use rynas_api_types::devices::PushPayload;
+    let dir = d.push.ok_or("mobile devices are not available")?;
+    let sub = dir
+        .subscription(device_id)
+        .ok_or("the device has no push subscription")?;
+    let sub = webpush::parse_subscription_with(&sub, d.push_loopback_http).map_err(str::to_string)?;
+    let mut payloads: Vec<PushPayload> = msg
+        .events
+        .iter()
+        .map(|e| PushPayload {
+            v: 1,
+            id: e.id,
+            title: format!("{}{}", e.prefix, e.title),
+            body: e.body.clone(),
+            severity: e.severity.into(),
+            category: e.category.into(),
+            source: e.source.clone(),
+            ts_ms: e.ts_ms,
+        })
+        .collect();
+    if payloads.is_empty() {
+        payloads.push(PushPayload {
+            v: 1,
+            title: msg.subject.clone(),
+            body: msg.text.clone(),
+            severity: msg.severity.as_str().into(),
+            ..Default::default()
+        });
+    }
+    for p in payloads {
+        let urgency = webpush::urgency(&p.severity);
+        match webpush::post(http, &sub, &webpush::payload_json(p), urgency).await? {
+            webpush::Delivery::Accepted => {}
+            webpush::Delivery::Gone => {
+                tracing::info!("push subscription of device {device_id} is gone: dropped");
+                dir.gone(device_id);
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The JSON document a webhook gets without a body template.

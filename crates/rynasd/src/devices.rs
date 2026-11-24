@@ -25,6 +25,12 @@
 //! | PATCH | `/v1/devices/{id}` | `DeviceRename` | `Device` (owner or administrator) |
 //! | DELETE | `/v1/devices/{id}?reason=user\|self` | | 204 (owner or administrator) |
 //! | GET | `/v1/devices/{id}/self` | | `DeviceSelf` (the owner: `devices/self` of the app) |
+//! | PUT | `/v1/devices/{id}/push` | `PushSubscription` | `Device` (the owner); creates the `device` notification target and its rule (warning and above) |
+//! | DELETE | `/v1/devices/{id}/push` | | 204 (the owner); removes the target |
+//!
+//! Push: the subscription is kept with the device; the notification engine's `device` target
+//! names the device and finds the subscription through [`PushDirectory`]; a 404/410 of the
+//! push service drops it. Revoking a device removes its target.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -36,12 +42,15 @@ use std::time::Duration;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use rynas_api_types::devices::internal::{RefreshCheck, RefreshOk, Register, Sid, Trust};
 use rynas_api_types::devices::{
-    Device, DeviceRename, DeviceSelf, INACTIVE_EXPIRY_DAYS, REFRESH_GRACE_S, clean_name, clean_text,
+    Device, DeviceRename, DeviceSelf, INACTIVE_EXPIRY_DAYS, PushSubscription, REFRESH_GRACE_S,
+    clean_name, clean_text,
 };
+use rynas_api_types::notify::{NotifyLanguage, NotifyRule, NotifySeverity, TargetConfig, TargetRequest};
+use rynas_notify::engine::webpush::{PushDirectory, parse_subscription};
 use rynas_api_types::error_codes;
 use rynas_auth::Clock;
 use rynas_auth::backend::BoxFuture;
@@ -107,6 +116,10 @@ struct Record {
     prev_sha: Option<String>,
     #[serde(default)]
     prev_until_ms: u64,
+    /// The Web Push subscription (endpoint, keys of the app): what the `device` notification
+    /// target of this device delivers to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    push: Option<PushSubscription>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -125,9 +138,39 @@ pub struct DevicesSvc {
     account: AccountCheck,
     trust: TrustProvider,
     clock: Arc<dyn Clock>,
+    /// The notification engine: one `device` target per push subscription.
+    engine: std::sync::OnceLock<rynas_notify::engine::Engine>,
 }
 
 pub type DevState = Option<Arc<DevicesSvc>>;
+
+/// The engine's view of the push subscriptions ([`PushDirectory`]).
+struct PushDir(std::sync::Weak<DevicesSvc>);
+
+impl PushDirectory for PushDir {
+    fn subscription(&self, device_id: &str) -> Option<PushSubscription> {
+        let svc = self.0.upgrade()?;
+        let reg = svc.lock();
+        reg.devices
+            .iter()
+            .find(|d| d.id == device_id)
+            .and_then(|d| d.push.clone())
+    }
+
+    fn gone(&self, device_id: &str) {
+        let Some(svc) = self.0.upgrade() else { return };
+        let id = device_id.to_string();
+        // called from the delivery loop: the store and the engine's database off its thread
+        tokio::task::spawn_blocking(move || svc.push_gone(&id));
+    }
+}
+
+/// The name of a device's notification target and rule: its name and the end of its id
+/// (names are unique in the engine; two phones may share a name).
+fn target_name(device_id: &str, name: &str) -> String {
+    let tail = &device_id[device_id.len().saturating_sub(6)..];
+    format!("{name} · {tail}")
+}
 
 fn audit(msg: std::fmt::Arguments) {
     tracing::info!(target: "rynas::audit", "devices: {msg}");
@@ -258,9 +301,162 @@ impl DevicesSvc {
             account,
             trust,
             clock,
+            engine: std::sync::OnceLock::new(),
         });
         svc.sid()?;
         Ok(svc)
+    }
+
+    /// Ties the devices to the notification engine: `device` targets find their subscription
+    /// here, and subscriptions create and remove their targets.
+    pub fn bind_engine(self: &Arc<Self>, engine: rynas_notify::engine::Engine) {
+        engine.set_push_directory(Arc::new(PushDir(Arc::downgrade(self))));
+        let _ = self.engine.set(engine);
+    }
+
+    /// The `device` target of `device_id`, with a rule for warnings and above, unless it
+    /// exists (blocking: the engine's database).
+    fn ensure_target(&self, device_id: &str, name: &str) {
+        let Some(e) = self.engine.get() else { return };
+        let targets = e.targets().unwrap_or_default();
+        let mine = |c: &TargetConfig| matches!(c, TargetConfig::Device { device_id: d } if d == device_id);
+        if targets.iter().any(|t| mine(&t.config)) {
+            return;
+        }
+        let req = TargetRequest {
+            name: target_name(device_id, name),
+            enabled: true,
+            language: NotifyLanguage::default(),
+            config: TargetConfig::Device {
+                device_id: device_id.to_string(),
+            },
+            secrets: Default::default(),
+        };
+        match e.create_target(&req) {
+            Ok(t) => {
+                let rule = NotifyRule {
+                    name: target_name(device_id, name),
+                    enabled: true,
+                    min_severity: NotifySeverity::Warning,
+                    targets: vec![t.id],
+                    ..Default::default()
+                };
+                if let Err(err) = e.create_rule(&rule) {
+                    tracing::warn!("devices: the rule of {device_id}: {err}");
+                }
+            }
+            Err(err) => tracing::warn!("devices: the notification target of {device_id}: {err}"),
+        }
+    }
+
+    /// Removes the `device` target of `device_id`: out of every rule (a rule left without
+    /// targets goes too), then the target itself.
+    fn remove_target(&self, device_id: &str) {
+        let Some(e) = self.engine.get() else { return };
+        let ids: Vec<u64> = e
+            .targets()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| matches!(&t.config, TargetConfig::Device { device_id: d } if d == device_id))
+            .map(|t| t.id)
+            .collect();
+        for id in ids {
+            for r in e.rules().unwrap_or_default().into_iter().filter(|r| r.targets.contains(&id)) {
+                let mut left = r.clone();
+                left.targets.retain(|t| *t != id);
+                let res = if left.targets.is_empty() {
+                    e.delete_rule(r.id)
+                } else {
+                    e.update_rule(r.id, &left).map(|_| ())
+                };
+                if let Err(err) = res {
+                    tracing::warn!("devices: rule {} of {device_id}: {err}", r.id);
+                }
+            }
+            if let Err(err) = e.delete_target(id) {
+                tracing::warn!("devices: the notification target of {device_id}: {err}");
+            }
+        }
+    }
+
+    /// The device's new name on its notification target.
+    fn rename_target(&self, device_id: &str, name: &str) {
+        let Some(e) = self.engine.get() else { return };
+        for t in e.targets().unwrap_or_default() {
+            if matches!(&t.config, TargetConfig::Device { device_id: d } if d == device_id) {
+                let req = TargetRequest {
+                    name: target_name(device_id, name),
+                    enabled: t.enabled,
+                    language: t.language,
+                    config: t.config.clone(),
+                    secrets: Default::default(),
+                };
+                if let Err(err) = e.update_target(t.id, &req) {
+                    tracing::warn!("devices: the notification target of {device_id}: {err}");
+                }
+            }
+        }
+    }
+
+    /// `PUT …/self/push`: the device's subscription, and its notification target.
+    pub fn set_push(&self, who: &str, id: &str, sub: PushSubscription) -> Res<Device> {
+        if let Err(m) = parse_subscription(&sub) {
+            let field = m.split(':').next().unwrap_or("endpoint");
+            return Err(Error::invalid(field, m));
+        }
+        let sub = PushSubscription {
+            endpoint: sub.endpoint.trim().to_string(),
+            ..sub
+        };
+        let view = {
+            let mut reg = self.lock();
+            let r = reg
+                .devices
+                .iter_mut()
+                .find(|d| d.id == id && d.user == who)
+                .ok_or_else(not_found)?;
+            r.push = Some(sub);
+            let view = Self::view(r);
+            self.save(&reg)?;
+            view
+        };
+        // the endpoint is a capability: never in the log
+        audit(format_args!("{who} registered push for {id} ({})", view.name));
+        self.ensure_target(id, &view.name);
+        Ok(view)
+    }
+
+    /// `DELETE …/self/push`: no more push to this device.
+    pub fn clear_push(&self, who: &str, id: &str) -> Res<()> {
+        {
+            let mut reg = self.lock();
+            let r = reg
+                .devices
+                .iter_mut()
+                .find(|d| d.id == id && d.user == who)
+                .ok_or_else(not_found)?;
+            if r.push.take().is_some() {
+                self.save(&reg)?;
+            }
+        }
+        audit(format_args!("{who} removed push of {id}"));
+        self.remove_target(id);
+        Ok(())
+    }
+
+    /// The push service no longer knows the subscription (404/410).
+    fn push_gone(&self, id: &str) {
+        {
+            let mut reg = self.lock();
+            if let Some(r) = reg.devices.iter_mut().find(|d| d.id == id)
+                && r.push.take().is_some()
+                && let Err(e) = self.save(&reg)
+            {
+                tracing::error!("devices: {}", e.2);
+            }
+        }
+        audit(format_args!("push subscription of {id} gone: dropped"));
+        self.remove_target(id);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Registry> {
@@ -300,7 +496,7 @@ impl DevicesSvc {
             key_hash: b64u_decode(&r.public_key)
                 .map(|k| key_hash(&k))
                 .unwrap_or_default(),
-            push: false,
+            push: r.push.is_some(),
             current: false,
         }
     }
@@ -347,6 +543,7 @@ impl DevicesSvc {
             refresh_sha: r.refresh_sha.clone(),
             prev_sha: None,
             prev_until_ms: 0,
+            push: None,
         };
         let view = Self::view(&rec);
         {
@@ -393,6 +590,9 @@ impl DevicesSvc {
             audit(format_args!("{who} renamed {id} from {old} to {}", view.name));
             self.notifier
                 .emit(device_renamed(&view.user, id, &old, &view.name));
+            if view.push {
+                self.rename_target(id, &view.name);
+            }
         }
         Ok(view)
     }
@@ -416,6 +616,9 @@ impl DevicesSvc {
         audit(format_args!("{who} revoked {} ({}) of {}: {reason}", rec.id, rec.name, rec.user));
         self.notifier
             .emit(device_revoked(&rec.user, &rec.id, &rec.name, reason));
+        if rec.push.is_some() {
+            self.remove_target(&rec.id);
+        }
         Ok(())
     }
 
@@ -437,6 +640,9 @@ impl DevicesSvc {
             audit(format_args!("{} ({}) of {} revoked: {reason}", r.id, r.name, r.user));
             self.notifier
                 .emit(device_revoked(&r.user, &r.id, &r.name, reason));
+            if r.push.is_some() {
+                self.remove_target(&r.id);
+            }
         }
         gone.into_iter().map(|r| r.id).collect()
     }
@@ -502,6 +708,9 @@ impl DevicesSvc {
             );
             self.notifier
                 .emit(device_refresh_reuse(&rec.user, &rec.id, &rec.name, &clean_text(&c.ip)));
+            if rec.push.is_some() {
+                self.remove_target(&rec.id);
+            }
             return Err(revoked());
         }
         if current {
@@ -606,7 +815,31 @@ pub fn router(st: DevState) -> Router {
         .route("/v1/devices", get(list_get))
         .route("/v1/devices/{id}", patch(rename_patch).delete(revoke_delete))
         .route("/v1/devices/{id}/self", get(self_get))
+        .route("/v1/devices/{id}/push", put(push_put).delete(push_delete))
         .with_state(st)
+}
+
+async fn push_put(
+    State(st): State<DevState>,
+    h: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+    body: Result<Json<PushSubscription>, JsonRejection>,
+) -> Res<Json<Device>> {
+    let s = svc(&st)?;
+    let who = user(&h)?;
+    let Json(sub) = body?;
+    Ok(Json(blocking(move || s.set_push(&who, &id, sub)).await?))
+}
+
+async fn push_delete(
+    State(st): State<DevState>,
+    h: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Res<StatusCode> {
+    let s = svc(&st)?;
+    let who = user(&h)?;
+    blocking(move || s.clear_push(&who, &id)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn sid_get(State(st): State<DevState>) -> Res<Json<Sid>> {
@@ -941,6 +1174,70 @@ mod tests {
         assert!(r.svc.self_view("bob", &d.id).await.is_err());
         let t = r.svc.trust().await.unwrap();
         assert_eq!(t.endpoints, vec!["https://192.0.2.5:8443".to_string()]);
+    }
+
+    fn sub() -> PushSubscription {
+        PushSubscription {
+            endpoint: " https://ntfy.example.org/upXYZ?up=1 ".into(),
+            p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4".into(),
+            auth: "BTBZMqHH6r4Tts7J_aSIgg".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn push_subscriptions_make_and_remove_targets() {
+        let r = rig();
+        let engine = rynas_notify::engine::Engine::open(rynas_notify::engine::EngineOptions::new(
+            r._dir.path().join("notify"),
+            "nas",
+        ))
+        .unwrap();
+        r.svc.bind_engine(engine.clone());
+        let d = register(&r, "alice", &Key::new(), "A1");
+        let device_targets = || {
+            engine
+                .targets()
+                .unwrap()
+                .into_iter()
+                .filter(|t| matches!(t.config, TargetConfig::Device { .. }))
+                .collect::<Vec<_>>()
+        };
+        // checked: https, a point on the curve, 16 bytes of auth; only the owner
+        let mut bad = sub();
+        bad.endpoint = "http://ntfy.example.org/up".into();
+        let e = r.svc.set_push("alice", &d.id, bad).unwrap_err();
+        assert_eq!((e.1, e.3.as_deref()), (error_codes::INVALID_VALUE, Some("endpoint")));
+        let mut bad = sub();
+        bad.auth = "AAAA".into();
+        assert_eq!(r.svc.set_push("alice", &d.id, bad).unwrap_err().3.as_deref(), Some("auth"));
+        assert_eq!(r.svc.set_push("bob", &d.id, sub()).unwrap_err().0, StatusCode::NOT_FOUND);
+        assert!(r.svc.set_push("alice", &d.id, sub()).unwrap().push);
+        let t = device_targets();
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].name, format!("Phone · {}", &d.id[d.id.len() - 6..]));
+        let rules = engine.rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!((rules[0].min_severity, rules[0].targets.clone()), (NotifySeverity::Warning, vec![t[0].id]));
+        // the engine finds the subscription by the device id
+        let dir = PushDir(Arc::downgrade(&r.svc));
+        assert_eq!(dir.subscription(&d.id).unwrap().endpoint, "https://ntfy.example.org/upXYZ?up=1");
+        // a second registration keeps one target; a rename follows
+        r.svc.set_push("alice", &d.id, sub()).unwrap();
+        r.svc.rename("alice", &d.id, "Pixel").unwrap();
+        let t = device_targets();
+        assert_eq!(t.len(), 1);
+        assert!(t[0].name.starts_with("Pixel · "));
+        // unregistered: target and rule gone
+        r.svc.clear_push("alice", &d.id).unwrap();
+        assert!(device_targets().is_empty() && engine.rules().unwrap().is_empty());
+        assert!(!r.svc.list("alice")[0].push);
+        // gone at the push service, or the device revoked: the same
+        r.svc.set_push("alice", &d.id, sub()).unwrap();
+        r.svc.push_gone(&d.id);
+        assert!(device_targets().is_empty() && dir.subscription(&d.id).is_none());
+        r.svc.set_push("alice", &d.id, sub()).unwrap();
+        r.svc.revoke("alice", &d.id, "user").unwrap();
+        assert!(device_targets().is_empty() && engine.rules().unwrap().is_empty());
     }
 
     #[test]
