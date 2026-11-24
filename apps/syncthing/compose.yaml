@@ -10,6 +10,8 @@ services:
       PUID: "${PUID}"
       PGID: "${PGID}"
       TZ: "${TZ}"
+      # the REST key rynas uses (generated at install, kept in .env)
+      STGUIAPIKEY: "${ST_API_KEY}"
     ports:
       - "${RYNAS_BIND}:${WEB_PORT}:8384"
       - "${SYNC_TCP_PORT}:22000/tcp"
@@ -17,7 +19,7 @@ services:
       - "${DISCOVERY_PORT}:21027/udp"
     volumes:
       - ${CONFIG_FOLDER}:/var/syncthing
-      - ${SYNC_SHARE}:/data
+      # the chosen shared folders are appended at render, one bind each at /shares/<share>
     healthcheck:
       test: curl -fkLsS -m 2 127.0.0.1:8384/rest/noauth/health | grep -o --color=never OK || exit 1
       interval: 1m

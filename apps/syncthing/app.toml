@@ -1,7 +1,7 @@
 schema = 1
 id = "syncthing"
 name = "Syncthing"
-version = "1.0.0"
+version = "2.0.0"
 app_version = "2.1.7"
 update_policy = "minor"
 description = "Continuous peer-to-peer file synchronization between your devices."
@@ -76,17 +76,30 @@ intent = "config"
 ssd = "ok"
 description = "Syncthing configuration, keys and index database"
 
-[[shares]]
-env = "SYNC_SHARE"
-label = "Synchronized folder"
-description = "The shared folder Syncthing synchronizes, mounted at /data"
+# Each chosen shared folder is mounted at /shares/<share>; the list can change after install
+# (PUT /api/v1/apps/installed/<stack>/share-set). Encrypted shares follow their mount.
+[share_set]
+env = "SYNC_SHARES"
+service = "syncthing"
+target = "/shares"
+label = "Synchronized shared folders"
+description = "Each chosen shared folder is mounted at /shares/<share>; add folders in Syncthing below these paths"
 access = "rw"
-required = false
-fallback = "sync"
+
+# The REST key rynas talks to Syncthing with (STGUIAPIKEY overrides the key in config.xml).
+[[secrets]]
+env = "ST_API_KEY"
+length = 32
+encoding = "alnum"
+description = "Key of the Syncthing REST interface, used by rynas"
 
 [[notes]]
 level = "warning"
 text = "Set a GUI user and password in Syncthing (Actions > Settings > GUI) right after install: the interface starts without one."
+
+[[notes]]
+level = "info"
+text = "Folders inside Syncthing live under /shares/<share>: choose one or more shared folders here, then add folders in Syncthing below those paths."
 
 [[notes]]
 level = "info"

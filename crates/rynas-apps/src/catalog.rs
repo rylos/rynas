@@ -93,6 +93,9 @@ pub struct TestValues {
     pub folders: BTreeMap<String, String>,
     #[serde(default)]
     pub ports: BTreeMap<String, u16>,
+    /// The `[share_set]` items (`[[share_set]]` tables with name, path, follow).
+    #[serde(default)]
+    pub share_set: Vec<crate::render::ShareSetItem>,
 }
 
 impl TestValues {
@@ -378,6 +381,7 @@ impl CatalogApp {
 
         let mut taken: Vec<&str> = PROVIDED_VARS.to_vec();
         taken.extend(manifest.declared_envs());
+        taken.extend(manifest.share_set.iter().map(|s| s.env.as_str()));
         form.check(id, &taken, &mut issues);
 
         // overlays: declared ⇔ present, each parses, condition known and boolean
@@ -461,6 +465,7 @@ impl CatalogApp {
             folders: self.tests.folders.clone(),
             ports: self.tests.ports.clone(),
             secrets: BTreeMap::new(),
+            share_set: self.tests.share_set.clone(),
         }
     }
 }

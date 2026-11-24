@@ -1,2 +1,8 @@
-[shares]
-SYNC_SHARE = "/volume1/sync"
+[[share_set]]
+name = "sync"
+path = "/volume1/sync"
+
+[[share_set]]
+name = "vault"
+path = "/volume1/vault"
+follow = true

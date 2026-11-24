@@ -193,6 +193,42 @@ fn split_volume(s: &str) -> (&str, &str, &str) {
     (src, dst, mode)
 }
 
+/// The keys of a long-syntax volume entry rynas accepts: a `bind` or `volume`, its source
+/// and target, `read_only`, and for binds only the propagation that never sends the
+/// container's mounts back to the host (`rslave`, `slave`, `rprivate`, `private`; a share
+/// whose mount comes and goes on the host needs `rslave`).
+pub fn long_volume_ok(vm: &Mapping) -> Result<(), String> {
+    for k in vm.keys() {
+        match k.as_str() {
+            Some("type" | "source" | "target" | "read_only" | "bind") => {}
+            Some(other) => return Err(format!("volume key `{other}` is not allowed")),
+            None => return Err("non-string volume key".into()),
+        }
+    }
+    let ty = vm.get("type").and_then(Value::as_str);
+    if !matches!(ty, Some("bind" | "volume")) {
+        return Err(format!("volume type `{}` is not allowed (bind or volume)", ty.unwrap_or("?")));
+    }
+    if vm.get("target").and_then(Value::as_str).is_none_or(|t| !t.starts_with('/')) {
+        return Err("a volume needs an absolute target".into());
+    }
+    if let Some(b) = vm.get("bind") {
+        if ty != Some("bind") {
+            return Err("`bind` options on a volume that is not a bind".into());
+        }
+        let Some(bm) = b.as_mapping() else { return Err("`bind` must be a mapping".into()) };
+        for (k, v) in bm {
+            match (k.as_str(), v.as_str()) {
+                (Some("propagation"), Some("rslave" | "slave" | "rprivate" | "private")) => {}
+                (Some("propagation"), p) => return Err(format!("bind propagation `{}` is not allowed (rslave, slave, rprivate, private)", p.unwrap_or("?"))),
+                (Some(o), _) => return Err(format!("bind option `{o}` is not allowed")),
+                (None, _) => return Err("non-string bind option".into()),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Lints one (base or overlay-merged) compose document. `label` names the variant in
 /// messages; `known` is every variable a render provides.
 pub(crate) fn lint(app: &AppManifest, doc: &Value, label: &str, known: &BTreeSet<String>, issues: &mut Issues) {
@@ -217,7 +253,7 @@ pub(crate) fn lint(app: &AppManifest, doc: &Value, label: &str, known: &BTreeSet
     if !names.contains(app.main_service.as_str()) {
         err(format!("main_service `{}` is not a service", app.main_service));
     }
-    for s in app.security.privileged.iter().chain(&app.security.docker_socket).chain(&app.security.devices).chain(app.ports.iter().map(|p| &p.service)) {
+    for s in app.security.privileged.iter().chain(&app.security.docker_socket).chain(&app.security.devices).chain(app.ports.iter().map(|p| &p.service)).chain(app.share_set.iter().map(|s| &s.service)) {
         if !names.contains(s.as_str()) {
             err(format!("app.toml names service `{s}`, which is not in the compose file"));
         }
@@ -356,6 +392,9 @@ pub(crate) fn lint(app: &AppManifest, doc: &Value, label: &str, known: &BTreeSet
                     (src.to_owned(), mode.to_owned())
                 }
                 Value::Mapping(vm) => {
+                    if let Err(e) = long_volume_ok(vm) {
+                        err(format!("service `{name}`: {e}"));
+                    }
                     let src = vm.get("source").and_then(Value::as_str).unwrap_or("").to_owned();
                     let ro = vm.get("read_only").and_then(Value::as_bool) == Some(true);
                     (src, if ro { "ro".into() } else { String::new() })

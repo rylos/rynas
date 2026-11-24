@@ -376,6 +376,133 @@ volumes:
     }
 }
 
+fn bind_of<'a>(doc: &'a Value, service: &str, target: &str) -> Option<&'a Value> {
+    doc["services"][service]["volumes"].as_sequence()?.iter().find(|v| v.get("target").and_then(Value::as_str) == Some(target))
+}
+
+#[test]
+fn share_set_renders_one_bind_per_share() {
+    let c = catalog();
+    let st = c.get("syncthing").unwrap();
+    let ss = st.manifest.share_set.as_ref().expect("syncthing has a share set");
+    assert_eq!((ss.env.as_str(), ss.target.as_str()), ("SYNC_SHARES", "/shares"));
+    let p = Provided::example("syncthing");
+    let r = render::render(st, "rynas", &p, &st.test_request()).unwrap();
+    assert_eq!(r.env["SYNC_SHARES"], "sync=/volume1/sync;vault=/volume1/vault!");
+    let env_text = String::from_utf8(r.file(".env").unwrap().contents.clone()).unwrap();
+    assert!(env_text.contains("SYNC_SHARES='sync=/volume1/sync;vault=/volume1/vault!'\n"), "{env_text}");
+    let text = String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap();
+    let doc: Value = yaml_serde::from_str(&text).unwrap();
+    let sync = bind_of(&doc, "syncthing", "/shares/sync").expect("sync bind");
+    assert_eq!(sync["type"].as_str(), Some("bind"));
+    assert_eq!(sync["source"].as_str(), Some("/volume1/sync"));
+    assert!(sync.get("bind").is_none() && sync.get("read_only").is_none());
+    let vault = bind_of(&doc, "syncthing", "/shares/vault").expect("vault bind");
+    assert_eq!(vault["bind"]["propagation"].as_str(), Some("rslave"));
+    // the config folder stays as it was; the key goes through the environment only
+    assert!(text.contains("${CONFIG_FOLDER}:/var/syncthing"));
+    assert_eq!(doc["services"]["syncthing"]["environment"]["STGUIAPIKEY"].as_str(), Some("${ST_API_KEY}"));
+    assert_eq!(r.env["ST_API_KEY"].len(), 32);
+    let shares: Vec<(&str, &str, bool)> = r.folders.iter().filter(|f| f.env.starts_with("SYNC_SHARES/")).map(|f| (f.env.as_str(), f.host_path.as_str(), f.share)).collect();
+    assert_eq!(shares, [("SYNC_SHARES/sync", "/volume1/sync", true), ("SYNC_SHARES/vault", "/volume1/vault", true)]);
+
+    // the rendered compose passes the same structural lint as an entry (long binds included)
+    for v in doc["services"]["syncthing"]["volumes"].as_sequence().unwrap() {
+        if let Value::Mapping(m) = v {
+            compose::long_volume_ok(m).unwrap();
+        }
+    }
+
+    // an empty set: no extra volume; an entry without a set refuses one
+    let mut req = st.test_request();
+    req.share_set.clear();
+    let r = render::render(st, "rynas", &p, &req).unwrap();
+    check_rendered(st, &r);
+    assert_eq!(r.env["SYNC_SHARES"], "");
+    let doc: Value = yaml_serde::from_str(&String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap()).unwrap();
+    assert_eq!(doc["services"]["syncthing"]["volumes"].as_sequence().unwrap().len(), 1);
+    let vw = c.get("vaultwarden").unwrap();
+    let mut req = vw.test_request();
+    req.share_set = st.test_request().share_set;
+    assert_eq!(render::render(vw, "rynas", &Provided::example("vaultwarden"), &req), Err(RenderError::UnknownValue("share_set".into())));
+    // a bad item is an invalid value of the set
+    let mut req = st.test_request();
+    req.share_set[1].name = "a/b".into();
+    assert!(matches!(render::render(st, "rynas", &p, &req), Err(RenderError::InvalidValue { field, .. }) if field == "SYNC_SHARES"));
+    // `$` in a path is kept literal in the compose file
+    let mut req = st.test_request();
+    req.share_set[0].path = "/volume1/a$b".into();
+    let r = render::render(st, "rynas", &p, &req).unwrap();
+    check_rendered(st, &r);
+    assert!(String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap().contains("/volume1/a$$b"));
+}
+
+/// An installed 1.x Syncthing (one share at /data, `SYNC_SHARE`) updates to the share set and
+/// keeps its folder, an absolute share or the stack's fallback folder.
+#[test]
+fn syncthing_1x_migrates_to_the_share_set() {
+    let c = catalog();
+    let st = c.get("syncthing").unwrap();
+    let p = Provided::example("syncthing");
+    let mut req = st.test_request();
+    req.share_set.clear();
+    let now = render::render(st, "rynas", &p, &req).unwrap();
+    let compose_text = String::from_utf8(now.file("compose.yaml").unwrap().contents.clone()).unwrap().replace("version: 2.0.0", "version: 1.0.0");
+    assert!(compose_text.contains("version: 1.0.0"));
+    let env_now = String::from_utf8(now.file(".env").unwrap().contents.clone()).unwrap();
+    for (old, want_set, share) in [("/volume1/sync", "sync=/volume1/sync", true), ("./sync", "sync=./sync", false)] {
+        let env_text: String = env_now
+            .lines()
+            .filter(|l| !l.starts_with("ST_API_KEY=") && !l.starts_with("SYNC_SHARES="))
+            .map(|l| format!("{l}\n"))
+            .chain(std::iter::once(format!("SYNC_SHARE={old}\n")))
+            .collect();
+        let plan = plan::update_plan(st, &compose_text, &env_text).unwrap();
+        assert_eq!(plan.migrations.iter().map(|v| v.to_string()).collect::<Vec<_>>(), ["2.0.0"]);
+        assert!(plan.missing_values.is_empty());
+        let up = plan::prepare_update(st, "rynas", &p, "syncthing", &compose_text, &env_text, &BTreeMap::new()).unwrap();
+        check_rendered(st, &up);
+        assert_eq!(up.env["SYNC_SHARES"], want_set);
+        assert!(!up.env.contains_key("SYNC_SHARE"));
+        assert_eq!(up.env["ST_API_KEY"].len(), 32, "the new secret is generated");
+        let f = up.folders.iter().find(|f| f.env == "SYNC_SHARES/sync").unwrap();
+        assert_eq!(f.share, share);
+        if !share {
+            assert_eq!(f.host_path, "/volume1/docker/stacks/syncthing/sync");
+        }
+        let doc: Value = yaml_serde::from_str(&String::from_utf8(up.file("compose.yaml").unwrap().contents.clone()).unwrap()).unwrap();
+        assert_eq!(bind_of(&doc, "syncthing", "/shares/sync").unwrap()["source"].as_str(), Some(old));
+    }
+}
+
+#[test]
+fn lint_checks_share_sets_and_long_binds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dst = tmp.path().join("syncthing");
+    copy_dir(&apps_dir().join("syncthing"), &dst);
+    let t = fs::read_to_string(dst.join("app.toml")).unwrap();
+    let broken = t.replace("service = \"syncthing\"\ntarget = \"/shares\"", "service = \"nope\"\ntarget = \"shares/../x\"").replace("env = \"SYNC_SHARES\"", "env = \"WEB_PORT\"");
+    fs::write(dst.join("app.toml"), broken).unwrap();
+    let text = CatalogApp::load(&dst).unwrap_err().to_string();
+    for needle in ["share_set: `WEB_PORT` is declared twice", "target `shares/../x` must be an absolute container folder", "names service `nope`"] {
+        assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
+    }
+    fs::write(dst.join("app.toml"), t).unwrap();
+    let c = fs::read_to_string(dst.join("compose.yaml")).unwrap();
+    let bad = c.replace(
+        "      - ${CONFIG_FOLDER}:/var/syncthing\n",
+        "      - {type: bind, source: \"${CONFIG_FOLDER}\", target: /var/syncthing, bind: {propagation: rshared}}\n      - {type: tmpfs, target: /tmp}\n",
+    );
+    fs::write(dst.join("compose.yaml"), bad).unwrap();
+    let text = CatalogApp::load(&dst).unwrap_err().to_string();
+    for needle in ["bind propagation `rshared` is not allowed", "volume type `tmpfs` is not allowed"] {
+        assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
+    }
+    let ok = c.replace("      - ${CONFIG_FOLDER}:/var/syncthing\n", "      - {type: bind, source: \"${CONFIG_FOLDER}\", target: /var/syncthing, bind: {propagation: rslave}}\n");
+    fs::write(dst.join("compose.yaml"), ok).unwrap();
+    CatalogApp::load(&dst).unwrap_or_else(|e| panic!("{e}"));
+}
+
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).unwrap();
     for e in fs::read_dir(src).unwrap() {

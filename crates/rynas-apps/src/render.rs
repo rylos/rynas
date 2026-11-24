@@ -96,6 +96,152 @@ pub struct InstallRequest {
     /// Secret env → value already known (updates); the others are generated.
     #[serde(default)]
     pub secrets: BTreeMap<String, String>,
+    /// The shares of the entry's `[share_set]`, in order (empty: none mounted).
+    #[serde(default)]
+    pub share_set: Vec<ShareSetItem>,
+}
+
+/// One share of a `[share_set]`: mounted at `<target>/<name>` of the set's service.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShareSetItem {
+    /// Folder name inside the target (usually the share's name).
+    pub name: String,
+    /// Absolute host path, or `./<folder>` below the stack folder (the fallback folder of a
+    /// layout with one optional share, kept by a migration).
+    pub path: String,
+    /// The bind follows mounts made on the host after the container started (propagation
+    /// `rslave`): for an encrypted share whose plaintext mount comes and goes.
+    #[serde(default)]
+    pub follow: bool,
+}
+
+/// A share set item name: 1-64 characters, no `/ ; = ! $ ' " \`, whitespace or control
+/// characters, not `.` or `..`.
+pub fn valid_share_set_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s != "."
+        && s != ".."
+        && !s.chars().any(|c| c.is_control() || c.is_whitespace() || "/;=!$'\"\\".contains(c))
+}
+
+/// A share set item path: absolute (no `..`, no `:`/`'`, see [`abs_path_ok`]) or
+/// `./<relative folder>`; never with `;`, a final `!` or control characters (the `.env`
+/// encoding).
+fn share_set_path_ok(p: &str) -> bool {
+    let shape = match p.strip_prefix("./") {
+        Some(rel) => crate::manifest::is_rel_path(rel),
+        None => abs_path_ok(p) && p.len() > 1,
+    };
+    shape && !p.contains(';') && !p.ends_with('!') && !p.chars().any(char::is_control)
+}
+
+/// Checks a share set: valid and unique names, valid and unique paths.
+pub fn check_share_set(field: &str, items: &[ShareSetItem]) -> Result<(), RenderError> {
+    let bad = |reason: String| RenderError::InvalidValue { field: field.to_owned(), reason };
+    let mut names = std::collections::BTreeSet::new();
+    let mut paths = std::collections::BTreeSet::new();
+    for it in items {
+        if !valid_share_set_name(&it.name) {
+            return Err(bad(format!("`{}` is not a valid folder name (no / ; = ! $ quotes or spaces, not . or ..)", it.name)));
+        }
+        if !share_set_path_ok(&it.path) {
+            return Err(bad(format!("{}: `{}` must be an absolute path (or ./<folder> of the stack)", it.name, it.path)));
+        }
+        if !names.insert(it.name.as_str()) {
+            return Err(bad(format!("the name `{}` is used twice", it.name)));
+        }
+        if !paths.insert(it.path.trim_end_matches('/')) {
+            return Err(bad(format!("{} is chosen twice", it.path)));
+        }
+    }
+    Ok(())
+}
+
+/// The `.env` value of a share set: `name=path` items joined by `;`, a trailing `!` on an
+/// item that follows host mounts (`photos=/volume1/photos;vault=/volume1/vault!`). Names
+/// never contain `= ; !` and paths never contain `;` nor end with `!`
+/// ([`check_share_set`]), so the text splits back unambiguously ([`decode_share_set`]).
+pub fn encode_share_set(items: &[ShareSetItem]) -> String {
+    items
+        .iter()
+        .map(|i| format!("{}={}{}", i.name, i.path, if i.follow { "!" } else { "" }))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// Reads [`encode_share_set`] back. An item without a name (`/volume1/sync`, `./sync`: the
+/// value of a single-share variable renamed by a migration) takes the last component of
+/// its path as name. Invalid items are errors.
+pub fn decode_share_set(text: &str) -> Result<Vec<ShareSetItem>, String> {
+    let out = split_share_set(text)?;
+    check_share_set("share_set", &out).map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// [`decode_share_set`] without the final check (an update renders what it read, and the
+/// render names the bad item).
+fn split_share_set(text: &str) -> Result<Vec<ShareSetItem>, String> {
+    let mut out = Vec::new();
+    for raw in text.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        let (body, follow) = match raw.strip_suffix('!') {
+            Some(b) => (b, true),
+            None => (raw, false),
+        };
+        let (name, path) = if body.starts_with('/') || body.starts_with("./") {
+            // the folder's own name, made a valid item name
+            let last = body.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+            let mut name: String = last.chars().map(|c| if c.is_control() || c.is_whitespace() || "/;=!$'\"\\".contains(c) { '_' } else { c }).collect();
+            if !valid_share_set_name(&name) {
+                name = "share".into();
+            }
+            (name, body.to_owned())
+        } else {
+            match body.split_once('=') {
+                Some((n, p)) => (n.to_owned(), p.to_owned()),
+                None => return Err(format!("`{raw}` is not name=path")),
+            }
+        };
+        out.push(ShareSetItem { name, path, follow });
+    }
+    Ok(out)
+}
+
+/// Escapes `$` for a literal string in the compose file (compose interpolates `$`).
+fn compose_literal(s: &str) -> String {
+    s.replace('$', "$$")
+}
+
+/// Appends one long-syntax bind per share set item to the volumes of `service`.
+fn add_share_set_volumes(doc: &mut Value, service: &str, target: &str, ro: bool, items: &[ShareSetItem]) -> Result<(), RenderError> {
+    let svc = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut(service))
+        .and_then(Value::as_mapping_mut)
+        .ok_or_else(|| RenderError::Compose(format!("share_set service `{service}` is not in the compose file")))?;
+    if !svc.contains_key("volumes") {
+        svc.insert("volumes".into(), Value::Sequence(Vec::new()));
+    }
+    let Some(Value::Sequence(seq)) = svc.get_mut("volumes") else {
+        return Err(RenderError::Compose(format!("service `{service}`: volumes is not a list")));
+    };
+    for it in items {
+        let mut m = Mapping::new();
+        m.insert("type".into(), "bind".into());
+        m.insert("source".into(), Value::String(compose_literal(&it.path)));
+        m.insert("target".into(), Value::String(format!("{}/{}", target.trim_end_matches('/'), it.name)));
+        if ro {
+            m.insert("read_only".into(), Value::Bool(true));
+        }
+        if it.follow {
+            let mut b = Mapping::new();
+            b.insert("propagation".into(), "rslave".into());
+            m.insert("bind".into(), Value::Mapping(b));
+        }
+        seq.push(Value::Mapping(m));
+    }
+    Ok(())
 }
 
 /// One file of the stack folder.
@@ -266,6 +412,9 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
             return Err(RenderError::UnknownValue(format!("{known} {k}")));
         }
     }
+    if m.share_set.is_none() && !req.share_set.is_empty() {
+        return Err(RenderError::UnknownValue("share_set".into()));
+    }
     let form_values = app.form.resolve(&req.form)?;
 
     let mut env: Vec<(String, String)> = provided.vars().into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
@@ -310,6 +459,19 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
             (None, None) => return Err(RenderError::MissingValue(s.env.clone())),
         }
     }
+    if let Some(ss) = &m.share_set {
+        check_share_set(&ss.env, &req.share_set)?;
+        env.push((ss.env.clone(), encode_share_set(&req.share_set)));
+        for it in &req.share_set {
+            let env = format!("{}/{}", ss.env, it.name);
+            let owner = (provided.puid, provided.pgid);
+            folders.push(match it.path.strip_prefix("./") {
+                // a folder of the stack (a kept fallback): made like the app's own folders
+                Some(rel) => FolderPlan { env, host_path: format!("{appdata}/{rel}"), intent: Some(Intent::Data), ssd: Ssd::No, share: false, owner, nocow: false },
+                None => FolderPlan { env, host_path: it.path.clone(), intent: None, ssd: Ssd::No, share: true, owner, nocow: false },
+            });
+        }
+    }
     for s in &m.secrets {
         let v = match req.secrets.get(&s.env) {
             Some(v) if !v.is_empty() => v.clone(),
@@ -320,7 +482,10 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
     env.extend(form_values);
     let env_map: BTreeMap<String, String> = env.iter().cloned().collect();
 
-    let (doc, applied) = merged_compose(app, &env_map);
+    let (mut doc, applied) = merged_compose(app, &env_map);
+    if let Some(ss) = &m.share_set {
+        add_share_set_volumes(&mut doc, &ss.service, &ss.target, ss.access == crate::manifest::Access::Ro, &req.share_set)?;
+    }
     for r in compose::refs(&doc).map_err(RenderError::Compose)? {
         if !env_map.contains_key(&r.name) {
             return Err(RenderError::UndefinedVariable(r.name));
@@ -418,6 +583,13 @@ pub fn request_from_env(app: &CatalogApp, stack: &str, env: &BTreeMap<String, St
             req.secrets.insert(s.env.clone(), v.clone());
         }
     }
+    if let Some(ss) = &m.share_set
+        && let Some(v) = env.get(&ss.env)
+    {
+        // a broken line is kept as read: the render then names the bad item instead of
+        // silently unmounting the shares
+        req.share_set = split_share_set(v).unwrap_or_else(|_| vec![ShareSetItem { name: String::new(), path: v.clone(), follow: false }]);
+    }
     for (name, field) in &app.form.properties {
         let Some(v) = env.get(name) else { continue };
         let json = match field.ty {
@@ -446,5 +618,57 @@ mod tests {
         for bad in ["a'b", "a\nb", "ends\\", "ends\\\\"] {
             assert_eq!(env_value("K", bad), Err(RenderError::UnsafeValue("K".into())), "{bad:?}");
         }
+    }
+
+    fn item(name: &str, path: &str, follow: bool) -> ShareSetItem {
+        ShareSetItem { name: name.into(), path: path.into(), follow }
+    }
+
+    #[test]
+    fn share_set_round_trip() {
+        let items = vec![item("photos", "/volume1/photos", false), item("vault", "/volume2/vault", true), item("odd=dir", "/v/a=b", false)];
+        assert!(check_share_set("S", &items).is_err(), "= in a name");
+        let items = vec![item("photos", "/volume1/photos", false), item("vault", "/volume2/my vault=x", true), item("sync", "./sync", false)];
+        let text = encode_share_set(&items);
+        assert_eq!(text, "photos=/volume1/photos;vault=/volume2/my vault=x!;sync=./sync");
+        assert_eq!(decode_share_set(&text).unwrap(), items);
+        // through .env quoting and back
+        let line = env_value("S", &text).unwrap();
+        assert!(line.starts_with('\''));
+        assert_eq!(parse_env(&format!("S={line}\n"))["S"], text);
+        assert_eq!(decode_share_set("").unwrap(), vec![]);
+        assert_eq!(encode_share_set(&[]), "");
+    }
+
+    #[test]
+    fn share_set_bare_paths_from_a_single_share_layout() {
+        assert_eq!(decode_share_set("/volume1/sync").unwrap(), vec![item("sync", "/volume1/sync", false)]);
+        assert_eq!(decode_share_set("./sync").unwrap(), vec![item("sync", "./sync", false)]);
+        assert_eq!(decode_share_set("/volume1/My Files/").unwrap(), vec![item("My_Files", "/volume1/My Files/", false)]);
+    }
+
+    #[test]
+    fn share_set_validation() {
+        for (items, needle) in [
+            (vec![item("", "/a", false)], "valid folder name"),
+            (vec![item("..", "/a", false)], "valid folder name"),
+            (vec![item("a/b", "/a", false)], "valid folder name"),
+            (vec![item("a;b", "/a", false)], "valid folder name"),
+            (vec![item("a!", "/a", false)], "valid folder name"),
+            (vec![item("a\tb", "/a", false)], "valid folder name"),
+            (vec![item("a", "relative", false)], "absolute path"),
+            (vec![item("a", "/x/../etc", false)], "absolute path"),
+            (vec![item("a", "/x;y", false)], "absolute path"),
+            (vec![item("a", "/x!", false)], "absolute path"),
+            (vec![item("a", "./../x", false)], "absolute path"),
+            (vec![item("a", "/x", false), item("a", "/y", false)], "used twice"),
+            (vec![item("a", "/x", false), item("b", "/x/", false)], "chosen twice"),
+        ] {
+            let e = check_share_set("S", &items).unwrap_err().to_string();
+            assert!(e.contains(needle), "{items:?}: {e}");
+            assert!(e.starts_with("S: "), "{e}");
+        }
+        assert!(decode_share_set("noequals").is_err());
+        assert!(check_share_set("S", &[item("a", "/x", true), item("b", "./y", false)]).is_ok());
     }
 }

@@ -100,6 +100,9 @@ pub struct AppManifest {
     pub folders: Vec<Folder>,
     #[serde(default)]
     pub shares: Vec<Share>,
+    /// A list of shares the user chooses, each mounted at `<target>/<name>` of one service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_set: Option<ShareSet>,
     #[serde(default)]
     pub secrets: Vec<Secret>,
     #[serde(default)]
@@ -369,6 +372,35 @@ pub struct Share {
     pub fallback: Option<String>,
 }
 
+/// `[share_set]`: a variable list of the NAS's shared folders, all mounted below one folder
+/// of one service (`<target>/<name>`), chosen at install and changed later without a new
+/// entry version. The compose file does not mention them: the render appends one bind per
+/// item to the service's `volumes`, and keeps the list in `.env` under `env`
+/// ([`crate::render::encode_share_set`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShareSet {
+    /// The `.env` variable holding the encoded list (never referenced by compose).
+    pub env: String,
+    /// The compose service the shares are mounted into.
+    pub service: String,
+    /// Absolute folder inside the container; each share is `<target>/<name>`.
+    pub target: String,
+    pub label: String,
+    pub description: String,
+    pub access: Access,
+}
+
+/// An absolute container path made of `[A-Za-z0-9._-]` segments, without `.`/`..`.
+pub(crate) fn is_container_dir(s: &str) -> bool {
+    match s.strip_prefix('/') {
+        Some(rest) if !rest.is_empty() && s.len() <= 128 => rest.split('/').all(|seg| {
+            !seg.is_empty() && seg != "." && seg != ".." && seg.bytes().all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+        }),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Encoding {
@@ -599,6 +631,25 @@ impl AppManifest {
             }
             if !envs.insert(e) {
                 err(format!("`{e}` is declared twice"));
+            }
+        }
+
+        if let Some(ss) = &self.share_set {
+            let e = ss.env.as_str();
+            if !is_env_name(e) {
+                err(format!("share_set: `{e}` is not an env name ([A-Z][A-Z0-9_]*)"));
+            }
+            if PROVIDED_VARS.contains(&e) {
+                err(format!("share_set: `{e}` is provided by rynas and cannot be declared"));
+            }
+            if envs.contains(e) {
+                err(format!("share_set: `{e}` is declared twice"));
+            }
+            if !is_container_dir(&ss.target) {
+                err(format!("share_set: target `{}` must be an absolute container folder ([A-Za-z0-9._-] segments)", ss.target));
+            }
+            if ss.label.trim().is_empty() || ss.description.trim().is_empty() {
+                err("share_set: label and description must not be empty".into());
             }
         }
 
