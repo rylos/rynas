@@ -6329,3 +6329,16 @@ stg.ad.stignore_help	Удаляет из .stignore шаблоны других �
 stg.ad.stignore_changes	Изменения .stignore
 stg.ad.go	Перенести
 stg.ad.done	Syncthing перенесён
+nev.syncthing.conflict.title	Конфликтные копии в {folder}
+nev.syncthing.conflict.body	Новых конфликтных копий в {folder}: {count} ({files}). Оставьте нужную версию и удалите копии; они перечислены на странице Syncthing.
+nev.syncthing.folder_error.title	Папка Syncthing {folder} в состоянии ошибки
+nev.syncthing.folder_error.body	{error}. В этой папке ничего не синхронизируется, пока ошибка не устранена.
+nev.syncthing.folder_recovered.title	Папка Syncthing {folder} снова работает
+nev.syncthing.device_unseen.title	Устройство {device} не подключалось {days} дн.
+nev.syncthing.device_unseen.body	Syncthing не видел {device} {days} дн.: его изменения не доходят до NAS.
+nev.syncthing.device_seen.title	Устройство {device} снова подключилось
+nev.syncthing.down.title	Syncthing не отвечает
+nev.syncthing.down.body	Приложение {stack} работает, но его интерфейс не отвечает {minutes} мин.: папки не синхронизируются, и rynas не видит их состояние.
+nev.syncthing.up.title	Syncthing снова отвечает
+nev.syncthing.folder_kept_paused.title	Папка Syncthing {folder} остаётся приостановленной
+nev.syncthing.folder_kept_paused.body	После разблокировки {share} маркер папки (.stfolder) не найден: rynas не возобновил её. Проверьте папку, затем возобновите её в Syncthing.

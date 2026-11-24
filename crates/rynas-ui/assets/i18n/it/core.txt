@@ -6267,3 +6267,16 @@ stg.ad.stignore_help	Toglie da .stignore i modelli di altri sistemi e ignora il 
 stg.ad.stignore_changes	Modifiche a .stignore
 stg.ad.go	Adotta
 stg.ad.done	Syncthing adottato
+nev.syncthing.conflict.title	Copie in conflitto in {folder}
+nev.syncthing.conflict.body	{count} nuove copie in conflitto in {folder}: {files}. Tieni la versione giusta ed elimina le copie; la pagina Syncthing le elenca.
+nev.syncthing.folder_error.title	La cartella Syncthing {folder} è in errore
+nev.syncthing.folder_error.body	{error}. In questa cartella non si sincronizza nulla finché non viene risolto.
+nev.syncthing.folder_recovered.title	La cartella Syncthing {folder} funziona di nuovo
+nev.syncthing.device_unseen.title	Il dispositivo {device} non si connette da {days} giorni
+nev.syncthing.device_unseen.body	Syncthing non vede {device} da {days} giorni: le sue modifiche non arrivano al NAS.
+nev.syncthing.device_seen.title	Il dispositivo {device} si è connesso di nuovo
+nev.syncthing.down.title	Syncthing non risponde
+nev.syncthing.down.body	L'app {stack} è in esecuzione ma la sua interfaccia non risponde da {minutes} minuti: le cartelle non vengono sincronizzate e rynas non ne vede lo stato.
+nev.syncthing.up.title	Syncthing risponde di nuovo
+nev.syncthing.folder_kept_paused.title	La cartella Syncthing {folder} resta in pausa
+nev.syncthing.folder_kept_paused.body	Dopo lo sblocco di {share} il marcatore della cartella (.stfolder) non è stato trovato: rynas non l'ha ripresa. Controlla la cartella, poi riprendila in Syncthing.

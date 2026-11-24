@@ -1048,6 +1048,11 @@ schema 2 added the `code` and `body_format` columns.
 | `ups.shutdown` | `reason` (`lowbatt`/`waittimeup`/`nocomm`/`fsd`/`shutdowncmd`) | UPS shutdown: {reason} (critical; rynas's own NUT stop, a module layer words its own notice) |
 | `ups.upsmon_failed` | `error` | upsmon did not take the shutdown request: rynas powers off itself (error) |
 | `crypt.auto_unlock_failed` | `share`, `path`, `error` | Encrypted folder {share} was not unlocked automatically (error; D-CRYPT) |
+| `syncthing.conflict` | `stack`, `folder` (label), `count`, `files` (up to 5 names) | Conflict copies in {folder} (warning, oneshot: new copies of a folder grouped for 10 minutes; setting `conflicts_alert`; `../phase2/syncthing.md` §5) |
+| `syncthing.folder_error` / `syncthing.folder_recovered` | `stack`, `folder`, `error` (error) | Syncthing folder {folder} is in error (error, after 5 minutes in state `error`, not while paused) / works again (resolved) |
+| `syncthing.device_unseen` / `syncthing.device_seen` | `stack`, `device`, `days` (unseen) | Device {device} has not connected for {days} days (warning, a device seen before; setting `device_unseen_days`, 0 = off; once per absence) / connected again (resolved quietly) |
+| `syncthing.down` / `syncthing.up` | `stack`, `minutes` (down) | Syncthing does not answer (error: the app runs and its REST interface has been silent for 10 minutes) / answers again (resolved; quietly when the app was stopped) |
+| `syncthing.folder_kept_paused` | `stack`, `folder`, `share` | Syncthing folder {folder} stays paused (warning: after the unlock of its encrypted share its `.stfolder` marker is missing; once per folder until it is resumed) |
 | `pcbackup.revoked` / `pcbackup.removed` | `device` | {device} revoked / removed: its open alerts resolve (resolved) |
 | `docker.unhealthy` / `docker.recovered` | `container`, `stack` | Container {container} is unhealthy / healthy again (`../phase2/docker-apps.md` §5.1) |
 | `docker.oom` | `container`, `stack` | Container {container} ran out of memory |
