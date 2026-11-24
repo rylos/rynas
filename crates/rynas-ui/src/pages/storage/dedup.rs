@@ -610,11 +610,13 @@ fn history_dialog(key: String, modal: RwSignal<Open>) -> AnyView {
 /// The share editor's switch (General tab, next to compression and no copy-on-write):
 /// disabled with the reason on encrypted and no copy-on-write folders; the recycle bin
 /// and extra excludes once on; the state of the filesystem's job.
-pub fn share_fields(d: RwSignal<Share>, nocow_now: bool, name: Option<String>) -> AnyView {
+pub fn share_fields(d: RwSignal<Share>, nocow_now: bool, name: Option<String>, encrypted: Signal<bool>) -> AnyView {
     let ov = overview();
     let reason = Signal::derive(move || {
+        // `encrypted` also holds a new folder whose "encrypt" switch is on
+        let enc = encrypted.get();
         let local = d.with(|s| {
-            if s.encrypted {
+            if s.encrypted || enc {
                 Some(DedupBlock::Encrypted)
             } else if nocow_now || s.subvolume.as_ref().is_some_and(|v| v.nocow) {
                 Some(DedupBlock::Nocow)

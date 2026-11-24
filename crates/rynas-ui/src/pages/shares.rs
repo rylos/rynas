@@ -598,7 +598,7 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
         {location_fields(d, is_new, show, cf)}
         {crypt_existing}
         {nocow}
-        {super::storage::dedup::share_fields(d, dedup_nocow, saved_name)}
+        {super::storage::dedup::share_fields(d, dedup_nocow, saved_name, encrypted)}
         {let (v, s) = lens_bool(d, |s| s.show_snapshots, |s, v| s.show_snapshots = v);
          view! { <div hidden=move || encrypted.get()>{switch("shares.show_snapshots", Some("shares.show_snapshots_help"), v, s)}</div> }}
         {(!root_warn.is_empty()).then(|| ui::note(Tone::Err, icons::TRIANGLE_ALERT, view! {
