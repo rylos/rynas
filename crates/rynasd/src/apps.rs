@@ -1752,6 +1752,8 @@ async fn grant_shares(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, app: &str, gid
 }
 
 pub(crate) struct UpdateJob {
+    /// The entry id (`x-rynas.app`).
+    pub(crate) app: String,
     pub(crate) stack: String,
     pub(crate) layout: Layout,
     pub(crate) old: (String, String),
@@ -1818,6 +1820,11 @@ pub(crate) async fn update_task(
     .await;
     match (r, snap) {
         (Ok(()), sn) => {
+            // the one per-app step of an update: Syncthing 1.x → 2.x moves its folders from
+            // /data to /shares (warnings only, never fails the update)
+            if crate::syncthing::needs_folder_move(&j.app, &j.from, &j.to) {
+                crate::syncthing::move_data_folders(s, ctx, &j.stack, &j.layout, &j.new.1).await;
+            }
             ctx.progress(100);
             ctx.log(&format!("{} updated to {}", j.stack, j.to));
             Ok(sn.map(|s| s.id))
@@ -2245,6 +2252,7 @@ impl AppsSvc {
         .map_err(render_err)?;
         let set = self.docker.settings();
         let job = UpdateJob {
+            app: d.meta.app.clone(),
             stack: stack.to_string(),
             layout: l,
             old: (d.compose.clone(), d.env.clone()),

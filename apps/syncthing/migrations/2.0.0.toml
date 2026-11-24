@@ -1,5 +1,5 @@
 to = "2.0.0"
-description = "Shared folders are now mounted at /shares/<share> instead of /data, and several can be chosen. The folder chosen before stays in the list (the stack's fallback folder as /shares/sync), but the folders inside Syncthing still point below /data: the Syncthing adoption (POST /api/v1/syncthing/adopt) moves them; otherwise change each folder path in Syncthing to /shares/<share>/... Until then those folders stop with an error, and nothing is deleted on the other devices."
+description = "Shared folders are now mounted at /shares/<share> instead of /data, and several can be chosen. The folder chosen before stays in the list (the stack's fallback folder as /shares/sync). After the update rynas moves every Syncthing folder below /data to the same place below /shares and rescans it; a folder whose .stfolder marker it cannot verify is paused instead (resume it in Syncthing once checked). If Syncthing does not answer, the folders keep the old path and stop with an error until it is changed in Syncthing; nothing is deleted on the other devices."
 
 [[ops]]
 op = "rename"

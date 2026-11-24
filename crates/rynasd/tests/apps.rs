@@ -964,6 +964,23 @@ async fn share_set_and_syncthing_adoption_of_the_older_layout() {
     let (s, b) = call(&e, "GET", "/v1/apps/installed/syncthing", None).await;
     let i: InstalledAppDetail = json_of(s, &b);
     assert_eq!(i.app.share_set.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["sync"]);
+    // the update itself moved the folders (the step a plain update from 1.x runs too)
+    assert!(log.contains("moving the Syncthing folders from /data to /shares/sync (dry system: not done)"), "{log}");
+
+    // a home folder given by path: the preview always warns that rynas cannot stop its
+    // instance; volume lines are checked
+    let path_src = json!({"kind": "path", "path": "/vol1/docker/stacks/syncthing/state/config"});
+    let (s, b) = call(&e, "POST", "/v1/syncthing/adopt/preview", Some(json!({"source": path_src, "volumes": [{"container": "/data", "host": "/vol1/../etc"}]}))).await;
+    assert_eq!((s, err(&b).field.as_deref()), (StatusCode::BAD_REQUEST, Some("volumes")));
+    let (s, b) = call(&e, "POST", "/v1/syncthing/adopt/preview", Some(json!({"source": path_src}))).await;
+    let pv: rynas_api_types::syncthing::SyncthingAdoptPreview = json_of(s, &b);
+    assert!(pv.problems.iter().any(|m| m.starts_with("info: ") && m.contains("stopped for good")), "{:?}", pv.problems);
+    // two Syncthing stacks: an adoption refuses (one device id runs in one place)
+    let (started, _) = install(&e, "syncthing", json!({"stack": "st2", "publish_lan": true})).await;
+    assert_eq!(started.stack, "st2");
+    let (s, b) = call(&e, "POST", "/v1/syncthing/adopt", Some(json!({"source": path_src}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&b));
+    assert!(err(&b).message.contains("other Syncthing stacks"), "{}", String::from_utf8_lossy(&b));
 }
 
 /// The `(method, path)` pairs of the `.route(…)` calls of a router's source: new routes
