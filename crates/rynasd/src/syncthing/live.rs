@@ -306,6 +306,181 @@ pub struct Persist {
     pub paused_by_rynas: BTreeMap<String, BTreeSet<String>>,
     /// stack → the notified conditions of its alerts ([`Alerts::persisted`]).
     pub alerts: BTreeMap<String, Alerts>,
+    /// stack → the source it adopted: no other instance may run with that home or identity.
+    pub adopted: BTreeMap<String, AdoptedGuard>,
+}
+
+/// The source an adoption copied: its home on this NAS and its identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdoptedGuard {
+    pub home: String,
+    /// The first 7 characters of the device id.
+    pub device_short: String,
+    /// SHA-256 (hex) of the certificate's DER: the same device id.
+    pub cert_sha256: String,
+}
+
+/// A running Syncthing process of the host (in the host's mount namespace).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostProc {
+    pub pid: String,
+    /// The homes it uses (named, else its user's defaults).
+    pub homes: Vec<String>,
+    /// Its systemd unit from `/proc/<pid>/cgroup`, and the user of a user unit.
+    pub unit: Option<(String, Option<String>)>,
+}
+
+/// Another instance with an adopted source's home or identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Duplicate {
+    Container(String),
+    Process { pid: String, unit: Option<(String, Option<String>)> },
+}
+
+impl Duplicate {
+    fn describe(&self) -> String {
+        match self {
+            Self::Container(n) => format!("the container {n}"),
+            Self::Process { pid, unit: Some((u, _)) } => format!("{u} (pid {pid})"),
+            Self::Process { pid, unit: None } => format!("the process {pid}"),
+        }
+    }
+}
+
+/// The instances that must not run next to an adopted source's app: running containers
+/// (`docker inspect` objects, the app's own `ours` excluded) with a mount of the home, of a
+/// folder inside it or holding it, or whose Syncthing home holds the same certificate
+/// (`cert_of(host home)` → SHA-256 hex, `exists(host file)`); host processes using the home
+/// or a home with the same certificate.
+pub fn find_duplicates(
+    g: &AdoptedGuard,
+    ours: &BTreeSet<String>,
+    containers: &[Value],
+    procs: &[HostProc],
+    cert_of: &dyn Fn(&str) -> Option<String>,
+    exists: &dyn Fn(&str) -> bool,
+) -> Vec<Duplicate> {
+    let home = g.home.trim_end_matches('/');
+    let mut out = Vec::new();
+    if home.is_empty() {
+        return out;
+    }
+    for js in containers {
+        let js = js.as_array().and_then(|a| a.first()).unwrap_or(js);
+        let name = js.get("Name").and_then(Value::as_str).unwrap_or("").trim_start_matches('/').to_string();
+        let project = js.pointer("/Config/Labels/com.docker.compose.project").and_then(Value::as_str);
+        if name.is_empty() || project.is_some_and(|p| ours.contains(p)) || ours.contains(&name) {
+            continue;
+        }
+        let mounts: Vec<config::Mount> = rynas_docker::model::inspect_mounts(js)
+            .into_iter()
+            .map(|m| config::Mount { source: m.source, destination: m.destination })
+            .collect();
+        let uses_home = mounts.iter().any(|m| {
+            let s = m.source.trim_end_matches('/');
+            !s.is_empty() && (config::is_within(s, home) || config::is_within(home, s))
+        });
+        let same_cert = !g.cert_sha256.is_empty() && {
+            let (image, cmd) = rynas_docker::model::inspect_image_and_command(js);
+            config::is_syncthing(&image, &cmd)
+                && config::home_from_mounts(&mounts, exists)
+                    .and_then(|h| cert_of(&h))
+                    .is_some_and(|c| c == g.cert_sha256)
+        };
+        if uses_home || same_cert {
+            out.push(Duplicate::Container(name));
+        }
+    }
+    for p in procs {
+        let uses = p.homes.iter().any(|h| {
+            let h = h.trim_end_matches('/');
+            config::is_within(h, home) || config::is_within(home, h)
+        });
+        let same_cert = !g.cert_sha256.is_empty() && p.homes.iter().any(|h| cert_of(h).is_some_and(|c| c == g.cert_sha256));
+        if uses || same_cert {
+            out.push(Duplicate::Process { pid: p.pid.clone(), unit: p.unit.clone() });
+        }
+    }
+    out
+}
+
+/// The running Syncthing processes of the host's own mount namespace (`<host>/proc`, comm
+/// `syncthing`; a container's processes are checked through Docker): their homes as the
+/// adoption reads them (named, else the defaults of their user from `<root>/etc/passwd`),
+/// and their unit.
+fn host_procs(host: &Path, root: &Path) -> Vec<HostProc> {
+    let proc = host.join("proc");
+    let nul = |p: PathBuf| -> Vec<String> {
+        std::fs::read(p)
+            .map(|b| b.split(|c| *c == 0).filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect())
+            .unwrap_or_default()
+    };
+    let passwd = std::fs::read_to_string(rynas_docker::under(root, "/etc/passwd")).unwrap_or_default();
+    let users: Vec<(String, u32, String)> = passwd
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            (f.len() >= 7).then(|| (f[0].to_string(), f[2].parse().unwrap_or(u32::MAX), f[5].trim_end_matches('/').to_string()))
+        })
+        .collect();
+    let host_ns = std::fs::read_link(proc.join("1/ns/mnt")).ok();
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(&proc).into_iter().flatten().flatten() {
+        let p = e.path();
+        if !std::fs::read_to_string(p.join("comm")).is_ok_and(|c| c.trim() == "syncthing") {
+            continue;
+        }
+        if host_ns.is_some() && std::fs::read_link(p.join("ns/mnt")).ok() != host_ns {
+            continue;
+        }
+        let Ok(m) = std::fs::metadata(&p) else { continue };
+        let uid = std::os::unix::fs::MetadataExt::uid(&m);
+        let mut homes = config::process_homes(&nul(p.join("cmdline")), &nul(p.join("environ")));
+        if homes.is_empty() {
+            homes = users
+                .iter()
+                .filter(|(_, u, h)| *u == uid && !h.is_empty() && h != "/")
+                .flat_map(|(_, _, h)| [".local/state/syncthing", ".config/syncthing"].map(|d| format!("{h}/{d}")))
+                .collect();
+        }
+        let user_of = |id: u32| users.iter().find(|(_, u, _)| *u == id).map(|(n, _, _)| n.clone());
+        let unit = std::fs::read_to_string(p.join("cgroup")).ok().and_then(|t| unit_of_cgroup(&t, &user_of));
+        out.push(HostProc { pid: e.file_name().to_string_lossy().into_owned(), homes, unit });
+    }
+    out
+}
+
+/// Stops a [`Duplicate`] for good.
+fn stop_duplicate(d: &Duplicate) -> Result<(), String> {
+    let run = |cmd: rynas_tasks::Cmd| cmd.timeout(Duration::from_secs(60)).run_blocking().map(|_| ()).map_err(|e| e.to_string());
+    let cmd = rynas_tasks::Cmd::new;
+    match d {
+        Duplicate::Container(n) => {
+            let a = run(cmd("docker").args(["update", "--restart=no", n]));
+            let b = run(cmd("docker").args(["stop", n]));
+            a.and(b)
+        }
+        Duplicate::Process { unit: Some((u, None)), .. } => run(cmd("systemctl").args(["disable", "--now", u])),
+        Duplicate::Process { unit: Some((u, Some(user))), .. } => {
+            run(cmd("systemctl").args(["--user".to_string(), format!("--machine={user}@.host"), "disable".into(), "--now".into(), u.clone()]))
+        }
+        Duplicate::Process { pid, unit: None } => run(cmd("kill").args(["-TERM", pid])),
+    }
+}
+
+/// The systemd unit of a process from its `/proc/<pid>/cgroup` text: a system unit, or a
+/// user unit with the uid of its `user@<uid>.service` (named through `user_of`).
+pub fn unit_of_cgroup(text: &str, user_of: &dyn Fn(u32) -> Option<String>) -> Option<(String, Option<String>)> {
+    let path = text.lines().find_map(|l| l.strip_prefix("0::")).or_else(|| text.lines().find_map(|l| l.splitn(3, ':').nth(2)))?;
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let unit = parts.iter().rev().find(|p| p.ends_with(".service"))?.to_string();
+    let user = parts.iter().find_map(|p| p.strip_prefix("user@").and_then(|r| r.strip_suffix(".service"))).and_then(|u| u.parse::<u32>().ok());
+    match user {
+        Some(_) if unit.starts_with("user@") => None,
+        Some(uid) => Some((unit, Some(user_of(uid)?))),
+        None => Some((unit, None)),
+    }
 }
 
 struct Loop {
@@ -459,6 +634,187 @@ impl Live {
     }
 
     // -----------------------------------------------------------------------------------------
+    // adopted sources
+    // -----------------------------------------------------------------------------------------
+
+    /// Remembers the source `stack` adopted: from now on every detection pass stops another
+    /// instance with its home or identity ([`Live::guard_pass`]).
+    pub fn guard_adopted(&self, stack: &str, g: AdoptedGuard) {
+        tracing::info!("syncthing: {stack} adopted {} (device {}): guarded against a second instance", g.home, g.device_short);
+        self.update_persist(|p| {
+            p.adopted.insert(stack.to_string(), g);
+        });
+    }
+
+    /// The adopted container came from a compose project of another tool (a warning).
+    pub fn compose_leftover(&self, stack: &str, project: &str, dir: &str) {
+        let mut ev = oneshot(
+            NotifyCategory::App,
+            NotifySeverity::Warning,
+            SOURCE,
+            format!("syncthing:compose:{stack}:{project}"),
+            format!("Remove the compose project {project}"),
+        );
+        ev.body = format!(
+            "The Syncthing adopted as {stack} came from a container of the compose project {project} ({dir}). rynas removed the container; remove the project from the tool that manages it, or a compose up there starts a second instance with the same device id."
+        );
+        self.notifier.emit(field(field(field(code(ev, "syncthing.compose_leftover"), "stack", stack), "project", project), "dir", dir));
+    }
+
+    /// Every detection pass: for each adopted source of an installed stack, another running
+    /// container or host process with its home or identity is stopped for good (`docker
+    /// update --restart=no` + `docker stop`, or its unit disabled and stopped, else
+    /// `SIGTERM`), logged and notified (`syncthing.duplicate_stopped`).
+    async fn guard_pass(&self, apps: &Arc<AppsSvc>, installed: &BTreeSet<String>) {
+        let guards: Vec<(String, AdoptedGuard)> = {
+            let g = lock(&self.persist).adopted.clone();
+            // a stack uninstalled meanwhile: nothing to guard
+            let gone: Vec<String> = g.keys().filter(|k| !installed.contains(*k)).cloned().collect();
+            if !gone.is_empty() && self.detected_once.load(std::sync::atomic::Ordering::Acquire) {
+                self.update_persist(|p| p.adopted.retain(|k, _| !gone.contains(k)));
+            }
+            g.into_iter().filter(|(k, _)| installed.contains(k)).collect()
+        };
+        if guards.is_empty() || apps.docker.dry {
+            return;
+        }
+        let Ok(cs) = apps.docker.containers().await else { return };
+        let mut ours: BTreeSet<String> = installed.clone();
+        let mut inspected = Vec::new();
+        for c in cs.iter().filter(|c| c.c.state == ContainerState::Running) {
+            if c.c.stack.as_ref().is_some_and(|s| installed.contains(s)) {
+                ours.insert(c.c.name.clone());
+                continue;
+            }
+            if let Ok(js) = apps.docker.inspect_json(&c.c.id).await {
+                inspected.push(js);
+            }
+        }
+        let (root, host) = (apps.docker.root.clone(), apps.docker.host_root.clone());
+        let found = tokio::task::spawn_blocking(move || {
+            let procs = host_procs(&host, &root);
+            let cert_of = |home: &str| -> Option<String> {
+                let canon = std::fs::canonicalize(rynas_docker::under(&root, home)).ok()?;
+                let pem = std::fs::read_to_string(config::home_file(&canon, "cert.pem")?).ok()?;
+                config::cert_identity(&pem).map(|i| i.1)
+            };
+            let exists = |p: &str| rynas_docker::under(&root, p).exists();
+            guards
+                .into_iter()
+                .map(|(stack, g)| {
+                    let d = find_duplicates(&g, &ours, &inspected, &procs, &cert_of, &exists);
+                    (stack, g, d)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        for (stack, g, dups) in found {
+            for d in dups {
+                let what = d.describe();
+                tracing::warn!("syncthing: {what} runs with the home or device id of the source {stack} adopted ({}): stopping it", g.home);
+                let r = tokio::task::spawn_blocking({
+                    let d = d.clone();
+                    move || stop_duplicate(&d)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+                if let Err(e) = &r {
+                    tracing::warn!("syncthing: {what} not stopped: {e}");
+                }
+                let mut ev = oneshot(
+                    NotifyCategory::App,
+                    NotifySeverity::Error,
+                    SOURCE,
+                    format!("syncthing:duplicate:{stack}:{}", now_ms()),
+                    format!("A second Syncthing with the device id of {stack} was stopped"),
+                );
+                ev.body = format!(
+                    "{what} used the home of the Syncthing adopted as {stack} ({}) or its device id: two instances with one device id must never run. rynas stopped it and turned its restart off; remove it.{}",
+                    g.home,
+                    r.err().map(|e| format!(" The stop failed: {e}")).unwrap_or_default()
+                );
+                self.notifier.emit(field(field(field(code(ev, "syncthing.duplicate_stopped"), "stack", &stack), "what", &what), "home", &g.home));
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // rollback of a share
+    // -----------------------------------------------------------------------------------------
+
+    /// The labels of the folders inside the share at `share_path`, in every instance (from
+    /// the models: for a preview).
+    pub fn folders_inside(&self, share_path: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for inst in self.instances() {
+            let folders = inst.with(|i| i.model.folders.clone());
+            for f in folders {
+                if inst.host(&f.path).is_some_and(|h| config::is_within(&h, share_path) || config::is_within(share_path, &h)) {
+                    out.push(if f.label.is_empty() { f.id.clone() } else { f.label.clone() });
+                }
+            }
+        }
+        out
+    }
+
+    /// Before a rollback (or an in-place restore) touching `path`: the running folders inside
+    /// it, or holding it, are paused in every instance and NOT remembered as paused by rynas
+    /// (forgotten if they were): they stay paused after the rollback until the user checks
+    /// the files and resumes them, since a resume sends the rolled-back state everywhere.
+    /// Waits until none scans or syncs ([`IDLE_WAIT`]). Returns the folders paused or found
+    /// paused (labels).
+    pub async fn pause_for_rollback(&self, path: &str) -> Vec<String> {
+        let deadline = tokio::time::Instant::now() + IDLE_WAIT;
+        let mut out = Vec::new();
+        let mut wait = Vec::new();
+        for inst in self.instances() {
+            let folders = match tokio::time::timeout_at(deadline, inst.client.get("/rest/config/folders")).await {
+                Ok(Ok(v)) => model::folders_of_config(&v),
+                Ok(Err(e)) => {
+                    tracing::warn!("syncthing: {}: folders inside {path} not paused before the rollback: {e}", inst.stack);
+                    continue;
+                }
+                Err(_) => {
+                    tracing::warn!("syncthing: {}: no answer before the rollback of {path}", inst.stack);
+                    continue;
+                }
+            };
+            for f in folders {
+                if !inst.host(&f.path).is_some_and(|h| config::is_within(&h, path) || config::is_within(path, &h)) {
+                    continue;
+                }
+                // never resumed by rynas
+                self.flag(&inst.stack, &f.id, false);
+                let label = if f.label.is_empty() { f.id.clone() } else { f.label.clone() };
+                if !f.paused {
+                    match tokio::time::timeout_at(deadline, inst.client.set_paused(&f.id, true)).await {
+                        Ok(Ok(())) => {
+                            tracing::info!("syncthing: {}: folder {} paused before the rollback of {path}", inst.stack, f.id);
+                            inst.with(|i| set_paused(&mut i.model, &f.id, true));
+                            wait.push((inst.clone(), f.id.clone()));
+                        }
+                        Ok(Err(e)) => tracing::warn!("syncthing: {}: folder {} not paused before the rollback: {e}", inst.stack, f.id),
+                        Err(_) => tracing::warn!("syncthing: {}: folder {}: no answer to the pause before the rollback", inst.stack, f.id),
+                    }
+                }
+                out.push(label);
+            }
+        }
+        while !wait.is_empty() && tokio::time::Instant::now() + Duration::from_millis(500) < deadline {
+            let states = futures_util::future::join_all(
+                wait.iter().map(|(inst, id)| async move { tokio::time::timeout_at(deadline, inst.client.folder_state(id)).await }),
+            )
+            .await;
+            wait = wait.into_iter().zip(states).filter(|(_, s)| matches!(s, Ok(Ok(s)) if BUSY.contains(&s.as_str()))).map(|(w, _)| w).collect();
+            if !wait.is_empty() {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------------------------------
     // detection
     // -----------------------------------------------------------------------------------------
 
@@ -537,8 +893,10 @@ impl Live {
                 loops.insert(stack, Loop { sig, task });
             }
         }
+        let installed: BTreeSet<String> = det.iter().map(|d| d.installed.stack.clone()).collect();
         *lock(&self.detected) = det;
         self.detected_once.store(true, std::sync::atomic::Ordering::Release);
+        self.guard_pass(apps, &installed).await;
     }
 
     /// The instance's loop: sessions, with a growing pause after a failure.
@@ -1569,5 +1927,113 @@ mod tests {
         assert_eq!(ev.code, "syncthing.up");
         let ev = event_of("sync", Alert::DeviceUnseen { device: "ABC".into(), name: "phone".into(), days: 8 });
         assert_eq!(ev.key.as_deref(), Some("syncthing:device:sync:ABC"));
+    }
+
+    #[tokio::test]
+    async fn a_rollback_pauses_the_folders_and_never_resumes_them() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let fake: FakeSt = Arc::new(Mutex::new(Fake {
+            folders: vec![folder("work", "/shares/docs/work", false), folder("kept", "/shares/docs/kept", true), folder("other", "/shares/photos", false)],
+            ..Default::default()
+        }));
+        let base = serve(fake.clone()).await;
+        let facts = Arc::new(Facts(Mutex::new(Vec::new())));
+        let live = Live::new(root.path(), state.path(), facts, Arc::new(rynas_notify::NullNotifier));
+        let binds = vec![
+            Bind { container: "/shares/docs".into(), host: "/vol1/docs".into(), share: Some("docs".into()) },
+            Bind { container: "/shares/photos".into(), host: "/vol1/photos".into(), share: Some("photos".into()) },
+        ];
+        live.add_instance(Instance::new("sync", Client::new(&base, "k3y").unwrap(), binds), true);
+        // a folder rynas paused for a lock: forgotten, never resumed after the rollback
+        live.flag("sync", "kept", true);
+        let mut paused = live.pause_for_rollback("/vol1/docs").await;
+        paused.sort();
+        assert_eq!(paused, ["KEPT", "WORK"]);
+        let log = fake.lock().unwrap().log.clone();
+        assert_eq!(log.iter().filter(|l| l.starts_with("pause")).collect::<Vec<_>>(), ["pause work"]);
+        assert!(live.persisted().paused_by_rynas.is_empty());
+        // an in-place restore of a path inside a folder pauses the folder holding it
+        fake.lock().unwrap().log.clear();
+        assert_eq!(live.pause_for_rollback("/vol1/photos/2024/a.jpg").await, ["OTHER"]);
+        // a full read later leaves them paused
+        marker(root.path(), "/vol1/docs/work", "work");
+        live.resume_inside("/vol1/docs").await;
+        assert!(!fake.lock().unwrap().log.iter().any(|l| l.starts_with("resume")));
+    }
+
+    #[test]
+    fn duplicates_of_an_adopted_source() {
+        let g = AdoptedGuard { home: "/vol1/docker/old-st/config".into(), device_short: "ABCDEFG".into(), cert_sha256: "c0ffee".into() };
+        let inspect = |name: &str, image: &str, project: Option<&str>, mounts: &[(&str, &str)]| {
+            let mut labels = serde_json::Map::new();
+            if let Some(p) = project {
+                labels.insert("com.docker.compose.project".into(), p.into());
+            }
+            json!([{
+                "Name": format!("/{name}"),
+                "Path": "/bin/entrypoint.sh", "Args": [],
+                "Config": {"Image": image, "Cmd": null, "Labels": labels},
+                "Mounts": mounts.iter().map(|(s, d)| json!({"Type": "bind", "Source": s, "Destination": d})).collect::<Vec<_>>(),
+            }])
+        };
+        let cs = vec![
+            // the app itself
+            inspect("syncthing-syncthing-1", "syncthing/syncthing:2", Some("syncthing"), &[("/vol1/docker/stacks/syncthing/state", "/var/syncthing")]),
+            // the old container recreated by its compose project: mounts the home
+            inspect("old-st", "lscr.io/linuxserver/syncthing", Some("old"), &[("/vol1/docker/old-st", "/config")]),
+            // a copy of the home elsewhere: same certificate
+            inspect("copy", "syncthing/syncthing", None, &[("/vol2/copy", "/var/syncthing")]),
+            // another Syncthing with its own identity, and an unrelated container
+            inspect("mine", "syncthing/syncthing", None, &[("/vol2/mine", "/var/syncthing")]),
+            inspect("web", "nginx", None, &[("/vol1/web", "/usr/share/nginx/html")]),
+        ];
+        let cert_of = |home: &str| match home {
+            "/vol2/copy/config" | "/vol1/docker/old-st/config" => Some("c0ffee".to_string()),
+            "/vol2/mine/config" => Some("other".to_string()),
+            _ => None,
+        };
+        let exists = |p: &str| p.ends_with("/config/config.xml") && !p.starts_with("/vol1/docker/stacks");
+        let procs = vec![
+            HostProc { pid: "812".into(), homes: vec!["/vol1/docker/old-st/config".into()], unit: Some(("syncthing@ann.service".into(), None)) },
+            HostProc { pid: "900".into(), homes: vec!["/home/bob/.local/state/syncthing".into()], unit: None },
+        ];
+        let ours = BTreeSet::from(["syncthing".to_string()]);
+        let d = find_duplicates(&g, &ours, &cs, &procs, &cert_of, &exists);
+        assert_eq!(d, vec![
+            Duplicate::Container("old-st".into()),
+            Duplicate::Container("copy".into()),
+            Duplicate::Process { pid: "812".into(), unit: Some(("syncthing@ann.service".into(), None)) },
+        ]);
+        assert_eq!(d[2].describe(), "syncthing@ann.service (pid 812)");
+        // nothing guarded without a home
+        assert!(find_duplicates(&AdoptedGuard::default(), &ours, &cs, &procs, &cert_of, &exists).is_empty());
+    }
+
+    #[test]
+    fn units_from_cgroups() {
+        let user_of = |uid: u32| (uid == 1026).then(|| "ann".to_string());
+        assert_eq!(unit_of_cgroup("0::/system.slice/system-syncthing.slice/syncthing@ann.service\n", &user_of), Some(("syncthing@ann.service".into(), None)));
+        assert_eq!(
+            unit_of_cgroup("0::/user.slice/user-1026.slice/user@1026.service/app.slice/syncthing.service\n", &user_of),
+            Some(("syncthing.service".into(), Some("ann".into())))
+        );
+        // a login session: no unit to stop
+        assert_eq!(unit_of_cgroup("0::/user.slice/user-1026.slice/session-3.scope\n", &user_of), None);
+        assert_eq!(unit_of_cgroup("0::/user.slice/user-1026.slice/user@1026.service/init.scope\n", &user_of), None);
+    }
+
+    #[tokio::test]
+    async fn adopted_sources_are_remembered() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let notes = Arc::new(rynas_notify::MemoryNotifier::default());
+        let live = Live::new(root.path(), state.path(), Arc::new(Facts(Mutex::new(Vec::new()))), notes.clone());
+        live.guard_adopted("sync", AdoptedGuard { home: "/vol1/old".into(), device_short: "ABCDEFG".into(), cert_sha256: "aa".into() });
+        let again = Live::new(root.path(), state.path(), Arc::new(Facts(Mutex::new(Vec::new()))), notes.clone());
+        assert_eq!(again.persisted().adopted["sync"].home, "/vol1/old");
+        live.compose_leftover("sync", "old", "/opt/old");
+        let ev = notes.take();
+        assert_eq!((ev[0].code.as_str(), ev[0].fields["project"].as_str(), ev[0].fields["dir"].as_str()), ("syncthing.compose_leftover", "old", "/opt/old"));
     }
 }

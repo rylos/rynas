@@ -768,6 +768,20 @@ async fn restore_one(
         .ops
         .tasks
         .spawn("snapshot.restore", &who, move |ctx| async move {
+            // in place: Syncthing folders holding the path would send the old version to
+            // every device; paused, and left paused for the user to check
+            if req.mode == rynas_api_types::snapshots::RestoreMode::Replace
+                && let Some(live) = crate::syncthing::live::get()
+            {
+                let target = l.subvolume.join(req.path.trim_matches('/')).to_string_lossy().into_owned();
+                let paused = live.pause_for_rollback(&target).await;
+                if !paused.is_empty() {
+                    ctx.log(&format!(
+                        "Syncthing folders paused, and left paused after the restore: {}. Check the files, then resume them in Syncthing: a resume sends the restored version to every device",
+                        paused.join(", ")
+                    ));
+                }
+            }
             let c = ctx.clone();
             tokio::task::spawn_blocking(move || -> Result<(), String> {
                 c.log(&format!(
@@ -847,21 +861,31 @@ async fn rollback(
     let ops = p.ops.clone();
     let task = p.ops.tasks.spawn("snapshot.rollback", &who, move |ctx| async move {
         let c = ctx.clone();
+        let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             let _lock = JobLock::acquire(&lock_path(&l.job)).map_err(|e| e.to_string())?;
             let sys = ops.config.system();
-            if let Some(u) = &view {
-                c.log(&format!("unmounting the snapshot folder ({u})"));
-                sys.stop_unit(u)?;
-            }
-            c.log(&format!("rolling {} back to {id}", l.subvolume.display()));
-            let r = restore::rollback(&l.dir.join(&id), &l.subvolume, now_s()).map_err(|e| e.to_string());
-            if let Some(u) = &view
-                && let Err(e) = sys.start_unit(u)
-            {
-                c.log(&format!("{u}: {e}"));
-            }
-            let r = r?;
+            let share = l.subvolume.to_string_lossy().into_owned();
+            let pause = || match crate::syncthing::live::get() {
+                Some(live) => handle.block_on(live.pause_for_rollback(&share)),
+                None => Vec::new(),
+            };
+            let users = || crate::services::running_users(&share);
+            let swap = || {
+                if let Some(u) = &view {
+                    c.log(&format!("unmounting the snapshot folder ({u})"));
+                    sys.stop_unit(u)?;
+                }
+                c.log(&format!("rolling {} back to {id}", l.subvolume.display()));
+                let r = restore::rollback(&l.dir.join(&id), &l.subvolume, now_s()).map_err(|e| e.to_string());
+                if let Some(u) = &view
+                    && let Err(e) = sys.start_unit(u)
+                {
+                    c.log(&format!("{u}: {e}"));
+                }
+                r
+            };
+            let r = around_swap(&pause, &users, &DockerAround, &|m| c.log(m), swap)?;
 
             c.log(&format!(
                 "done; the previous content is kept as {} next to it (delete it when no longer needed). NFS clients must mount the share again.",
@@ -873,6 +897,69 @@ async fn rollback(
         .map_err(|e| e.to_string())?
     })?;
     Ok(started(task))
+}
+
+/// Starting and stopping the containers around a share rollback (real: Docker; tests: a
+/// fake).
+trait Containers {
+    fn stop(&self, name: &str) -> Result<(), String>;
+    fn start(&self, name: &str) -> Result<(), String>;
+}
+
+struct DockerAround;
+
+impl Containers for DockerAround {
+    fn stop(&self, name: &str) -> Result<(), String> {
+        crate::services::docker_cmd("stop", name)
+    }
+    fn start(&self, name: &str) -> Result<(), String> {
+        crate::services::docker_cmd("start", name)
+    }
+}
+
+/// A share rollback around the subvolume swap: the Syncthing folders inside the share are
+/// paused first and left paused (`pause`, their labels), then the running containers with a
+/// bind of the share (`users`) are stopped (all or none: after a failed stop the stopped
+/// ones start again and nothing is swapped), the swap runs, and they start again whatever
+/// it gave (a container not started is logged).
+fn around_swap<T>(
+    pause: &dyn Fn() -> Vec<String>,
+    users: &dyn Fn() -> Result<Vec<String>, String>,
+    docker: &dyn Containers,
+    log: &dyn Fn(&str),
+    swap: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let paused = pause();
+    if !paused.is_empty() {
+        log(&format!(
+            "Syncthing folders on this shared folder paused, and left paused after the rollback: {}. Check the files, then resume them in Syncthing: a resume sends the rolled-back state, deletions included, to every device",
+            paused.join(", ")
+        ));
+    }
+    let names = users().map_err(|e| format!("cannot check the containers using the shared folder: {e}"))?;
+    let mut stopped = Vec::new();
+    let mut failed = None;
+    for n in &names {
+        log(&format!("stopping the container {n} for the rollback"));
+        match docker.stop(n) {
+            Ok(()) => stopped.push(n.clone()),
+            Err(e) => {
+                failed = Some(format!("the container {n} could not be stopped: {e}"));
+                break;
+            }
+        }
+    }
+    let r = match failed {
+        Some(e) => Err(format!("{e}; nothing was rolled back")),
+        None => swap(),
+    };
+    for n in &stopped {
+        match docker.start(n) {
+            Ok(()) => log(&format!("container {n} started again")),
+            Err(e) => log(&format!("warning: the container {n} was not started again: {e}")),
+        }
+    }
+    r
 }
 
 /// The preview of a rollback to `l`/`id` (no side effect).
@@ -891,11 +978,14 @@ fn rollback_preview(
     let readonly = snap.info.as_ref().is_some_and(|i| i.readonly);
     if !l.system {
         let ok = snap.deletion != rynas_api_types::snapshots::SnapshotDeletion::NotSubvolume;
+        let share = l.subvolume.to_string_lossy().into_owned();
         return Ok(RollbackPreview {
             id: id.into(),
             allowed: ok,
             refusal: (!ok).then_some(RollbackRefusal::NotReadonly),
             subvolume: Some(l.subvolume.display().to_string()),
+            syncthing_folders: crate::syncthing::live::get().map(|live| live.folders_inside(&share)).unwrap_or_default(),
+            restart_containers: crate::services::running_users(&share).unwrap_or_default(),
             ..Default::default()
         });
     }
@@ -920,7 +1010,7 @@ fn rollback_preview(
         kernel: k.release,
         running_kernel: ops.running_kernel(),
         modules: k.modules,
-        subvolume: None,
+        ..Default::default()
     })
 }
 
@@ -1064,4 +1154,73 @@ async fn snapshot_delete(
             .map_err(|e| e.to_string())?
         })?;
     Ok(started(task))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    struct Fake<'a> {
+        steps: &'a RefCell<Vec<String>>,
+        fail_stop: Option<&'static str>,
+    }
+
+    impl Containers for Fake<'_> {
+        fn stop(&self, name: &str) -> Result<(), String> {
+            if self.fail_stop == Some(name) {
+                return Err("busy".into());
+            }
+            self.steps.borrow_mut().push(format!("stop {name}"));
+            Ok(())
+        }
+        fn start(&self, name: &str) -> Result<(), String> {
+            self.steps.borrow_mut().push(format!("start {name}"));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_share_rollback_pauses_then_restarts_around_the_swap() {
+        let steps = RefCell::new(Vec::new());
+        let lines = RefCell::new(Vec::new());
+        let log = |m: &str| lines.borrow_mut().push(m.to_string());
+        let pause = || {
+            steps.borrow_mut().push("pause".into());
+            vec!["Photos".to_string()]
+        };
+        let users = || {
+            steps.borrow_mut().push("users".into());
+            Ok(vec!["syncthing".to_string(), "photos-app".to_string()])
+        };
+        let fake = Fake { steps: &steps, fail_stop: None };
+        let r = around_swap(&pause, &users, &fake, &log, || {
+            steps.borrow_mut().push("swap".into());
+            Ok("kept")
+        });
+        assert_eq!(r, Ok("kept"));
+        assert_eq!(*steps.borrow(), ["pause", "users", "stop syncthing", "stop photos-app", "swap", "start syncthing", "start photos-app"]);
+        assert!(lines.borrow().iter().any(|l| l.contains("Photos") && l.contains("left paused")));
+
+        // a failed swap still starts them again
+        steps.borrow_mut().clear();
+        let r: Result<(), String> = around_swap(&pause, &users, &fake, &log, || Err("no space".into()));
+        assert_eq!(r, Err("no space".into()));
+        assert_eq!(steps.borrow().last().map(String::as_str), Some("start photos-app"));
+
+        // a container that does not stop: nothing is swapped, the stopped ones start again
+        steps.borrow_mut().clear();
+        let fake = Fake { steps: &steps, fail_stop: Some("photos-app") };
+        let r: Result<(), String> = around_swap(&pause, &users, &fake, &log, || {
+            steps.borrow_mut().push("swap".into());
+            Ok(())
+        });
+        assert!(r.unwrap_err().contains("photos-app could not be stopped"));
+        assert_eq!(*steps.borrow(), ["pause", "users", "stop syncthing", "start syncthing"]);
+
+        // Docker cannot be asked: no swap
+        let no_docker = || Err::<Vec<String>, String>("no answer".into());
+        let r: Result<(), String> = around_swap(&Vec::new, &no_docker, &fake, &log, || panic!("swapped"));
+        assert!(r.unwrap_err().contains("cannot check the containers"));
+    }
 }

@@ -39,6 +39,10 @@ pub struct StConfig {
     pub folders: Vec<StFolder>,
     pub devices: Vec<StDevice>,
     pub gui_address: Option<String>,
+    /// `<gui tls="true">`: the GUI serves HTTPS itself.
+    pub gui_tls: bool,
+    /// `<options><listenAddress>` values (sync connections).
+    pub listen: Vec<String>,
 }
 
 fn child<'a, 'i>(n: roxmltree::Node<'a, 'i>, name: &str) -> Option<roxmltree::Node<'a, 'i>> {
@@ -81,7 +85,18 @@ pub fn parse_config(xml: &str) -> Result<StConfig, String> {
                 id: n.attribute("id").unwrap_or("").to_string(),
                 name: n.attribute("name").unwrap_or("").to_string(),
             }),
-            "gui" => out.gui_address = child_text(n, "address").filter(|a| !a.is_empty()),
+            "gui" => {
+                out.gui_address = child_text(n, "address").filter(|a| !a.is_empty());
+                out.gui_tls = n.attribute("tls") == Some("true");
+            }
+            "options" => {
+                out.listen = n
+                    .children()
+                    .filter(|c| c.is_element() && c.tag_name().name() == "listenAddress")
+                    .map(|c| c.text().unwrap_or("").trim().to_string())
+                    .filter(|a| !a.is_empty())
+                    .collect();
+            }
             _ => {}
         }
     }
@@ -198,6 +213,118 @@ pub fn rewrite_config(xml: &str, edits: &[FolderEdit]) -> Result<String, String>
         }
     }
     Ok(out)
+}
+
+/// The port the app publishes for sync connections.
+pub const SYNC_PORT: &str = "22000";
+
+/// Sync listen addresses the app cannot serve: not `default`, not a relay, and not on port
+/// 22000.
+pub fn custom_listen(listen: &[String]) -> Vec<String> {
+    listen
+        .iter()
+        .filter(|a| {
+            let a = a.trim();
+            if a == "default" || a.starts_with("relay://") || a.starts_with("dynamic+") {
+                return false;
+            }
+            let rest = a.split_once("://").map(|(_, r)| r).unwrap_or(a);
+            let host_port = rest.split(['/', '?']).next().unwrap_or("");
+            host_port.rsplit_once(':').map(|(_, p)| p) != Some(SYNC_PORT)
+        })
+        .cloned()
+        .collect()
+}
+
+fn is_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// The GUI's own HTTPS off (`<gui tls="false">`, rynas' proxy serves HTTPS) and, with
+/// `reset_listen`, the sync listen addresses replaced by one `default`; text splices like
+/// [`rewrite_config`], the result read back and checked.
+pub fn rewrite_options(xml: &str, gui_tls_off: bool, reset_listen: bool) -> Result<String, String> {
+    let before = parse_config(xml)?;
+    let doc = roxmltree::Document::parse(xml).map_err(|e| format!("config.xml: {e}"))?;
+    let root = doc.root_element();
+    let mut splices: Vec<(Range<usize>, String)> = Vec::new();
+    if gui_tls_off
+        && let Some(a) = child(root, "gui").and_then(|g| g.attribute_node("tls"))
+        && a.value() == "true"
+    {
+        splices.push((a.range_value(), "false".into()));
+    }
+    if reset_listen && let Some(o) = child(root, "options") {
+        let ls: Vec<roxmltree::Node> = o.children().filter(|c| c.is_element() && c.tag_name().name() == "listenAddress").collect();
+        for (i, l) in ls.iter().enumerate() {
+            if i == 0 {
+                match l.first_child().filter(|t| t.is_text()) {
+                    Some(t) => splices.push((t.range(), "default".into())),
+                    None => splices.push((l.range(), "<listenAddress>default</listenAddress>".into())),
+                }
+            } else {
+                // the element and the indentation before it
+                let mut start = l.range().start;
+                while start > 0 && is_space(xml.as_bytes()[start - 1]) {
+                    start -= 1;
+                }
+                splices.push((start..l.range().end, String::new()));
+            }
+        }
+    }
+    splices.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+    let mut out = xml.to_string();
+    for (r, s) in splices {
+        out.replace_range(r, &s);
+    }
+    let back = parse_config(&out)?;
+    let want_listen = if reset_listen && !before.listen.is_empty() { vec!["default".to_string()] } else { before.listen.clone() };
+    if back.folders != before.folders
+        || back.devices != before.devices
+        || back.gui_address != before.gui_address
+        || back.gui_tls != (before.gui_tls && !gui_tls_off)
+        || back.listen != want_listen
+    {
+        return Err("config.xml: the rewrite of the GUI and listen settings did not give the expected result".into());
+    }
+    Ok(out)
+}
+
+/// RFC 4648 base32 (no padding) of `bytes`.
+fn base32(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = String::new();
+    let (mut buf, mut bits) = (0u32, 0u32);
+    for b in bytes {
+        buf = (buf << 8) | u32::from(*b);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((buf >> bits) & 31) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buf << (5 - bits)) & 31) as usize] as char);
+    }
+    out
+}
+
+/// The identity of a `cert.pem`: the first 7 characters of its device id (base32 of the
+/// SHA-256 of the certificate's DER: the Luhn characters come later) and that SHA-256 in
+/// hex. `None` without a certificate.
+pub fn cert_identity(pem: &str) -> Option<(String, String)> {
+    use base64::Engine;
+    let body: String = pem
+        .lines()
+        .skip_while(|l| !l.starts_with("-----BEGIN CERTIFICATE-----"))
+        .skip(1)
+        .take_while(|l| !l.starts_with("-----END CERTIFICATE-----"))
+        .map(str::trim)
+        .collect();
+    let der = base64::engine::general_purpose::STANDARD.decode(body).ok().filter(|d| !d.is_empty())?;
+    let h = Sha256::digest(&der);
+    let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
+    Some((base32(&h).chars().take(7).collect(), hex))
 }
 
 /// The file Syncthing writes inside a folder's marker: `syncthing-folder-` + the first three
@@ -373,11 +500,18 @@ fn bare_pattern(line: &str) -> &str {
     l.strip_suffix('/').unwrap_or(l)
 }
 
-/// The proposed `.stignore`: lines that only name other systems' folders out, `(?d)#recycle`
-/// in. `None` when nothing changes.
-pub fn clean_stignore(text: &str) -> Option<StignoreProposal> {
+/// The names of other systems' folders a `.stignore` cleaning looks for in the folder.
+pub fn foreign_names() -> &'static [&'static str] {
+    FOREIGN
+}
+
+/// The proposed `.stignore`: lines that only name other systems' folders out, unless
+/// `present` says the folder holds a folder of that name (the line keeps it out of the
+/// synchronization: kept, listed in `kept`); `(?d)#recycle` in. `None` when nothing changes.
+pub fn clean_stignore(text: &str, present: &dyn Fn(&str) -> bool) -> Option<StignoreProposal> {
     let mut removed = Vec::new();
     let mut kept: Vec<&str> = Vec::new();
+    let mut kept_foreign = Vec::new();
     let mut has_recycle = false;
     for line in text.lines() {
         let bare = bare_pattern(line);
@@ -387,6 +521,9 @@ pub fn clean_stignore(text: &str) -> Option<StignoreProposal> {
                 continue;
             }
             has_recycle = true;
+            kept.push(line);
+        } else if FOREIGN.contains(&bare) && present(bare) {
+            kept_foreign.push(line.to_string());
             kept.push(line);
         } else if FOREIGN.contains(&bare) {
             removed.push(line.to_string());
@@ -406,7 +543,7 @@ pub fn clean_stignore(text: &str) -> Option<StignoreProposal> {
         after.push_str(a);
         after.push('\n');
     }
-    Some(StignoreProposal { before: text.to_string(), after, removed, added })
+    Some(StignoreProposal { before: text.to_string(), after, removed, added, kept: kept_foreign })
 }
 
 /// The most common owner and how many entries have another one.
@@ -574,13 +711,55 @@ mod tests {
     #[test]
     fn stignore_drops_other_systems_patterns() {
         let before = "// mine\n*.tmp\n@eaDir\n(?d)/#snapshot/\n**/.SynologyWorkingDirectory\n!@Recycle\n.@__thumb/**\n.streams\n#recycle\n#include more.txt\n";
-        let p = clean_stignore(before).unwrap();
+        let none = |_: &str| false;
+        let p = clean_stignore(before, &none).unwrap();
         assert_eq!(p.after, "// mine\n*.tmp\n#include more.txt\n(?d)#recycle\n");
         assert_eq!(p.removed.len(), 7);
         assert_eq!(p.added, ["(?d)#recycle"]);
-        assert_eq!(clean_stignore("*.tmp\n(?d)#recycle\n"), None);
-        let p = clean_stignore("").unwrap();
+        assert!(p.kept.is_empty());
+        assert_eq!(clean_stignore("*.tmp\n(?d)#recycle\n", &none), None);
+        let p = clean_stignore("", &none).unwrap();
         assert_eq!(p.after, "(?d)#recycle\n");
+        // folders of that name in the folder: their lines stay, so they stay out
+        let has = |n: &str| n == "@eaDir" || n == "#snapshot";
+        let p = clean_stignore(before, &has).unwrap();
+        assert_eq!(p.kept, ["@eaDir", "(?d)/#snapshot/"]);
+        assert_eq!(p.after, "// mine\n*.tmp\n@eaDir\n(?d)/#snapshot/\n#include more.txt\n(?d)#recycle\n");
+        assert_eq!(p.removed.len(), 5);
+    }
+
+    #[test]
+    fn gui_tls_and_listen_addresses() {
+        let x = "<configuration>\n    <gui enabled=\"true\" tls=\"true\">\n        <address>0.0.0.0:8384</address>\n    </gui>\n    <options>\n        <listenAddress>tcp://0.0.0.0:22001</listenAddress>\n        <listenAddress>quic://0.0.0.0:22001</listenAddress>\n        <listenAddress>dynamic+https://relays.syncthing.net/endpoint</listenAddress>\n        <globalAnnounceEnabled>true</globalAnnounceEnabled>\n    </options>\n    <folder id=\"a\" path=\"/x\"/>\n</configuration>\n";
+        let c = parse_config(x).unwrap();
+        assert!(c.gui_tls);
+        assert_eq!(custom_listen(&c.listen), ["tcp://0.0.0.0:22001", "quic://0.0.0.0:22001"]);
+        let ok = ["default", "tcp://:22000", "quic://0.0.0.0:22000", "tcp://[::]:22000/?x=1", "relay://r.example:443/?id=X", "dynamic+https://relays"];
+        assert!(custom_listen(&ok.map(String::from)).is_empty());
+        // TLS off only
+        let out = rewrite_options(x, true, false).unwrap();
+        assert_eq!(out, x.replace("tls=\"true\"", "tls=\"false\""));
+        // both: one default line, the rest of the file as it was
+        let out = rewrite_options(x, true, true).unwrap();
+        let c2 = parse_config(&out).unwrap();
+        assert_eq!((c2.gui_tls, c2.listen.clone()), (false, vec!["default".to_string()]));
+        assert!(out.contains("<options>\n        <listenAddress>default</listenAddress>\n        <globalAnnounceEnabled>"), "{out}");
+        assert_eq!(c2.folders, c.folders);
+        // nothing to change
+        assert_eq!(rewrite_options(FIXTURE, true, true).unwrap(), FIXTURE);
+    }
+
+    #[test]
+    fn device_id_prefix_of_a_certificate() {
+        assert_eq!(base32(b"foobar"), "MZXW6YTBOI");
+        assert_eq!(base32(b"f"), "MY");
+        let pem = "-----BEGIN CERTIFICATE-----\nZm9v\nYmFy\n-----END CERTIFICATE-----\n";
+        let (short, hex) = cert_identity(pem).unwrap();
+        // sha256("foobar") = c3ab8ff1…
+        assert!(hex.starts_with("c3ab8ff1"), "{hex}");
+        assert_eq!(short, base32(&Sha256::digest(b"foobar")).chars().take(7).collect::<String>());
+        assert_eq!(short.len(), 7);
+        assert_eq!(cert_identity("no certificate"), None);
     }
 
     #[test]

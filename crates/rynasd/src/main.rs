@@ -933,6 +933,8 @@ fn main() -> std::io::Result<()> {
         // encrypted folders whose password is sealed on this machine (D-CRYPT E1); a failed
         // automatic unlock is notified
         rynasd::services::crypt::set_notifier(notifier.clone());
+        // containers a lock stopped while rynasd ended are started again
+        rynasd::services::crypt::start_left_stopped(&args.state_dir);
         if let Some(s) = &state.services {
             rynasd::services::crypt::auto_unlock_at_start(s);
         }

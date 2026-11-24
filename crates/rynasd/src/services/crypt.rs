@@ -392,6 +392,95 @@ fn holders(path: &str) -> Res<Vec<String>> {
     Ok(h.restart)
 }
 
+/// `<state>/crypt/lock-stopped.json`: the containers a lock stopped and has not started again
+/// yet (set at rynasd start, [`start_left_stopped`]).
+static LOCK_STOPPED: OnceLock<std::path::PathBuf> = OnceLock::new();
+const LOCK_STOPPED_FILE: &str = "crypt/lock-stopped.json";
+
+fn read_stopped(f: &std::path::Path) -> Vec<String> {
+    std::fs::read(f).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// Writes the list (none: the file goes).
+fn write_stopped(f: &std::path::Path, names: &[String]) -> std::io::Result<()> {
+    if names.is_empty() {
+        return match std::fs::remove_file(f) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    let dir = f.parent().ok_or_else(|| std::io::Error::other("no folder"))?;
+    std::fs::create_dir_all(dir)?;
+    crate::tls::write_atomic(f, &serde_json::to_vec(names).map_err(std::io::Error::other)?, 0o600, None)
+}
+
+/// Adds (`add`) or removes names of the record in `f`.
+fn update_stopped(f: &std::path::Path, names: &[String], add: bool) {
+    if names.is_empty() {
+        return;
+    }
+    let mut v = read_stopped(f);
+    if add {
+        for n in names {
+            if !v.contains(n) {
+                v.push(n.clone());
+            }
+        }
+    } else {
+        v.retain(|n| !names.contains(n));
+    }
+    if let Err(e) = write_stopped(f, &v) {
+        tracing::warn!("encrypted folder lock: {} not written: {e}", f.display());
+    }
+}
+
+fn remember_stopped(names: &[String]) {
+    if let Some(f) = LOCK_STOPPED.get() {
+        update_stopped(f, names, true);
+    }
+}
+
+fn forget_stopped(names: &[String]) {
+    if let Some(f) = LOCK_STOPPED.get() {
+        update_stopped(f, names, false);
+    }
+}
+
+/// When rynasd starts: the containers a lock stopped and did not start again (rynasd ended
+/// in between) are started, in a thread that waits for the engine (every 10 s, 5 minutes at
+/// most); each one started leaves the record.
+pub fn start_left_stopped(state_dir: &std::path::Path) {
+    let f = state_dir.join(LOCK_STOPPED_FILE);
+    let _ = LOCK_STOPPED.set(f.clone());
+    if read_stopped(&f).is_empty() {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("crypt-lock-leftovers".into())
+        .spawn(move || {
+            for round in 0..30 {
+                let left = read_stopped(&f);
+                if left.is_empty() {
+                    return;
+                }
+                let started: Vec<String> = left.iter().filter(|n| super::docker_cmd("start", n).is_ok()).cloned().collect();
+                for n in &started {
+                    tracing::info!("encrypted folder lock: {n} stopped by a lock that did not end, started again");
+                }
+                update_stopped(&f, &started, false);
+                if round < 29 {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                }
+            }
+            let left = read_stopped(&f);
+            if !left.is_empty() {
+                tracing::warn!("encrypted folder lock: containers stopped by a lock not started again: {}", left.join(", "));
+            }
+        })
+        .map(|_| ())
+        .unwrap_or_else(|e| tracing::warn!("encrypted folder lock leftovers: {e}"));
+}
+
 /// `docker <action>` of each container, in order: the ones done and the failures (a stop
 /// ends at the first failure, a start tries every container).
 async fn docker_each(action: &'static str, names: Vec<String>) -> (Vec<String>, Option<String>) {
@@ -434,7 +523,10 @@ pub(super) async fn lock(State(st): State<SvcState>, h: HeaderMap, Path(name): P
     if !restart.is_empty() {
         tracing::info!("encrypted folder lock of {path}: restarting around it: {}", restart.join(", "));
     }
-    let (stopped, stop_err) = docker_each("stop", restart).await;
+    // recorded before the stop: a crash of rynasd in between starts them at its next start
+    remember_stopped(&restart);
+    let (stopped, stop_err) = docker_each("stop", restart.clone()).await;
+    forget_stopped(&restart.iter().filter(|n| !stopped.contains(n)).cloned().collect::<Vec<_>>());
     let r = match stop_err {
         Some(e) => Err(conflict(error_codes::CONFLICT, format!("a container using the share could not be stopped for the lock: {e}"))),
         None => {
@@ -474,7 +566,9 @@ pub(super) async fn lock(State(st): State<SvcState>, h: HeaderMap, Path(name): P
         }
     };
     if !stopped.is_empty() {
-        let (_, e) = docker_each("start", stopped).await;
+        let (started, e) = docker_each("start", stopped).await;
+        // one that did not start stays recorded: the next start of rynasd tries again
+        forget_stopped(&started);
         if let Some(e) = e {
             tracing::warn!("encrypted folder lock of {path}: a stopped container was not started again: {e}");
         }
@@ -626,4 +720,27 @@ pub(super) async fn auto_unlock_now(State(st): State<SvcState>) -> Res<Json<Vec<
     let s = svc(&st)?;
     let done = tokio::task::spawn_blocking(move || unlock_sealed(&s)).await.map_err(|e| internal(e.to_string()))?;
     Ok(Json(done))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn containers_stopped_by_a_lock_are_recorded_until_started() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join(LOCK_STOPPED_FILE);
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(read_stopped(&f).is_empty());
+        update_stopped(&f, &names(&["syncthing", "photos"]), true);
+        update_stopped(&f, &names(&["photos", "other"]), true);
+        assert_eq!(read_stopped(&f), ["syncthing", "photos", "other"]);
+        // started again: out of the record; the last one removes the file
+        update_stopped(&f, &names(&["photos"]), false);
+        assert_eq!(read_stopped(&f), ["syncthing", "other"]);
+        update_stopped(&f, &names(&["syncthing", "other"]), false);
+        assert!(!f.exists());
+        update_stopped(&f, &[], false);
+        assert!(!f.exists());
+    }
 }

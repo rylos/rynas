@@ -326,10 +326,21 @@ struct MadeFolders {
     /// Parents made on the way (deleted only when empty).
     #[serde(default)]
     parents: Vec<String>,
+    /// Share permission entries the app's installs and share set changes added or raised
+    /// (an uninstall with `remove_grants` takes them back).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    grants: Vec<rynas_api_types::apps::AppAddedGrant>,
 }
 
 impl MadeFolders {
     fn add(&mut self, other: MadeFolders) {
+        for g in other.grants {
+            match self.grants.iter_mut().find(|x| x.share == g.share && x.kind == g.kind && x.name == g.name) {
+                // the first change keeps what the entry was before the app
+                Some(x) => x.access = g.access,
+                None => self.grants.push(g),
+            }
+        }
         for f in other.folders {
             if !self.folders.contains(&f) {
                 self.folders.push(f);
@@ -1304,6 +1315,7 @@ impl AppsSvc {
                     follow: i.follow,
                 })
                 .collect(),
+            added_grants: read_made(&self.docker, &d.stack).grants,
         }
     }
 
@@ -1612,7 +1624,7 @@ pub(crate) async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob)
     .await
     .map_err(keep)?;
     // the apps' account into the chosen shared folders, before the app starts reading them
-    grant_shares(a, ctx, &j.who, &j.name, ids, &j.share_grants)
+    grant_shares(a, ctx, &j.who, &j.stack, &j.name, ids, &j.share_grants)
         .await
         .map_err(keep)?;
     s.changed();
@@ -1719,6 +1731,35 @@ pub(crate) fn with_share_grant(cfg: &rynas_api_types::SharesConfig, path: &str, 
     Some(out)
 }
 
+/// The entry [`with_share_grant`] adds or raises on `path` for `subject`, as the stack's
+/// record keeps it; `None` when nothing changes.
+fn added_grant(shares: &[rynas_api_types::Share], path: &str, subject: &GrantSubject, write: bool) -> Option<rynas_api_types::apps::AppAddedGrant> {
+    use rynas_api_types::Access;
+    let (Some(share), action) = share_grant_action(shares, path, subject, write) else { return None };
+    let before = match action {
+        ShareGrantAction::Add => None,
+        ShareGrantAction::Raise => Some(Access::Ro),
+        _ => return None,
+    };
+    let (kind, name) = subject.kind_name();
+    Some(rynas_api_types::apps::AppAddedGrant { share, kind, name: name.to_string(), access: if write { Access::Rw } else { Access::Ro }, before })
+}
+
+/// The share document with a recorded entry taken back: removed (the app added it) or set to
+/// what it was; `None` when the share or the entry is gone, or the entry changed since.
+fn without_grant(cfg: &rynas_api_types::SharesConfig, g: &rynas_api_types::apps::AppAddedGrant) -> Option<rynas_api_types::SharesConfig> {
+    let mut out = cfg.clone();
+    let s = out.shares.iter_mut().find(|s| s.name == g.share)?;
+    let i = s.permissions.iter().position(|p| p.kind == g.kind && p.name == g.name && p.access == g.access)?;
+    match g.before {
+        None => {
+            s.permissions.remove(i);
+        }
+        Some(b) => s.permissions[i].access = b,
+    }
+    Some(out)
+}
+
 impl AppsSvc {
     /// The shares of the applied configuration (not the staged one).
     pub(crate) fn applied_shares(&self) -> Vec<rynas_api_types::Share> {
@@ -1810,13 +1851,23 @@ fn share_set_grants(
 /// logged; the app is installed anyway.
 /// `ids` are the app's (uid, gid): the gid is the subject of the file ACLs for the apps'
 /// group, the uid for a grant to the NAS user the app runs as ([`PlannedShareGrant::user`]).
-async fn grant_shares(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, app: &str, ids: (u32, u32), grants: &[PlannedShareGrant]) -> Result<(), String> {
+/// Every entry added or raised is recorded for the stack (`MadeFolders::grants`).
+async fn grant_shares(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, stack: &str, app: &str, ids: (u32, u32), grants: &[PlannedShareGrant]) -> Result<(), String> {
     for g in grants {
         let subject = GrantSubject::of(g.user.as_deref());
         let sname = subject.name().to_string();
         if g.action == ShareGrantAction::Denied {
             ctx.log(&format!("warning: {} denies {sname}: the app cannot use {}", g.share.as_deref().unwrap_or(&g.path), g.path));
             continue;
+        }
+        if let Some(added) = added_grant(&a.applied_shares(), &g.path, &subject, g.write) {
+            ctx.log(&format!(
+                "the share {} gets a permission entry for {sname}: it also opens the share to {sname} over SMB and NFS",
+                added.share
+            ));
+            if let Err(e) = record_made(&a.docker, stack, MadeFolders { grants: vec![added], ..Default::default() }) {
+                ctx.log(&format!("warning: the permission entry is not recorded: {e}"));
+            }
         }
         let (cfg, log, path, write, who2, sub2) = (a.docker.ops.config.clone(), ctx.clone(), g.path.clone(), g.write, who.to_string(), subject.clone());
         let what = format!(
@@ -2517,7 +2568,7 @@ async fn uninstall_post(
         &stack,
     );
     let (s2, n2) = (a.docker.clone(), stack.clone());
-    let (web, who2) = (a.web.get().cloned(), who.clone());
+    let (web, who2, who3) = (a.web.get().cloned(), who.clone(), who.clone());
     let id = a.docker.ops.tasks.spawn("apps.uninstall", &who, move |ctx| async move {
         let _guard = guard;
         let s = &s2;
@@ -2530,6 +2581,9 @@ async fn uninstall_post(
                 Ok(false) => {}
                 Err(e) => ctx.log(&format!("warning: the web access route was not removed: {e}")),
             }
+        }
+        if req.remove_grants {
+            remove_grants(s, &ctx, &who3, &n2).await;
         }
         if !req.delete_data {
             ctx.log(&format!(
@@ -2579,6 +2633,39 @@ async fn uninstall_post(
         Ok(())
     })?;
     Ok(accepted(id))
+}
+
+/// Takes back the share permission entries the stack's record lists (an uninstall with
+/// `remove_grants`): each one still as the app left it is removed or set back; the record
+/// keeps none of them afterwards.
+async fn remove_grants(s: &Arc<DockerSvc>, ctx: &TaskCtx, who: &str, stack: &str) {
+    let mut made = read_made(s, stack);
+    if made.grants.is_empty() {
+        ctx.log("no share permission entry was added by the app");
+        return;
+    }
+    for g in std::mem::take(&mut made.grants) {
+        let (cfg, log, who2, g2) = (s.ops.config.clone(), ctx.clone(), who.to_string(), g.clone());
+        let what = format!("the permission entry of {} on {} added for the app {stack} is removed", g.name, g.share);
+        let r = blocking(move || {
+            cfg.apply_update(&who2, rynas_services::shares::SHARES_KEY, &what, &|l| log.log(l), |cur| {
+                let Some(cur) = cur else { return Ok(None) };
+                let doc: rynas_api_types::SharesConfig = serde_json::from_value(cur).map_err(|e| e.to_string())?;
+                without_grant(&doc, &g2).map(|d| serde_json::to_value(d).map_err(|e| e.to_string())).transpose()
+            })
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await;
+        match r {
+            Ok(()) => ctx.log(&format!("{}: the entry of {} is back as before the app (or changed since: left as it is)", g.share, g.name)),
+            Err(e) => ctx.log(&format!("warning: {}: the entry of {} not taken back: {e}", g.share, g.name)),
+        }
+    }
+    let p = made_path(s, stack);
+    if let Ok(text) = serde_json::to_vec_pretty(&made) {
+        let _ = crate::tls::write_atomic(&p, &text, 0o600, None);
+    }
 }
 
 /// "Move behind the proxy": loopback binding (`RYNAS_BIND=127.0.0.1`, then `up`) and the
@@ -2654,6 +2741,8 @@ pub(crate) struct ShareSetJob {
     ids: (u32, u32),
     /// The items now mounted.
     pub(crate) items: Vec<rynas_apps::render::ShareSetItem>,
+    /// Items mounted before that the change removes (names).
+    removed: Vec<String>,
 }
 
 impl AppsSvc {
@@ -2686,7 +2775,16 @@ impl AppsSvc {
         let r = rynas_apps::render::render(app, &cat.source, &provided, &req).map_err(render_err)?;
         let subject = GrantSubject::of(req.run_as.as_deref());
         let grants = share_set_grants(&self.applied_shares(), m, &items, &subject);
+        let removed = env
+            .get(&ss.env)
+            .and_then(|v| rynas_apps::render::decode_share_set(v).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|i| !items.iter().any(|n| n.name == i.name))
+            .map(|i| i.name)
+            .collect();
         Ok(ShareSetJob {
+            removed,
             stack: stack.to_string(),
             layout: l,
             name: m.name.clone(),
@@ -2720,7 +2818,7 @@ pub(crate) async fn share_set_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, j
             record_made(&s2, &n2, made)
         })
         .await?;
-        grant_shares(a, ctx, who, &j.name, j.ids, &j.grants).await?;
+        grant_shares(a, ctx, who, &j.stack, &j.name, j.ids, &j.grants).await?;
         ctx.progress(60);
         compose_run(s, ctx, &j.stack, &j.layout, ComposeAction::Up).await
     }
@@ -2761,6 +2859,26 @@ async fn share_set_put(
         share_set_task(&a2, &ctx, &who, job).await
     })?;
     Ok(accepted(id))
+}
+
+/// `POST /v1/apps/installed/{stack}/share-set/plan`: what a `PUT` with this body does (the
+/// items, the ones removed, the permission entries added or raised). No side effect.
+async fn share_set_plan_post(
+    State(st): State<AppsState>,
+    hd: HeaderMap,
+    UrlPath(stack): UrlPath<String>,
+    body: Result<Json<ShareSetRequest>, JsonRejection>,
+) -> Res<Json<rynas_api_types::apps::ShareSetPlan>> {
+    let a = asvc(&st)?;
+    admin(&a, &hd)?;
+    let Json(req) = body?;
+    let items = resolve_share_set(&a.applied_shares(), &req.items).map_err(|e| Error::invalid("items", e))?;
+    let job = a.prepare_share_set(&stack, items).await?;
+    Ok(Json(rynas_api_types::apps::ShareSetPlan {
+        items: job.items.iter().map(|i| InstalledShareSetItem { name: i.name.clone(), path: i.path.clone(), follow: i.follow }).collect(),
+        removed: job.removed.clone(),
+        grants: job.grants.iter().filter(|g| matches!(g.action, ShareGrantAction::Add | ShareGrantAction::Raise)).cloned().collect(),
+    }))
 }
 
 async fn catalog_source_get(
@@ -2830,6 +2948,7 @@ pub fn router(st: AppsState) -> Router {
         .route("/v1/apps/installed/{stack}/uninstall", post(uninstall_post))
         .route("/v1/apps/installed/{stack}/proxy", post(proxy_post))
         .route("/v1/apps/installed/{stack}/share-set", put(share_set_put))
+        .route("/v1/apps/installed/{stack}/share-set/plan", post(share_set_plan_post))
         .with_state(st)
 }
 
@@ -2900,6 +3019,19 @@ mod tests {
         for (path, write) in [("/srv/v1/Ro", false), ("/srv/v1/No", true), ("/srv/v1/Open", true), ("/srv/v1/plain", false)] {
             assert!(with_share_grant(&cfg, path, &g, write).is_none(), "{path}");
         }
+        // what is recorded, and taken back at an uninstall with remove_grants
+        let rec_add = added_grant(&cfg.shares, "/srv/v1/Photos", &g, false).unwrap();
+        assert_eq!((rec_add.share.as_str(), rec_add.access, rec_add.before), ("Photos", Access::Ro, None));
+        let rec_raise = added_grant(&cfg.shares, "/srv/v1/Ro", &g, true).unwrap();
+        assert_eq!((rec_raise.access, rec_raise.before), (Access::Rw, Some(Access::Ro)));
+        assert!(added_grant(&cfg.shares, "/srv/v1/Open", &g, true).is_none());
+        assert_eq!(without_grant(&added, &rec_add).unwrap(), cfg);
+        assert_eq!(without_grant(&raised, &rec_raise).unwrap(), cfg);
+        // changed since (or gone): left alone
+        assert!(without_grant(&cfg, &rec_add).is_none());
+        let mut made = MadeFolders { grants: vec![rec_raise.clone()], ..Default::default() };
+        made.add(MadeFolders { grants: vec![rynas_api_types::apps::AppAddedGrant { access: Access::Rw, before: Some(Access::Rw), ..rec_raise.clone() }], ..Default::default() });
+        assert_eq!(made.grants, [rec_raise], "the first change keeps the entry as it was before the app");
     }
 
     #[test]

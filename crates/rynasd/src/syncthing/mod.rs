@@ -38,7 +38,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::post;
 use axum::{Json, Router};
-use rynas_api_types::apps::{AppInstallRequest, AppUpdateRequest, PortProtocol, ShareSetChoice};
+use rynas_api_types::apps::{AppInstallRequest, AppUpdateRequest, PlannedShareGrant, PortProtocol, ShareGrantAction, ShareSetChoice};
 use rynas_api_types::docker::ContainerState;
 use rynas_api_types::syncthing::*;
 use rynas_apps::render::ShareSetItem;
@@ -165,6 +165,17 @@ struct Resolved {
     restart_policy: Option<String>,
     /// Host ports the old instance holds: free once it is turned off, so not a conflict.
     freed: Vec<(u16, PortProtocol)>,
+    /// A container's compose project (another tool may recreate it).
+    compose: Option<AdoptCompose>,
+}
+
+/// The compose project of one `docker inspect` object, from its labels.
+fn compose_of(js: &serde_json::Value) -> Option<AdoptCompose> {
+    let obj = js.as_array().and_then(|a| a.first()).unwrap_or(js);
+    let labels = obj.pointer("/Config/Labels")?;
+    let project = labels.get("com.docker.compose.project")?.as_str().filter(|p| !p.is_empty())?.to_string();
+    let working_dir = labels.get("com.docker.compose.project.working_dir").and_then(serde_json::Value::as_str).filter(|d| !d.is_empty()).map(str::to_string);
+    Some(AdoptCompose { project, working_dir })
 }
 
 /// The older catalogue layout: installed stacks of the entry below 2.0.0.
@@ -240,6 +251,7 @@ async fn container_sources(a: &AppsSvc) -> Vec<Resolved> {
             home,
             table: config::table_from_mounts(&mounts),
             restart_policy: Some(config::restart_policy(&js)),
+            compose: compose_of(&js),
             freed: c.c.ports.iter().filter_map(|p| Some((p.public_port?, protocol_of(&p.protocol)?))).collect(),
             ..Default::default()
         });
@@ -383,6 +395,36 @@ fn marker_state(root: &Path, host: &str, marker: &str, id: &str) -> MarkerState 
     }
 }
 
+/// How many folders [`foreign_dirs`] looks at, at most.
+const FOREIGN_SCAN: usize = 20_000;
+
+/// The names of other systems' folders ([`config::foreign_names`]) found in the folder
+/// `dir` or below it (links not followed, at most [`FOREIGN_SCAN`] folders looked at).
+fn foreign_dirs(dir: &Path) -> BTreeSet<String> {
+    let names = config::foreign_names();
+    let mut found = BTreeSet::new();
+    let mut queue = std::collections::VecDeque::from([dir.to_path_buf()]);
+    let mut seen = 0;
+    while let Some(d) = queue.pop_front() {
+        seen += 1;
+        if seen > FOREIGN_SCAN || found.len() == names.len() {
+            break;
+        }
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if !e.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let n = e.file_name().to_string_lossy().into_owned();
+            if names.contains(&n.as_str()) {
+                found.insert(n);
+            } else {
+                queue.push_back(e.path());
+            }
+        }
+    }
+    found
+}
+
 /// Owners of the folder roots and their top-level entries (at most 1000 each).
 fn owners_of(a: &AppsSvc, roots: &[String]) -> Vec<(u32, u32)> {
     let mut v = Vec::new();
@@ -491,6 +533,26 @@ fn plan_sync(a: &AppsSvc, req: &SyncthingAdoptPreviewRequest, containers: Vec<Re
         problems.push(format!("config.xml names these folder ids twice: {}", dup.join(", ")));
     }
     p.gui_address = cfg.gui_address.clone();
+    p.gui_tls_off = cfg.gui_tls;
+    if cfg.gui_tls {
+        problems.push(format!("{INFO}the old interface served HTTPS itself: the copy turns that off, rynas' proxy serves it over HTTPS"));
+    }
+    p.listen_addresses = config::custom_listen(&cfg.listen);
+    if !p.listen_addresses.is_empty() {
+        problems.push(format!(
+            "{INFO}sync listen addresses other than the default: {} (the app publishes port {}): the adoption sets them back to default only when asked (reset_listen)",
+            p.listen_addresses.join(", "),
+            config::SYNC_PORT
+        ));
+    }
+    if let Some(c) = &r.compose {
+        p.compose = Some(c.clone());
+        problems.push(format!(
+            "{INFO}the container belongs to the compose project {}{}: rynas removes the container after the adoption; remove the project from the tool that manages it, or a compose up there starts it again",
+            c.project,
+            c.working_dir.as_deref().map(|d| format!(" ({d})")).unwrap_or_default()
+        ));
+    }
     p.devices = cfg.devices.iter().map(|d| AdoptDevice { id_short: d.id.chars().take(7).collect(), name: d.name.clone() }).collect();
     p.volumes = config::merge_tables(r.table.clone(), &req.volumes);
     // where folders may land: the older layout's single item, or the applied shares
@@ -516,7 +578,10 @@ fn plan_sync(a: &AppsSvc, req: &SyncthingAdoptPreviewRequest, containers: Vec<Re
             Err(why) => af.unmapped = Some(why),
             Ok(host) => {
                 af.marker = marker_state(&a.docker.root, &host, &f.marker_name, &f.id);
-                af.stignore = std::fs::read_to_string(real(a, &format!("{host}/.stignore"))).ok().and_then(|t| config::clean_stignore(&t));
+                af.stignore = std::fs::read_to_string(real(a, &format!("{host}/.stignore"))).ok().and_then(|t| {
+                    let found = foreign_dirs(&real(a, &host));
+                    config::clean_stignore(&t, &|n| found.contains(n))
+                });
                 match config::share_path(&host, &shares, TARGET) {
                     Ok((share, new_path)) => {
                         used.insert(share.clone());
@@ -537,6 +602,27 @@ fn plan_sync(a: &AppsSvc, req: &SyncthingAdoptPreviewRequest, containers: Vec<Re
     p.owners = config::owner_tally(&owners_of(a, &roots)).map(|((uid, gid), others)| AdoptOwners { uid, gid, others, user: user_of_uid(&passwd, uid) });
     let installed_run_as = installed.map(|d| rynas_apps::render::parse_env(&d.env)).and_then(|e| e.get(rynas_apps::manifest::RUN_AS_ENV).filter(|u| !u.is_empty()).cloned());
     let (run_as, run_as_problems) = propose_run_as(src.kind, req.run_as.as_deref(), p.owners.as_ref(), installed.map(|d| (d.stack.as_str(), installed_run_as.as_deref())), &passwd);
+    // the share permissions the adoption adds for the app's user (or the apps' group)
+    if src.kind != AdoptSourceKind::App {
+        let applied = a.applied_shares();
+        let subject = crate::apps::GrantSubject::of(app_user(run_as.as_deref()));
+        p.grants = p
+            .shares
+            .iter()
+            .filter_map(|name| {
+                let path = applied.iter().find(|s| &s.name == name)?.path.clone();
+                let (share, action) = crate::apps::share_grant_action(&applied, &path, &subject, true);
+                matches!(action, ShareGrantAction::Add | ShareGrantAction::Raise).then(|| PlannedShareGrant {
+                    env: format!("SYNC_SHARES/{name}"),
+                    path,
+                    share,
+                    write: true,
+                    action,
+                    user: app_user(run_as.as_deref()).map(str::to_string),
+                })
+            })
+            .collect();
+    }
     p.run_as = run_as;
     problems.extend(run_as_problems);
     if r.candidate.running {
@@ -555,9 +641,15 @@ fn user_of_uid(passwd: &str, uid: u32) -> Option<String> {
     crate::apps::nas_users(passwd).into_iter().find(|u| u.1 == uid).map(|u| u.0)
 }
 
-/// Who the adopted app runs as, and the preview lines about it: the request's choice, else
-/// the NAS user owning most synchronized files. The older catalogue layout keeps the apps'
-/// account; an installed app keeps its user (changing it is not supported).
+/// The NAS user of a `run_as` value: `None` for the apps' account ([`RUN_AS_APPS`]).
+fn app_user(run_as: Option<&str>) -> Option<&str> {
+    run_as.filter(|u| !u.is_empty() && *u != RUN_AS_APPS)
+}
+
+/// Who the adopted app runs as ([`RUN_AS_APPS`]: the apps' account), and the preview lines
+/// about it: the request's choice, else the installed app's user (changing it is not
+/// supported), else the NAS user owning most synchronized files. The older catalogue layout
+/// keeps the apps' account.
 fn propose_run_as(
     kind: AdoptSourceKind,
     asked: Option<&str>,
@@ -566,22 +658,26 @@ fn propose_run_as(
     passwd: &str,
 ) -> (Option<String>, Vec<String>) {
     let mut problems = Vec::new();
+    let asked = asked.filter(|u| !u.is_empty());
     if kind == AdoptSourceKind::App {
-        if asked.is_some() {
+        if app_user(asked).is_some() {
             problems.push("the older layout is updated in place and keeps the apps' account: run_as is not supported there".into());
         } else {
             problems.push(format!("{INFO}the older layout keeps running as the apps' account; to run it as a NAS user, uninstall it and install again"));
         }
-        return (None, problems);
+        return (Some(RUN_AS_APPS.into()), problems);
     }
-    let run_as = match (asked, owners) {
-        (Some(u), _) => {
+    let run_as = match (asked, installed, owners) {
+        (Some(u), _, _) if u == RUN_AS_APPS => Some(RUN_AS_APPS.to_string()),
+        (Some(u), _, _) => {
             if let Err(e) = crate::apps::nas_user_ids(passwd, u) {
                 problems.push(format!("run_as: {e}"));
             }
             Some(u.to_string())
         }
-        (None, Some(o)) => match &o.user {
+        // the installed app keeps its user
+        (None, Some((_, current)), _) => Some(current.unwrap_or(RUN_AS_APPS).to_string()),
+        (None, None, Some(o)) => match &o.user {
             Some(u) => Some(u.clone()),
             None => {
                 problems.push(format!(
@@ -591,18 +687,23 @@ fn propose_run_as(
                 None
             }
         },
-        (None, None) => {
+        (None, None, None) => {
             problems.push(format!("{INFO}no synchronized folder on this NAS yet: the app runs as the apps' account unless run_as names a NAS user"));
-            None
+            Some(RUN_AS_APPS.into())
         }
     };
     if let Some((stack, current)) = installed
-        && current != run_as.as_deref()
+        && current != app_user(run_as.as_deref())
     {
         problems.push(format!(
             "the installed app {stack} runs as {}: changing the user is not supported, uninstall it and install again",
             current.unwrap_or("the apps' account")
         ));
+    }
+    if let (Some(o), Some(u)) = (owners, app_user(run_as.as_deref()))
+        && o.user.as_deref() != Some(u)
+    {
+        problems.push(format!("{INFO}most synchronized files belong to {}, not to {u}", o.user.clone().unwrap_or_else(|| format!("uid {}", o.uid))));
     }
     (run_as, problems)
 }
@@ -626,6 +727,13 @@ fn check_ready(p: &Planned, req: &SyncthingAdoptRequest) -> Result<Resolved, Str
     let r = p.resolved.clone().ok_or("no source")?;
     if r.candidate.running && !req.stop_source {
         return Err("the source runs: stop it first, or ask the adoption to (stop_source)".into());
+    }
+    if !p.preview.listen_addresses.is_empty() && !req.reset_listen {
+        return Err(format!(
+            "the source listens on {} for sync connections and the app publishes port {}: set them back to default (reset_listen) or change them first",
+            p.preview.listen_addresses.join(", "),
+            config::SYNC_PORT
+        ));
     }
     Ok(r)
 }
@@ -656,7 +764,15 @@ async fn adopt_post(State(st): State<AppsState>, hd: HeaderMap, body: Result<Jso
     let Json(req) = body?;
     let slot = take_slot()?;
     let planned = plan(&a, &preview_request(&req)).await?;
-    let r = check_ready(&planned, &req).map_err(|e| if e.contains("stop_source") { conflict(e).field("stop_source") } else { conflict(e) })?;
+    let r = check_ready(&planned, &req).map_err(|e| {
+        if e.contains("stop_source") {
+            conflict(e).field("stop_source")
+        } else if e.contains("reset_listen") {
+            conflict(e).field("reset_listen")
+        } else {
+            conflict(e)
+        }
+    })?;
     let stack = target_stack(&req, &planned.preview);
     if !rynas_apps::render::valid_stack_name(&stack) {
         return Err(Error::invalid("stack", format!("`{stack}` is not a valid stack name")));
@@ -901,17 +1017,34 @@ fn write_stignore(root: &Path, host: &str, text: &str) -> std::io::Result<()> {
     safefs::write_at(&d, ".stignore", text.as_bytes(), mode, Some((uid, gid)))
 }
 
-/// Writes the `.stignore` proposals of mapped folders whose marker is verified.
-fn apply_stignore(a: &AppsSvc, ctx: &TaskCtx, folders: &[AdoptFolder]) {
+/// Writes the `.stignore` proposals of mapped folders whose marker is verified. Returns the
+/// files written with their previous text, for [`restore_stignore`].
+fn apply_stignore(a: &AppsSvc, ctx: &TaskCtx, folders: &[AdoptFolder]) -> Vec<(String, String)> {
+    let mut written = Vec::new();
     for f in folders.iter().filter(|f| f.new_path.is_some() && f.marker == MarkerState::Verified) {
         let (Some(host), Some(s)) = (&f.host_path, &f.stignore) else { continue };
+        let kept = if s.kept.is_empty() { String::new() } else { format!(", kept because the folder holds such folders: {}", s.kept.join(" ")) };
         if a.docker.dry {
-            ctx.log(&format!("{host}/.stignore: {} line(s) out, {} in (dry system: not written)", s.removed.len(), s.added.len()));
+            ctx.log(&format!("{host}/.stignore: {} line(s) out, {} in{kept} (dry system: not written)", s.removed.len(), s.added.len()));
             continue;
         }
         match write_stignore(&a.docker.root, host, &s.after) {
-            Ok(()) => ctx.log(&format!("{host}/.stignore: {} line(s) out, {} in", s.removed.len(), s.added.len())),
+            Ok(()) => {
+                ctx.log(&format!("{host}/.stignore: {} line(s) out, {} in{kept}", s.removed.len(), s.added.len()));
+                written.push((host.clone(), s.before.clone()));
+            }
             Err(e) => ctx.log(&format!("warning: {host}/.stignore not written: {e}")),
+        }
+    }
+    written
+}
+
+/// Puts the `.stignore` files an adoption wrote back as they were (the adoption failed).
+fn restore_stignore(root: &Path, log: &dyn Fn(&str), written: &[(String, String)]) {
+    for (host, before) in written {
+        match write_stignore(root, host, before) {
+            Ok(()) => log(&format!("restored: {host}/.stignore as it was")),
+            Err(e) => log(&format!("warning: {host}/.stignore not put back: {e}")),
         }
     }
 }
@@ -1094,6 +1227,13 @@ async fn adopt_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, stack: &str, req
     // every check that can fail, before the old instance is touched
     let xml = planned.config_xml.ok_or("config.xml is unreadable")?;
     let new_xml = config::rewrite_config(&xml, &edits_of(&p.folders))?;
+    let new_xml = config::rewrite_options(&new_xml, p.gui_tls_off, req.reset_listen)?;
+    if p.gui_tls_off {
+        ctx.log("the copied configuration serves the interface without its own HTTPS (rynas' proxy serves HTTPS)");
+    }
+    if req.reset_listen && !p.listen_addresses.is_empty() {
+        ctx.log(&format!("the sync listen addresses {} become default", p.listen_addresses.join(", ")));
+    }
     let home = r.home.clone().ok_or("no home")?;
     let layout = a.docker.layout().ok_or("Docker has no volume")?;
     let choices: Vec<ShareSetChoice> = p.shares.iter().map(|s| ShareSetChoice { share: s.clone(), follow: None }).collect();
@@ -1111,7 +1251,7 @@ async fn adopt_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, stack: &str, req
             Target::Existing { job: Box::new(job), owner, dest }
         }
         None => {
-            let ireq = AppInstallRequest { stack: Some(stack.to_string()), share_set: choices, start: false, run_as: p.run_as.clone(), ..Default::default() };
+            let ireq = AppInstallRequest { stack: Some(stack.to_string()), share_set: choices, start: false, run_as: app_user(p.run_as.as_deref()).map(str::to_string), ..Default::default() };
             let mut freed = r.freed.clone();
             if r.unit.is_some() && r.candidate.running {
                 let out = a.docker.run(ctx, &Cmd::new("ss").args(["-Hlnptu"])).await?;
@@ -1136,15 +1276,20 @@ async fn adopt_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, stack: &str, req
         restore_source(a, ctx, &undo).await;
         return Err(e);
     }
-    if req.apply_stignore {
-        apply_stignore(a, ctx, &p.folders);
-    }
+    let written = if req.apply_stignore { apply_stignore(a, ctx, &p.folders) } else { Vec::new() };
     let mut copied: Option<Option<String>> = None;
     if let Err(e) = place(a, ctx, who, stack, &layout, target, &home, &new_xml, &mut copied).await {
         ctx.log(&format!("adoption failed ({e}): rolling back"));
         if let Some(aside) = copied {
-            if let Err(e2) = compose_run(&a.docker, ctx, stack, &layout, ComposeAction::Stop).await {
-                ctx.log(&format!("warning: {stack} not stopped: {e2}"));
+            // the adopted home may only go, and the old instance come back, once the app is
+            // surely stopped: two instances with one device id must never run
+            let stop = compose_run(&a.docker, ctx, stack, &layout, ComposeAction::Stop).await;
+            let running = stack_running(a, stack).await;
+            if let Err(why) = rollback_allowed(&stop, &running) {
+                ctx.log(&format!(
+                    "rollback stopped: {why}. The adopted home stays in {dest} and the old instance stays off; stop {stack} by hand, then turn the old instance on again if needed"
+                ));
+                return Err(format!("{e}; {stack} could not be stopped for the rollback ({why}): the old instance stays off"));
             }
             if !a.docker.dry {
                 let (root, log, d2) = (a.docker.root.clone(), ctx.clone(), dest.clone());
@@ -1155,14 +1300,82 @@ async fn adopt_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, stack: &str, req
                 .await;
             }
         }
+        if !written.is_empty() {
+            let (root, log, w) = (a.docker.root.clone(), ctx.clone(), written.clone());
+            let _ = blocking(move || {
+                restore_stignore(&root, &|m| log.log(m), &w);
+                Ok(())
+            })
+            .await;
+        }
         restore_source(a, ctx, &undo).await;
         return Err(e);
     }
     ctx.progress(80);
     rescan(a, ctx, stack, &p.folders).await;
+    after_adoption(a, ctx, stack, &r, &home).await;
     ctx.progress(100);
     ctx.log(&format!("{} adopted as {stack}", r.candidate.name));
     Ok(())
+}
+
+/// Whether a failed adoption may put the app's previous home back and turn the old
+/// instance on again: only when the app was stopped and none of its containers runs.
+fn rollback_allowed(stop: &Result<(), String>, running: &Result<bool, String>) -> Result<(), String> {
+    match (stop, running) {
+        (Err(e), _) => Err(format!("the stop failed: {e}")),
+        (_, Err(e)) => Err(format!("whether it still runs is unknown: {e}")),
+        (_, Ok(true)) => Err("a container of it still runs".into()),
+        (Ok(()), Ok(false)) => Ok(()),
+    }
+}
+
+/// A container of the stack runs.
+async fn stack_running(a: &AppsSvc, stack: &str) -> Result<bool, String> {
+    if a.docker.dry {
+        return Ok(false);
+    }
+    let cs = a.docker.containers().await.map_err(|e| e.2)?;
+    Ok(cs.iter().any(|c| c.c.stack.as_deref() == Some(stack) && c.c.state == ContainerState::Running))
+}
+
+/// After a successful adoption: the old container goes (never its volumes), a compose
+/// project of another tool is reported (log and notification), and the old home is
+/// remembered so that the live loop stops any other instance with it or its device id.
+async fn after_adoption(a: &AppsSvc, ctx: &TaskCtx, stack: &str, r: &Resolved, home: &str) {
+    if r.candidate.source.kind == AdoptSourceKind::Container {
+        let name = r.candidate.source.id.clone().unwrap_or_default();
+        ctx.log(&format!("removing the old container {name} (its volumes and folders stay)"));
+        if let Err(e) = run(a, ctx, Cmd::new("docker").args(["rm", &name])).await {
+            ctx.log(&format!("warning: {name} not removed: {e}; it stays stopped with restart policy no"));
+        }
+        if let Some(c) = &r.compose {
+            let dir = c.working_dir.clone().unwrap_or_else(|| "-".into());
+            ctx.log(&format!(
+                "warning: {name} came from the compose project {} ({dir}) of another tool: remove that project there, or a compose up starts a second instance with the same device id",
+                c.project
+            ));
+            if let Some(l) = live::get() {
+                l.compose_leftover(stack, &c.project, &dir);
+            }
+        }
+    }
+    let (root, h) = (a.docker.root.clone(), home.to_string());
+    let identity = blocking(move || {
+        let canon = std::fs::canonicalize(real_in(&root, &h)).map_err(|e| e.to_string())?;
+        let pem = config::home_file(&canon, "cert.pem").and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+        Ok(config::cert_identity(&pem))
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(l) = live::get() {
+        l.guard_adopted(stack, live::AdoptedGuard {
+            home: home.to_string(),
+            device_short: identity.as_ref().map(|i| i.0.clone()).unwrap_or_default(),
+            cert_sha256: identity.map(|i| i.1).unwrap_or_default(),
+        });
+    }
 }
 
 /// Installs or stops the app, copies the home in, starts it. `copied` is set once the home
@@ -1207,11 +1420,17 @@ async fn place(
 /// folder from `/data/...` to `/shares/<share>/...` ([`move_data_folders`]).
 async fn adopt_app_layout(a: &Arc<AppsSvc>, ctx: &TaskCtx, stack: &str, p: &SyncthingAdoptPreview, stignore: bool) -> Result<(), String> {
     let (job, plan) = a.prepare_update_job(stack, &AppUpdateRequest::default()).await.map_err(|e| e.2)?;
-    if stignore {
-        apply_stignore(a, ctx, &p.folders);
-    }
+    let written = if stignore { apply_stignore(a, ctx, &p.folders) } else { Vec::new() };
     ctx.log(&format!("updating {stack} from {} to {} (the share moves to /shares)", plan.from_version, plan.to_version));
-    crate::apps::update_task(&a.docker, ctx, job).await?;
+    if let Err(e) = crate::apps::update_task(&a.docker, ctx, job).await {
+        let (root, log) = (a.docker.root.clone(), ctx.clone());
+        let _ = blocking(move || {
+            restore_stignore(&root, &|m| log.log(m), &written);
+            Ok(())
+        })
+        .await;
+        return Err(e);
+    }
     ctx.progress(100);
     ctx.log(&format!("{stack} uses /shares now"));
     Ok(())
@@ -1372,14 +1591,69 @@ udp   UNCONN 0      0               [::]:21027         [::]:*    users:((\"synct
         // a bad choice
         let (_, pr) = propose_run_as(AdoptSourceKind::Path, Some("root"), None, None, passwd);
         assert_eq!(blocking(&pr), 1);
-        // the installed app keeps its user
-        let (_, pr) = propose_run_as(AdoptSourceKind::Container, None, Some(&own(1026)), Some(("syncthing", None)), passwd);
+        // the installed app's user is the proposal, the apps' account included
+        let (r, pr) = propose_run_as(AdoptSourceKind::Container, None, Some(&own(1026)), Some(("syncthing", None)), passwd);
+        assert_eq!((r.as_deref(), blocking(&pr)), (Some(RUN_AS_APPS), 0), "{pr:?}");
+        let (r, pr) = propose_run_as(AdoptSourceKind::Container, None, Some(&own(1027)), Some(("syncthing", Some("ann"))), passwd);
+        assert_eq!((r.as_deref(), blocking(&pr)), (Some("ann"), 0));
+        // another choice than the installed user is refused
+        let (_, pr) = propose_run_as(AdoptSourceKind::Container, Some("bob"), None, Some(("syncthing", Some("ann"))), passwd);
         assert!(pr.iter().any(|m| m.contains("changing the user is not supported")), "{pr:?}");
-        let (_, pr) = propose_run_as(AdoptSourceKind::Container, None, Some(&own(1026)), Some(("syncthing", Some("ann"))), passwd);
-        assert_eq!(blocking(&pr), 0);
+        let (_, pr) = propose_run_as(AdoptSourceKind::Container, Some(RUN_AS_APPS), None, Some(("syncthing", Some("ann"))), passwd);
+        assert_eq!(blocking(&pr), 1);
+        // the apps' account chosen explicitly stays chosen
+        let (r, pr) = propose_run_as(AdoptSourceKind::Path, Some(RUN_AS_APPS), Some(&own(1026)), None, passwd);
+        assert_eq!((r.as_deref(), blocking(&pr)), (Some(RUN_AS_APPS), 0));
+        assert_eq!(app_user(r.as_deref()), None);
+        assert_eq!(app_user(Some("ann")), Some("ann"));
+        // nothing to go by: the apps' account
+        let (r, _) = propose_run_as(AdoptSourceKind::Path, None, None, None, passwd);
+        assert_eq!(r.as_deref(), Some(RUN_AS_APPS));
         // the older layout keeps the apps' account
         let (r, pr) = propose_run_as(AdoptSourceKind::App, None, Some(&own(1026)), Some(("syncthing", None)), passwd);
-        assert_eq!((r, blocking(&pr)), (None, 0));
+        assert_eq!((r.as_deref(), blocking(&pr)), (Some(RUN_AS_APPS), 0));
+    }
+
+    #[test]
+    fn a_rollback_never_runs_two_instances() {
+        assert_eq!(rollback_allowed(&Ok(()), &Ok(false)), Ok(()));
+        // the app could not be stopped, still runs, or nobody knows: no put back, no restart
+        assert!(rollback_allowed(&Err("compose stop failed".into()), &Ok(false)).unwrap_err().contains("stop failed"));
+        assert!(rollback_allowed(&Ok(()), &Ok(true)).unwrap_err().contains("still runs"));
+        assert!(rollback_allowed(&Ok(()), &Err("engine down".into())).unwrap_err().contains("unknown"));
+    }
+
+    #[test]
+    fn compose_project_of_a_container() {
+        let js: serde_json::Value = serde_json::from_str(
+            r#"[{"Config":{"Labels":{"com.docker.compose.project":"old","com.docker.compose.project.working_dir":"/opt/old"}}}]"#,
+        )
+        .unwrap();
+        assert_eq!(compose_of(&js), Some(AdoptCompose { project: "old".into(), working_dir: Some("/opt/old".into()) }));
+        assert_eq!(compose_of(&serde_json::json!({"Config": {"Labels": {}}})), None);
+        assert_eq!(compose_of(&serde_json::json!({"Config": {"Labels": null}})), None);
+    }
+
+    #[test]
+    fn foreign_folders_are_found_below_the_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        std::fs::create_dir_all(d.join("2024/trip/@eaDir/x")).unwrap();
+        std::fs::create_dir_all(d.join("#snapshot")).unwrap();
+        std::fs::write(d.join(".streams"), "a file, not a folder").unwrap();
+        assert_eq!(foreign_dirs(d), BTreeSet::from(["#snapshot".to_string(), "@eaDir".to_string()]));
+        assert!(foreign_dirs(&d.join("2024/trip/@eaDir")).is_empty());
+    }
+
+    #[test]
+    fn stignore_changes_go_back_after_a_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("vol1/photos")).unwrap();
+        std::fs::write(root.join("vol1/photos/.stignore"), "(?d)#recycle\n").unwrap();
+        let log = |_: &str| {};
+        restore_stignore(root, &log, &[("/vol1/photos".into(), "@eaDir\n".into()), ("/vol1/gone".into(), "x".into())]);
+        assert_eq!(std::fs::read_to_string(root.join("vol1/photos/.stignore")).unwrap(), "@eaDir\n");
     }
 
     #[test]

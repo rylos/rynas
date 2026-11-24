@@ -1292,6 +1292,12 @@ fn inspect_containers(running: bool) -> Result<Vec<Value>, String> {
         return Ok(Vec::new());
     }
     let t = std::time::Duration::from_secs(10);
+    // the engine and its socket both off: no container runs (and asking would fail)
+    if let Ok(o) = rynas_tasks::Cmd::new("systemctl").args(["is-active", "docker.service", "docker.socket"]).timeout(t).output_blocking()
+        && docker_off(&o.stdout)
+    {
+        return Ok(Vec::new());
+    }
     let ids = rynas_tasks::Cmd::new("docker")
         .args(if running { ["ps", "-q"] } else { ["ps", "-aq"] })
         .timeout(t)
@@ -1315,6 +1321,13 @@ fn inspect_containers(running: bool) -> Result<Vec<Value>, String> {
         }
     }
     Ok(out)
+}
+
+/// `systemctl is-active docker.service docker.socket` output: both units are known and
+/// neither is active (`inactive`, `failed`...). An unknown answer is not "off".
+fn docker_off(out: &str) -> bool {
+    let states: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    states.len() == 2 && states.iter().all(|s| !matches!(*s, "active" | "activating" | "reloading" | "deactivating" | "refreshing"))
 }
 
 /// Containers that mount `path` or something inside it, or a folder holding it (when Docker
@@ -1392,6 +1405,18 @@ fn holders_in_inspect(list: &[Value], path: &str) -> Holders {
         }
     }
     h
+}
+
+/// The running containers with a mount of `path` or of a folder inside it (a bind of a
+/// folder holding it sees the new subvolume by itself); `Err` when Docker cannot be asked.
+/// A share rollback restarts them around the subvolume swap, or they keep writing into the
+/// old subvolume, renamed aside.
+pub(crate) fn running_users(path: &str) -> Result<Vec<String>, String> {
+    inspect_containers(true).map(|l| binders_in_inspect(&l, path))
+}
+
+fn binders_in_inspect(list: &[Value], path: &str) -> Vec<String> {
+    list.iter().filter(|c| mounts_of(c).iter().any(|(src, _)| folders::is_within(src, path))).filter_map(container_name).collect()
 }
 
 /// [`Holders`] of `path` among the running containers; `Err` when Docker cannot be asked.
@@ -1978,6 +2003,20 @@ mod tests {
         assert_eq!(h.restart, ["follows", "slave-sub"]);
         // the usages of a folder count every container that mounts it
         assert_eq!(users_in_inspect(&list(), "/vol1/secret"), ["private", "follows", "slave-sub", "parent-follows", "parent-private"]);
+        // a rollback restarts the binds of the share and inside it, whatever the propagation
+        assert_eq!(binders_in_inspect(&list(), "/vol1/secret"), ["private", "follows", "slave-sub"]);
+    }
+
+    #[test]
+    fn docker_engine_and_socket_off_means_no_container() {
+        assert!(docker_off("inactive\ninactive\n"));
+        assert!(docker_off("failed\ninactive\n"));
+        assert!(!docker_off("active\ninactive\n"));
+        assert!(!docker_off("inactive\nactive\n"));
+        assert!(!docker_off("inactive\nactivating\n"));
+        // systemd did not answer as expected: ask Docker
+        assert!(!docker_off(""));
+        assert!(!docker_off("inactive\n"));
     }
 
     #[test]
