@@ -67,7 +67,7 @@ function mediaFacts(m) {
   const add = (label, value) => value && rows.push(`<dt>${label}</dt><dd>${value}</dd>`);
   if (m.width && m.height) {
     const mp = (m.width * m.height) / 1e6;
-    add(t("files.pane.dimensions"), `${int(m.width)} × ${int(m.height)}${!m.duration && mp >= 1 ? ` <span style="color:var(--faint)">(${num(mp, 1)} MP)</span>` : ""}`);
+    add(t(m.duration ? "files.pane.resolution" : "files.pane.dimensions"), `${int(m.width)} × ${int(m.height)}${!m.duration && mp >= 1 ? ` <span style="color:var(--faint)">(${num(mp, 1)} MP)</span>` : ""}`);
   }
   if (m.duration) add(t("files.pane.duration"), esc(duration(m.duration * 1000)));
   if (m.video) add(t("files.common.video"), esc([m.video.codec, m.video.fps && t("files.pane.fps", { n: num(m.video.fps, 2) }), m.video.hdr].filter(Boolean).join(" · ")));

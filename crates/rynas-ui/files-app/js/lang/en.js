@@ -545,6 +545,7 @@ export default {
   "files.health.clear_finished": "Clear finished",
   "files.health.places": "Places",
   "files.pane.dimensions": "Dimensions",
+  "files.pane.resolution": "Resolution",
   "files.pane.duration": "Duration",
   "files.pane.subtitles": "Subtitles",
   "files.pane.bitrate": "Bitrate",

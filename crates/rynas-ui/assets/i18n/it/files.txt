@@ -539,6 +539,7 @@ files.health.drop_upload	Rilascia per caricare in
 files.health.clear_finished	Pulisci completati
 files.health.places	Posizioni
 files.pane.dimensions	Dimensioni
+files.pane.resolution	Risoluzione
 files.pane.duration	Durata
 files.pane.subtitles	Sottotitoli
 files.pane.bitrate	Bitrate

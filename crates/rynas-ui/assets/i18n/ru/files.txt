@@ -555,6 +555,7 @@ files.health.drop_upload	Отпустите, чтобы загрузить в
 files.health.clear_finished	Убрать завершённые
 files.health.places	Места
 files.pane.dimensions	Размеры
+files.pane.resolution	Разрешение
 files.pane.duration	Длительность
 files.pane.subtitles	Субтитры
 files.pane.bitrate	Битрейт
