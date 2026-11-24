@@ -704,6 +704,8 @@ dict! { BLOB, LENS;
     "nev.device.revoked.reason.unclaimed" => "never picked up by the phone";
     "nev.device.refresh_reuse.title" => "Device {device} of {user} revoked: a token was used twice";
     "nev.device.refresh_reuse.body" => "An old refresh token of the mobile device {device} ({user}) came back from {ip}: a copy of it may exist elsewhere. The device was revoked; pair it again.";
+    "nev.device.password_kept.title" => "Password of {user} changed: {n} paired devices keep access";
+    "nev.device.password_kept.body" => "Devices: {devices}. Revoke any you do not recognize in Security › Mobile devices.";
     "nev.device.power.title" => "System power by device {device}: {action}";
     "nev.device.power.action.restart" => "restart";
     "nev.device.power.action.shutdown" => "shut down";

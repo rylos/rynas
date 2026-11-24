@@ -960,9 +960,10 @@ async fn fake_push() -> FakePush {
     let reqs: PushRequests = Arc::default();
     let status = Arc::new(AtomicU16::new(201));
     let (r, s) = (reqs.clone(), status.clone());
+    let base = url.clone();
     tokio::spawn(async move {
         while let Ok((sock, _)) = l.accept().await {
-            let (r, s) = (r.clone(), s.clone());
+            let (r, s, here) = (r.clone(), s.clone(), base.clone());
             tokio::spawn(async move {
                 let mut rd = BufReader::new(sock);
                 let mut line = String::new();
@@ -987,7 +988,9 @@ async fn fake_push() -> FakePush {
                 rd.read_exact(&mut body).await.unwrap();
                 r.lock().unwrap().push((line.trim_end().to_string(), headers, body));
                 let code = s.load(Ordering::SeqCst);
-                let resp = format!("HTTP/1.1 {code} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                // a redirect points back here: a client that followed it would be seen
+                let location = if (300..400).contains(&code) { format!("Location: {here}/elsewhere\r\n") } else { String::new() };
+                let resp = format!("HTTP/1.1 {code} X\r\n{location}Content-Length: 0\r\nConnection: close\r\n\r\n");
                 rd.into_inner().write_all(resp.as_bytes()).await.unwrap();
             });
         }
@@ -1082,6 +1085,13 @@ async fn device_targets_push_encrypted_messages() {
     assert!(r.ok, "{:?}", r.error);
     let reqs = std::mem::take(&mut *push.reqs.lock().unwrap());
     assert_eq!(reqs[0].1.iter().find(|(n, _)| n == "urgency").map(|(_, v)| v.as_str()), Some("normal"));
+
+    // a redirect is not followed: the message stays for a retry, nothing goes elsewhere
+    push.status.store(307, Ordering::SeqCst);
+    let r = e.engine.test_target(t.id, "admin").await.unwrap();
+    assert!(!r.ok && r.error.as_deref().is_some_and(|m| m.contains("307")), "{:?}", r.error);
+    assert_eq!(push.reqs.lock().unwrap().len(), 1, "one request, no second one to a Location");
+    push.reqs.lock().unwrap().clear();
 
     // the push service forgot the subscription: dropped, the message counts as handled
     push.status.store(410, Ordering::SeqCst);

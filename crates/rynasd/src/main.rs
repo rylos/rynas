@@ -1492,9 +1492,10 @@ fn main() -> std::io::Result<()> {
             });
             let account: rynasd::devices::AccountCheck = if args.dry_system {
                 // development: the system users, without PAM
-                Arc::new(|u: &str| match rynasd::groups::user_groups(u) {
-                    Some(_) => rynasd::devices::Account::Ok,
-                    None => rynasd::devices::Account::Gone,
+                Arc::new(|u: &str| match rynasd::groups::user_groups_checked(u) {
+                    Ok(Some(_)) => rynasd::devices::Account::Ok,
+                    Ok(None) => rynasd::devices::Account::Gone,
+                    Err(_) => rynasd::devices::Account::Unknown,
                 })
             } else {
                 let service = service.clone();
@@ -1504,12 +1505,13 @@ fn main() -> std::io::Result<()> {
                 &args.state_dir,
                 notifier.clone(),
                 ops.admins.clone(),
-                state.groups,
+                rynasd::groups::user_groups_checked,
                 account,
                 trust,
                 Arc::new(SystemClock),
             ) {
                 Ok(d) => {
+                    rynasd::devices::set_running(&d);
                     // push to the devices: `device` targets of the notification engine
                     d.bind_engine(engine.clone());
                     rynasd::devices::spawn_watch(d.clone());

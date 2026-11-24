@@ -1033,6 +1033,7 @@ schema 2 added the `code` and `body_format` columns.
 | `device.revoked` | `user`, `device`, `reason` (`user`, `self`, `account`, `inactive`, `unclaimed`) | Device {device} of {user} revoked |
 | `device.refresh_reuse` | `user`, `device`, `ip` | Device {device} of {user} revoked: a token was used twice |
 | `device.power` | `user`, `device`, `action` (`restart`, `shutdown`, `cancel`) | System power by device {device}: {action} |
+| `device.password_kept` | `user`, `n`, `devices` | Password of {user} changed: {n} paired devices keep access |
 | `power.shutdown` / `power.shutdown_skipped` | `rule`, `reasons` (skipped) | Scheduled shutdown {rule} (skipped) |
 | `net.confirmed` | `revision`, `interfaces` | Network change confirmed (revision {revision}) |
 | `net.rolled_back` / `net.rollback_unverified` | `reason`, `revision`, `problems` | Network change rolled back / rollback could not be verified |

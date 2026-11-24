@@ -18,6 +18,28 @@ pub fn user_groups(user: &str) -> Option<Vec<String>> {
     Some(names)
 }
 
+/// Like [`user_groups`], telling a user that does not exist (`Ok(None)`, a clean answer of
+/// NSS) from a lookup that failed (`Err`: a directory down, an I/O error). The mobile
+/// devices revoke only on the first.
+pub fn user_groups_checked(user: &str) -> Result<Option<Vec<String>>, String> {
+    let Some(pw) = User::from_name(user).map_err(|e| format!("user lookup: {e}"))? else {
+        return Ok(None);
+    };
+    let cname = CString::new(user).map_err(|_| "user name with a NUL".to_string())?;
+    let gids = getgrouplist(&cname, pw.gid).map_err(|e| format!("group lookup: {e}"))?;
+    let mut names = Vec::with_capacity(gids.len());
+    for g in gids {
+        match Group::from_gid(g) {
+            Ok(Some(g)) => names.push(g.name),
+            Ok(None) => {}
+            Err(e) => return Err(format!("group lookup: {e}")),
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(Some(names))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

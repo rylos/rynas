@@ -960,6 +960,27 @@ pub fn device_power(user: &str, id: &str, device: &str, action: &str) -> NewEven
     )
 }
 
+/// A user's password changed while devices are paired: they keep access (bound to their own
+/// key); listing them shows a device someone else may have paired.
+pub fn devices_kept_after_password(user: &str, devices: &[String]) -> NewEvent {
+    let user = safe_word(user);
+    let list = devices.iter().map(|d| safe_word(d)).collect::<Vec<_>>().join(", ");
+    let n = devices.len();
+    let mut e = oneshot(
+        Cat::Security,
+        Sev::Info,
+        "devices",
+        format!("device:password:{user}"),
+        format!("Password of {user} changed: {n} paired devices keep access"),
+    );
+    e.body = format!("Devices: {list}. Revoke any you do not recognize in Security › Mobile devices.");
+    field(
+        field(field(code(e, "device.password_kept"), "user", user), "n", n),
+        "devices",
+        list,
+    )
+}
+
 /// A user name as it may appear in a title: printable, at most 64 characters (names in
 /// lockout events come from the login form).
 fn safe_word(s: &str) -> &str {

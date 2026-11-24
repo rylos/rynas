@@ -67,11 +67,22 @@ minutes too, so a removed account loses its devices without waiting for their ne
 
 Details of the implementation:
 
-- Grace window: the old refresh token is accepted again for 60 s after a rotation, only with a
-  valid signature of the device's key, and answered with a **fresh** pair (the server keeps no
-  token in clear, so it cannot repeat the lost one); the token the lost answer carried is dead
-  from then on. The mock NAS of the app behaves the same, and the app takes whatever pair comes
-  back.
+- Grace window: a replaced refresh token is accepted again for 60 s after its replacement,
+  only with a valid signature of the device's key, and answered with a **fresh** pair (the
+  server keeps no token in clear, so it cannot repeat the lost one). Every token replaced in
+  the window keeps its own 60 s, so two refreshes sent at once never revoke the device:
+  whichever answer the app keeps works. Each refresh must carry a `ts` strictly newer than the
+  last accepted one (equal or older: `refresh_invalid`, the device stays), so a captured
+  request cannot be replayed inside the window; the app signs again for every retry. After
+  the window an old token is a reuse and revokes the device.
+- Account check: only definite answers revoke (a user NSS cleanly reports as unknown, a `!`/`*`
+  lock in `/etc/shadow`, `PAM_ACCT_EXPIRED`). Any other NSS or PAM failure refuses the refresh
+  with 503 `backend_unavailable` and keeps the devices; the periodic check skips that user with
+  a warning. The NAS id is read once at start and made only when the file does not exist; an
+  unreadable or damaged file answers 503 to refreshes, trust and `/ping`, and is never
+  rewritten (a new id would unpair every phone).
+- rynas-web sends its administrator groups with each refresh, and rynasd rotates only for a
+  user in one of them: rynas-web never drops a token rynasd already rotated.
 - A refresh of an account that may not sign in to the web interface (today: not an
   administrator) is refused with `refresh_invalid`; the device stays, and works again when the
   account gets the role back. Devices belong to system (PAM) accounts.
@@ -99,9 +110,16 @@ Bearer checks happen where `require_session` runs, without a round trip to rynas
   key, account check through PAM account management and `/etc/shadow`, role, rotation, grace,
   reuse); the TLS pins and base URLs; the periodic expiry. rynasd never sees a token: rynas-web
   generates them and sends their SHA-256.
-- Revocation: a revoke through rynas-web ends the device's sessions at once; revocations rynasd
-  makes on its own (expiry, removed accounts, reuse) reach rynas-web's sessions within a minute
-  (it compares its device sessions with `GET /v1/devices/ids`).
+- Revocation: a revoke through rynas-web ends the device's sessions at once and remembers the
+  id: an access token issued while the revocation was on its way is dropped right after it is
+  made. Revocations rynasd makes on its own (expiry, removed accounts, reuse) and role changes
+  reach rynas-web within 10 s: it compares its device sessions with `GET /v1/devices/live`
+  (the live devices and their users' groups) and ends the sessions of devices not listed and
+  of users who lost the role (a failed group lookup decides nothing).
+- Password change: paired devices keep their access (they hold their own key, D-DEVICES); a
+  security notification `device.password_kept` (info) lists them, so a device paired by
+  someone else becomes visible.
+- Web Push delivery never follows a redirect.
 - Internal routes of rynasd: the table at the top of `crates/rynasd/src/devices.rs`.
 
 ## 4. Push
@@ -141,7 +159,8 @@ As implemented (`rynas_notify::engine::webpush`, `crates/rynasd/src/devices.rs`)
 Notifications (category security) and SSE (`notification` events): `device.paired` (notice),
 `device.renamed` (info), `device.revoked` (notice, `reason`: `user`, `self`, `account`,
 `inactive`, `unclaimed`), `device.refresh_reuse` (warning: the device was revoked),
-`device.power` (info: a restart, shutdown or cancellation asked from a device).
+`device.power` (info: a restart, shutdown or cancellation asked from a device),
+`device.password_kept` (info: the user's password changed; lists the devices that keep access).
 
 ## 6. Web interface
 

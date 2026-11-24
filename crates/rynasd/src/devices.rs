@@ -18,7 +18,7 @@
 //! |---|---|---|---|
 //! | GET | `/v1/devices/sid` | | `internal::Sid` |
 //! | GET | `/v1/devices/trust` | | `internal::Trust` (sid, base URLs, TLS pins) |
-//! | GET | `/v1/devices/ids` | | `Vec<String>`: the live devices (rynas-web drops the access tokens of the others) |
+//! | GET | `/v1/devices/live` | | `Vec<internal::Live>`: the live devices and their user's groups (rynas-web's sweep every 10 s ends the access tokens of the others and of users who lost the role) |
 //! | POST | `/v1/devices/register` | `internal::Register` | `Device` (the approving user owns it) |
 //! | POST | `/v1/devices/refresh` | `internal::RefreshCheck` | `internal::RefreshOk`; 401 `device_revoked` / `refresh_invalid` |
 //! | GET | `/v1/devices` | | `Vec<Device>`: the user's; administrators everyone's |
@@ -44,7 +44,7 @@ use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
-use rynas_api_types::devices::internal::{RefreshCheck, RefreshOk, Register, Sid, Trust};
+use rynas_api_types::devices::internal::{Live, RefreshCheck, RefreshOk, Register, Sid, Trust};
 use rynas_api_types::devices::{
     Device, DeviceRename, DeviceSelf, INACTIVE_EXPIRY_DAYS, PushSubscription, REFRESH_GRACE_S,
     clean_name, clean_text,
@@ -79,9 +79,14 @@ pub enum Account {
     Ok,
     /// No such user any more.
     Gone,
-    /// Locked, expired, or refused by PAM account management.
+    /// Locked (`!`/`*` in shadow) or expired.
     Disabled,
+    /// The check failed (NSS or PAM error): nothing is decided, nothing is revoked.
+    Unknown,
 }
+
+/// A user's groups: `Ok(None)` when the user does not exist, `Err` when the lookup failed.
+pub type Lookup = fn(&str) -> Result<Option<Vec<String>>, String>;
 
 /// The account check (blocking): PAM in production ([`crate::pam::account_state`]).
 pub type AccountCheck = Arc<dyn Fn(&str) -> Account + Send + Sync>;
@@ -110,16 +115,24 @@ struct Record {
     last_refresh_ms: u64,
     /// b64u(SHA-256) of the current refresh token.
     refresh_sha: String,
-    /// The token the last rotation replaced, accepted with a valid signature until
-    /// `prev_until_ms` (a lost answer).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    prev_sha: Option<String>,
+    /// Tokens replaced in the last [`REFRESH_GRACE_S`], still accepted with a valid signature
+    /// (a lost answer, two refreshes at once): each until its own end.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    prev: Vec<PrevToken>,
+    /// `ts` of the last accepted refresh: the next one must be newer (no replay of a captured
+    /// request inside the grace window).
     #[serde(default)]
-    prev_until_ms: u64,
+    last_ts: i64,
     /// The Web Push subscription (endpoint, keys of the app): what the `device` notification
     /// target of this device delivers to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     push: Option<PushSubscription>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PrevToken {
+    sha: String,
+    until_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -130,11 +143,14 @@ struct Registry {
 
 pub struct DevicesSvc {
     dir: PathBuf,
-    sid_path: PathBuf,
+    /// `<state>/nas-sid`, read once ([`load_sid`]); an error stays an error.
+    sid: Result<String, String>,
     reg: Mutex<Registry>,
     notifier: Arc<dyn Notifier>,
     admins: AdminPolicy,
-    groups: fn(&str) -> Option<Vec<String>>,
+    /// The user's groups: `Ok(None)` for a user that does not exist, `Err` when the lookup
+    /// failed ([`crate::groups::user_groups_checked`]).
+    lookup: Lookup,
     account: AccountCheck,
     trust: TrustProvider,
     clock: Arc<dyn Clock>,
@@ -192,6 +208,14 @@ fn refresh_invalid() -> Error {
     )
 }
 
+fn unavailable(what: &str) -> Error {
+    Error::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        error_codes::BACKEND_UNAVAILABLE,
+        format!("{what}: try again later"),
+    )
+}
+
 fn not_found() -> Error {
     Error::not_found("no such device")
 }
@@ -213,6 +237,30 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     f.sync_all()?;
     drop(f);
     std::fs::rename(&tmp, path)
+}
+
+/// This NAS' identity for the app: made (16 random bytes, b64u) only when the file does not
+/// exist. Any other failure, or a file that does not hold an id, is an error and the file is
+/// left as it is.
+pub fn load_sid(path: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => {
+            let s = s.trim();
+            if s.len() == 22 && b64u_decode(s).is_some_and(|b| b.len() == 16) {
+                Ok(s.to_string())
+            } else {
+                Err("not a NAS id (left as it is)".into())
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut b = [0u8; 16];
+            getrandom::fill(&mut b).map_err(|e| e.to_string())?;
+            let sid = b64u(&b);
+            write_private(path, format!("{sid}\n").as_bytes()).map_err(|e| e.to_string())?;
+            Ok(sid)
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// LAN base URLs: the IPv4 addresses that are not loopback, link-local or Tailscale's
@@ -276,7 +324,7 @@ impl DevicesSvc {
         state_dir: &Path,
         notifier: Arc<dyn Notifier>,
         admins: AdminPolicy,
-        groups: fn(&str) -> Option<Vec<String>>,
+        lookup: Lookup,
         account: AccountCheck,
         trust: TrustProvider,
         clock: Arc<dyn Clock>,
@@ -291,19 +339,22 @@ impl DevicesSvc {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Registry::default(),
             Err(e) => return Err(e),
         };
+        let sid = load_sid(&state_dir.join("nas-sid"));
+        if let Err(e) = &sid {
+            tracing::error!("devices: the NAS id {}: {e}", state_dir.join("nas-sid").display());
+        }
         let svc = Arc::new(Self {
             dir,
-            sid_path: state_dir.join("nas-sid"),
+            sid,
             reg: Mutex::new(reg),
             notifier,
             admins,
-            groups,
+            lookup,
             account,
             trust,
             clock,
             engine: std::sync::OnceLock::new(),
         });
-        svc.sid()?;
         Ok(svc)
     }
 
@@ -468,18 +519,16 @@ impl DevicesSvc {
         write_private(&self.dir.join("devices.json"), &json).map_err(Error::internal)
     }
 
-    /// This NAS' identity for the app, made on first use.
-    pub fn sid(&self) -> std::io::Result<String> {
-        match std::fs::read_to_string(&self.sid_path) {
-            Ok(s) if !s.trim().is_empty() => Ok(s.trim().to_string()),
-            Ok(_) | Err(_) => {
-                let mut b = [0u8; 16];
-                getrandom::fill(&mut b).map_err(std::io::Error::other)?;
-                let sid = b64u(&b);
-                write_private(&self.sid_path, format!("{sid}\n").as_bytes())?;
-                Ok(sid)
-            }
-        }
+    /// This NAS' identity for the app (read once at start). A file that could not be read
+    /// answers 503 everywhere it is needed: a new id would unpair every phone.
+    pub fn sid(&self) -> Res<String> {
+        self.sid.clone().map_err(|e| {
+            Error::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                error_codes::BACKEND_UNAVAILABLE,
+                format!("the NAS id is unreadable: {e}"),
+            )
+        })
     }
 
     fn view(r: &Record) -> Device {
@@ -502,6 +551,31 @@ impl DevicesSvc {
     }
 
     /// The live device ids.
+    /// The live devices with their user's groups now (blocking: NSS), for rynas-web's sweep.
+    pub fn live(&self) -> Vec<Live> {
+        let devices: Vec<(String, String)> = self
+            .lock()
+            .devices
+            .iter()
+            .map(|d| (d.id.clone(), d.user.clone()))
+            .collect();
+        let mut users: std::collections::HashMap<String, Option<Vec<String>>> = Default::default();
+        devices
+            .into_iter()
+            .map(|(id, user)| {
+                let groups = users
+                    .entry(user.clone())
+                    .or_insert_with(|| match (self.lookup)(&user) {
+                        Ok(Some(g)) => Some(g),
+                        Ok(None) => Some(Vec::new()),
+                        Err(_) => None,
+                    })
+                    .clone();
+                Live { id, groups }
+            })
+            .collect()
+    }
+
     pub fn ids(&self) -> Vec<String> {
         self.lock().devices.iter().map(|d| d.id.clone()).collect()
     }
@@ -541,8 +615,8 @@ impl DevicesSvc {
             last_ip: clean_text(&r.ip),
             last_refresh_ms: now,
             refresh_sha: r.refresh_sha.clone(),
-            prev_sha: None,
-            prev_until_ms: 0,
+            prev: Vec::new(),
+            last_ts: 0,
             push: None,
         };
         let view = Self::view(&rec);
@@ -651,7 +725,7 @@ impl DevicesSvc {
     /// window and reuse detection.
     pub fn refresh(&self, c: &RefreshCheck) -> Res<RefreshOk> {
         let now = self.clock.now_ms();
-        let sid = self.sid().map_err(Error::internal)?;
+        let sid = self.sid()?;
         if !valid_sha(&c.refresh_sha) || !valid_sha(&c.new_refresh_sha) {
             return Err(refresh_invalid());
         }
@@ -674,24 +748,41 @@ impl DevicesSvc {
                 self.revoke_where("account", |d| d.user == user);
                 return Err(revoked());
             }
+            Account::Unknown => return Err(unavailable("the account check failed")),
         }
-        if !self.admins.is_admin(&user) {
-            // the account may not sign in to the web interface (today: administrators)
+        let groups = match (self.lookup)(&user) {
+            Ok(Some(g)) => g,
+            Ok(None) => {
+                self.revoke_where("account", |d| d.user == user);
+                return Err(revoked());
+            }
+            Err(e) => {
+                tracing::warn!("devices: refresh of {}: {e}", c.device_id);
+                return Err(unavailable("the account check failed"));
+            }
+        };
+        // the account may sign in to the web interface (today: administrators), by rynasd's
+        // groups and by rynas-web's: a token is never rotated for an answer rynas-web drops
+        let web_ok = c.admin_groups.is_empty() || groups.iter().any(|g| c.admin_groups.contains(g));
+        if !self.admins.is_admin(&user) || !web_ok {
             return Err(refresh_invalid());
         }
-        let groups = (self.groups)(&user).unwrap_or_default();
         let mut reg = self.lock();
         let Some(i) = reg.devices.iter().position(|d| d.id == c.device_id) else {
             return Err(revoked());
         };
         let r = &mut reg.devices[i];
+        // an old or replayed request: refused, the device stays
+        if c.ts <= r.last_ts {
+            return Err(refresh_invalid());
+        }
+        r.prev.retain(|p| now < p.until_ms);
         let current = ct_eq_bytes(r.refresh_sha.as_bytes(), c.refresh_sha.as_bytes());
         let previous = !current
-            && now < r.prev_until_ms
             && r
-                .prev_sha
-                .as_ref()
-                .is_some_and(|p| ct_eq_bytes(p.as_bytes(), c.refresh_sha.as_bytes()));
+                .prev
+                .iter()
+                .any(|p| ct_eq_bytes(p.sha.as_bytes(), c.refresh_sha.as_bytes()));
         if !current && !previous {
             let rec = reg.devices.remove(i);
             if let Err(e) = self.save(&reg) {
@@ -713,12 +804,17 @@ impl DevicesSvc {
             }
             return Err(revoked());
         }
-        if current {
-            r.prev_sha = Some(std::mem::take(&mut r.refresh_sha));
-            r.prev_until_ms = now + REFRESH_GRACE_S * 1000;
+        // the replaced token stays good for the grace window (a lost answer, a second refresh
+        // sent at the same time); every token of the window keeps its own end
+        let replaced = std::mem::replace(&mut r.refresh_sha, c.new_refresh_sha.clone());
+        r.prev.push(PrevToken {
+            sha: replaced,
+            until_ms: now + REFRESH_GRACE_S * 1000,
+        });
+        if r.prev.len() > 8 {
+            r.prev.remove(0);
         }
-        // in the grace window the lost token is replaced, the previous one keeps its window
-        r.refresh_sha = c.new_refresh_sha.clone();
+        r.last_ts = c.ts;
         r.last_refresh_ms = now;
         r.last_seen_ms = now;
         r.last_ip = clean_text(&c.ip);
@@ -752,7 +848,7 @@ impl DevicesSvc {
     }
 
     pub async fn trust(&self) -> Res<Trust> {
-        let sid = self.sid().map_err(Error::internal)?;
+        let sid = self.sid()?;
         let (endpoints, tls_pins) = (self.trust)().await;
         Ok(Trust {
             sid,
@@ -769,11 +865,50 @@ impl DevicesSvc {
         let mut out = self.revoke_where("inactive", |d| now.saturating_sub(d.last_refresh_ms) >= limit);
         let users: BTreeSet<String> = self.lock().devices.iter().map(|d| d.user.clone()).collect();
         for u in users {
-            if (self.account)(&u) != Account::Ok {
-                out.extend(self.revoke_where("account", |d| d.user == u));
+            match (self.account)(&u) {
+                Account::Ok => {}
+                Account::Gone | Account::Disabled => {
+                    out.extend(self.revoke_where("account", |d| d.user == u));
+                }
+                Account::Unknown => {
+                    tracing::warn!("devices: the account check of {u} failed: its devices stay, checked again later");
+                }
             }
         }
         out
+    }
+}
+
+/// The running device service, for the users' password change ([`password_changed`]).
+static RUNNING: std::sync::OnceLock<std::sync::Weak<DevicesSvc>> = std::sync::OnceLock::new();
+
+/// Makes `svc` the one [`password_changed`] reports to (rynasd's start).
+pub fn set_running(svc: &Arc<DevicesSvc>) {
+    let _ = RUNNING.set(Arc::downgrade(svc));
+}
+
+/// A user's password was changed: paired devices keep their access (they hold their own
+/// key), and a security notification lists them, so a device paired by someone else shows.
+pub fn password_changed(user: &str) {
+    if let Some(svc) = RUNNING.get().and_then(std::sync::Weak::upgrade) {
+        svc.note_password_changed(user);
+    }
+}
+
+impl DevicesSvc {
+    fn note_password_changed(&self, user: &str) {
+        let names: Vec<String> = self
+            .lock()
+            .devices
+            .iter()
+            .filter(|d| d.user == user)
+            .map(|d| d.name.clone())
+            .collect();
+        if !names.is_empty() {
+            audit(format_args!("password of {user} changed: {} paired devices keep access", names.len()));
+            self.notifier
+                .emit(rynas_notify::checks::devices_kept_after_password(user, &names));
+        }
     }
 }
 
@@ -809,7 +944,7 @@ pub fn router(st: DevState) -> Router {
     Router::new()
         .route("/v1/devices/sid", get(sid_get))
         .route("/v1/devices/trust", get(trust_get))
-        .route("/v1/devices/ids", get(ids_get))
+        .route("/v1/devices/live", get(live_get))
         .route("/v1/devices/register", post(register_post))
         .route("/v1/devices/refresh", post(refresh_post))
         .route("/v1/devices", get(list_get))
@@ -845,7 +980,7 @@ async fn push_delete(
 async fn sid_get(State(st): State<DevState>) -> Res<Json<Sid>> {
     let s = svc(&st)?;
     Ok(Json(Sid {
-        sid: s.sid().map_err(Error::internal)?,
+        sid: s.sid()?,
     }))
 }
 
@@ -853,8 +988,9 @@ async fn trust_get(State(st): State<DevState>) -> Res<Json<Trust>> {
     Ok(Json(svc(&st)?.trust().await?))
 }
 
-async fn ids_get(State(st): State<DevState>) -> Res<Json<Vec<String>>> {
-    Ok(Json(svc(&st)?.ids()))
+async fn live_get(State(st): State<DevState>) -> Res<Json<Vec<Live>>> {
+    let s = svc(&st)?;
+    Ok(Json(blocking(move || Ok(s.live())).await?))
 }
 
 async fn register_post(
@@ -968,11 +1104,25 @@ mod tests {
         }
     }
 
+    thread_local! {
+        /// The group lookup fails (NSS down) on this test's thread.
+        static LOOKUP_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn lookup(u: &str) -> Result<Option<Vec<String>>, String> {
+        if LOOKUP_FAILS.with(|f| f.get()) {
+            return Err("nss: connection refused".into());
+        }
+        Ok(groups(u))
+    }
+
     struct Rig {
         svc: Arc<DevicesSvc>,
         clock: Arc<ManualClock>,
         events: Arc<MemoryNotifier>,
         gone: Arc<Mutex<Vec<String>>>,
+        /// Users whose account check fails (PAM or NSS error).
+        failing: Arc<Mutex<Vec<String>>>,
         _dir: tempfile::TempDir,
     }
 
@@ -981,9 +1131,12 @@ mod tests {
         let clock = Arc::new(ManualClock::new(T0));
         let events = Arc::new(MemoryNotifier::default());
         let gone: Arc<Mutex<Vec<String>>> = Arc::default();
-        let g = gone.clone();
+        let failing: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (g, f) = (gone.clone(), failing.clone());
         let account: AccountCheck = Arc::new(move |u: &str| {
-            if g.lock().unwrap().iter().any(|x| x == u) || groups(u).is_none() {
+            if f.lock().unwrap().iter().any(|x| x == u) {
+                Account::Unknown
+            } else if g.lock().unwrap().iter().any(|x| x == u) || groups(u).is_none() {
                 Account::Gone
             } else {
                 Account::Ok
@@ -996,13 +1149,13 @@ mod tests {
             dir.path(),
             events.clone(),
             AdminPolicy::new(vec!["rynas-admin".into()], groups),
-            groups,
+            lookup,
             account,
             trust,
             clock.clone(),
         )
         .unwrap();
-        Rig { svc, clock, events, gone, _dir: dir }
+        Rig { svc, clock, events, gone, failing, _dir: dir }
     }
 
     fn register(r: &Rig, user: &str, key: &Key, token: &str) -> Device {
@@ -1023,18 +1176,118 @@ mod tests {
             .unwrap()
     }
 
+    /// A refresh signed now (a second after the previous one: each must be newer).
     fn check(r: &Rig, key: &Key, id: &str, old: &str, new: &str) -> Res<RefreshOk> {
+        r.clock.advance_ms(1000);
+        r.svc.refresh(&signed(r, key, id, old, new))
+    }
+
+    fn signed(r: &Rig, key: &Key, id: &str, old: &str, new: &str) -> RefreshCheck {
         let sid = r.svc.sid().unwrap();
         let ts = (r.clock.now_ms() / 1000) as i64;
         let sha = sha_b64u(old);
-        r.svc.refresh(&RefreshCheck {
+        RefreshCheck {
             device_id: id.into(),
             ts,
             sig: key.sign(&refresh_message(&sid, id, ts, &sha)),
             refresh_sha: sha,
             new_refresh_sha: sha_b64u(new),
             ip: "192.0.2.10".into(),
-        })
+            admin_groups: vec!["rynas-admin".into(), "sudo".into()],
+        }
+    }
+
+    #[test]
+    fn a_replayed_request_is_refused_without_revoking() {
+        let r = rig();
+        let key = Key::new();
+        let d = register(&r, "alice", &key, "R1");
+        r.clock.advance_ms(1000);
+        let req = signed(&r, &key, &d.id, "R1", "R2");
+        r.svc.refresh(&req).unwrap();
+        // the same request again (captured), inside the grace window: refused, device kept
+        let e = r.svc.refresh(&req).unwrap_err();
+        assert_eq!(e.1, error_codes::REFRESH_INVALID);
+        // an older signature of the old token, too
+        let mut old = req.clone();
+        old.new_refresh_sha = sha_b64u("X");
+        assert_eq!(r.svc.refresh(&old).unwrap_err().1, error_codes::REFRESH_INVALID);
+        assert_eq!(r.svc.ids(), vec![d.id.clone()]);
+        // the app's next refresh, signed later, works
+        check(&r, &key, &d.id, "R2", "R3").unwrap();
+    }
+
+    #[test]
+    fn two_refreshes_at_once_keep_the_device() {
+        let r = rig();
+        let key = Key::new();
+        let d = register(&r, "alice", &key, "R1");
+        // two refreshes of R1 sent together (the second signed a second later): both pass
+        check(&r, &key, &d.id, "R1", "A").unwrap();
+        check(&r, &key, &d.id, "R1", "B").unwrap();
+        // whichever answer the app kept works, the other one too while the window lasts
+        check(&r, &key, &d.id, "A", "C").unwrap();
+        check(&r, &key, &d.id, "C", "D").unwrap();
+        assert_eq!(r.svc.ids(), vec![d.id.clone()]);
+        // after the window an old token is a reuse
+        r.clock.advance_ms(61_000);
+        assert_eq!(check(&r, &key, &d.id, "B", "E").unwrap_err().1, error_codes::DEVICE_REVOKED);
+    }
+
+    #[test]
+    fn failed_account_checks_revoke_nothing() {
+        let r = rig();
+        let key = Key::new();
+        let d = register(&r, "alice", &key, "R1");
+        r.failing.lock().unwrap().push("alice".into());
+        let e = check(&r, &key, &d.id, "R1", "R2").unwrap_err();
+        assert_eq!((e.0, e.1), (StatusCode::SERVICE_UNAVAILABLE, error_codes::BACKEND_UNAVAILABLE));
+        assert!(r.svc.check().is_empty(), "the periodic check skips the user");
+        assert_eq!(r.svc.ids(), vec![d.id.clone()]);
+        r.failing.lock().unwrap().clear();
+        // NSS down for the group lookup: the same, and the token is not rotated
+        LOOKUP_FAILS.with(|f| f.set(true));
+        let e = check(&r, &key, &d.id, "R1", "R2").unwrap_err();
+        assert_eq!(e.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(r.svc.live().iter().all(|l| l.groups.is_none()));
+        LOOKUP_FAILS.with(|f| f.set(false));
+        check(&r, &key, &d.id, "R1", "R2").unwrap();
+        // a user outside rynas-web's administrator groups: no rotation
+        let mut req = signed(&r, &key, &d.id, "R2", "R3");
+        req.ts += 1;
+        req.sig = key.sign(&refresh_message(&r.svc.sid().unwrap(), &d.id, req.ts, &req.refresh_sha));
+        req.admin_groups = vec!["wheel".into()];
+        assert_eq!(r.svc.refresh(&req).unwrap_err().1, error_codes::REFRESH_INVALID);
+        check(&r, &key, &d.id, "R2", "R3").unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_nas_id_is_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        // not readable as a file: the id is unknown, nothing is written
+        std::fs::create_dir(dir.path().join("nas-sid")).unwrap();
+        let svc = DevicesSvc::new(
+            dir.path(),
+            Arc::new(rynas_notify::NullNotifier),
+            AdminPolicy::new(vec!["rynas-admin".into()], groups),
+            lookup,
+            Arc::new(|_: &str| Account::Ok),
+            Arc::new(|| Box::pin(async { (Vec::new(), Vec::new()) })),
+            Arc::new(ManualClock::new(T0)),
+        )
+        .unwrap();
+        let e = svc.sid().unwrap_err();
+        assert_eq!((e.0, e.1), (StatusCode::SERVICE_UNAVAILABLE, error_codes::BACKEND_UNAVAILABLE));
+        assert!(dir.path().join("nas-sid").is_dir());
+        // garbage in the file: the same, the file is left as it is
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("nas-sid"), "not an id\n").unwrap();
+        assert!(load_sid(&other.path().join("nas-sid")).is_err());
+        assert_eq!(std::fs::read_to_string(other.path().join("nas-sid")).unwrap(), "not an id\n");
+        // only a missing file makes a new id, and the same one is read back
+        let p = other.path().join("new-sid");
+        let a = load_sid(&p).unwrap();
+        assert_eq!(load_sid(&p).unwrap(), a);
     }
 
     #[test]
@@ -1059,7 +1312,7 @@ mod tests {
             r._dir.path(),
             Arc::new(rynas_notify::NullNotifier),
             AdminPolicy::new(vec!["rynas-admin".into()], groups),
-            groups,
+            lookup,
             Arc::new(|_: &str| Account::Ok),
             r.svc.trust.clone(),
             r.clock.clone(),
@@ -1117,6 +1370,7 @@ mod tests {
                 refresh_sha: sha,
                 new_refresh_sha: sha_b64u("R2"),
                 ip: String::new(),
+                admin_groups: Vec::new(),
             })
             .unwrap_err();
         assert_eq!(e.1, error_codes::REFRESH_INVALID);

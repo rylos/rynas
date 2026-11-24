@@ -6403,3 +6403,5 @@ nev.device.power.action.shutdown	выключение
 nev.device.power.action.cancel	отменено
 nt.kind.device	Мобильное устройство
 nt.device_summary	Push на сопряжённый телефон
+nev.device.password_kept.title	Пароль {user} изменён: сопряжённые устройства ({n}) сохраняют доступ
+nev.device.password_kept.body	Устройства: {devices}. Отзовите незнакомые в разделе «Безопасность › Мобильные устройства».

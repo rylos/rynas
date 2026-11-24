@@ -43,7 +43,7 @@ const INTERNAL: &[(&str, &str)] = &[
     ("/v1/ups/safe-mode", "rynasctl from the UPS hooks, root only"),
     ("/v1/devices/sid", "rynas-web's /ping and pairing QR codes"),
     ("/v1/devices/trust", "rynas-web's pairing QR codes"),
-    ("/v1/devices/ids", "rynas-web's sweep of revoked devices' access tokens"),
+    ("/v1/devices/live", "rynas-web's sweep of revoked devices' access tokens (every 10 s)"),
     ("/v1/devices/register", "rynas-web's pairing approval"),
     ("/v1/devices/refresh", "rynas-web's /auth/device/refresh, after its rate limit"),
     ("/v1/devices/{id}/self", "rynas-web's /devices/self (the device from its bearer token)"),

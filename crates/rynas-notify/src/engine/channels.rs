@@ -56,7 +56,7 @@ pub async fn send(
         TargetConfig::Gotify { .. } => gotify(http, d, msg).await,
         TargetConfig::Webhook { .. } => webhook(http, tpl, d, msg).await,
         TargetConfig::Ui {} => Ok(()),
-        TargetConfig::Device { device_id } => device(http, d, msg, device_id).await,
+        TargetConfig::Device { device_id } => device(d, msg, device_id).await,
     };
     r.map_err(|e| {
         let mut e = redact(&e, d.secrets);
@@ -222,7 +222,6 @@ async fn gotify(http: &reqwest::Client, d: &Dest<'_>, msg: &Message) -> Result<(
 /// dedupes by id). A subscription the push service no longer knows (404/410) is dropped and
 /// the message counts as handled.
 async fn device(
-    http: &reqwest::Client,
     d: &Dest<'_>,
     msg: &Message,
     device_id: &str,
@@ -259,7 +258,7 @@ async fn device(
     }
     for p in payloads {
         let urgency = webpush::urgency(&p.severity);
-        match webpush::post(http, &sub, &webpush::payload_json(p), urgency).await? {
+        match webpush::post(&sub, &webpush::payload_json(p), urgency).await? {
             webpush::Delivery::Accepted => {}
             webpush::Delivery::Gone => {
                 tracing::info!("push subscription of device {device_id} is gone: dropped");

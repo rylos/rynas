@@ -192,6 +192,20 @@ impl SessionStore {
         before - map.len()
     }
 
+    /// The devices with a live session.
+    pub fn device_ids(&self) -> Vec<String> {
+        let now = self.clock.now_ms();
+        let mut v: Vec<String> = self
+            .lock()
+            .values()
+            .filter(|s| !self.expired(s, now))
+            .filter_map(|s| s.device.as_ref().map(|d| d.id.clone()))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
     /// Ends the device sessions whose device `keep` refuses (devices revoked elsewhere).
     pub fn retain_devices(&self, keep: impl Fn(&str) -> bool) {
         self.lock()

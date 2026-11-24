@@ -217,16 +217,26 @@ pub enum Delivery {
     Gone,
 }
 
+/// The push client: no redirects (a push service answers the endpoint itself; following a
+/// redirect would send the message, and the capability in the URL, elsewhere).
+fn client() -> &'static reqwest::Client {
+    static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(super::channels::SEND_TIMEOUT)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(concat!("rynas/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("HTTP client with native TLS")
+    })
+}
+
 /// Posts one encrypted message (RFC 8030 §5). Errors carry no URL (the endpoint is a
-/// capability).
-pub async fn post(
-    http: &reqwest::Client,
-    sub: &Subscription,
-    plaintext: &[u8],
-    urgency: &str,
-) -> Result<Delivery, String> {
+/// capability); a redirect is an error.
+pub async fn post(sub: &Subscription, plaintext: &[u8], urgency: &str) -> Result<Delivery, String> {
     let body = encrypt(&sub.p256dh, &sub.auth, plaintext)?;
-    let r = http
+    let r = client()
         .post(sub.endpoint.clone())
         .header(reqwest::header::CONTENT_ENCODING, "aes128gcm")
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")

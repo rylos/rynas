@@ -535,9 +535,14 @@ async fn user_password(
         .spawn("user.password", &user(&h)?, move |ctx| async move {
             let c = ctx.clone();
             tokio::task::spawn_blocking(move || {
-                users::set_password(accounts.as_ref(), &name, &password, smb, disabled, &|l| {
+                let r = users::set_password(accounts.as_ref(), &name, &password, smb, disabled, &|l| {
                     c.log(l)
-                })
+                });
+                if r.is_ok() {
+                    // paired phones keep access: say so, with their names
+                    crate::devices::password_changed(&name);
+                }
+                r
             })
             .await
             .map_err(|e| e.to_string())?

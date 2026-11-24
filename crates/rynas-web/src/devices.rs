@@ -24,7 +24,7 @@ use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use rynas_api_types::devices::internal::{RefreshCheck, RefreshOk, Register, Sid, Trust};
+use rynas_api_types::devices::internal::{Live, RefreshCheck, RefreshOk, Register, Sid, Trust};
 use rynas_api_types::devices::{
     ACCESS_TTL_S, ClaimRequest, Device, DeviceRename, DeviceSelf, NasRef, PROTOCOL_VERSION,
     PairingApprove, PairingCreated, PairingState, PairingStatus, Ping, PollApproved, PollPending,
@@ -32,7 +32,7 @@ use rynas_api_types::devices::{
 };
 use rynas_api_types::{UserInfo, error_codes};
 use rynas_auth::device::{PairingError, PollOutcome, b64u, sha_b64u};
-use rynas_auth::session::{DeviceRef, SessionData};
+use rynas_auth::session::{DeviceRef, SessionData, SessionStore};
 use rynas_auth::{Identity, random_token};
 
 use crate::app::AppState;
@@ -41,9 +41,11 @@ use crate::conn::Client;
 use crate::error::Error;
 use crate::rynasd_client::UpstreamError;
 
-/// How often finished pairings are dropped and access tokens of devices revoked elsewhere
-/// (expired, removed accounts) are ended.
-pub const SWEEP_EVERY: Duration = Duration::from_secs(60);
+/// How often finished pairings are dropped and access tokens of devices revoked by rynasd
+/// itself (expired, removed accounts, reuse) or of users who lost the role are ended.
+pub const SWEEP_EVERY: Duration = Duration::from_secs(10);
+/// Revoked device ids remembered (the newest; older ones are long past any refresh in flight).
+const MAX_REVOKED: usize = 4096;
 
 /// rynas-web's memory of the devices: the NAS id (asked once from rynasd), when and from
 /// where each device was last seen (merged into the lists; the store records it at each
@@ -52,6 +54,9 @@ pub struct DeviceHub {
     sid: Mutex<Option<String>>,
     seen: Mutex<HashMap<String, (u64, String)>>,
     poll_wait: Duration,
+    /// Devices revoked since rynas-web started: an access token issued while a revocation
+    /// was on its way is dropped right after it is made ([`DeviceHub::issue`]).
+    revoked: Mutex<std::collections::VecDeque<String>>,
 }
 
 impl Default for DeviceHub {
@@ -66,7 +71,49 @@ impl DeviceHub {
             sid: Mutex::new(None),
             seen: Mutex::new(HashMap::new()),
             poll_wait,
+            revoked: Mutex::new(std::collections::VecDeque::new()),
         }
+    }
+
+    /// The device `id` is revoked: its sessions end, and any made later are dropped at once.
+    pub fn revoked(&self, sessions: &SessionStore, id: &str) {
+        {
+            let mut r = self.revoked.lock().unwrap_or_else(|e| e.into_inner());
+            if !r.iter().any(|x| x == id) {
+                r.push_back(id.to_string());
+                if r.len() > MAX_REVOKED {
+                    r.pop_front();
+                }
+            }
+        }
+        sessions.remove_device(id);
+        self.forget(id);
+    }
+
+    fn is_revoked(&self, id: &str) -> bool {
+        self.revoked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|x| x == id)
+    }
+
+    /// A device session for `device` of `user`: the access token handed to the phone, or
+    /// `None` when the device was revoked meanwhile (the session made is dropped again: a
+    /// revocation running at the same time removes it either before or after this check).
+    pub fn issue(&self, sessions: &SessionStore, user: UserInfo, device: &Device) -> Option<String> {
+        let (token, _) = sessions.create_device(
+            user,
+            DeviceRef {
+                id: device.id.clone(),
+                name: device.name.clone(),
+            },
+        );
+        if self.is_revoked(&device.id) {
+            sessions.remove_device(&device.id);
+            return None;
+        }
+        Some(token)
     }
 
     /// A request of the device `id` from `ip`.
@@ -287,16 +334,8 @@ async fn poll(
     }
 }
 
-/// A device session for `device` of `user`: the access token handed to the phone.
-fn issue_access(st: &AppState, user: UserInfo, device: &Device) -> String {
-    let (token, _) = st.auth.sessions().create_device(
-        user,
-        DeviceRef {
-            id: device.id.clone(),
-            name: device.name.clone(),
-        },
-    );
-    token
+fn revoked_answer() -> Response {
+    err(StatusCode::UNAUTHORIZED, error_codes::DEVICE_REVOKED, "device unknown or revoked")
 }
 
 async fn refresh(
@@ -330,6 +369,7 @@ async fn refresh(
         refresh_sha: sha_b64u(&req.refresh_token),
         new_refresh_sha: sha_b64u(&new_token),
         ip: ip.to_string(),
+        admin_groups: st.auth.admin_groups().to_vec(),
     };
     let ok: RefreshOk = match st
         .rynasd
@@ -342,8 +382,7 @@ async fn refresh(
         {
             limiter.record_failure(ip, &key);
             if e.code == error_codes::DEVICE_REVOKED {
-                st.auth.sessions().remove_device(&req.device_id);
-                st.devices.forget(&req.device_id);
+                st.devices.revoked(st.auth.sessions(), &req.device_id);
             }
             return Error(status, e).into_response();
         }
@@ -353,17 +392,21 @@ async fn refresh(
         username: ok.device.user.clone(),
         groups: ok.groups.clone(),
     };
-    let Some(role) = st.auth.role_of(&identity) else {
-        limiter.record_failure(ip, &key);
-        return invalid();
-    };
+    // rynasd rotated only for a member of our administrator groups (`admin_groups`): the
+    // role is there; the new refresh token is never thrown away
+    let role = st.auth.role_of(&identity).unwrap_or_else(|| {
+        tracing::error!("devices: refresh of {} rotated without a role here", ok.device.id);
+        rynas_api_types::Role::Admin
+    });
     limiter.record_success(ip, &key);
     let user = UserInfo {
         username: ok.device.user.clone(),
         realm: "pam".into(),
         role,
     };
-    let access = issue_access(&st, user, &ok.device);
+    let Some(access) = st.devices.issue(st.auth.sessions(), user, &ok.device) else {
+        return revoked_answer();
+    };
     st.devices.seen(&ok.device.id, ip, st.auth.pairings().now_ms());
     Json(RefreshResponse {
         access_token: access,
@@ -485,7 +528,10 @@ async fn pairing_approve(
         }
     };
     let sid = sid(&st).await.unwrap_or_default();
-    let access = issue_access(&st, s.user.clone(), &device);
+    let Some(access) = st.devices.issue(st.auth.sessions(), s.user.clone(), &device) else {
+        st.auth.pairings().approve_failed(&id);
+        return revoked_answer();
+    };
     st.auth.pairings().approved(
         &id,
         PollApproved {
@@ -571,8 +617,7 @@ async fn revoke_device(st: &AppState, s: &SessionData, id: &str, reason: &str) -
             None::<&()>,
         )
         .await?;
-    st.auth.sessions().remove_device(id);
-    st.devices.forget(id);
+    st.devices.revoked(st.auth.sessions(), id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -705,18 +750,99 @@ pub async fn sweep(st: &AppState) {
             tracing::warn!("devices: unclaimed device {id} not revoked: {e:?}");
         }
     }
-    let ids: Result<Vec<String>, _> = st
+    let live: Result<Vec<Live>, _> = st
         .rynasd
-        .call(Method::GET, "/v1/devices/ids", None, None::<&()>)
+        .call(Method::GET, "/v1/devices/live", None, None::<&()>)
         .await;
-    if let Ok(ids) = ids {
-        st.auth.sessions().retain_devices(|id| ids.iter().any(|x| x == id));
+    if let Ok(live) = live {
+        apply_live(&st.auth, &st.devices, &live);
+    }
+}
+
+/// rynasd's list of live devices: the sessions of devices not in it end (revoked), and those
+/// of devices whose user lost the role (they refresh, and rynasd refuses). A user whose groups
+/// could not be read keeps their sessions until the next sweep.
+pub fn apply_live(auth: &rynas_auth::AuthService, hub: &DeviceHub, live: &[Live]) {
+    for id in auth.sessions().device_ids() {
+        match live.iter().find(|l| l.id == id) {
+            None => hub.revoked(auth.sessions(), &id),
+            Some(Live { groups: Some(g), .. }) => {
+                let who = Identity {
+                    username: String::new(),
+                    groups: g.clone(),
+                };
+                if auth.role_of(&who).is_none() {
+                    auth.sessions().remove_device(&id);
+                }
+            }
+            Some(Live { groups: None, .. }) => {}
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn admin() -> UserInfo {
+        UserInfo {
+            username: "admin".into(),
+            realm: "pam".into(),
+            role: rynas_api_types::Role::Admin,
+        }
+    }
+
+    fn device(id: &str) -> Device {
+        Device {
+            id: id.into(),
+            name: "Pixel".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_token_issued_while_a_revocation_runs_is_dropped() {
+        let auth = rynas_auth::AuthService::with_clock(
+            Vec::new(),
+            rynas_auth::AuthConfig::default(),
+            std::sync::Arc::new(rynas_auth::ManualClock::new(1_000)),
+        );
+        let hub = DeviceHub::default();
+        let s = auth.sessions();
+        let t = hub.issue(s, admin(), &device("d_1")).unwrap();
+        assert!(s.get_bearer(&t).is_some());
+        // the revocation lands between rynasd's answer and the session: no token survives
+        hub.revoked(s, "d_1");
+        assert!(s.get_bearer(&t).is_none());
+        assert!(hub.issue(s, admin(), &device("d_1")).is_none());
+        assert!(s.device_ids().is_empty(), "the session made is gone again");
+        assert!(hub.issue(s, admin(), &device("d_2")).is_some());
+    }
+
+    #[test]
+    fn the_sweep_ends_revoked_devices_and_lost_roles() {
+        let auth = rynas_auth::AuthService::with_clock(
+            Vec::new(),
+            rynas_auth::AuthConfig::default(),
+            std::sync::Arc::new(rynas_auth::ManualClock::new(1_000)),
+        );
+        let hub = DeviceHub::default();
+        let s = auth.sessions();
+        let gone = hub.issue(s, admin(), &device("d_gone")).unwrap();
+        let demoted = hub.issue(s, admin(), &device("d_demoted")).unwrap();
+        let unknown = hub.issue(s, admin(), &device("d_unknown")).unwrap();
+        let fine = hub.issue(s, admin(), &device("d_fine")).unwrap();
+        let live = [
+            Live { id: "d_demoted".into(), groups: Some(vec!["users".into()]) },
+            Live { id: "d_unknown".into(), groups: None },
+            Live { id: "d_fine".into(), groups: Some(vec!["sudo".into()]) },
+        ];
+        apply_live(&auth, &hub, &live);
+        assert!(s.get_bearer(&gone).is_none() && hub.issue(s, admin(), &device("d_gone")).is_none());
+        assert!(s.get_bearer(&demoted).is_none());
+        assert!(s.get_bearer(&unknown).is_some(), "a failed lookup decides nothing");
+        assert!(s.get_bearer(&fine).is_some());
+    }
 
     #[test]
     fn qr_link_encodes_every_field() {

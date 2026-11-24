@@ -297,6 +297,17 @@ pub mod internal {
         pub tls_pins: Vec<String>,
     }
 
+    /// `GET /v1/devices/live`: a live device and its user's groups now (rynas-web ends the
+    /// access tokens of devices not listed, and of users whose role is gone). `groups`:
+    /// empty for a user that no longer exists, `None` when the lookup failed (nothing is
+    /// decided then).
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+    pub struct Live {
+        pub id: String,
+        #[serde(default)]
+        pub groups: Option<Vec<String>>,
+    }
+
     /// `POST /v1/devices/register` (`x-rynas-user`: the approving user): an approved pairing.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
     pub struct Register {
@@ -319,6 +330,10 @@ pub mod internal {
         pub refresh_sha: String,
         pub new_refresh_sha: String,
         pub ip: String,
+        /// rynas-web's administrator groups: rynasd rotates only when the user is in one of
+        /// them, so rynas-web never drops a rotated token for want of a role.
+        #[serde(default)]
+        pub admin_groups: Vec<String>,
     }
 
     /// Answer of a refresh check: the device, its user's groups (rynas-web derives the role)

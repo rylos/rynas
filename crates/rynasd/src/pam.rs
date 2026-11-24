@@ -62,33 +62,56 @@ fn pam_check(service: &str, user: &str, password: &str) -> Result<(), String> {
 /// its password is not locked (`!` in `/etc/shadow`), and PAM account management on `service`
 /// accepts it (expired accounts, `pam_access`, `pam_time`…). A paired mobile device's refresh
 /// and the devices' periodic check use it.
+///
+/// Only definite answers revoke: `Gone` for a user NSS cleanly says does not exist,
+/// `Disabled` for a `!`/`*` lock in `/etc/shadow` or an expired account (`PAM_ACCT_EXPIRED`).
+/// Any other failure (NSS or PAM error, unreadable shadow file) is `Unknown`: the refresh is
+/// refused for now and the devices stay.
 pub fn account_state(service: &str, user: &str) -> crate::devices::Account {
     use crate::devices::Account;
-    if user_groups(user).is_none() {
-        return Account::Gone;
+    match crate::groups::user_groups_checked(user) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Account::Gone,
+        Err(e) => {
+            tracing::warn!("account check of {user}: {e}");
+            return Account::Unknown;
+        }
     }
-    if shadow_locked(user) {
-        return Account::Disabled;
+    match std::fs::read_to_string("/etc/shadow") {
+        Ok(t) if shadow_locked(&t, user) => return Account::Disabled,
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("account check of {user}: /etc/shadow: {e}");
+            return Account::Unknown;
+        }
     }
     let _g = PAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let conv = Conversation::new();
-    let ok = Context::new(service, Some(user), conv)
-        .and_then(|mut ctx| ctx.acct_mgmt(Flag::NONE))
-        .map_err(|e| tracing::debug!("PAM account check of {user}: {e}"))
-        .is_ok();
-    if ok { Account::Ok } else { Account::Disabled }
+    let r = Context::new(service, Some(user), Conversation::new())
+        .and_then(|mut ctx| ctx.acct_mgmt(Flag::NONE));
+    match r {
+        Ok(()) => Account::Ok,
+        Err(e) => match e.code() {
+            pam_client::ErrorCode::ACCT_EXPIRED => Account::Disabled,
+            // a password to change does not end the account's access
+            pam_client::ErrorCode::NEW_AUTHTOK_REQD => Account::Ok,
+            _ => {
+                tracing::warn!("PAM account check of {user}: {e}");
+                Account::Unknown
+            }
+        },
+    }
 }
 
-/// The password field of `user` in `/etc/shadow` starts with `!` (`passwd -l`, `usermod -L`).
-fn shadow_locked(user: &str) -> bool {
-    std::fs::read_to_string("/etc/shadow")
-        .ok()
-        .and_then(|t| {
-            t.lines()
-                .find(|l| l.split(':').next() == Some(user))
-                .map(|l| l.split(':').nth(1).unwrap_or("").starts_with('!'))
+/// Whether the password field of `user` in a shadow file starts with `!` or `*` (`passwd -l`,
+/// `usermod -L`, a system account without a password).
+pub fn shadow_locked(shadow: &str, user: &str) -> bool {
+    shadow
+        .lines()
+        .find(|l| l.split(':').next() == Some(user))
+        .is_some_and(|l| {
+            let pw = l.split(':').nth(1).unwrap_or("");
+            pw.starts_with('!') || pw.starts_with('*')
         })
-        .unwrap_or(false)
 }
 
 impl Authenticator for PamAuthenticator {
@@ -124,5 +147,20 @@ impl Authenticator for PamAuthenticator {
             .await
             .map_err(|e| AuthError::Unavailable(e.to_string()))?
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shadow_locks() {
+        let shadow = "alice:$y$j9T$x:19000:0:99999:7:::\nbob:!$y$j9T$x:19000::::::\ncarol:*:19000::::::\n";
+        assert!(!shadow_locked(shadow, "alice"));
+        assert!(shadow_locked(shadow, "bob"));
+        assert!(shadow_locked(shadow, "carol"));
+        assert!(!shadow_locked(shadow, "dave"), "not in shadow: not locked here");
+        assert!(!shadow_locked(shadow, "ali"));
     }
 }

@@ -6341,3 +6341,5 @@ nev.device.power.action.shutdown	spegnimento
 nev.device.power.action.cancel	annullato
 nt.kind.device	Dispositivo mobile
 nt.device_summary	Push al telefono abbinato
+nev.device.password_kept.title	Password di {user} cambiata: {n} dispositivi abbinati mantengono l'accesso
+nev.device.password_kept.body	Dispositivi: {devices}. Revoca quelli che non riconosci in Sicurezza › Dispositivi mobili.

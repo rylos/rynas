@@ -126,7 +126,7 @@ async fn rig() -> Rig {
         &dir.path().join("state"),
         Arc::new(rynas_notify::NullNotifier),
         AdminPolicy::new(vec!["rynas-admin".into()], groups),
-        groups,
+        |u: &str| Ok(groups(u)),
         account,
         trust,
         clock,
@@ -430,6 +430,33 @@ async fn expired_codes_reauth_and_refused_accounts() {
     // an administrator sees every user's devices
     let list: Vec<Device> = app.get("/api/v1/devices", &creds).await.json();
     assert!(list.iter().any(|x| x.user == "guest"));
+}
+
+#[tokio::test]
+async fn two_refreshes_at_once_keep_the_device() {
+    let rig = rig().await;
+    let app = &rig.app;
+    let creds = app.login().await;
+    let phone = Phone::new();
+    let ok = pair(&rig, &creds, &phone).await;
+    let sid = rig.svc.sid().unwrap();
+    let ts = rig.ts();
+    // the app sends two refreshes of the same token at once (a retry signs anew)
+    let a = public(app, "/api/v1/auth/device/refresh", phone.refresh(&sid, &ok.device_id, &ok.refresh_token, ts + 1));
+    let b = public(app, "/api/v1/auth/device/refresh", phone.refresh(&sid, &ok.device_id, &ok.refresh_token, ts + 2));
+    let (a, b) = tokio::join!(a, b);
+    assert_eq!((a.status, b.status), (StatusCode::OK, StatusCode::OK), "{}", String::from_utf8_lossy(&b.body));
+    let (a, b): (RefreshResponse, RefreshResponse) = (a.json(), b.json());
+    // whichever answer the app keeps goes on working, and so does the other one
+    let r = public(app, "/api/v1/auth/device/refresh", phone.refresh(&sid, &ok.device_id, &a.refresh_token, ts + 3)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    let r = public(app, "/api/v1/auth/device/refresh", phone.refresh(&sid, &ok.device_id, &b.refresh_token, ts + 4)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    // the same request replayed: refused, the device stays
+    let replay = phone.refresh(&sid, &ok.device_id, &b.refresh_token, ts + 4);
+    let r = public(app, "/api/v1/auth/device/refresh", replay).await;
+    assert_eq!(r.code(), error_codes::REFRESH_INVALID);
+    assert_eq!(rig.svc.ids(), vec![ok.device_id.clone()]);
 }
 
 #[tokio::test]

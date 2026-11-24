@@ -105,6 +105,12 @@ impl AuthService {
         self.policy.role(identity)
     }
 
+    /// The groups whose members are administrators (sent with a device's refresh: rynasd
+    /// rotates the token only for a user rynas-web will accept).
+    pub fn admin_groups(&self) -> &[String] {
+        &self.policy.admin_groups
+    }
+
     /// Mobile device pairings waiting for a phone or an approval.
     pub fn pairings(&self) -> &crate::device::Pairings {
         &self.pairings
