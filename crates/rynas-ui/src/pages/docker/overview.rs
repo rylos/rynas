@@ -123,7 +123,9 @@ fn storage_card() -> AnyView {
     let b = move |f: fn(&DockerDiskUsage) -> u64| Signal::derive(move || df.data.with(|d| d.as_ref().map(|d| i18n::bytes(f(d))).unwrap_or_default()));
     view! {
         <section class="card widget w-6">
-            <WidgetHead icon=icons::HARD_DRIVE title="dk.disk" />
+            <WidgetHead icon=icons::HARD_DRIVE title="dk.disk">
+                <a class="btn ghost sm" href="/storage/space"><Icon icon=icons::LAYERS size=16 />{tr("sp.open")}</a>
+            </WidgetHead>
             {move || usage.get().map(|u| view! {
                 <div class="sub-row">
                     <span>{tr("dk.disk.fs")}</span>

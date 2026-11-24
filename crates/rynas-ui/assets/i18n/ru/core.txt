@@ -6405,3 +6405,140 @@ nt.kind.device	Мобильное устройство
 nt.device_summary	Push на сопряжённый телефон
 nev.device.password_kept.title	Пароль {user} изменён: сопряжённые устройства ({n}) сохраняют доступ
 nev.device.password_kept.body	Устройства: {devices}. Отзовите незнакомые в разделе «Безопасность › Мобильные устройства».
+# Storage > Space (D-SPACE)
+sp.tab	Пространство
+sp.open	Пространство
+sp.subtitle	Что занимает место на каждом томе и как его освободить
+sp.scan_now	Проверить сейчас
+sp.scanning	Проверка
+sp.scanned	Проверено {when}
+sp.never_scanned	Ещё не проверено: первая проверка идёт в фоне, или запустите её сейчас.
+sp.volumes	Тома
+sp.used	Занято
+sp.free	Свободно
+sp.reclaimable	Освободится после очистки:
+sp.no_snapshots	снимки не измерены
+sp.low_free	Мало свободного места
+sp.auto_on	Автоочистка включена
+sp.cat.snapshots	Снимки
+sp.cat.recycle_bins	Корзины
+sp.cat.docker	Docker
+sp.cat.system	Система
+sp.cat.leftovers	Остатки
+sp.cat.data	Данные
+sp.sources	Снимки по источникам
+sp.sources_text	Сколько освободится при удалении всех снимков источника (≈: учитываются и данные, общие с другими). Откройте источник, выберите снимки и посмотрите точное значение перед удалением.
+sp.sort	Сортировать по
+sp.sort.size	Размеру
+sp.sort.growth	Росту
+sp.no_sources	На этих томах нет снимков.
+sp.kind.share_job	Задание снимков
+sp.kind.orphan_job	Задание больше не настроено
+sp.kind.app_stack	Приложение
+sp.kind.pc_backup	Резервная копия ПК
+sp.approx	≈ {size}
+sp.not_measured	не измерено
+sp.count	Снимков: {n}
+sp.oldest	самый старый {when}
+sp.growth	7 дней: {size}
+sp.over_budget	Сверх лимита
+sp.keeps	Его хранение оставляет до {n}
+sp.budget_count	лимит {n} снимков
+sp.budget_age	лимит {n} дн.
+sp.budget_bytes	лимит {size}
+sp.select_all	Выбрать удаляемые
+sp.budget	Лимит…
+sp.identical	Как сейчас
+sp.pin	Закрепить
+sp.unpin	Открепить
+sp.prot.newest	Самый новый
+sp.prot.replication_parent	Нужен реплике
+sp.prot.newest_backup	Последняя полная копия
+sp.prot.boot_reference	Система запущена из него
+sp.prot.pinned	Закреплён
+sp.prot.writable	Не только для чтения
+sp.selected	Выбрано: {n}
+sp.clear_selection	Сбросить
+sp.preview	Предпросмотр
+sp.preview_title	Что освободится?
+sp.measuring	Измерение содержимого снимков…
+sp.preview_text	Удаление снимков ({n}) освободит {size}.
+sp.preview_at_least	Не менее {size} хранится только в этих снимках.
+sp.kept_title	Сохраняются:
+sp.unknown_snapshot	неизвестный снимок
+sp.freed_later	Файловая система освобождает место в фоне; задача завершится, когда место освободится.
+sp.delete	Удалить
+sp.delete_n	Удалить ({n})
+sp.deleted	Снимки удалены
+sp.safe_actions	Безопасная очистка
+sp.items	объектов: {n}
+sp.clean	Очистить
+sp.cleaned	Очищено
+sp.act.journal_vacuum	Системный журнал
+sp.act.journal_vacuum_text	Сокращает журнал до его лимита.
+sp.act.apt_clean	Загруженные пакеты
+sp.act.apt_clean_text	Файлы пакетов, которые apt хранит после установки.
+sp.act.docker_dangling	Неиспользуемые слои Docker
+sp.act.docker_dangling_text	Образы без тегов, которые ничего не использует (точки отката сохраняются), и кэш сборки.
+sp.act.recycle_bins	Старые объекты в корзинах
+sp.act.recycle_bins_text	Объекты старше срока хранения каждой корзины, общие и домашние папки.
+sp.act.thumbnails	Миниатюры
+sp.act.thumbnails_text	Кэш миниатюр файлового менеджера (создаётся заново при необходимости).
+sp.act.catalog_serials	Старые каталоги приложений
+sp.act.catalog_serials_text	Загруженные каталоги старше текущего и предыдущего.
+sp.act.identical_app_snapshots	Неизменённые снимки приложений
+sp.act.identical_app_snapshots_text	Снимки приложений, идентичные текущей папке (никогда не самый новый).
+sp.review	На проверку
+sp.review_text	rynas никогда не удаляет их сам: копии после откатов и восстановлений, снимки удалённых заданий, реплики и ПК, старые ядра, неиспользуемые образы и тома.
+sp.review_empty	Проверять нечего.
+sp.remove_selected	Удалить выбранное
+sp.review_ask_title	Удалить выбранные объекты?
+sp.review_ask	Объекты ({n}) будут удалены безвозвратно.
+sp.removed	Удалено
+sp.rev.rollback_copy	Копия после отката
+sp.rev.restore_copy	Копия после восстановления
+sp.rev.adopt_copy	Копия после принятия
+sp.rev.stack_copy	Папка приложения после неудачного отката
+sp.rev.orphan_snapshots	Снимки удалённого задания
+sp.rev.removed_target_replicas	Реплики удалённого назначения
+sp.rev.removed_pc_folder	Копии удалённого ПК
+sp.rev.old_kernel	Старое ядро
+sp.rev.unused_image	Неиспользуемый образ Docker
+sp.rev.unused_volume	Неиспользуемый том Docker
+sp.guardrails	Защита
+sp.notify_low_free	Уведомлять о нехватке места
+sp.notify_low_free_help	Ниже нижнего порога, пока место не вернётся выше порога восстановления.
+sp.low_free_pct	Нижний порог (% свободно)
+sp.recover_pct	Порог восстановления (% свободно)
+sp.notify_growth	Еженедельное уведомление о росте снимков
+sp.notify_growth_help	Когда снимки выросли больше лимитов ниже за 7 дней.
+sp.growth_gib	Лимит роста (ГиБ)
+sp.growth_pct	Лимит роста (%)
+sp.auto_free	Освобождать место автоматически
+sp.auto_free_help	По умолчанию выключено. Когда том ниже нижнего порога, rynas удаляет самые старые снимки заданий, приложений и точек восстановления (никогда защищённые или закреплённые, никогда копии ПК), пока место не вернётся выше порога восстановления. Каждое удаление записывается и сопровождается уведомлением.
+sp.auto_free_on	На {volume}
+sp.journal_cap	Лимит журнала (МиБ)
+sp.journal_cap_help	Пусто: min(2 ГиБ, 5 % файловой системы); 0: по умолчанию системы.
+sp.recycle_daily	Ежедневно удалять старые объекты из корзин
+sp.recycle_daily_help	Общие и домашние папки, после срока хранения каждой корзины (0 дней — хранить всё).
+sp.thumbs_cap	Лимит кэша миниатюр (МиБ)
+sp.saved	Настройки сохранены
+sp.budget_title	Лимит для {name}
+sp.budget_text	Лимиты для автоочистки и отметки «сверх лимита»; пусто — без лимита.
+sp.budget_max_count	Максимум снимков
+sp.budget_max_age	Максимальный возраст (дни)
+sp.budget_max_gib	Максимум места (ГиБ)
+cfg.key.space	Пространство
+task.space.scan	Проверка места
+task.space.preview	Предпросмотр места
+task.space.delete	Удаление снимков
+task.space.action	Очистка места
+task.space.review-delete	Удаление проверенных объектов
+nev.space.low_free.title	Мало свободного места на {volume}
+nev.space.low_free.body	На {volume} свободно {free} ({free_pct}%). Хранилище › Пространство показывает, что занимает место и что можно удалить.
+nev.space.free_ok.title	На {volume} снова достаточно места
+nev.space.free_ok.body	{volume} свободен на {free_pct}%.
+nev.space.snapshots_growth.title	Снимки на {volume} выросли на {grown} за неделю
+nev.space.snapshots_growth.body	Наибольший рост: {top}.
+nev.space.auto_freed.title	На {volume} удалены старые снимки для освобождения места
+nev.space.auto_freed.body	Автоочистка удалила снимков: {count}: {snapshots}

@@ -6343,3 +6343,140 @@ nt.kind.device	Dispositivo mobile
 nt.device_summary	Push al telefono abbinato
 nev.device.password_kept.title	Password di {user} cambiata: {n} dispositivi abbinati mantengono l'accesso
 nev.device.password_kept.body	Dispositivi: {devices}. Revoca quelli che non riconosci in Sicurezza › Dispositivi mobili.
+# Storage > Space (D-SPACE)
+sp.tab	Spazio
+sp.open	Spazio
+sp.subtitle	Cosa occupa spazio su ogni volume e come recuperarlo
+sp.scan_now	Analizza ora
+sp.scanning	Analisi in corso
+sp.scanned	Analizzato il {when}
+sp.never_scanned	Non ancora analizzato: la prima analisi parte in background, oppure avviala ora.
+sp.volumes	Volumi
+sp.used	Usato
+sp.free	Libero
+sp.reclaimable	Liberato pulendo:
+sp.no_snapshots	nessuno snapshot misurato
+sp.low_free	Poco spazio libero
+sp.auto_on	Pulizia automatica attiva
+sp.cat.snapshots	Snapshot
+sp.cat.recycle_bins	Cestini
+sp.cat.docker	Docker
+sp.cat.system	Sistema
+sp.cat.leftovers	Residui
+sp.cat.data	Dati
+sp.sources	Snapshot per origine
+sp.sources_text	Quanto si recupera eliminando tutti gli snapshot di un'origine (≈: conta anche i dati condivisi fuori dall'origine). Apri un'origine per scegliere gli snapshot, poi guarda il numero esatto prima di eliminarli.
+sp.sort	Ordina per
+sp.sort.size	Dimensione
+sp.sort.growth	Crescita
+sp.no_sources	Nessuno snapshot su questi volumi.
+sp.kind.share_job	Attività di snapshot
+sp.kind.orphan_job	Attività non più configurata
+sp.kind.app_stack	App
+sp.kind.pc_backup	Backup del PC
+sp.approx	≈ {size}
+sp.not_measured	non misurato
+sp.count	Snapshot: {n}
+sp.oldest	il più vecchio {when}
+sp.growth	7 giorni: {size}
+sp.over_budget	Oltre il limite
+sp.keeps	La sua conservazione ne tiene fino a {n}
+sp.budget_count	limite {n} snapshot
+sp.budget_age	limite {n} giorni
+sp.budget_bytes	limite {size}
+sp.select_all	Seleziona quelli eliminabili
+sp.budget	Limite…
+sp.identical	Uguale a ora
+sp.pin	Fissa
+sp.unpin	Sblocca
+sp.prot.newest	Più recente
+sp.prot.replication_parent	Serve a una replica
+sp.prot.newest_backup	Ultimo backup completo
+sp.prot.boot_reference	Il sistema parte da qui
+sp.prot.pinned	Fissato
+sp.prot.writable	Non in sola lettura
+sp.selected	Selezionati: {n}
+sp.clear_selection	Deseleziona
+sp.preview	Anteprima
+sp.preview_title	Cosa verrebbe liberato?
+sp.measuring	Misura di cosa contengono questi snapshot…
+sp.preview_text	Eliminare {n} snapshot libera {size}.
+sp.preview_at_least	Almeno {size} è tenuto solo da questi snapshot.
+sp.kept_title	Tenuti:
+sp.unknown_snapshot	non è uno snapshot noto a Spazio
+sp.freed_later	Il filesystem libera lo spazio in background; l'attività finisce quando è libero.
+sp.delete	Elimina
+sp.delete_n	Elimina {n}
+sp.deleted	Snapshot eliminati
+sp.safe_actions	Pulizie sicure
+sp.items	elementi: {n}
+sp.clean	Pulisci
+sp.cleaned	Pulizia eseguita
+sp.act.journal_vacuum	Registro di sistema
+sp.act.journal_vacuum_text	Riduce il registro al suo limite di dimensione.
+sp.act.apt_clean	Pacchetti scaricati
+sp.act.apt_clean_text	File dei pacchetti che apt tiene dopo l'installazione.
+sp.act.docker_dangling	Livelli Docker inutilizzati
+sp.act.docker_dangling_text	Immagini senza tag che nulla usa (i punti di ripristino restano) e la cache di build.
+sp.act.recycle_bins	Elementi vecchi nei cestini
+sp.act.recycle_bins_text	Elementi più vecchi della conservazione di ogni cestino, condivisioni e home.
+sp.act.thumbnails	Miniature
+sp.act.thumbnails_text	La cache delle miniature del file manager (rifatta quando serve).
+sp.act.catalog_serials	Cataloghi app vecchi
+sp.act.catalog_serials_text	Cataloghi scaricati più vecchi dell'attuale e del precedente.
+sp.act.identical_app_snapshots	Snapshot app invariati
+sp.act.identical_app_snapshots_text	Snapshot delle app identici alla cartella dell'app ora (mai il più recente).
+sp.review	Da rivedere
+sp.review_text	Mai eliminati da rynas da solo: copie lasciate da ripristini e ritorni alla versione precedente, snapshot di attività, repliche e PC rimossi, kernel vecchi, immagini e volumi inutilizzati.
+sp.review_empty	Niente da rivedere.
+sp.remove_selected	Elimina selezionati
+sp.review_ask_title	Eliminare gli elementi selezionati?
+sp.review_ask	{n} elementi vengono eliminati definitivamente.
+sp.removed	Eliminati
+sp.rev.rollback_copy	Copia tenuta da un ritorno alla versione precedente
+sp.rev.restore_copy	Copia tenuta da un ripristino
+sp.rev.adopt_copy	Copia tenuta da un'adozione
+sp.rev.stack_copy	Cartella app lasciata da un ritorno non riuscito
+sp.rev.orphan_snapshots	Snapshot di un'attività rimossa
+sp.rev.removed_target_replicas	Repliche di una destinazione rimossa
+sp.rev.removed_pc_folder	Backup di un PC rimosso
+sp.rev.old_kernel	Kernel vecchio
+sp.rev.unused_image	Immagine Docker inutilizzata
+sp.rev.unused_volume	Volume Docker inutilizzato
+sp.guardrails	Protezioni
+sp.notify_low_free	Avvisa quando lo spazio libero è poco
+sp.notify_low_free_help	Sotto il limite basso, finché lo spazio libero non torna sopra il limite di recupero.
+sp.low_free_pct	Limite basso (% libero)
+sp.recover_pct	Limite di recupero (% libero)
+sp.notify_growth	Avviso settimanale di crescita degli snapshot
+sp.notify_growth_help	Quando gli snapshot crescono più dei limiti qui sotto in 7 giorni.
+sp.growth_gib	Limite di crescita (GiB)
+sp.growth_pct	Limite di crescita (%)
+sp.auto_free	Libera spazio automaticamente
+sp.auto_free_help	Spento di default. Quando un volume è sotto il limite basso, rynas elimina gli snapshot più vecchi di attività, app e punti di ripristino (mai quelli protetti o fissati, mai i backup dei PC) finché lo spazio libero non torna sopra il limite di recupero. Ogni eliminazione è registrata e notificata.
+sp.auto_free_on	Su {volume}
+sp.journal_cap	Limite del registro (MiB)
+sp.journal_cap_help	Vuoto: min(2 GiB, 5 % del suo filesystem); 0: il predefinito del sistema.
+sp.recycle_daily	Svuota ogni giorno gli elementi vecchi dei cestini
+sp.recycle_daily_help	Condivisioni e home, dopo la conservazione di ogni cestino (0 giorni tiene tutto).
+sp.thumbs_cap	Limite della cache delle miniature (MiB)
+sp.saved	Impostazioni salvate
+sp.budget_title	Limite di {name}
+sp.budget_text	Limiti per la pulizia automatica e l'indicazione «oltre il limite»; vuoto: nessun limite.
+sp.budget_max_count	Snapshot al massimo
+sp.budget_max_age	Età massima (giorni)
+sp.budget_max_gib	Spazio massimo (GiB)
+cfg.key.space	Spazio
+task.space.scan	Analisi dello spazio
+task.space.preview	Anteprima dello spazio
+task.space.delete	Eliminazione snapshot
+task.space.action	Pulizia dello spazio
+task.space.review-delete	Eliminazione elementi rivisti
+nev.space.low_free.title	Poco spazio libero su {volume}
+nev.space.low_free.body	{volume} ha {free} liberi ({free_pct}%). Archiviazione › Spazio mostra cosa occupa spazio e cosa si può eliminare.
+nev.space.free_ok.title	Di nuovo abbastanza spazio libero su {volume}
+nev.space.free_ok.body	{volume} è libero al {free_pct}%.
+nev.space.snapshots_growth.title	Gli snapshot su {volume} sono cresciuti di {grown} in una settimana
+nev.space.snapshots_growth.body	Crescita maggiore: {top}.
+nev.space.auto_freed.title	Snapshot vecchi eliminati su {volume} per liberare spazio
+nev.space.auto_freed.body	{count} snapshot eliminati dalla pulizia automatica: {snapshots}

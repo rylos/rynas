@@ -61,7 +61,7 @@ fn deletion_reason(d: SnapshotDeletion) -> Option<&'static str> {
 
 #[component]
 pub fn Snapshots() -> impl IntoView {
-    let tab = RwSignal::new(0usize);
+    let tab = RwSignal::new(crate::ui::tab_from_query(4, 0));
     let jobs = Remote::<Vec<SnapshotJobView>>::with_config("/api/v1/snapshots/jobs");
     let system = Remote::<SystemSnapshots>::with_config("/api/v1/snapshots/system");
     let filter = RwSignal::new(String::new());
@@ -82,6 +82,7 @@ pub fn Snapshots() -> impl IntoView {
                     2 => crate::pages::replication::add_button(jobs, edit_replica),
                     _ => ().into_any(),
                 }}
+                <a class="btn ghost" href="/storage/space"><Icon icon=icons::LAYERS size=16 /><span class="btn-label">{tr("sp.open")}</span></a>
             </PageHeader>
             <section class="card widget w-12">
                 {tabs("snp", &["snap.tab.snapshots", "snap.tab.jobs", "snap.tab.replication", "snap.tab.system"], tab, "snap.title")}
@@ -162,6 +163,7 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
             {ui::table("", &["snap.col.snapshot", "snap.col.job", "snap.col.created", "col.status", ""], rows.into_iter().map(|s| {
                             let is_system = s.reason.is_some() || prefix.as_deref() == Some(s.job.as_str());
                             let why_not = deletion_reason(s.deletion);
+                            let pinned_now = s.pinned;
                             let (s1, s2, s3) = (s.clone(), s.clone(), s.clone());
                             let can_browse = s.readonly;
                             let can_rollback = if is_system { s.readonly } else { s.deletion != SnapshotDeletion::NotSubvolume };
@@ -185,6 +187,7 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
                                     <div class="chips">
                                         {if s.readonly { view! { <span class="chip"><Icon icon=icons::LOCK size=12 />{tr("snap.readonly")}</span> }.into_any() } else { ui::status(Tone::Warn, t("snap.writable").to_string()) }}
                                         {(s.deletion == SnapshotDeletion::Latest).then(|| view! { <span class="chip accent">{tr("snap.latest")}</span> })}
+                                        {s.pinned.then(|| view! { <span class="chip accent"><Icon icon=icons::PIN size=12 />{tr("sp.prot.pinned")}</span> })}
                                         {reason_text(&s).map(|r| view! { <span class="chip">{r}</span> })}
                                     </div>
                                 }
@@ -197,8 +200,27 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
                                         aria-label=ui::verb_name("snap.rollback", &s.id) disabled=!can_rollback on:click=move |_| if is_system { open_root(root, s3.clone()) } else { rollback.set(Some(s3.clone())) }>
                                         <Icon icon=icons::ROTATE_CCW size=16 />
                                     </button>
-                                    <button class="icon-btn sm danger" title=move || why_not.map(t).unwrap_or_else(|| t("delete"))
-                                        aria-label=ui::verb_name("delete", &s.id) disabled=why_not.is_some() on:click=move |_| del.set(Some(s.clone()))>
+                                    {
+                                        let (path, pinned) = (s.path.clone(), s.pinned);
+                                        view! {
+                                            <button class="icon-btn sm" title=if pinned { tr("sp.unpin") } else { tr("sp.pin") }
+                                                aria-label=ui::verb_name(if pinned { "sp.unpin" } else { "sp.pin" }, &s.id) disabled=!s.readonly
+                                                on:click=move |_| {
+                                                    let path = path.clone();
+                                                    leptos::task::spawn_local(async move {
+                                                        let url = if pinned { "/api/v1/space/unpin" } else { "/api/v1/space/pin" };
+                                                        match api::post_empty(url, Some(&rynas_api_types::space::PinRequest { path })).await {
+                                                            Ok(()) => reload.run(()),
+                                                            Err(e) => crate::toast::toast(Tone::Err, e.text()),
+                                                        }
+                                                    });
+                                                }>
+                                                <Icon icon=if pinned { icons::PIN_OFF } else { icons::PIN } size=16 />
+                                            </button>
+                                        }
+                                    }
+                                    <button class="icon-btn sm danger" title=move || if pinned_now { t("sp.prot.pinned") } else { why_not.map(t).unwrap_or_else(|| t("delete")) }
+                                        aria-label=ui::verb_name("delete", &s.id) disabled=why_not.is_some() || pinned_now on:click=move |_| del.set(Some(s.clone()))>
                                         <Icon icon=icons::TRASH_2 size=16 />
                                     </button>
                                 }

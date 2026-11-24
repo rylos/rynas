@@ -10,14 +10,15 @@ mod restic;
 use leptos::prelude::*;
 
 use crate::form::tabs;
-use crate::icons;
+use crate::i18n::tr;
+use crate::icons::{self, Icon};
 use crate::ui::PageHeader;
 
 const TABS: &[&str] = &["bk.tab.restic", "bk.tab.pcs", "bk.tab.agent"];
 
 #[component]
 pub fn BackupPage() -> impl IntoView {
-    let tab = RwSignal::new(0usize);
+    let tab = RwSignal::new(crate::ui::tab_from_query(TABS.len(), 0));
     let edit = RwSignal::new(None::<Option<rynas_api_types::backup::BackupJobView>>);
     let add_pc = RwSignal::new(None::<bool>);
     let agent_header = RwSignal::new(None::<bool>);
@@ -30,6 +31,7 @@ pub fn BackupPage() -> impl IntoView {
                     1 => pcs::header_buttons(add_pc),
                     _ => agent::header_buttons(agent_header),
                 }}
+                <a class="btn ghost" href="/storage/space"><Icon icon=icons::LAYERS size=16 /><span class="btn-label">{tr("sp.open")}</span></a>
             </PageHeader>
             <section class="card widget w-12">
                 {tabs("bkp", TABS, tab, "bk.title")}

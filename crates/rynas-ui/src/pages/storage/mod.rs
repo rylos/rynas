@@ -13,6 +13,7 @@ mod calc;
 pub mod dedup;
 pub mod disks;
 pub mod plan;
+pub mod space;
 pub mod volume;
 pub mod wizard;
 
@@ -444,7 +445,7 @@ pub fn serial_of(d: &DiskSummary) -> String {
 
 // ------------------------------------------------------------------ shared pieces
 
-/// Storage section tabs: Overview | Drives.
+/// Storage section tabs: Overview | Drives | Space.
 #[component]
 pub fn SubNav() -> impl IntoView {
     let loc = leptos_router::hooks::use_location();
@@ -460,6 +461,7 @@ pub fn SubNav() -> impl IntoView {
         <nav class="subnav" aria-label=tr("sto.title")>
             {item("/storage", "sto.tab.overview", icons::LAYOUT_DASHBOARD)}
             {item("/storage/disks", "sto.disks", icons::HARD_DRIVE)}
+            {item("/storage/space", "sp.tab", icons::LAYERS)}
         </nav>
     }
 }

@@ -1101,6 +1101,15 @@ impl Folds {
     }
 }
 
+/// The tab a link asks for with `?tab=<n>` (the command palette's deep links), when below
+/// `count`; else `default`.
+pub fn tab_from_query(count: usize, default: usize) -> usize {
+    leptos_router::hooks::use_query_map()
+        .with_untracked(|q| q.get("tab").and_then(|t| t.parse::<usize>().ok()))
+        .filter(|t| *t < count)
+        .unwrap_or(default)
+}
+
 /// A folded part of a view (advanced options, history, a log, rare actions): a `<details>`
 /// with a chevron, the title (i18n key) and an optional `summary` after it (a state, a count).
 /// With `folds` the open state survives a rebuild of the content.
