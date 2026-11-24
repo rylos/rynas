@@ -31,12 +31,22 @@ pub struct NavItem {
 }
 
 /// Whether a navigation entry exists now: Docker only while it is installed or being
-/// installed (nothing of it on systems without Docker).
+/// installed (nothing of it on systems without Docker); Syncthing (a catalogue app) also
+/// only for administrators.
 pub fn nav_shown(path: &str) -> bool {
-    path != "/docker" || crate::docker::docker().present()
+    match path {
+        "/docker" => crate::docker::docker().present(),
+        "/syncthing" => crate::docker::docker().present() && is_admin(),
+        _ => true,
+    }
 }
 
-pub const NAV: [NavItem; 14] = [
+/// The signed-in user is an administrator.
+pub fn is_admin() -> bool {
+    crate::auth::auth().session.with(|s| s.as_ref().is_some_and(|s| s.user.role == rynas_api_types::Role::Admin))
+}
+
+pub const NAV: [NavItem; 15] = [
     NavItem { id: "dashboard", path: "/", key: "nav.dashboard", icon: icons::LAYOUT_DASHBOARD },
     NavItem { id: "storage", path: "/storage", key: "nav.storage", icon: icons::HARD_DRIVE },
     NavItem { id: "files", path: "/files", key: "nav.files", icon: icons::FOLDER },
@@ -45,6 +55,7 @@ pub const NAV: [NavItem; 14] = [
     NavItem { id: "backup", path: "/backup", key: "nav.backup", icon: icons::ARCHIVE_RESTORE },
     NavItem { id: "users", path: "/users", key: "nav.users", icon: icons::USERS },
     NavItem { id: "services", path: "/services", key: "nav.services", icon: icons::SERVER },
+    NavItem { id: "syncthing", path: "/syncthing", key: "nav.syncthing", icon: icons::FOLDER_SYNC },
     NavItem { id: "docker", path: "/docker", key: "nav.docker", icon: icons::CONTAINER },
     NavItem { id: "apps", path: "/apps", key: "nav.apps", icon: icons::PUZZLE },
     NavItem { id: "network", path: "/network", key: "nav.network", icon: icons::NETWORK },
@@ -262,6 +273,7 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/users") view=pages::users::Users />
                     <Route path=path!("/services") view=pages::services::FileServices />
                     <Route path=path!("/services/ssh") view=pages::ssh::SshPage />
+                    <Route path=path!("/syncthing") view=pages::syncthing::SyncthingPage />
                     <Route path=path!("/apps") view=pages::apps::AppsPage />
                     <Route path=path!("/plugins") view=pages::apps::AppsPage />
                     <Route path=path!("/docker") view=pages::docker::DockerPage />

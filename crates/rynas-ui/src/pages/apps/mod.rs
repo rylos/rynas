@@ -152,6 +152,17 @@ pub fn AppsPage() -> impl IntoView {
         tab: RwSignal::new(if plugins_route { 2 } else { 0 }),
     };
     provide_context(a);
+    // links from other pages: `?app=<entry>` opens the entry's detail, `?stack=<stack>` the
+    // installed app's drawer
+    leptos_router::hooks::use_query_map().with_untracked(|q| {
+        if let Some(id) = q.get("app").filter(|v| !v.is_empty()) {
+            a.detail.set(Some(id));
+        }
+        if let Some(stack) = q.get("stack").filter(|v| !v.is_empty()) {
+            a.tab.set(3);
+            a.manage.set(Some(stack));
+        }
+    });
     // web access state only decides defaults and "Move behind the proxy": rynasd without web
     // access answers 503 (inactive); any other failure is shown
     let proxy_err = RwSignal::new(None::<String>);
@@ -376,7 +387,7 @@ pub(super) fn proxy_url(stack: &str, host: &str) -> Option<String> {
 
 /// Where an installed app's web page answers: its web access route, else the published port
 /// when it is on the LAN.
-pub(super) fn open_href(a: &InstalledApp) -> Option<String> {
+pub(crate) fn open_href(a: &InstalledApp) -> Option<String> {
     let lan = a.bind.as_deref() != Some("127.0.0.1");
     match (&a.web_url, a.web_port) {
         (Some(u), _) if !lan => Some(u.clone()),

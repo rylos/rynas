@@ -29,7 +29,7 @@ pub const PIN_PATH_MAX: usize = 256;
 pub const SIDEBAR_DEFAULT: &[&[&str]] = &[
     &["dashboard"],
     &["storage", "files", "shares", "snapshots", "backup"],
-    &["users", "services", "docker", "apps"],
+    &["users", "services", "syncthing", "docker", "apps"],
     &["network", "wake", "hardware", "system"],
 ];
 
@@ -474,7 +474,7 @@ mod tests {
                 &["network", "wake", "hardware", "system"],
                 &["dashboard"],
                 &["backup", "storage", "files", "shares", "snapshots"],
-                &["users", "services", "docker", "apps"],
+                &["users", "services", "syncthing", "docker", "apps"],
             ])
         );
         assert_eq!(m.hidden, ["files"]);
@@ -494,7 +494,7 @@ mod tests {
         let m = merge(Some(&saved));
         assert_eq!(m.validate(), Ok(()));
         assert_eq!(m.groups[1][0], "storage");
-        assert_eq!(m.groups[2], ["users", "services", "docker", "apps"]);
+        assert_eq!(m.groups[2], ["users", "services", "syncthing", "docker", "apps"]);
         // new entries are shown even if a hidden list names them
         assert!(m.hidden.is_empty());
     }

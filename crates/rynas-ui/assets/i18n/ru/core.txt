@@ -6207,3 +6207,125 @@ nev.updates.kernel_installed.title_2	Ядро {kernel} установлено
 nev.updates.kernel_failed.title	Ядро {kernel} не установлено
 nev.updates.kernel_failed.body	{error}
 cfg.key.updates.kernel	Обновления ядра
+nav.syncthing	Syncthing
+stg.subtitle	Папки, синхронизируемые с ПК и телефонами, рядом с общими папками
+stg.open	Открыть Syncthing
+stg.adopt	Перенести существующий Syncthing
+stg.install	Установить из каталога
+stg.none_title	Syncthing не установлен
+stg.none_text	Установите приложение Syncthing из каталога или перенесите Syncthing, который уже работает на этом NAS или скопирован с другой машины: устройства останутся сопряжёнными.
+stg.app	Приложение Syncthing
+stg.running	Работает
+stg.stopped	Остановлено
+stg.stopped_text	Приложение остановлено: папки не синхронизируются. Запустите его в разделе «Приложения».
+stg.unreachable_text	Syncthing не отвечает: его папки и устройства показать нельзя.
+stg.unreachable_why	Syncthing не отвечает ({error}): его папки и устройства показать нельзя.
+stg.this_device	Этот NAS как устройство
+stg.version	Версия Syncthing
+stg.stack	Стек
+stg.read	Полностью прочитано
+stg.in_apps	Управление в «Приложениях»
+stg.no_snapshots	Версии файлов в {share} берутся из снапшотов общей папки, но ни один не запланирован.
+stg.to_snapshots	Запланировать снапшоты
+stg.folders	Синхронизируемые папки
+stg.no_folders	Папок пока нет: добавьте их в Syncthing.
+stg.type.sendreceive	Отправка и получение
+stg.type.sendonly	Только отправка
+stg.type.receiveonly	Только получение
+stg.type.receiveencrypted	Получение зашифрованного
+stg.type.other	Другой тип
+stg.st.locked	Приостановлено, пока общая папка заблокирована
+stg.st.paused	Приостановлено
+stg.st.error	Ошибка
+stg.st.syncing	Синхронизация {pct}
+stg.st.scanning	Сканирование
+stg.st.waiting	Ожидание синхронизации
+stg.st.cleaning	Очистка
+stg.st.behind	Не синхронизировано
+stg.st.idle	Актуально
+stg.st.unknown	Неизвестно
+stg.last_scan	сканирование {when}
+stg.last_file	последнее изменение: {file}
+stg.errors	Ошибки файлов: {n}
+stg.errors_more	…и ещё {n}
+stg.conflicts	Конфликтные копии: {n}
+stg.conflicts_gone	Замеченные конфликтные копии уже удалены.
+stg.conflicts_help	Два устройства изменили один и тот же файл: Syncthing сохранил оба. Оставьте нужную версию и удалите копии.
+stg.shared_with	Общий доступ: устройств {n}
+stg.dev_offline	Не подключено
+stg.dev_in_sync	Синхронизировано
+stg.dev_pct	{pct}, не хватает {size}
+stg.paused_by_rynas	rynas приостановил эту папку, пока её зашифрованная общая папка заблокирована, и возобновит её после разблокировки.
+stg.locked_help	Сначала разблокируйте общую папку
+stg.pause	Приостановить
+stg.resume	Возобновить
+stg.rescan	Пересканировать
+stg.rescan_asked	Повторное сканирование запрошено
+stg.devices	Устройства
+stg.no_devices	Устройств пока нет: выполните сопряжение в Syncthing.
+stg.col.device	Устройство
+stg.col.connection	Подключение
+stg.col.folders	Папки
+stg.dev_paused	Приостановлено
+stg.connected	Подключено
+stg.disconnected	Отключено
+stg.last_seen	в последний раз {when}
+stg.never_seen	ни разу не подключалось
+stg.alerts	Оповещения
+stg.alerts_edit	Изменить оповещения Syncthing
+stg.unseen_days	Оповещать об устройстве, не появлявшемся
+stg.unseen_days_help	Дней без подключения устройства, которое уже появлялось; 0 = выключено.
+stg.conflicts_alert	Оповещать о новых конфликтных копиях
+stg.conflicts_alert_help	Конфликтные копии одной папки объединяются за 10 минут в одно уведомление.
+stg.days_invalid	Число дней от 0 до {max}.
+stg.on	Включено
+stg.off	Выключено
+stg.ad.title	Перенос существующего экземпляра Syncthing
+stg.ad.text	Приложение Syncthing перенимает идентификатор, настройки и базу данных экземпляра, работавшего в другом месте: устройства остаются сопряжёнными, а папки не синхронизируются заново с нуля. Старый экземпляр отключается, его файлы не изменяются.
+stg.ad.source	Экземпляр для переноса
+stg.ad.k.app	старая структура приложения
+stg.ad.k.container	контейнер
+stg.ad.k.service	системная служба
+stg.ad.k.path	скопированная папка
+stg.ad.running	работает сейчас
+stg.ad.copied	Домашняя папка, скопированная из другого места
+stg.ad.copied_help	Папка с config.xml, cert.pem и key.pem другого NAS или резервной копии.
+stg.ad.home_help	Абсолютный путь на этом NAS к папке с config.xml.
+stg.ad.volumes	Пути папок старого экземпляра
+stg.ad.volumes_help	Если старый экземпляр видел папки по другим путям (контейнер): каждая строка сопоставляет такой путь той же папке на этом NAS.
+stg.ad.vol_container	Путь в старом экземпляре
+stg.ad.vol_host	Путь на этом NAS
+stg.ad.vol_remove	Удалить строку
+stg.ad.vol_add	Добавить строку
+stg.ad.preview	Что сделает перенос
+stg.ad.identity	Идентификатор устройства
+stg.ad.identity_ok	Найден (cert.pem, key.pem, config.xml)
+stg.ad.identity_missing	Неполный: устройства увидят новое устройство
+stg.ad.database	База данных
+stg.ad.db.none	Нет: все папки будут просканированы заново
+stg.ad.db.v2	Syncthing 2
+stg.ad.db.v1	Syncthing 1: переносится при первом запуске, медленно
+stg.ad.shares	Подключаемые общие папки
+stg.ad.col.folder	Папка
+stg.ad.col.from	Старый путь
+stg.ad.col.to	Новый путь
+stg.ad.col.state	Проверка
+stg.mk.verified	маркер проверен
+stg.mk.unverified	маркер не проверен
+stg.mk.missing	маркер отсутствует
+stg.mk.unknown	не проверено
+stg.um.no_volume	Не сопоставлена: добавьте строку для её пути
+stg.um.no_share	Вне всех общих папок: остаётся приостановленной
+stg.um.bad_path	Непригодный путь: остаётся приостановленной
+stg.ad.will_pause	приостановлена после переноса
+stg.ad.run_as_help	Файлы, приходящие с устройств, принадлежат этому пользователю NAS.
+stg.ad.apps_account	Учётная запись приложений
+stg.ad.owners	Большинство синхронизируемых файлов принадлежит {user}; у {n} элементов верхнего уровня другой владелец.
+stg.ad.uid	uid {uid} (нет пользователя NAS)
+stg.ad.stop	Отключить старый экземпляр
+stg.ad.stop_help	Он сейчас работает: два экземпляра с одним идентификатором никогда не должны работать одновременно. Он будет остановлен, а его автозапуск отключён.
+stg.ad.stignore	Очистить шаблоны исключений
+stg.ad.stignore_help	Удаляет из .stignore шаблоны других систем и исключает корзину.
+stg.ad.stignore_changes	Изменения .stignore
+stg.ad.go	Перенести
+stg.ad.done	Syncthing перенесён

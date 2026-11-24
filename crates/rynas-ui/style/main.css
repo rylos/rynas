@@ -2493,3 +2493,21 @@ body:has(.sysp-overlay), body:has(.sysp-overlay) .main { overflow: hidden; }
   .wol-table td.actions { justify-content: flex-end; }
   .wol-table .wol-name { text-align: left; }
 }
+
+/* Syncthing (pages/syncthing) */
+.stg-list { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; }
+.stg-folder { overflow-wrap: anywhere; }
+.stg-lines { display: grid; gap: var(--s-1); min-width: 0; overflow-wrap: anywhere; }
+.stg-dev { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s-1) var(--s-2); }
+.stg-conn { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-1); min-width: 0; overflow-wrap: anywhere; }
+.stg-sources { display: grid; gap: var(--s-2); }
+.stg-source { display: flex; align-items: flex-start; min-width: 0; }
+.stg-source input { flex: none; margin-top: var(--s-1); }
+.stg-source > span { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); min-width: 0; overflow-wrap: anywhere; }
+.stg-source .cell-sub { flex-basis: 100%; }
+.stg-volume { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto; align-items: center; gap: var(--s-2); }
+@media (max-width: 767px) {
+  .stg-volume { grid-template-columns: minmax(0, 1fr); padding-bottom: var(--s-2); border-bottom: 1px solid var(--border); }
+  .stg-volume > span[aria-hidden] { display: none; }
+  .stg-volume > .icon-btn { justify-self: end; }
+}

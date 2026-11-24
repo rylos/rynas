@@ -24,6 +24,7 @@ pub mod share_nocow;
 pub mod shares;
 pub mod snapshots;
 pub mod ssh;
+pub mod syncthing;
 pub mod storage;
 pub mod system;
 pub mod time;

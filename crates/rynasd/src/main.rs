@@ -1390,6 +1390,18 @@ fn main() -> std::io::Result<()> {
                     }
                 });
             }
+            // Syncthing integrated (S1b-S1d): the installed app's state from its events, its
+            // alerts, and the pause of its folders while an encrypted share is locked
+            if let Some(s) = &state.services {
+                let live = rynasd::syncthing::live::Live::new(
+                    &docker.root,
+                    &args.state_dir,
+                    Arc::new(rynasd::syncthing::live::ServicesFacts(s.clone())),
+                    notifier.clone(),
+                );
+                rynasd::syncthing::live::install(live.clone());
+                rynasd::syncthing::live::spawn(live, apps.clone());
+            }
             state.apps = Some(apps);
             state.docker = Some(docker);
         }

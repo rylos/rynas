@@ -6145,3 +6145,125 @@ nev.updates.kernel_installed.title_2	Kernel {kernel} installato
 nev.updates.kernel_failed.title	Kernel {kernel} non installato
 nev.updates.kernel_failed.body	{error}
 cfg.key.updates.kernel	Aggiornamenti del kernel
+nav.syncthing	Syncthing
+stg.subtitle	Cartelle sincronizzate con PC e telefoni, accanto alle cartelle condivise
+stg.open	Apri Syncthing
+stg.adopt	Adotta un Syncthing esistente
+stg.install	Installa dal catalogo
+stg.none_title	Syncthing non è installato
+stg.none_text	Installa l'app Syncthing dal catalogo, oppure adotta un Syncthing che gira già su questo NAS o copiato da un'altra macchina: i dispositivi restano abbinati.
+stg.app	App Syncthing
+stg.running	In esecuzione
+stg.stopped	Fermo
+stg.stopped_text	L'app è ferma: nessuna cartella viene sincronizzata. Avviala in App.
+stg.unreachable_text	Syncthing non risponde: le sue cartelle e i suoi dispositivi non si possono mostrare.
+stg.unreachable_why	Syncthing non risponde ({error}): le sue cartelle e i suoi dispositivi non si possono mostrare.
+stg.this_device	Questo NAS come dispositivo
+stg.version	Versione di Syncthing
+stg.stack	Stack
+stg.read	Letto per intero
+stg.in_apps	Gestisci in App
+stg.no_snapshots	Le versioni dei file in {share} vengono dagli snapshot della cartella condivisa, e non ce n'è nessuno pianificato.
+stg.to_snapshots	Pianifica gli snapshot
+stg.folders	Cartelle sincronizzate
+stg.no_folders	Ancora nessuna cartella: aggiungile in Syncthing.
+stg.type.sendreceive	Invia e ricevi
+stg.type.sendonly	Solo invio
+stg.type.receiveonly	Solo ricezione
+stg.type.receiveencrypted	Ricevi cifrato
+stg.type.other	Altro tipo
+stg.st.locked	In pausa finché la cartella condivisa è bloccata
+stg.st.paused	In pausa
+stg.st.error	Errore
+stg.st.syncing	Sincronizzazione {pct}
+stg.st.scanning	Scansione
+stg.st.waiting	In attesa di sincronizzare
+stg.st.cleaning	Pulizia
+stg.st.behind	Non sincronizzata
+stg.st.idle	Aggiornata
+stg.st.unknown	Sconosciuto
+stg.last_scan	scansione {when}
+stg.last_file	ultima modifica: {file}
+stg.errors	Errori dei file: {n}
+stg.errors_more	…e altri {n}
+stg.conflicts	Copie in conflitto: {n}
+stg.conflicts_gone	Le copie in conflitto viste sono già state rimosse.
+stg.conflicts_help	Due dispositivi hanno modificato lo stesso file: Syncthing li ha tenuti entrambi. Tieni la versione giusta ed elimina le copie.
+stg.shared_with	Condivisa con {n} dispositivi
+stg.dev_offline	Non connesso
+stg.dev_in_sync	Sincronizzato
+stg.dev_pct	{pct}, mancano {size}
+stg.paused_by_rynas	rynas ha messo in pausa questa cartella finché la sua cartella condivisa cifrata è bloccata; la riprende dopo lo sblocco.
+stg.locked_help	Prima sblocca la cartella condivisa
+stg.pause	Pausa
+stg.resume	Riprendi
+stg.rescan	Riesamina
+stg.rescan_asked	Nuova scansione richiesta
+stg.devices	Dispositivi
+stg.no_devices	Ancora nessun dispositivo: abbinali in Syncthing.
+stg.col.device	Dispositivo
+stg.col.connection	Connessione
+stg.col.folders	Cartelle
+stg.dev_paused	In pausa
+stg.connected	Connesso
+stg.disconnected	Disconnesso
+stg.last_seen	visto l'ultima volta {when}
+stg.never_seen	mai connesso
+stg.alerts	Avvisi
+stg.alerts_edit	Modifica gli avvisi di Syncthing
+stg.unseen_days	Avvisa per un dispositivo non visto da
+stg.unseen_days_help	Giorni senza connessione da un dispositivo già visto; 0 = disattivato.
+stg.conflicts_alert	Avvisa per nuove copie in conflitto
+stg.conflicts_alert_help	Le copie in conflitto di una cartella sono raggruppate su 10 minuti in una notifica.
+stg.days_invalid	Un numero di giorni da 0 a {max}.
+stg.on	Attivo
+stg.off	Disattivato
+stg.ad.title	Adozione di un'istanza Syncthing esistente
+stg.ad.text	L'app Syncthing riprende identità, configurazione e database di un'istanza che girava altrove: i dispositivi restano abbinati e le cartelle non vengono risincronizzate da zero. La vecchia istanza viene spenta e i suoi file restano intatti.
+stg.ad.source	Istanza da adottare
+stg.ad.k.app	vecchia struttura dell'app
+stg.ad.k.container	container
+stg.ad.k.service	servizio del sistema
+stg.ad.k.path	cartella copiata
+stg.ad.running	in esecuzione ora
+stg.ad.copied	Una cartella home copiata da altrove
+stg.ad.copied_help	La cartella con config.xml, cert.pem e key.pem di un altro NAS o di un backup.
+stg.ad.home_help	Percorso assoluto su questo NAS della cartella che contiene config.xml.
+stg.ad.volumes	Percorsi delle cartelle della vecchia istanza
+stg.ad.volumes_help	Quando la vecchia istanza vedeva le cartelle con altri percorsi (un container): ogni riga collega quel percorso alla stessa cartella su questo NAS.
+stg.ad.vol_container	Percorso visto dalla vecchia istanza
+stg.ad.vol_host	Percorso su questo NAS
+stg.ad.vol_remove	Rimuovi la riga
+stg.ad.vol_add	Aggiungi riga
+stg.ad.preview	Cosa fa l'adozione
+stg.ad.identity	Identità del dispositivo
+stg.ad.identity_ok	Trovata (cert.pem, key.pem, config.xml)
+stg.ad.identity_missing	Incompleta: i dispositivi vedrebbero un nuovo dispositivo
+stg.ad.database	Database
+stg.ad.db.none	Nessuno: ogni cartella viene riesaminata
+stg.ad.db.v2	Syncthing 2
+stg.ad.db.v1	Syncthing 1: migrato al primo avvio, lentamente
+stg.ad.shares	Cartelle condivise montate
+stg.ad.col.folder	Cartella
+stg.ad.col.from	Vecchio percorso
+stg.ad.col.to	Nuovo percorso
+stg.ad.col.state	Verifica
+stg.mk.verified	marcatore verificato
+stg.mk.unverified	marcatore non verificato
+stg.mk.missing	marcatore mancante
+stg.mk.unknown	non controllato
+stg.um.no_volume	Non collegata: aggiungi una riga per il suo percorso
+stg.um.no_share	Fuori da ogni cartella condivisa: resta in pausa
+stg.um.bad_path	Percorso non utilizzabile: resta in pausa
+stg.ad.will_pause	in pausa dopo l'adozione
+stg.ad.run_as_help	I file che arrivano dai dispositivi appartengono a questo utente del NAS.
+stg.ad.apps_account	L'account delle app
+stg.ad.owners	La maggior parte dei file sincronizzati appartiene a {user}; {n} elementi di primo livello hanno un altro proprietario.
+stg.ad.uid	uid {uid} (nessun utente del NAS)
+stg.ad.stop	Spegni la vecchia istanza
+stg.ad.stop_help	È in esecuzione: due istanze con la stessa identità non devono mai girare insieme. Viene fermata e il suo avvio automatico disattivato.
+stg.ad.stignore	Pulisci i modelli da ignorare
+stg.ad.stignore_help	Toglie da .stignore i modelli di altri sistemi e ignora il cestino.
+stg.ad.stignore_changes	Modifiche a .stignore
+stg.ad.go	Adotta
+stg.ad.done	Syncthing adottato

@@ -2056,3 +2056,34 @@ once the container answers, every Syncthing folder below `/data` gets
 marker is not verified on the host), then the moved folders are rescanned. A failure is a
 warning line: the update stays done and those folders stay paused or in error, never deleted.
 This is the only per-app step of `update_task`.
+
+## API v1: Syncthing state (S1b)
+Modules `rynasd::syncthing::live` (detection, REST client, event loop, alerts, crypt hooks,
+routes) and `rynasd::syncthing::model` (pure state and alerts), types in
+`rynas_api_types::syncthing`, page `crates/rynas-ui/src/pages/syncthing/` (sidebar entry
+`syncthing` after `services`, shown to administrators while Docker is present), design in
+`../phase2/syncthing.md` §4. Administrators only; rynas-web forwards every route. No new error
+code; the API key never leaves rynasd, device ids only as their first 7 characters.
+
+Detection: the installed stacks of the catalogue entry `syncthing` (any stack name; the first
+by name is the default, `?stack=` picks another), whether a container of the stack runs, base
+URL `http://127.0.0.1:<WEB_PORT>` and key `ST_API_KEY` from the stack's `.env`, the binds from
+`SYNC_SHARES` (`/shares/<item>`) and the older `SYNC_SHARE` (`/data`); again on every Docker
+change hint (debounced 2 s) and every minute. One event loop per running instance: position
+(`/rest/events?since=0&limit=1`), full read (system status and version, config folders and
+devices, connections, device and folder stats, `/metrics` conflict counters when reachable,
+then `db/status`, `folder/errors` and `db/completion` per folder and device), then the long
+poll `/rest/events?since=&timeout=60&events=<fixed mask>`. A full read again on an id gap, a
+smaller id, any connection error (Syncthing restarted) and after `ConfigSaved` (then
+`db/status` only for new folders); device stats every 10 minutes. Conflict copies: names with
+`.sync-conflict-` in `ItemFinished` (not deletions, not failed items), the last 50 per folder in
+memory, forgotten when the file is gone at the next read; count = Syncthing's counter at the
+last full read + copies seen since. State file `<state>/syncthing/state.json` (0600): settings
+and the folders paused by rynas, per stack.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/v1/syncthing[?stack=]` | — | `SyncthingState` {installed? {stack, version, running}, other_stacks, reachable, error?, device? {id_short, name, version}, folders [`SyncthingFolder` {id, label, path, share?, sub_path?, folder_type, state, paused, paused_by_rynas, locked, error?, errors (first 20 {path, error}), error_count, need_bytes, global_bytes, in_sync_bytes, completion [{id_short, name, completion, need_bytes, connected}], last_scan_ms?, last_file?, conflicts, conflict_files}], devices [{id_short, name, connected, paused, address?, connection_type?, last_seen_ms?, folders}], shares [{share, snapshots_scheduled}], settings, read_ms?}. Not installed: `installed` absent; stopped or silent: `reachable` false with `error` |
+| POST | `/api/v1/syncthing/folders/{id}/pause\|resume\|rescan[?stack=]` | — | 204. `PATCH /rest/config/folders/{id}` `{paused}` or `POST /rest/db/scan`. 409 `conflict` when the app does not run, or on resume while the folder's encrypted share is locked; 404 unknown folder or action; 503 `backend_unavailable` when Syncthing refuses or does not answer. A resume forgets "paused by rynas" |
+| GET | `/api/v1/syncthing/settings` | — | `SyncthingSettings` {device_unseen_days (default 7, 0 = off), conflicts_alert (default true)} |
+| PUT | `/api/v1/syncthing/settings` | `SyncthingSettings` | the settings; 400 `invalid_value` (`device_unseen_days` above 365) |

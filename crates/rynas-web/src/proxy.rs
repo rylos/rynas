@@ -364,6 +364,10 @@ pub fn routes() -> Router<AppState> {
         // Syncthing adoption (docs/phase2/syncthing.md §3)
         .route("/syncthing/adopt/preview", post(forward))
         .route("/syncthing/adopt", post(forward))
+        // the installed app: state, folder actions, settings (§4)
+        .route("/syncthing", get(forward))
+        .route("/syncthing/folders/{id}/{action}", post(forward))
+        .route("/syncthing/settings", get(forward).put(forward))
         // web access (phase 2, W1): state and staging of the `web_access` key, the engine
         // configuration an apply would load, anti-drift now, route diagnostics, and the
         // timed confirmation of the interface's own route (with the Host and the local

@@ -5,6 +5,8 @@
 //!   instances found on this NAS ([`AdoptCandidate`]) and, for the chosen one, its files,
 //!   folders mapped to `/shares/<share>/...`, markers, `.stignore` proposals and owners.
 //! - [`SyncthingAdoptRequest`] → task `syncthing.adopt`.
+//! - Phase S1b: [`SyncthingState`] (`GET /api/v1/syncthing`), the folders' actions
+//!   (`POST .../folders/{id}/pause|resume|rescan`) and [`SyncthingSettings`].
 //!
 //! Never in these types: the API key, the GUI password, the keys; device ids only as their
 //! first 7 characters.
@@ -248,4 +250,165 @@ pub struct SyncthingAdoptRequest {
     /// The NAS user the app runs as, instead of the preview's proposal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_as: Option<String>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// S1b: state of the installed app (`GET /api/v1/syncthing`), folder actions, settings
+// ---------------------------------------------------------------------------------------------
+
+/// The installed catalogue app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SyncthingInstalled {
+    pub stack: String,
+    /// The catalogue entry's version.
+    pub version: String,
+    /// Its container runs.
+    pub running: bool,
+}
+
+/// This NAS as a Syncthing device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SyncthingSelf {
+    /// The first 7 characters of the device id.
+    pub id_short: String,
+    pub name: String,
+    /// Syncthing's version (`v2.0.10`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
+}
+
+/// One line of `/rest/folder/errors`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SyncthingItemError {
+    pub path: String,
+    pub error: String,
+}
+
+/// How far a remote device is with a folder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SyncthingCompletion {
+    pub id_short: String,
+    pub name: String,
+    /// 0 to 100.
+    pub completion: f64,
+    pub need_bytes: u64,
+    pub connected: bool,
+}
+
+/// A folder of the installed app.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SyncthingFolder {
+    pub id: String,
+    pub label: String,
+    /// The path inside the app (`/shares/<share>/<rest>`).
+    pub path: String,
+    /// The share holding it (the share set item), when the path is below one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<String>,
+    /// The part below the share (empty: the share itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_path: Option<String>,
+    /// `sendreceive`, `sendonly`, `receiveonly`, `receiveencrypted`.
+    pub folder_type: String,
+    /// Syncthing's state: `idle`, `scanning`, `scan-waiting`, `syncing`, `sync-waiting`,
+    /// `sync-preparing`, `cleaning`, `error`, `paused`, `unknown`.
+    pub state: String,
+    pub paused: bool,
+    /// Paused by rynas while its encrypted share is locked: resumed after the unlock.
+    pub paused_by_rynas: bool,
+    /// Its share is an encrypted folder that is locked now.
+    pub locked: bool,
+    /// The folder's own error (state `error`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The first 20 item errors.
+    pub errors: Vec<SyncthingItemError>,
+    /// How many item errors there are in all.
+    pub error_count: u32,
+    pub need_bytes: u64,
+    pub global_bytes: u64,
+    pub in_sync_bytes: u64,
+    /// The remote devices it is shared with.
+    pub completion: Vec<SyncthingCompletion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scan_ms: Option<u64>,
+    /// The last file changed (path inside the folder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_file: Option<String>,
+    /// Conflict copies made since Syncthing started (its counter), plus those seen since.
+    pub conflicts: u32,
+    /// The latest conflict copies that still exist (paths inside the folder, newest first, at
+    /// most 50).
+    pub conflict_files: Vec<String>,
+}
+
+/// A remote device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SyncthingDevice {
+    pub id_short: String,
+    pub name: String,
+    pub connected: bool,
+    pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// `tcp-client`, `quic-server`, `relay-client`...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_type: Option<String>,
+    /// Last connection (`/rest/stats/device`); `None`: never seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_ms: Option<u64>,
+    /// Labels of the folders shared with it.
+    pub folders: Vec<String>,
+}
+
+/// A share the app synchronizes and whether snapshots keep its versions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SyncthingShareNote {
+    pub share: String,
+    /// An enabled scheduled snapshot job takes snapshots of it.
+    pub snapshots_scheduled: bool,
+}
+
+/// `GET|PUT /api/v1/syncthing/settings`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncthingSettings {
+    /// Alert when a device seen before has not connected for this many days (0: off).
+    pub device_unseen_days: u32,
+    /// Alert on new conflict copies.
+    pub conflicts_alert: bool,
+}
+
+impl Default for SyncthingSettings {
+    fn default() -> Self {
+        Self { device_unseen_days: 7, conflicts_alert: true }
+    }
+}
+
+/// Largest [`SyncthingSettings::device_unseen_days`].
+pub const MAX_UNSEEN_DAYS: u32 = 365;
+
+/// `GET /api/v1/syncthing[?stack=]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SyncthingState {
+    /// `None`: the catalogue app is not installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed: Option<SyncthingInstalled>,
+    /// Other installed stacks of the app (`?stack=` shows one of them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_stacks: Vec<String>,
+    /// Its REST interface answers.
+    pub reachable: bool,
+    /// Why not (English).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<SyncthingSelf>,
+    pub folders: Vec<SyncthingFolder>,
+    pub devices: Vec<SyncthingDevice>,
+    pub shares: Vec<SyncthingShareNote>,
+    pub settings: SyncthingSettings,
+    /// When the state was last read in full from Syncthing (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_ms: Option<u64>,
 }

@@ -1,7 +1,7 @@
 # Syncthing integrated (S1)
 
-Status: design, 2026-11-24; S1a implemented the same day. Item S1 of `dsm-migration-gaps.md`
-(round 2).
+Status: design, 2026-11-24; S1a and S1b implemented the same day. Item S1 of
+`dsm-migration-gaps.md` (round 2).
 
 A NAS leaving a cloud-drive style service keeps PCs and phones in sync with Syncthing. rynas runs
 Syncthing as a catalogue app and adds what Syncthing's own web interface lacks on a NAS: the
@@ -129,7 +129,7 @@ API: `GET /v1/syncthing` (`SyncthingState`), `POST /v1/syncthing/folders/{id}/pa
 | Phase | Content |
 |---|---|
 | S1a | catalogue entry with `/shares/<share>` mounts (list setting, rslave for encrypted shares), `STGUIAPIKEY`, adoption preview and task. Done 2026-11-24: entry 2.0.0 (`[share_set]`, migration from the single `/data` share), API in `../phase1/plan.md` "API v1: Syncthing adoption (S1a)"; the wizard picks the shares, adoption is API only for now |
-| S1b | rynasd client and event loop, `GET /v1/syncthing`, page |
+| S1b | rynasd client and event loop, `GET /v1/syncthing`, page. Done 2026-11-24: API and loop in `../phase1/plan.md` "API v1: Syncthing state (S1b)"; the page has the adoption dialog (candidates, a copied folder with typed volume lines, preview, user, stop and `.stignore` choices, task). Deviations: device stats also at every full read; a full read after any connection error too (a restart drops the long poll, and its new ids would never pass the old `since`); several installed stacks of the entry are supported (`?stack=`), the first by name is the default |
 | S1c | notifications and settings |
 | S1d | lock/unlock integration: pause before lock, resume after unlock and after the automatic unlock at boot; `containers_using` accepts an rslave bind of a share that follows the host |
 

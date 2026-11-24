@@ -14,11 +14,16 @@
 //!   back and turns the old instance on again as it was. The old home is never changed. The
 //!   older catalogue layout is updated in place: the update itself moves its folders
 //!   ([`move_data_folders`], also run by a plain update from 1.x).
+//! - S1b-S1d ([`live`], [`model`]): the installed app's state from its events, the page's
+//!   API (`GET /v1/syncthing`, folder actions, settings), notifications, and the pause of
+//!   the folders of an encrypted share while it is locked.
 //! - Secrets: the app's API key lives in its stack's `.env` (0600, root, an app secret like
 //!   every other); the old home's API key, GUI password and keys are copied as files, never
 //!   read into a response or a log.
 
 pub mod config;
+pub mod live;
+pub mod model;
 
 use std::collections::BTreeSet;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1297,6 +1302,9 @@ pub fn router(st: AppsState) -> Router {
     Router::new()
         .route("/v1/syncthing/adopt/preview", post(preview_post))
         .route("/v1/syncthing/adopt", post(adopt_post))
+        .route("/v1/syncthing", axum::routing::get(live::state_get))
+        .route("/v1/syncthing/folders/{id}/{action}", post(live::folder_post))
+        .route("/v1/syncthing/settings", axum::routing::get(live::settings_get).put(live::settings_put))
         .with_state(st)
 }
 
