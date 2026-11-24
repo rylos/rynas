@@ -499,7 +499,18 @@ impl Live {
             .collect();
         {
             let mut loops = lock(&self.loops);
-            let stale: Vec<String> = loops.iter().filter(|(k, l)| want.get(*k).is_none_or(|(sig, _)| *sig != l.sig)).map(|(k, _)| k.clone()).collect();
+            // a new share set changes the binds only: the loop starts again with them, or a
+            // folder on a newly added encrypted share would not be paused before its lock
+            let stale: Vec<String> = {
+                let insts = lock(&self.instances);
+                loops
+                    .iter()
+                    .filter(|(k, l)| {
+                        want.get(*k).is_none_or(|(sig, binds)| *sig != l.sig || insts.get(*k).is_none_or(|i| i.binds != *binds))
+                    })
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            };
             for k in stale {
                 if let Some(l) = loops.remove(&k) {
                     l.task.abort();
