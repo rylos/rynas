@@ -33,7 +33,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::post;
 use axum::{Json, Router};
-use rynas_api_types::apps::{AppInstallRequest, AppUpdateRequest, ShareSetChoice};
+use rynas_api_types::apps::{AppInstallRequest, AppUpdateRequest, PortProtocol, ShareSetChoice};
 use rynas_api_types::docker::ContainerState;
 use rynas_api_types::syncthing::*;
 use rynas_apps::render::ShareSetItem;
@@ -158,6 +158,8 @@ struct Resolved {
     unit: Option<(String, bool)>,
     /// A container's restart policy (`no`, `always`, `unless-stopped`, `on-failure`).
     restart_policy: Option<String>,
+    /// Host ports the old instance holds: free once it is turned off, so not a conflict.
+    freed: Vec<(u16, PortProtocol)>,
 }
 
 /// The older catalogue layout: installed stacks of the entry below 2.0.0.
@@ -233,6 +235,7 @@ async fn container_sources(a: &AppsSvc) -> Vec<Resolved> {
             home,
             table: config::table_from_mounts(&mounts),
             restart_policy: Some(config::restart_policy(&js)),
+            freed: c.c.ports.iter().filter_map(|p| Some((p.public_port?, protocol_of(&p.protocol)?))).collect(),
             ..Default::default()
         });
     }
@@ -453,6 +456,10 @@ fn plan_sync(a: &AppsSvc, req: &SyncthingAdoptPreviewRequest, containers: Vec<Re
             AdoptDatabase::None
         },
     };
+    if ["/tmp", "/var/tmp"].iter().any(|t| home == *t || home.starts_with(&format!("{t}/"))) {
+        // rynasd runs with a private /tmp: what other processes keep there is not visible
+        problems.push(format!("the home {home} is in a temporary folder rynas cannot read: move it elsewhere first"));
+    }
     if !p.files.cert || !p.files.key {
         problems.push("cert.pem or key.pem is missing, or a link out of the home: the devices would see a new device id".into());
     }
@@ -670,6 +677,29 @@ async fn run(a: &AppsSvc, ctx: &TaskCtx, cmd: Cmd) -> Result<(), String> {
         return Err(format!("{} failed: {}", cmd.display(), out.stderr.trim()));
     }
     Ok(())
+}
+
+fn protocol_of(p: &str) -> Option<PortProtocol> {
+    match p {
+        "tcp" => Some(PortProtocol::Tcp),
+        "udp" => Some(PortProtocol::Udp),
+        _ => None,
+    }
+}
+
+/// Ports listened on by `syncthing` processes, from `ss -Hlnptu` output (a host service).
+fn syncthing_listening(ss: &str) -> Vec<(u16, PortProtocol)> {
+    let mut out = Vec::new();
+    for l in ss.lines().filter(|l| l.contains("((\"syncthing\"")) {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        let (Some(proto), Some(local)) = (f.first().and_then(|p| protocol_of(p)), f.get(4)) else { continue };
+        if let Some(port) = local.rsplit(':').next().and_then(|p| p.parse::<u16>().ok())
+            && !out.contains(&(port, proto))
+        {
+            out.push((port, proto));
+        }
+    }
+    out
 }
 
 /// What turning the old instance off changed, to turn it on again after a failure.
@@ -1077,7 +1107,12 @@ async fn adopt_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, stack: &str, req
         }
         None => {
             let ireq = AppInstallRequest { stack: Some(stack.to_string()), share_set: choices, start: false, run_as: p.run_as.clone(), ..Default::default() };
-            let (job, _) = crate::apps::install_job(a, APP_ID, &ireq, who).await.map_err(|e| e.2)?;
+            let mut freed = r.freed.clone();
+            if r.unit.is_some() && r.candidate.running {
+                let out = a.docker.run(ctx, &Cmd::new("ss").args(["-Hlnptu"])).await?;
+                freed.extend(syncthing_listening(&out.stdout));
+            }
+            let (job, _) = crate::apps::install_job_freeing(a, APP_ID, &ireq, who, &freed).await.map_err(|e| e.2)?;
             Target::New { job: Box::new(job), dest: format!("{}/state/{HOME_IN_CONFIG}", layout.stack(stack)) }
         }
     };
@@ -1280,6 +1315,20 @@ mod tests {
         let e = edits_of(&[f, g, h]);
         assert_eq!(e.len(), 2);
         assert!(e[1].pause && e[1].path.is_none());
+    }
+
+    #[test]
+    fn ports_of_a_host_service() {
+        let ss = "tcp   LISTEN 0      4096               *:22000            *:*    users:((\"syncthing\",pid=812,fd=14))\n\
+udp   UNCONN 0      0                  *:22000            *:*    users:((\"syncthing\",pid=812,fd=15))\n\
+tcp   LISTEN 0      4096       127.0.0.1:8384       0.0.0.0:*    users:((\"syncthing\",pid=812,fd=20))\n\
+tcp   LISTEN 0      128          0.0.0.0:22         0.0.0.0:*    users:((\"sshd\",pid=500,fd=3))\n\
+udp   UNCONN 0      0               [::]:21027         [::]:*    users:((\"syncthing\",pid=812,fd=16))\n";
+        assert_eq!(
+            syncthing_listening(ss),
+            vec![(22000, PortProtocol::Tcp), (22000, PortProtocol::Udp), (8384, PortProtocol::Tcp), (21027, PortProtocol::Udp)]
+        );
+        assert_eq!(protocol_of("sctp"), None);
     }
 
     #[test]

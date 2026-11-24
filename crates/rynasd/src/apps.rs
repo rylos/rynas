@@ -2131,6 +2131,18 @@ async fn install_post(
 /// An install checked and rendered, with the plan's refusals as API errors: the job of the
 /// `apps.install` task and its answer (without the task id).
 pub(crate) async fn install_job(a: &AppsSvc, id: &str, req: &AppInstallRequest, who: &str) -> Res<(InstallJob, AppInstallStarted)> {
+    install_job_freeing(a, id, req, who, &[]).await
+}
+
+/// [`install_job`] where the host ports in `freed` do not count as conflicts: an instance
+/// the caller turns off before the app starts holds them (an adoption).
+pub(crate) async fn install_job_freeing(
+    a: &AppsSvc,
+    id: &str,
+    req: &AppInstallRequest,
+    who: &str,
+    freed: &[(u16, rynas_api_types::apps::PortProtocol)],
+) -> Res<(InstallJob, AppInstallStarted)> {
     let id = id.to_string();
     let who = who.to_string();
     let p = a.prepare(&id, req).await?;
@@ -2154,7 +2166,7 @@ pub(crate) async fn install_job(a: &AppsSvc, id: &str, req: &AppInstallRequest, 
         }
         return Err(Error::invalid(e.field.clone(), e.message.clone()));
     }
-    if let Some(c) = p.plan.port_conflicts.first() {
+    if let Some(c) = p.plan.port_conflicts.iter().find(|c| !freed.contains(&(c.port, c.protocol))) {
         return Err(conflict(format!(
             "port {}/{} is already in use{}",
             c.port,
