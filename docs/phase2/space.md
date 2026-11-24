@@ -66,8 +66,8 @@ btrfs facts that shape the design:
 | System rollback copy | top-level `@rootfs.rynas-rollback-<stamp>` | kept forever | review item, deleted by subvolume id after re-listing (never the running root) |
 | Share rollback / restore copies | `<subvol>.rynas-rollback-<ts>`, `<name>.rynas-before-restore-<ts>` | kept, no API | review items (walk depth 4) |
 | Syncthing adoption copy | `<folder>.before-adopt-<ms>` | kept | review item |
-| Replicas | target folders | removed target left replicas | `.replicas/<x>` folders no configured target owns → replica source + review item |
-| PC backups | registered folders | own retention | measured; folders of received snapshots nobody owns → removed PC source + review item |
+| Replicas | target folders | removed target left replicas | `.replicas/<x>` folders no configured target owns → incoming replica, fully protected (§7) |
+| PC backups | registered folders | own retention | measured; folders of received snapshots nobody owns → "received, owner unknown", newest of each line protected (§7) |
 | Kernels | `linux-image-*` | never removed | review item (never running, newest of each series or held) |
 | Recycle bins | `#recycle` of shares and homes | cleanup only from a manual task | **daily cleanup by default** honouring `retention_days` (0 = never), homes included |
 | Thumbnails | `/var/cache/rynas/files/thumbs/<uid>/` | no eviction | **LRU eviction to a cap** (default 2 GiB) + safe action |
