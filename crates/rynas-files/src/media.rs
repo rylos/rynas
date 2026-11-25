@@ -37,6 +37,14 @@ pub fn describe(path: &Path) -> Value {
             }
         }
     }
+    // a HEIC without its size in the EXIF: the size of the grid, not of one tile
+    if !out.contains_key("width")
+        && crate::thumbs::is_heif(ext)
+        && let Some((w, h)) = crate::thumbs::heif_size(path)
+    {
+        out.insert("width".into(), json!(w));
+        out.insert("height".into(), json!(h));
+    }
     if av && let Some(text) = ffmpeg(path) {
         // ffmpeg knows better for what both read: codecs, exact size, bitrate
         for (k, v) in parse_ffmpeg(&text) {
