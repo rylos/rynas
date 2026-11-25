@@ -2125,6 +2125,13 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .upd-head { margin-bottom: var(--s-3); }
 .upd-list { margin: var(--s-2) 0; padding: var(--s-2) var(--s-3); list-style: none; max-height: min(240px, 40vh); overflow-y: auto; border: 1px solid var(--border); border-radius: var(--r-md); font-size: var(--fs-13); overflow-wrap: anywhere; }
 .upd-table td.mono { overflow-wrap: anywhere; }
+/* software repositories page */
+.repo-infos { margin: var(--s-2) 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--s-1); font-size: var(--fs-13); overflow-wrap: anywhere; }
+.repo-infos li { display: flex; gap: var(--s-2); align-items: baseline; flex-wrap: wrap; }
+.repo-file + .repo-file { margin-top: var(--s-4); }
+.repo-file-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); font-size: var(--fs-14); margin: 0 0 var(--s-2); overflow-wrap: anywhere; }
+.repo-file-head .icon-btn { margin-left: auto; }
+.repo-table td { overflow-wrap: anywhere; }
 /* code editor (compose files, .env): line numbers + textarea, no wrapping */
 .code-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap; }
 .code-file { cursor: pointer; }

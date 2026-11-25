@@ -286,6 +286,9 @@ nev.updates.available.title	{updates} aggiornamenti disponibili, {security} di s
 nev.updates.available.title_2	{updates} aggiornamenti disponibili
 nev.updates.available.body	Pacchetti: {packages}.
 nev.updates.up_to_date.title	Il sistema è aggiornato
+nev.repositories.unsupported.title	Sorgenti software non supportate
+nev.repositories.unsupported.body	I pacchetti da {sources} non sono provati con rynas; aggiornamenti e supporto potrebbero non funzionare.
+nev.repositories.supported.title	Le sorgenti software sono supportate
 nev.ups.on_battery.title	UPS a batteria
 nev.ups.on_battery.body	Manca la corrente. Il sistema si spegne dopo {minutes} min a batteria, o prima se la batteria si scarica.
 nev.ups.on_battery.body_2	Manca la corrente. Il sistema si spegne quando la batteria si scarica.
@@ -3792,6 +3795,8 @@ task.tailscale.options	Modifica delle impostazioni di Tailscale
 task.tailscale.revert	Ritorno alle impostazioni precedenti di Tailscale
 task.updates.check	Controllo aggiornamenti
 task.updates.backports	Modifica dell'impostazione dei backports di Debian
+task.updates.repositories	Modifica dei repository software
+task.updates.sources-check	Verifica dei repository software
 task.updates.install	Installazione aggiornamenti
 task.updates.autoremove	Rimozione pacchetti inutilizzati
 task.updates.changelog	Lettura del changelog di un pacchetto
@@ -3840,10 +3845,7 @@ upd.autoremove_text	apt autoremove rimuove i pacchetti da cui non dipende più n
 upd.autoremove_warn	Controlla l'elenco: può includere il kernel precedente o pacchetti che servono all'avvio del sistema.
 upd.remove	Rimuovi
 upd.auto	Aggiornamenti automatici
-upd.bp_title	Backports di Debian
-upd.bp	Usa i backports di Debian
-upd.bp_help	I backports sono pacchetti più recenti ricompilati per questa versione di Debian. Attivandoli non viene installato né aggiornato nulla da lì se non lo si chiede (priorità apt 100). rynas li usa per NUT quando un UPS ne richiede uno più recente.
-upd.bp_system	Configurati dal sistema
+upd.repos_text	I backports di Debian, il mirror e le altre sorgenti dei pacchetti si impostano in Repository software.
 upd.no_unattended	unattended-upgrades non è installato: gli aggiornamenti automatici non verranno eseguiti.
 upd.mode	Installa automaticamente
 upd.mode_help	Gli elenchi dei pacchetti vengono aggiornati ogni giorno in ogni modalità, per la notifica. I pacchetti non vengono mai rimossi automaticamente.
@@ -6091,6 +6093,150 @@ wol.h.timeout	Tempo scaduto
 wol.pc.add_hint	(si apre in una nuova scheda)
 upd.kernel_held	Trattenuti per scelta
 upd.kernel_held_help	Il kernel si installa da Aggiornamenti del kernel.
+repo.title	Repository software
+repo.subtitle	Da dove apt prende i pacchetti: l'archivio Debian, le sorgenti di rynas e i repository di terze parti.
+repo.open_text	Mirror e suite di Debian, backports, repository di terze parti e i loro controlli.
+repo.check	Verifica ora
+repo.open	Apri Repository software
+repo.unsupported_title	Configurazione non supportata:
+repo.unsupported	i pacchetti da {list} non sono provati con rynas; aggiornamenti e supporto potrebbero non funzionare.
+repo.summary	Stato
+repo.status	Stato
+repo.status_good	Tutto a posto
+repo.status_warning	Avvisi
+repo.status_critical	Problemi
+repo.release	Versione
+repo.last_check	Ultima verifica
+repo.convert	Converti nel formato moderno
+repo.convert_help	Alcuni file usano il vecchio formato a una riga. Debian 13 usa file deb822 (.sources); i file vecchi restano come .bak.
+repo.convert_title	Convertire nel formato moderno?
+repo.debian	Debian (ufficiali)
+repo.deb_help	L'archivio di Debian per questa versione. rynas scrive queste voci in un solo file, debian.sources, dopo aver mostrato cosa cambia; poi esegue apt-get update.
+repo.deb_system_layer	Il supporto hardware gestisce le sorgenti Debian di questo sistema: sono elencate sotto, in sola lettura.
+repo.deb_not_debian	Questo non è un sistema Debian standard: rynas non modifica le sue sorgenti Debian.
+repo.suites	Suite
+repo.s_main	Versione
+repo.s_main_help	I pacchetti di questa versione di Debian. Sempre attiva.
+repo.s_security	Aggiornamenti di sicurezza
+repo.s_security_help	Le correzioni del team di sicurezza di Debian.
+repo.s_updates	Aggiornamenti stabili
+repo.s_updates_help	Correzioni urgenti pubblicate prima del prossimo rilascio minore.
+repo.s_backports	Backports di Debian
+repo.s_backports_help	I backports sono pacchetti più recenti ricompilati per questa versione di Debian. Attivandoli non viene installato né aggiornato nulla da lì se non lo si chiede (priorità apt 100). rynas li usa per NUT quando un UPS ne richiede uno più recente.
+repo.bp_system	Ora i backports sono configurati in un altro file: salvando qui passano nel file di rynas.
+repo.s_proposed	Aggiornamenti proposti
+repo.s_proposed_help	Pacchetti in attesa del prossimo rilascio minore, non ancora provati del tutto.
+repo.proposed_warn	Gli aggiornamenti proposti servono a provare un rilascio minore prima che esca: lasciali spenti su un NAS in uso.
+repo.components	Componenti
+repo.c_main_help	main (software libero) è sempre attivo. Le scelte qui sotto valgono allo stesso modo per la versione, gli aggiornamenti di sicurezza, quelli stabili e i backports.
+repo.c_contrib	contrib
+repo.c_contrib_help	Software libero che dipende da software fuori da main.
+repo.c_nonfree	non-free
+repo.c_nonfree_help	Software con licenza non libera, come alcuni driver e codec.
+repo.c_firmware	non-free-firmware
+repo.c_firmware_help	Firmware per i dispositivi (schede di rete, grafica, processori). Attivo di default da Debian 12.
+repo.s_sources	Pacchetti sorgente
+repo.s_sources_help	Anche le voci deb-src, per apt source. Non servono per installare pacchetti.
+repo.mirror	Mirror
+repo.mirror_help	deb.debian.org sceglie da solo un server vicino; si può scrivere o scegliere un mirror nazionale.
+repo.test_mirrors	Prova i mirror
+repo.ms	{n} ms
+repo.use	Usa
+repo.deb_save	Salva…
+repo.no_change	Niente da cambiare.
+repo.deb_preview	Modificare le sorgenti Debian?
+repo.preview_text	Verranno scritti questi file; i precedenti restano nella cartella di stato di rynas. Poi viene eseguito apt-get update.
+repo.ch_rename	rinominato in {to}
+repo.ch_remove	rimosso
+repo.ch_edit	modificato
+repo.ch_write	file nuovo
+repo.apply	Applica
+repo.entries	Sorgenti
+repo.add	Aggiungi repository
+repo.k_debian	Debian
+repo.k_rynas	rynas
+repo.k_system	Supporto hardware
+repo.k_third	Terze parti
+repo.ro_rynas	Gestita da rynas in un'altra pagina.
+repo.ro_system	Gestita dal supporto hardware.
+repo.ro_debian_system	Il supporto hardware gestisce le sorgenti Debian.
+repo.manage	Gestisci
+repo.enable	Attiva
+repo.disable	Disattiva
+repo.fetched	Scaricata {when}
+repo.never_fetched	Non ancora scaricata
+repo.col_on	Attiva
+repo.col_type	Tipo
+repo.col_uris	Indirizzo
+repo.col_suites	Suite
+repo.col_components	Componenti
+repo.col_origin	Origine
+repo.col_state	Stato
+repo.remove	Rimuovi
+repo.package	dal pacchetto {name}
+repo.ignored	Ignorati da apt
+repo.ign_backup	copia di riserva
+repo.ign_name	il nome ha caratteri che apt non accetta
+repo.ign_extension	né .list né .sources
+repo.enable_title	Attivare questa sorgente?
+repo.disable_title	Disattivare questa sorgente?
+repo.toggle_text	{what}. Poi viene eseguito apt-get update.
+repo.remove_text	Vengono rimossi il file e la sua chiave in /etc/apt/keyrings (ne resta una copia). I pacchetti già installati da lì restano installati.
+repo.add_warn	I pacchetti di un repository di terze parti non sono provati con rynas e possono sostituire quelli di Debian. Aggiungi solo sorgenti di cui ti fidi.
+repo.f_name	Nome
+repo.f_name_help	Il nome del file: lettere minuscole, cifre, punti e trattini.
+repo.f_uris	Indirizzo
+repo.f_uris_help	L'URL del repository (meglio https://); più indirizzi separati da spazi.
+repo.http_warn	Con http:// i pacchetti vengono comunque verificati con la chiave, ma chi sta in mezzo può vedere cosa si scarica.
+repo.f_suites	Suite
+repo.f_suites_help	Per esempio stable o trixie; un percorso esatto finisce con / e non ha componenti.
+repo.f_components	Componenti
+repo.f_components_help	Per esempio main; separati da spazi.
+repo.f_archs	Architetture
+repo.f_archs_help	Vuoto: quella di questo sistema.
+repo.f_key	Chiave di firma
+repo.f_key_help	Incolla la chiave pubblica del repository (armored), oppure indica qui sotto il suo indirizzo.
+repo.f_key_url	Indirizzo della chiave
+repo.f_key_url_help	L'indirizzo https:// della chiave: la scarica rynas.
+repo.read_key	Leggi la chiave
+repo.key_expires	Scade {when}
+repo.key_expired	Scaduta {when}
+repo.key_no_expiry	Non scade
+repo.key_confirm	L'impronta è quella pubblicata dal fornitore
+repo.key_confirm_help	Confrontala con la pagina del fornitore: è questo che rende affidabile la chiave.
+repo.f.no_pubkey	Manca la chiave di firma.
+repo.f.expired_key	La chiave di firma è scaduta.
+repo.f.bad_signature	Firma non valida: la chiave del repository potrebbe essere cambiata.
+repo.f.not_signed	Il repository non è firmato.
+repo.f.expired_release	L'indice del repository è scaduto.
+repo.f.not_found	Non trovato sul server (404 o manca il file Release).
+repo.f.network	Il server non è raggiungibile.
+repo.f.changed	Il nome o la versione del repository sono cambiati.
+repo.i.parse_error	apt non riesce a leggere questo file: {error}
+repo.i.key_changed	Firma non valida da {uri}: la sua chiave potrebbe essere cambiata.
+repo.i.key_expired	La chiave di {uri} è scaduta.
+repo.i.no_pubkey	Manca la chiave di {uri}: apt non lo usa.
+repo.i.not_signed	{uri} non è firmato: apt non lo usa.
+repo.i.fetch_failed	Impossibile scaricare {uri}: {message}
+repo.i.fetch_warning	{uri}: {message}
+repo.i.insecure	{uri}: i controlli delle firme sono disattivati.
+repo.i.other_distro	{uri}: pacchetti di un'altra distribuzione, incompatibili con Debian.
+repo.i.no_signed_by	{uri} non ha Signed-By: può firmarlo qualsiasi chiave fidata.
+repo.i.key_missing	Il file della chiave {key} non esiste.
+repo.i.duplicate	Configurata anche in {other}.
+repo.i.proposed	{suite}: pacchetti non ancora provati del tutto.
+repo.i.testing	{suite} non è adatta alla produzione e mescola versioni di Debian.
+repo.i.use_codename	{suite}: usa il nome della versione ({codename}), così la prossima versione non arriva senza preavviso.
+repo.i.old_suite	{suite} è una versione di Debian precedente.
+repo.i.next_release	{suite} è la prossima versione di Debian: solo durante l'aggiornamento.
+repo.i.security_suite	{suite}: da Debian 11 la suite di sicurezza si chiama {codename}-security.
+repo.i.security_uri	{suite} si trova in …/debian-security, non nell'archivio principale.
+repo.i.non_free_firmware	non-free è usato senza non-free-firmware: da Debian 12 i firmware sono lì.
+repo.i.no_debian	Nessuna sorgente Debian attiva per {codename}: il sistema non riceve aggiornamenti.
+repo.i.no_security	{codename}-security non è configurata: niente aggiornamenti di sicurezza.
+repo.i.no_updates	{codename}-updates non è configurata: le correzioni urgenti arrivano solo con i rilasci minori.
+repo.i.mixed_suites	Sono attive sorgenti Debian di più versioni: {suites}.
+repo.i.legacy_keyring	{key}: le sue chiavi sono fidate per ogni sorgente (deprecato).
 kch.title	Aggiornamenti del kernel
 kch.refresh	Cerca di nuovo nuovi kernel
 kch.uptodate	È installato il kernel più recente della serie
@@ -6332,6 +6478,8 @@ err.not_for_devices	Un dispositivo abbinato non può farlo: usa l'interfaccia we
 err.device_revoked	Questo dispositivo è stato revocato: abbinalo di nuovo.
 err.refresh_invalid	Il dispositivo non ha potuto rinnovare l'accesso: abbinalo di nuovo.
 err.clock_skew	L'orologio del dispositivo differisce da quello del NAS di più di 2 minuti: imposta l'ora corretta e riprova.
+err.last_debian_entry	È l'ultima sorgente Debian attiva della versione: senza di essa il sistema non riceve aggiornamenti.
+err.key_invalid	La chiave non è una chiave pubblica OpenPGP utilizzabile, oppure le sue impronte non sono quelle confermate.
 nav.devices	Dispositivi mobili
 dev.subtitle	Telefoni abbinati a questo NAS: rinominali, revocali, abbinane uno nuovo
 dev.pair	Abbina un dispositivo

@@ -146,6 +146,14 @@ pub fn System() -> impl IntoView {
                     </div>
                     <a class="btn ghost" href="/system/updates">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
                 </section>
+                <section class="card widget w-12 link-card" style="--i:2">
+                    <span class="w-icon"><Icon icon=icons::DATABASE size=18 /></span>
+                    <div class="link-card-text">
+                        <h2 class="w-title">{tr("repo.title")}</h2>
+                        <p class="muted small">{tr("repo.open_text")}</p>
+                    </div>
+                    <a class="btn ghost" href="/system/repositories">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
+                </section>
                 <section class="card widget w-12 link-card" style="--i:3">
                     <span class="w-icon"><Icon icon=icons::CALENDAR_CLOCK size=18 /></span>
                     <div class="link-card-text">
