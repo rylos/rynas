@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rynas_api_types::storage::{
-    ArrayHealth, BtrfsDevice, BtrfsDeviceErrors, BtrfsFilesystem, DiskKind, DiskSummary,
+    ArrayHealth, BtrfsDevice, BtrfsDeviceErrors, BtrfsFilesystem, DiskContent, DiskKind, DiskSummary,
     HealthVerdict, NodeKind, Partition, PowerState, QuotaMode, ScrubStatus, StorageTree, Subvolume,
     TreeNode, VolumeTree,
 };
@@ -132,6 +132,55 @@ pub fn disk_usage(g: &BlockGraph, disk: &str) -> DiskUsage {
     u
 }
 
+/// The signatures on a disk and its partitions, from lsblk alone (nothing is mounted or
+/// read): what a new volume on it erases. Partitions without a signature are listed only
+/// when none has one, so a disk with just a partition table still shows something.
+pub fn contents(g: &BlockGraph, disk: &str) -> Vec<DiskContent> {
+    let Some(d) = g.get(disk) else {
+        return Vec::new();
+    };
+    let parts: Vec<&BlockDev> = d
+        .children
+        .iter()
+        .filter_map(|c| g.get(c))
+        .filter(|c| c.kind == "part")
+        .collect();
+    let of = |x: &BlockDev| DiskContent {
+        device: x.kname.clone(),
+        fstype: x.fstype.clone().unwrap_or_default(),
+        label: x.label.clone().filter(|l| !l.is_empty()),
+    };
+    let mut v: Vec<DiskContent> = std::iter::once(d)
+        .chain(parts.iter().copied())
+        .filter(|x| x.fstype.as_deref().is_some_and(|f| !f.is_empty()))
+        .map(of)
+        .collect();
+    if v.is_empty() {
+        v = parts.into_iter().map(of).collect();
+    }
+    v
+}
+
+/// What `used_by` says first about a boot flash.
+pub const BOOT_FLASH: &str = "boot flash";
+
+/// Marks a disk as the machine's own boot flash: a system disk, never a candidate for a
+/// volume, whatever lsblk says about its mounts or its removable flag.
+pub fn mark_boot_flash(s: &mut DiskSummary) {
+    s.system = true;
+    if !s.used_by.iter().any(|u| u == BOOT_FLASH) {
+        s.used_by.insert(0, BOOT_FLASH.to_string());
+    }
+}
+
+/// `(vendor, product)` is one of `ids` (sysfs and udev write them in lower case; compared
+/// without case anyway).
+pub fn usb_id_matches(ids: &[(String, String)], vendor: &str, product: &str) -> bool {
+    ids.iter().any(|(v, p)| {
+        v.eq_ignore_ascii_case(vendor.trim()) && p.eq_ignore_ascii_case(product.trim())
+    })
+}
+
 pub fn partitions(g: &BlockGraph, disk: &str) -> Vec<Partition> {
     let Some(d) = g.get(disk) else {
         return Vec::new();
@@ -196,6 +245,7 @@ pub fn summary(
         used_by: usage.used_by,
         in_use: usage.in_use,
         system: usage.system,
+        contents: contents(g, &d.kname),
         model,
         ..Default::default()
     };
@@ -587,6 +637,56 @@ mod tests {
         let sde = disk_usage(g, "sde");
         assert!(!sde.in_use);
         assert_eq!(sde.used_by, ["LUKS (locked)"]);
+    }
+
+    /// What an unused drive still carries, for the "will be erased" acknowledgement: the
+    /// signatures, else the bare partitions; nothing on a blank disk.
+    #[test]
+    fn contents_of_disks() {
+        let inv = nas_inventory();
+        let g = &inv.graph;
+        assert!(contents(g, "sdd").is_empty());
+        let sde = inv.disks.iter().find(|d| d.name == "sde").unwrap();
+        assert_eq!(
+            sde.contents,
+            [DiskContent { device: "sde1".into(), fstype: "crypto_LUKS".into(), label: None }]
+        );
+        let dev = |name: &str, kind: &str, fstype: &str, label: &str, children: &str| {
+            format!(
+                r#"{{"name":"{name}","kname":"{name}","path":"/dev/{name}","type":"{kind}","fstype":{fstype},"fsver":null,"label":{label},"uuid":null,"partlabel":null,"size":1000,"rota":false,"tran":"sata","model":null,"serial":null,"wwn":null,"rev":null,"mountpoints":[null],"rm":false,"hotplug":false,"maj:min":"8:0"{children}}}"#
+            )
+        };
+        // btrfs on the whole disk (as `mkfs.btrfs /dev/sdd` leaves it), a disk with two empty
+        // partitions, a disk with an ext4 partition next to an empty one
+        let json = format!(
+            r#"{{"blockdevices":[{},{},{}]}}"#,
+            dev("sdd", "disk", "\"btrfs\"", "\"data\"", ""),
+            dev("sdf", "disk", "null", "null", &format!(r#","children":[{},{}]"#, dev("sdf1", "part", "null", "null", ""), dev("sdf2", "part", "null", "null", ""))),
+            dev("sdg", "disk", "null", "null", &format!(r#","children":[{},{}]"#, dev("sdg1", "part", "null", "null", ""), dev("sdg2", "part", "\"ext4\"", "\"\"", ""))),
+        );
+        let g = BlockGraph::parse(&json).unwrap();
+        assert_eq!(
+            contents(&g, "sdd"),
+            [DiskContent { device: "sdd".into(), fstype: "btrfs".into(), label: Some("data".into()) }]
+        );
+        let sdf: Vec<_> = contents(&g, "sdf").into_iter().map(|c| (c.device, c.fstype)).collect();
+        assert_eq!(sdf, [("sdf1".to_string(), String::new()), ("sdf2".to_string(), String::new())]);
+        assert_eq!(
+            contents(&g, "sdg"),
+            [DiskContent { device: "sdg2".into(), fstype: "ext4".into(), label: None }]
+        );
+    }
+
+    #[test]
+    fn boot_flash_is_a_system_disk() {
+        let mut s = DiskSummary { used_by: vec!["vfat “boot”".into()], ..Default::default() };
+        mark_boot_flash(&mut s);
+        mark_boot_flash(&mut s);
+        assert!(s.system);
+        assert_eq!(s.used_by, [BOOT_FLASH, "vfat “boot”"]);
+        let ids = vec![("f400".to_string(), "f400".to_string())];
+        assert!(usb_id_matches(&ids, "F400", "f400\n"));
+        assert!(!usb_id_matches(&ids, "f400", "f401"));
     }
 
     /// A btrfs RAID1 root on sda2 + sdb2: lsblk lists every mountpoint on sda2 only.

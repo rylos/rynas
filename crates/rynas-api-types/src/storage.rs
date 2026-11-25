@@ -194,13 +194,39 @@ pub struct DiskSummary {
     /// Something on it is live (mounted, assembled array, open LUKS, swap): not a candidate.
     #[serde(default)]
     pub in_use: bool,
-    /// Holds the operating system: never a candidate.
+    /// Holds the operating system, or is the machine's own boot flash
+    /// ([`BOOT_FLASH_USB_IDS`] and the hardware module's ids): never a candidate.
     #[serde(default)]
     pub system: bool,
     /// Known or detected shingled (SMR) drive: bad for RAID5/6 rebuilds.
     pub smr: bool,
     pub removable: bool,
+    /// The signatures on the disk and its partitions (file systems, LUKS, md and LVM
+    /// members), read from lsblk without mounting anything: what a new volume on a drive
+    /// that is not in use erases. Empty for a blank disk.
+    #[serde(default)]
+    pub contents: Vec<DiskContent>,
 }
+
+/// One signature on a disk or on one of its partitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DiskContent {
+    /// Kernel name of the device that carries it: the disk itself or a partition.
+    pub device: String,
+    /// The signature as blkid names it ("btrfs", "ext4", "crypto_LUKS",
+    /// "linux_raid_member", "LVM2_member", "vfat"...); empty for a partition without one.
+    pub fstype: String,
+    /// Its label (for an md member, the array name).
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// USB `(vendor, product)` ids of internal boot flash modules that are the same on every
+/// machine of a vendor, so they are known without a hardware module: the drive is the
+/// machine's system disk (never offered for a volume, never mounted or powered off as a
+/// removable drive). `f400:f400` is the boot module of Synology units; no other device uses
+/// that id. Hardware modules add ids that are only right on their models.
+pub const BOOT_FLASH_USB_IDS: &[(&str, &str)] = &[("f400", "f400")];
 
 /// The M.2 slot that holds a disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

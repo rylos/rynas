@@ -1187,6 +1187,13 @@ sto.no_volumes_text	Создайте том на свободных дисках
 sto.free_disks	Доступно дисков: {n}. Используйте их для нового тома или для расширения существующего.
 wiz.erase_chip	Будет стёрт
 wiz.will_erase	Существующие данные будут стёрты: {what}
+wiz.holds	Содержит: {what}
+wiz.data_ack	Я понимаю, что на {disk} есть {what} и всё содержимое этого диска будет стёрто
+sto.content_part	раздел {name}
+sto.content_luks	LUKS
+sto.content_md	участник RAID
+sto.content_lvm	участник LVM
+sto.content_label	{what} «{label}»
 sto.n_disks	Дисков: {n}
 sto.used_n	Используется: {n}
 sto.encrypted	Зашифрован
@@ -1506,7 +1513,7 @@ wiz.s_options	Параметры
 wiz.s_review	Проверка
 wiz.next	Далее
 wiz.pick_disks	Выберите диски
-wiz.pick_text	Показаны только диски без данных. Всё содержимое выбранных дисков будет стёрто.
+wiz.pick_text	Используемые диски не показаны. Всё содержимое выбранных дисков будет стёрто.
 wiz.in_use	Используемые диски не показаны: {n}.
 wiz.selected.one	Выбран {n} диск · {size} (сырой объём)
 wiz.selected.few	Выбрано {n} диска · {size} (сырой объём)

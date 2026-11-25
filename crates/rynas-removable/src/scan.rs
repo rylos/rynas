@@ -16,8 +16,9 @@
 //! removable. A drive is never listed when it holds a system mount point (`/`, `/boot*`,
 //! `/efi*`, `/home`, `/usr`, `/var`), an active swap, a RAID or LVM member, a filesystem of
 //! `/etc/fstab`, or when udev marks it `UDISKS_IGNORE=1` / `UDISKS_SYSTEM=1` (the standard
-//! udisks properties), or when a hardware module names its USB ids as the machine's own boot
-//! flash ([`Scanner::with_system_usb_ids`]).
+//! udisks properties), or when its USB ids are those of the machine's own boot flash: the
+//! core list ([`BOOT_FLASH_USB_IDS`]) plus what a hardware module adds
+//! ([`Scanner::with_system_usb_ids`]). Such a drive is never listed, so never mounted.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ use std::path::{Path, PathBuf};
 use rynas_api_types::removable::{
     ClearDevice, DriveBus, RemovableDrive, RemovableVolume, RemoveMethod, UsbLink,
 };
+use rynas_api_types::storage::BOOT_FLASH_USB_IDS;
 
 /// One mounted filesystem of the mount table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,10 +343,36 @@ pub struct Scanner {
 
 impl Scanner {
     /// USB `(vendor, product)` ids of internal boot flash modules on the USB bus (they hold the
-    /// firmware's boot loader and must never be powered off), given by a hardware module.
+    /// firmware's boot loader and must never be mounted or powered off), given by a hardware
+    /// module: added to the core list ([`BOOT_FLASH_USB_IDS`]), which applies without one.
     pub fn with_system_usb_ids(mut self, ids: Vec<(String, String)>) -> Self {
-        self.system_usb_ids = ids;
+        for (v, p) in ids {
+            if !self.is_system_usb(&v, &p) {
+                self.system_usb_ids.push((v, p));
+            }
+        }
         self
+    }
+
+    fn is_system_usb(&self, vendor: &str, product: &str) -> bool {
+        self.system_usb_ids.iter().any(|(v, p)| {
+            v.eq_ignore_ascii_case(vendor.trim()) && p.eq_ignore_ascii_case(product.trim())
+        })
+    }
+
+    /// The disk's USB ids are those of a boot flash: from the udev entry, else from sysfs
+    /// (the udev database may lack them, e.g. right after boot or in a container).
+    fn is_boot_flash(&self, name: &str, props: &HashMap<String, String>) -> bool {
+        if let (Some(v), Some(m)) = (props.get("ID_VENDOR_ID"), props.get("ID_MODEL_ID"))
+            && self.is_system_usb(v, m)
+        {
+            return true;
+        }
+        let Some(dir) = usb_device_dir(&self.tree, name) else {
+            return false;
+        };
+        let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok();
+        matches!((read("idVendor"), read("idProduct")), (Some(v), Some(p)) if self.is_system_usb(&v, &p))
     }
 
     pub fn new(tree: Tree) -> Self {
@@ -356,7 +384,10 @@ impl Scanner {
             drives: Vec::new(),
             last_written: HashMap::new(),
             support,
-            system_usb_ids: Vec::new(),
+            system_usb_ids: BOOT_FLASH_USB_IDS
+                .iter()
+                .map(|(v, p)| (v.to_string(), p.to_string()))
+                .collect(),
         }
     }
 
@@ -566,12 +597,7 @@ impl Scanner {
         if (bus.is_none() && !removable) || ignored(&props) {
             return None;
         }
-        if let (Some(v), Some(m)) = (props.get("ID_VENDOR_ID"), props.get("ID_MODEL_ID"))
-            && self
-                .system_usb_ids
-                .iter()
-                .any(|(bv, bm)| v.eq_ignore_ascii_case(bv) && m.eq_ignore_ascii_case(bm))
-        {
+        if self.is_boot_flash(name, &props) {
             return None;
         }
         let bus = bus.unwrap_or_default();

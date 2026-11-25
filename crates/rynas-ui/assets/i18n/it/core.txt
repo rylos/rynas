@@ -1169,6 +1169,13 @@ sto.no_volumes_text	Crea un volume sui dischi liberi per iniziare ad archiviare 
 sto.free_disks	Dischi disponibili: {n}. Usali per un nuovo volume o per espanderne uno.
 wiz.erase_chip	Verrà cancellato
 wiz.will_erase	I dati esistenti verranno cancellati: {what}
+wiz.holds	Contiene {what}
+wiz.data_ack	So che {disk} contiene {what} e che tutto ciò che c'è sopra verrà cancellato
+sto.content_part	partizione {name}
+sto.content_luks	LUKS
+sto.content_md	membro RAID
+sto.content_lvm	membro LVM
+sto.content_label	{what} «{label}»
 sto.n_disks	Dischi: {n}
 sto.used_n	Usato: {n}
 sto.encrypted	Cifrato
@@ -1478,7 +1485,7 @@ wiz.s_options	Opzioni
 wiz.s_review	Riepilogo
 wiz.next	Avanti
 wiz.pick_disks	Scegli i dischi
-wiz.pick_text	Sono elencati solo i dischi senza dati. Tutto ciò che c'è sui dischi scelti verrà cancellato.
+wiz.pick_text	I dischi in uso non sono elencati. Tutto ciò che c'è sui dischi scelti verrà cancellato.
 wiz.in_use	Dischi in uso, non elencati: {n}.
 wiz.selected.one	{n} disco selezionato · {size} grezzi
 wiz.selected.other	{n} dischi selezionati · {size} grezzi
