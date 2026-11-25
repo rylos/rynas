@@ -37,9 +37,9 @@ pub fn describe(path: &Path) -> Value {
             }
         }
     }
-    // a HEIC without its size in the EXIF: the size of the grid, not of one tile
-    if !out.contains_key("width")
-        && crate::thumbs::is_heif(ext)
+    // a HEIC made of tiles: the grid's size, turned as its thumbnail is (HEIF `irot`, which
+    // its EXIF does not repeat)
+    if crate::thumbs::is_heif(ext)
         && let Some((w, h)) = crate::thumbs::heif_size(path)
     {
         out.insert("width".into(), json!(w));
@@ -52,6 +52,17 @@ pub fn describe(path: &Path) -> Value {
         }
     }
     Value::Object(out)
+}
+
+/// The EXIF Orientation (1 to 8) of a photo.
+pub(crate) fn exif_orientation(path: &Path) -> Option<u32> {
+    let ms = crate::confine::open(path).map_err(nom_exif::Error::from).and_then(MediaSource::seekable).ok()?;
+    if !matches!(ms.kind(), MediaKind::Image) {
+        return None;
+    }
+    let mut parser = MediaParser::new();
+    let iter = parser.parse_exif(ms).ok()?;
+    number(nom_exif::Exif::from(iter).get(ExifTag::Orientation)).map(|o| o as u32)
 }
 
 fn is_av(ext: &str) -> bool {
