@@ -442,6 +442,26 @@ impl Space {
         self.ops.config.applied(SPACE_KEY).ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
     }
 
+    /// The defaults in force on a system where nobody ever saved the Space settings: without
+    /// an applied value the journald drop-in (the journal cap) is never written. Applied once,
+    /// as rynas, with its own changeset; an administrator's journald cap still wins (render).
+    pub fn ensure_applied(&self, log: &dyn Fn(&str)) {
+        let cfg = &self.ops.config;
+        if !matches!(cfg.applied(SPACE_KEY), Ok(None)) {
+            return;
+        }
+        let Ok(v) = serde_json::to_value(SpaceSettings::default()) else { return };
+        let owner = "rynas";
+        let r = cfg
+            .stage(owner, SPACE_KEY, Some(v))
+            .map_err(|e| e.to_string())
+            .and_then(|_| cfg.apply_keys(owner, owner, "Space defaults", &[SPACE_KEY.to_string()], log, &|| false).map_err(|e| e.to_string()));
+        match r {
+            Ok(rev) => log(&format!("default settings applied (revision {rev})")),
+            Err(e) => log(&format!("default settings not applied: {e}")),
+        }
+    }
+
     fn write_json<T: Serialize>(&self, name: &str, v: &T) {
         let _ = std::fs::create_dir_all(&self.dir);
         let tmp = self.dir.join(format!("{name}.new"));
@@ -1647,6 +1667,8 @@ pub fn spawn_loop(s: Arc<Space>) {
     tokio::spawn(async move {
         // let the system settle after a start
         tokio::time::sleep(Duration::from_secs(120)).await;
+        let s2 = s.clone();
+        let _ = in_thread(move || s2.ensure_applied(&|m| tracing::info!("space: {m}"))).await;
         let mut last_daily: Option<Instant> = None;
         loop {
             let s2 = s.clone();
