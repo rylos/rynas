@@ -28,6 +28,7 @@ pub mod btrbk;
 pub mod btrbk_ssh;
 pub mod domain;
 pub mod extents;
+pub mod freed;
 pub mod ioctl;
 pub mod name;
 pub mod readahead;

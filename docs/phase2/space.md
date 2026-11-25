@@ -99,25 +99,126 @@ The answer is cached in `<state>/space/<volume>.json` and `<state>/space/_global
 
 ### 5.2 How "freed if removed" is computed
 
-`rynas_btrfs::extents::measure_set(set, keep)` walks every regular file of the set with
-`FS_IOC_FIEMAP` (like `du`), never following links or entering nested subvolumes:
+Two methods: an exact one for the deletion preview, by diffs (§5.2.1), and a full walk for the
+scan of whole sources and as the preview's fallback (§5.2.2). Quota groups go first when they
+can answer (§5.2.3).
 
-1. extents without `FIEMAP_EXTENT_SHARED` are referenced once: freed for sure ("at least");
-2. the shared extents of the set are merged into one physical range set `A`;
-3. the members that **stay** (`keep`: the live subvolume and, for a preview, the other
-   snapshots of the same source) are walked too, their shared extents clipped to `A` and merged
-   into `K`;
-4. freed = exclusive + |A| − |A ∩ K|.
+#### 5.2.1 Preview: diffs and an exact check
 
-For a whole source the set is all its snapshots and `keep` is the live subvolume; for a
-preview of a selection, `keep` adds the unselected snapshots of the same source. Memory is
-bounded (1 Mi ranges per range set, peak under 128 MiB) and so is time (the scan budget, or the task's cancel).
+Reading whole snapshots is the wrong shape on a small NAS. Measured on a J4125 with disks (3.6
+GB RAM, cold cache, best-effort 7): one tree search pass over a PC backup snapshot of `@` (700k
+files, 4.5 M items) took 89 s, over `@home` (3.3 M files, 19.4 M items) 341 s, its neighbour
+466 s (no cache benefit). Deleting one `@home` snapshot by full walks of it and its two
+neighbours is over 15 minutes. `rynas_btrfs::freed::measure_lines` works on what changed:
 
-Limits, shown as "≈": data the set also shares with subvolumes outside `keep`
-(deduplicated or reflinked into another share) is counted as freed; an extent of which the set
-and the kept members reference different, non-overlapping parts is counted although btrfs frees
-an extent only when no part is referenced; lengths are logical (compressed extents count their
-uncompressed size, as in `du`). The "at least" number has none of these errors.
+1. **Candidates.** The preview groups the selection by filesystem and by **line** of snapshots
+   (the name before the time: `@` and `@home` of a PC are two lines; names without a time are
+   one line), each oldest first. Every run of selected snapshots is compared, member by member,
+   with the **adjacent** snapshot on one side, the same side for the whole run: the older one
+   when the run has one, else the newer one. A comparison gives the file ranges of the member
+   whose extent differs from what the neighbour has at the same place (inode, offset):
+   - *tree blocks since a transaction*: a `TREE_SEARCH_V2` of the member with `min_transid`,
+     where the kernel skips every older subtree (what `btrfs subvolume find-new` uses). Used
+     when every older block of the member is a block of the older neighbour: the member is a
+     snapshot of it (`parent_uuid` = its UUID: an incremental receive) and it has not changed
+     since (`generation <= member's otransid`; then `min_transid` = the member's `otransid`),
+     or both are snapshots of one subvolume and the older one has not changed since it was
+     taken (`generation <= otransid`; `min_transid` = its `otransid`). A block still in a tree
+     was in it since it was written, so a block of the member older than that transaction was
+     in the neighbour too. A changed block also holds unchanged items, so for each inode found
+     the neighbour's items for the same offsets are read and the items it has at the same
+     place (same offset, same extent) are left out. Cost: the changed part of the tree, plus
+     one small search of the neighbour per changed inode;
+   - otherwise a **no-data send**: `BTRFS_IOC_SEND` with `BTRFS_SEND_FLAG_NO_FILE_DATA` and the
+     neighbour as parent (both read-only; a writable neighbour such as the live subvolume is
+     never used). `UPDATE_EXTENT`, `WRITE` and `CLONE` give `(path, offset, length)` of the
+     member; renames later in the stream are applied to the recorded paths (a send names files
+     by where they are at that point: orphan names `o257-…`, folders not moved yet), the final
+     path is opened inside the member without following links for the inode, and a tree search
+     of that inode's `EXTENT_DATA` items gives the extents of the ranges. A recorded file
+     removed later in the stream, or a path not found, makes the method give up (below). Cost:
+     the kernel's tree compare (the changed part), its clone lookup per changed extent, then
+     one small tree search per changed file.
+
+   Why nothing is missed: take an extent `E` only selected snapshots reference, and a member
+   that references it at some place. Walk the run towards the compared side while the next
+   snapshot references `E` at the same place. Each snapshot on the way references `E`, so it
+   is selected; the walk ends at a member whose compared neighbour does not have `E` at that
+   place, and that member's comparison reports the range. It cannot step past the run's end:
+   the neighbour there is not selected, and it would reference `E`. Hence one side per run is
+   enough, and it must be the same side for the whole run.
+2. **Extents.** The candidates are deduplicated by their start (`disk_bytenr`): btrfs frees
+   an extent only when nothing references any part of it.
+3. **Exact check.** `BTRFS_IOC_LOGICAL_INO_V2` with `IGNORE_OFFSET` lists every `(inode,
+   offset, root)` referencing a candidate, across the whole filesystem. A candidate is freed
+   when every root is a selected snapshot. This is exact also for data reflinked or
+   deduplicated into other shares or other snapshots: the over-estimates of the full walk do
+   not apply. A list that does not fit 16 MiB (the buffer grows from 64 KiB) counts as kept,
+   with a line in the task log. Cost: one back-reference walk per candidate.
+
+The number is the on-disk size of the extents freed (compressed extents count what they take).
+Not counted, so it can only be low by them: the metadata only the selection holds (tree
+blocks, inline data of small files). A run with no neighbour that can be compared on either
+side (a whole line selected, or both neighbours writable or missing), a send that fails, or a
+lost path makes the preview use the full walk of §5.2.2 for that filesystem, with the selection
+as the set and, as kept members, the live subvolume and the snapshot right before and right
+after every run of selected ones.
+
+Memory: one entry per distinct candidate extent (capped at 8 Mi; more is "not measured"), a
+send stream of at most 512 MiB. Time: 5 minutes for a preview (`timed_out_minutes` past it,
+never a partial number), the task's cancel; the task log has a line per comparison and the
+count of candidates and freed extents.
+
+#### 5.2.2 Full walk (scan, preview fallback)
+
+The scan measures whole sources (all snapshots against the live subvolume, which is writable:
+nothing to compare with), so it keeps the full walk. `rynas_btrfs::extents::measure(set,
+keep)` reads the subvolume trees, not the files (`measure_tree`):
+
+1. `BTRFS_IOC_TREE_SEARCH_V2` (root privileges) over each subvolume's tree gives every
+   `EXTENT_DATA` item: each file range and the data extent it points to (`disk_bytenr`,
+   `disk_num_bytes`); inline data and holes are left out;
+2. the unit is the **whole extent**, deduplicated by its start: btrfs frees an extent only when
+   no file range anywhere still references any part of it;
+3. the distinct extents of the set go into one sorted list (8 bytes each); the members that
+   **stay** (`keep`) are searched too and mark the extents of the list they reference;
+4. freed = the bytes of the extents left unmarked.
+
+No file is opened and no back reference is walked (what makes `btrfs filesystem du` and the
+`FIEMAP` shared flag slow: on a J4125 with disks, `du -s` of one PC backup snapshot with 3.3
+million files took more than 10 minutes), so each subvolume costs one pass over its metadata.
+
+For a whole source the set is all its snapshots and `keep` is the live subvolume. For a
+preview of a selection, `keep` adds, in each **line** of snapshots of the source (the name
+before the time: `@` and `@home` of a PC are two lines; names without a time are one line), the
+kept snapshot right before and right after every run of selected ones. A line is a linear
+history, so an extent lives in a contiguous run of its snapshots: if neither neighbour of the
+run references it, no farther snapshot does either.
+
+Memory is bounded (8 Mi distinct extents for the set, under 128 MiB with the batch not yet
+deduplicated, plus one bit per extent for the marks; more is "not measured") and so is time
+(the scan budget per volume; 5 minutes for a preview, the task's cancel). A preview past its
+time answers "not measured" (`timed_out_minutes`), never a partial number; the task log has a
+line per subvolume searched.
+
+Limits, shown as "≈": data the set also shares with subvolumes outside `keep` is counted as
+freed — deduplicated or reflinked into another share, or, for a preview, reflinked or
+deduplicated into a snapshot of the line that is not a neighbour of the selection (for example a
+`btrfs receive` whose stream cloned from an older snapshot than its parent). These are
+over-estimates. Not counted,
+so the number is low by them: the metadata only the set holds (its own tree blocks and inline
+data of small files). Sizes are on-disk (compressed extents count what they take). The tree
+search knows no reference counts, so it gives no "at least" number.
+
+When the tree search cannot be used at all (not root, a member that is not a subvolume top
+directory, an old kernel), the older walk `measure_set` runs instead: `FS_IOC_FIEMAP` on every
+regular file (like `du`), never following links or entering nested subvolumes; extents without
+`FIEMAP_EXTENT_SHARED` are freed for sure ("at least"), the shared extents of the set are merged
+into a physical range set `A`, those of `keep` clipped to `A` into `K`, and freed = exclusive +
+|A| − |A ∩ K| (1 Mi ranges per range set, peak under 128 MiB). Its extra limits: an extent of
+which the set and the kept members reference different, non-overlapping parts is counted
+although btrfs frees an extent only when no part is referenced; lengths are logical
+(compressed extents count their uncompressed size).
 
 When quotas are on, full and consistent, the sum of the level-0 exclusive sizes is the "at
 least" number, and a level-1 group whose children are exactly the set (snapper creates those)
@@ -140,7 +241,8 @@ engine does not answer (images unknown) or the metadata is missing, nothing is i
 ### 5.4 Deleting
 
 - `POST /api/v1/space/preview {paths}` → task `space.preview`; `GET /api/v1/space/previews/{id}`
-  gives what can go, what is refused (with the protection) and the exact numbers for the set.
+  gives what can go, what is refused (with the protection) and the numbers for the set
+  (or `timed_out_minutes` when measuring took longer than the preview's 5 minutes).
 - `POST /api/v1/space/delete {paths, confirm}` (confirm = number of paths) → task
   `space.delete`: discovery runs again, any refused path refuses the whole request; share job and
   restore point snapshots are deleted under btrbk's job lock, PC backup snapshots through the PC

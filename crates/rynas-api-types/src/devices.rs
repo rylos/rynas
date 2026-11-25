@@ -33,6 +33,16 @@ pub const MAX_NAME: usize = 64;
 /// that reaches the store) is answered `device_revoked` with the `reason`; later without.
 pub const REVOKED_KEPT_DAYS: u64 = 30;
 
+/// `reason` of a `clock_skew` answer: which clock is likely wrong. The answer's `Date` header
+/// carries the NAS' time.
+pub mod clock_skew_reason {
+    /// The NAS clock is not synchronized (phones take their time from the network); the
+    /// administrator gets a notification pointing to Date and time.
+    pub const NAS: &str = "nas_clock";
+    /// The NAS clock is synchronized: the device's clock is off.
+    pub const DEVICE: &str = "device_clock";
+}
+
 /// `reason` of a `device_revoked` answer and of the `device.revoked` event: why the device was
 /// revoked. Absent for a device the NAS does not know (never paired, or revoked more than
 /// [`REVOKED_KEPT_DAYS`] ago).

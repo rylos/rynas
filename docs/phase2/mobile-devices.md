@@ -66,7 +66,12 @@ Signed messages, QR fields, compare code, rotation with reuse detection and the 
 window: as in the proposal (§2-4 there), except that a grace refresh answers a **fresh** pair
 (below), and a signed `ts` more than 120 s away from the NAS' clock is answered 400
 `clock_skew` (a claim: only for a valid code with a valid signature, and the code stays
-usable; a refresh: only with the device's valid signature; the device stays). A refresh also checks that the Linux account still exists
+usable; a refresh: only with the device's valid signature; the device stays). Its `reason`
+(`clock_skew_reason`) names the clock likely wrong: `nas_clock` when the NAS clock is not
+synchronized (kernel `adjtimex`; phones take their time from the network), else
+`device_clock`; the answer's `Date` header carries the NAS' time. A refresh refused with
+`nas_clock` opens the `device.clock_skew` alarm (one for all the devices, with a link to
+Date and time); the next accepted time closes it. A refresh also checks that the Linux account still exists
 and may sign in (PAM account management through rynasd); a removed or disabled account revokes
 its devices. Devices without a refresh for 180 days expire. rynasd looks for both every 10
 minutes too, so a removed account loses its devices without waiting for their next refresh.
@@ -232,7 +237,9 @@ Notifications (category security) and SSE (`notification` events): `device.paire
 except `refresh_reuse`, which raises `device.refresh_reuse`; older events may say
 `account`), `device.refresh_reuse` (warning: the device was revoked),
 `device.power` (info: a restart, shutdown or cancellation asked from a device),
-`device.password_kept` (info: the user's password changed; lists the devices that keep access).
+`device.password_kept` (info: the user's password changed; lists the devices that keep access),
+`device.clock_skew` (warning, category system: a device refused while the NAS clock is not
+synchronized; resolved by `device.clock_ok`).
 
 ## 6. Web interface
 

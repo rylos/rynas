@@ -23,6 +23,7 @@ pub mod power;
 pub mod processes;
 pub mod removable;
 pub mod replication;
+pub mod repositories;
 pub mod scheduler;
 mod services;
 pub mod snapshots;
@@ -463,6 +464,11 @@ pub mod error_codes {
     /// NAS' clock (400); the app tells the user to fix the phone's (or the NAS') time. Only
     /// sent for a valid code or a valid device signature.
     pub const CLOCK_SKEW: &str = "clock_skew";
+    /// Software repositories: the change would leave no enabled Debian main suite (409).
+    pub const LAST_DEBIAN_ENTRY: &str = "last_debian_entry";
+    /// Software repositories: the key is not a usable OpenPGP public key, or its
+    /// fingerprints differ from the confirmed ones (400).
+    pub const KEY_INVALID: &str = "key_invalid";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -548,6 +554,8 @@ pub mod error_codes {
         DEVICE_REVOKED,
         REFRESH_INVALID,
         CLOCK_SKEW,
+        LAST_DEBIAN_ENTRY,
+        KEY_INVALID,
     ];
 }
 

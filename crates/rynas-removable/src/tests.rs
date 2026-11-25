@@ -204,9 +204,34 @@ fn system_drives_are_never_listed() {
     );
     f.put("/run/udev/data/b8:96", "E:ID_BUS=usb\nE:UDISKS_IGNORE=1\n");
     assert!(scan(&f).is_empty(), "{:#?}", scan(&f));
-    // without the module's ids the appliance's flash is an ordinary USB disk
+    // the f400:f400 flash is known without any hardware module (core list)
     let plain = Scanner::new(Tree::new(f.root())).tick(true);
-    assert_eq!(plain.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["sdf"]);
+    assert!(plain.is_empty(), "{plain:#?}");
+}
+
+/// A boot flash whose udev entry lacks the USB ids (udev database not filled yet, or a
+/// container): the ids are read from the USB device in sysfs. A module-only id counts only
+/// once the module adds it.
+#[test]
+fn boot_flash_by_sysfs_ids_without_module() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new(dir.path());
+    f.usb_disk("sdc", 32, "2-1", "Synology", "DiskStation", "1", 128_000_000, 480, false);
+    f.put("/run/udev/data/b8:32", "E:ID_BUS=usb\n");
+    let flash = "/sys/devices/pci0000:00/0000:00:14.0/usb2/2-1";
+    f.put(&format!("{flash}/idVendor"), "f400\n");
+    f.put(&format!("{flash}/idProduct"), "f400\n");
+    f.usb_disk("sdd", 48, "2-2", "Apacer", "Flash", "2", 512_000_000, 480, false);
+    let model_flash = "/sys/devices/pci0000:00/0000:00:14.0/usb2/2-2";
+    f.put(&format!("{model_flash}/idVendor"), "1005\n");
+    f.put(&format!("{model_flash}/idProduct"), "b155\n");
+    f.put("/run/udev/data/b8:48", "E:ID_BUS=usb\nE:ID_VENDOR_ID=1005\nE:ID_MODEL_ID=b155\n");
+    let plain = Scanner::new(Tree::new(f.root())).tick(true);
+    assert_eq!(plain.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["sdd"]);
+    let with_module = Scanner::new(Tree::new(f.root()))
+        .with_system_usb_ids(vec![("1005".into(), "B155".into())])
+        .tick(true);
+    assert!(with_module.is_empty(), "{with_module:#?}");
 }
 
 #[test]

@@ -512,7 +512,7 @@ Types in `rynas_api_types::storage`. Nothing here changes the system: plans only
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/api/v1/storage/disks` | — | `Vec<DiskSummary>`: model, serial, WWN, size, kind (hdd/ssd/nvme), transport, bay, power state, temperature, health verdict with reasons, `used_by`, SMR |
+| GET | `/api/v1/storage/disks` | — | `Vec<DiskSummary>`: model, serial, WWN, size, kind (hdd/ssd/nvme), transport, bay, power state, temperature, health verdict with reasons, `used_by`, `in_use`, `system`, `contents` (`DiskContent` {device, fstype, label?}: the signatures on the disk and its partitions from lsblk, nothing mounted), SMR |
 | GET | `/api/v1/storage/disks/{name}` | — | `DiskDetail`: summary + `SmartInfo` (ATA attributes, NVMe health log, self-test log, life left, bytes written) + `SettingCheck` list (recommended vs current) + partitions |
 | GET | `/api/v1/storage/arrays` | — | `Vec<MdArray>`: level, members with role (active/spare/faulty/rebuilding), state, health, sync progress, bitmap, chunk, events, mismatch count |
 | GET | `/api/v1/storage/filesystems` | — | `Vec<BtrfsFilesystem>`: devices with error counters, usage and profiles, compression, mount options, quota mode, scrub status, subvolumes |
@@ -521,6 +521,20 @@ Types in `rynas_api_types::storage`. Nothing here changes the system: plans only
 | POST | `/api/v1/storage/plan/grow` | `GrowPlanRequest` {array, disks, level?} | `StoragePlan` |
 | POST | `/api/v1/storage/plan/replace` | `ReplacePlanRequest` {array, old, new_disk} | `StoragePlan` |
 | POST | `/api/v1/storage/plan/scrub` | `ScrubPlanRequest` {filesystem, md_check} | `StoragePlan` |
+
+Drives a new volume, a grow or a replace may take: not `in_use` (mounted, an assembled array, an
+open LUKS mapping, swap), not `system`, not removable. `system` is the disk of the root, `/usr`,
+`/boot` or `/boot/efi`, and the machine's own boot flash: a disk whose USB device has the ids of
+`rynas_api_types::storage::BOOT_FLASH_USB_IDS` (`f400:f400`, the same on every unit of that
+vendor, so it applies without a hardware module) or of a detected module
+(`Module::system_disk_usb_ids`, e.g. a QNAP model's flash), read from sysfs above
+`/sys/block/<disk>/device`; `used_by` then starts with "boot flash". The planners refuse a
+`system` disk (`system_disk`) whatever the page sends, also when lsblk shows nothing mounted on
+it. Leftovers on a free drive (a file system, LUKS, an md or LVM member, bare partitions) stay
+allowed, because old disks are reused: `contents` names them, the drive list shows them ("Holds
+btrfs “data”") and each such chosen drive needs its own tick ("I know sdd holds … and everything
+on it will be erased") before the plan is asked for, in Create volume, Grow and Replace. The same
+boot flash ids keep the drive out of the removable drives (never listed, mounted or powered off).
 
 `StoragePlan`: `valid`, `errors`, `warnings`, `raw_bytes`, `usable_bytes`, `fault_tolerance`,
 `wasted_bytes`, `summary`, ordered `steps` (`command` with argv and an optional named stdin secret,
@@ -1037,6 +1051,7 @@ schema 2 added the `code` and `body_format` columns.
 | `device.refresh_reuse` | `user`, `device`, `ip` | Device {device} of {user} revoked: a token was used twice |
 | `device.power` | `user`, `device`, `action` (`restart`, `shutdown`, `cancel`) | System power by device {device}: {action} |
 | `device.password_kept` | `user`, `n`, `devices` | Password of {user} changed: {n} paired devices keep access |
+| `device.clock_skew` / `device.clock_ok` | `user`, `device` | Device {device} refused: the NAS clock is not synchronized / Mobile devices accepted again: the clocks agree |
 | `files.job_done` / `files.job_failed` | `job_id`, `state` (`done`, `failed`, `canceled`), `user`, `kind`, `op`, `name` or `count`, `dest`, `size`, `minutes`, `error` (failed) | Copy finished / Copy failed (per kind; category `files`; only transfers longer than 30 s; body "Film.mkv → /Video · 45.8 GiB in 7 min", or the first error, not translated) |
 | `power.shutdown` / `power.shutdown_skipped` | `rule`, `reasons` (skipped) | Scheduled shutdown {rule} (skipped) |
 | `net.confirmed` | `revision`, `interfaces` | Network change confirmed (revision {revision}) |
@@ -1059,6 +1074,7 @@ schema 2 added the `code` and `body_format` columns.
 | `system.clock_sync_off` | — | Automatic time sync was turned off while one of the two above was open: resolved quietly (`NewEvent::quiet`, kept in the list, sent to no target; D-TIME) |
 | `system.config_refresh_failed` | `version`, `keys` | After an update, rynas {version} renders the managed files of {keys} differently but writing them failed: rolled back, the previous files stay (warning; `Config::refresh_rendered`, once per version at rynasd's start, keys changed by hand are never rewritten) |
 | `updates.available` / `updates.up_to_date` | `updates`, `security` (only when some are), `packages` | {updates} updates available[, {security} for security] (notice, warning with security updates) / the system is up to date (resolved) |
+| `repositories.unsupported` / `repositories.supported` | `sources` | Unsupported software sources: packages from {sources} are not tested with rynas (warning; enabled third-party, testing/unstable, other distributions or insecure apt sources, D-REPOS) / the software sources are supported (resolved) |
 | `updates.kernel_available` | `kernel`, `behind`, `cves` (when every newer kernel's CVEs are known) | Kernel {kernel} available: kernels newer than the installed one, CVEs fixed (notice; kernel policy `notify`, at most every `interval_days`, once per version) |
 | `updates.kernel_installed` / `updates.kernel_failed` | `kernel`, `at` (restart time, when one was scheduled) / `kernel`, `error` | Kernel {kernel} installed[, restart at {at}] (notice) / not installed (warning): the automatic kernel installation (kernel policy `auto`) |
 | `ups.on_battery` / `ups.power_back` | `minutes` (when a time on battery is set) | UPS on battery (warning) / back on mains power (info) |

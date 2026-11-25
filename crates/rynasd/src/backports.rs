@@ -193,7 +193,7 @@ pub fn render(codename: &str, sources: &[(PathBuf, AptSource)]) -> String {
         .filter(|c: &Vec<&str>| !c.is_empty())
         .unwrap_or_else(|| vec!["main"]);
     format!(
-        "# Written by rynas (System > Updates > Debian backports): remove it with that switch.\n\
+        "# Written by rynas (System > Software repositories > Debian backports): remove it with that switch.\n\
          # Nothing is installed from backports unless asked (apt pin 100).\n\
          Types: deb\nURIs: {uri}\nSuites: {codename}-backports\nComponents: {}\nSigned-By: {KEYRING}\n",
         comps.join(" ")

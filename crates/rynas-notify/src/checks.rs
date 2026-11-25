@@ -944,6 +944,34 @@ pub fn device_refresh_reuse(user: &str, id: &str, device: &str, ip: &str) -> New
     field(field(field(code(e, "device.refresh_reuse"), "user", user), "device", device), "ip", ip)
 }
 
+/// Key of [`device_clock_skew`] and [`device_clock_ok`]: one open alarm for all the devices.
+pub const DEVICE_CLOCK_KEY: &str = "device:clock_skew";
+
+/// A device refused because its signed time is far from the NAS' clock while the NAS clock is
+/// not synchronized: the NAS is the likely culprit (phones take their time from the network).
+pub fn device_clock_skew(user: &str, device: &str) -> NewEvent {
+    let (user, device) = (safe_word(user), safe_word(device));
+    let mut e = firing(
+        Cat::System,
+        Sev::Warning,
+        "devices",
+        DEVICE_CLOCK_KEY,
+        format!("Device {device} refused: the NAS clock is not synchronized"),
+    );
+    e.body = format!(
+        "The mobile device {device} ({user}) sent a time more than 2 minutes away from the NAS' \
+         clock, and the NAS clock is not synchronized: phones cannot connect until it is. Check \
+         the time servers in Date and time."
+    );
+    e.actions = vec![rynas_api_types::notify::EventAction { label: "Open date and time".into(), url: "/system/time".into() }];
+    field(field(code(e, "device.clock_skew"), "user", user), "device", device)
+}
+
+/// A device's time was accepted again after [`device_clock_skew`].
+pub fn device_clock_ok() -> NewEvent {
+    code(resolved(Cat::System, "devices", DEVICE_CLOCK_KEY, "Mobile devices accepted again: the clocks agree"), "device.clock_ok")
+}
+
 /// A restart, shutdown or its cancellation asked from a paired device. `action`: `restart`,
 /// `shutdown`, `cancel`.
 pub fn device_power(user: &str, id: &str, device: &str, action: &str) -> NewEvent {

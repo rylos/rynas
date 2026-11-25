@@ -121,6 +121,7 @@ const PACKAGE_KINDS: &[&str] = &[
     "updates.install",
     "updates.autoremove",
     "updates.backports",
+    "updates.repositories",
     "docker.install",
     "docker.auto-update",
     "apps.auto-update",

@@ -14,6 +14,7 @@
 
 pub mod apps;
 pub mod backports;
+pub mod repositories;
 pub mod backup;
 pub mod cgroup;
 pub mod claims;

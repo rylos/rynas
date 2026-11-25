@@ -286,6 +286,9 @@ nev.updates.available.title	Доступно обновлений: {updates}, и
 nev.updates.available.title_2	Доступно обновлений: {updates}
 nev.updates.available.body	Пакеты: {packages}.
 nev.updates.up_to_date.title	Система обновлена
+nev.repositories.unsupported.title	Неподдерживаемые источники ПО
+nev.repositories.unsupported.body	Пакеты из {sources} не проверены с rynas; обновления и поддержка могут не работать.
+nev.repositories.supported.title	Источники ПО поддерживаются
 nev.ups.on_battery.title	ИБП работает от батареи
 nev.ups.on_battery.body	Пропало сетевое питание. Система выключится через {minutes} мин работы от батареи или раньше при низком заряде.
 nev.ups.on_battery.body_2	Пропало сетевое питание. Система выключится при низком заряде батареи.
@@ -1187,6 +1190,13 @@ sto.no_volumes_text	Создайте том на свободных дисках
 sto.free_disks	Доступно дисков: {n}. Используйте их для нового тома или для расширения существующего.
 wiz.erase_chip	Будет стёрт
 wiz.will_erase	Существующие данные будут стёрты: {what}
+wiz.holds	Содержит: {what}
+wiz.data_ack	Я понимаю, что на {disk} есть {what} и всё содержимое этого диска будет стёрто
+sto.content_part	раздел {name}
+sto.content_luks	LUKS
+sto.content_md	участник RAID
+sto.content_lvm	участник LVM
+sto.content_label	{what} «{label}»
 sto.n_disks	Дисков: {n}
 sto.used_n	Используется: {n}
 sto.encrypted	Зашифрован
@@ -1506,7 +1516,7 @@ wiz.s_options	Параметры
 wiz.s_review	Проверка
 wiz.next	Далее
 wiz.pick_disks	Выберите диски
-wiz.pick_text	Показаны только диски без данных. Всё содержимое выбранных дисков будет стёрто.
+wiz.pick_text	Используемые диски не показаны. Всё содержимое выбранных дисков будет стёрто.
 wiz.in_use	Используемые диски не показаны: {n}.
 wiz.selected.one	Выбран {n} диск · {size} (сырой объём)
 wiz.selected.few	Выбрано {n} диска · {size} (сырой объём)
@@ -3834,6 +3844,8 @@ task.tailscale.options	Изменение настроек Tailscale
 task.tailscale.revert	Откат настроек Tailscale
 task.updates.check	Проверка обновлений
 task.updates.backports	Изменение настройки Debian backports
+task.updates.repositories	Изменение репозиториев ПО
+task.updates.sources-check	Проверка репозиториев ПО
 task.updates.install	Установка обновлений
 task.updates.autoremove	Удаление неиспользуемых пакетов
 task.updates.changelog	Чтение журнала изменений пакета
@@ -3882,10 +3894,7 @@ upd.autoremove_text	apt autoremove удаляет пакеты, от котор�
 upd.autoremove_warn	Проверьте список: в нём может оказаться предыдущее ядро или пакеты, нужные системе для загрузки.
 upd.remove	Удалить
 upd.auto	Автоматические обновления
-upd.bp_title	Debian backports
-upd.bp	Использовать Debian backports
-upd.bp_help	Backports — более новые пакеты, пересобранные для этого выпуска Debian. Когда они включены, из них ничего не устанавливается и не обновляется без явного запроса (приоритет apt 100). rynas использует их для NUT, когда ИБП требуется более новая версия.
-upd.bp_system	Настроено системой
+upd.repos_text	Backports Debian, зеркало и другие источники пакетов настраиваются в разделе «Репозитории ПО».
 upd.no_unattended	unattended-upgrades не установлен: автоматические обновления выполняться не будут.
 upd.mode	Устанавливать автоматически
 upd.mode_help	Списки пакетов обновляются ежедневно в любом режиме — для уведомления. Пакеты никогда не удаляются автоматически.
@@ -6149,6 +6158,150 @@ wol.h.timeout	Время истекло
 wol.pc.add_hint	(откроется в новой вкладке)
 upd.kernel_held	Удерживаются по выбору
 upd.kernel_held_help	Ядро устанавливается в разделе «Обновления ядра».
+repo.title	Репозитории ПО
+repo.subtitle	Откуда apt берёт пакеты: архив Debian, источники rynas и сторонние репозитории.
+repo.open_text	Зеркало и наборы Debian, backports, сторонние репозитории и их проверки.
+repo.check	Проверить сейчас
+repo.open	Открыть «Репозитории ПО»
+repo.unsupported_title	Неподдерживаемая конфигурация:
+repo.unsupported	пакеты из {list} не проверены с rynas; обновления и поддержка могут не работать.
+repo.summary	Состояние
+repo.status	Состояние
+repo.status_good	Всё в порядке
+repo.status_warning	Предупреждения
+repo.status_critical	Проблемы
+repo.release	Выпуск
+repo.last_check	Последняя проверка
+repo.convert	Преобразовать в современный формат
+repo.convert_help	Некоторые файлы используют старый однострочный формат. Debian 13 использует файлы deb822 (.sources); старые файлы сохраняются как .bak.
+repo.convert_title	Преобразовать в современный формат?
+repo.debian	Debian (официальные)
+repo.deb_help	Собственный архив Debian для этого выпуска. rynas записывает эти записи в один файл, debian.sources, предварительно показав изменения; затем запускается apt-get update.
+repo.deb_system_layer	Источниками Debian этой системы управляет поддержка оборудования: они перечислены ниже, только для чтения.
+repo.deb_not_debian	Это не обычная система Debian: rynas не изменяет её источники Debian.
+repo.suites	Наборы
+repo.s_main	Выпуск
+repo.s_main_help	Пакеты этого выпуска Debian. Всегда включено.
+repo.s_security	Обновления безопасности
+repo.s_security_help	Исправления от команды безопасности Debian.
+repo.s_updates	Стабильные обновления
+repo.s_updates_help	Срочные исправления до следующего промежуточного выпуска.
+repo.s_backports	Backports Debian
+repo.s_backports_help	Backports — более новые пакеты, пересобранные для этого выпуска Debian. Когда они включены, из них ничего не устанавливается и не обновляется без запроса (приоритет apt 100). rynas использует их для NUT, когда ИБП нужна более новая версия.
+repo.bp_system	Сейчас backports настроены в другом файле: при сохранении здесь они перейдут в файл rynas.
+repo.s_proposed	Предлагаемые обновления
+repo.s_proposed_help	Пакеты, ожидающие следующего промежуточного выпуска, ещё не полностью проверенные.
+repo.proposed_warn	Предлагаемые обновления нужны для проверки промежуточного выпуска до его публикации: на рабочем NAS оставьте их выключенными.
+repo.components	Компоненты
+repo.c_main_help	main (свободное ПО) включён всегда. Выбор ниже одинаково применяется к выпуску, обновлениям безопасности, стабильным обновлениям и backports.
+repo.c_contrib	contrib
+repo.c_contrib_help	Свободное ПО, зависящее от ПО вне main.
+repo.c_nonfree	non-free
+repo.c_nonfree_help	ПО с несвободной лицензией, например некоторые драйверы и кодеки.
+repo.c_firmware	non-free-firmware
+repo.c_firmware_help	Прошивки для устройств (сетевые карты, графика, процессоры). Включено по умолчанию начиная с Debian 12.
+repo.s_sources	Пакеты с исходным кодом
+repo.s_sources_help	Также записи deb-src, для apt source. Для установки пакетов не нужны.
+repo.mirror	Зеркало
+repo.mirror_help	deb.debian.org сам выбирает ближайший сервер; зеркало страны можно ввести или выбрать.
+repo.test_mirrors	Проверить зеркала
+repo.ms	{n} мс
+repo.use	Использовать
+repo.deb_save	Сохранить…
+repo.no_change	Нечего изменять.
+repo.deb_preview	Изменить источники Debian?
+repo.preview_text	Будут записаны эти файлы; предыдущие сохраняются в папке состояния rynas. Затем запускается apt-get update.
+repo.ch_rename	переименован в {to}
+repo.ch_remove	удалён
+repo.ch_edit	изменён
+repo.ch_write	новый файл
+repo.apply	Применить
+repo.entries	Источники
+repo.add	Добавить репозиторий
+repo.k_debian	Debian
+repo.k_rynas	rynas
+repo.k_system	Поддержка оборудования
+repo.k_third	Сторонний
+repo.ro_rynas	Управляется rynas на другой странице.
+repo.ro_system	Управляется поддержкой оборудования.
+repo.ro_debian_system	Источниками Debian управляет поддержка оборудования.
+repo.manage	Управлять
+repo.enable	Включить
+repo.disable	Отключить
+repo.fetched	Загружено {when}
+repo.never_fetched	Ещё не загружено
+repo.col_on	Вкл.
+repo.col_type	Тип
+repo.col_uris	Адрес
+repo.col_suites	Наборы
+repo.col_components	Компоненты
+repo.col_origin	Происхождение
+repo.col_state	Состояние
+repo.remove	Удалить
+repo.package	из пакета {name}
+repo.ignored	Игнорируются apt
+repo.ign_backup	резервная копия
+repo.ign_name	в имени есть символы, которые apt не принимает
+repo.ign_extension	ни .list, ни .sources
+repo.enable_title	Включить этот источник?
+repo.disable_title	Отключить этот источник?
+repo.toggle_text	{what}. Затем запускается apt-get update.
+repo.remove_text	Файл и его ключ в /etc/apt/keyrings удаляются (копия сохраняется). Уже установленные из него пакеты остаются.
+repo.add_warn	Пакеты из стороннего репозитория не проверены с rynas и могут заменить пакеты Debian. Добавляйте только источники, которым доверяете.
+repo.f_name	Имя
+repo.f_name_help	Имя файла: строчные буквы, цифры, точки и дефисы.
+repo.f_uris	Адрес
+repo.f_uris_help	URL репозитория (лучше https://); несколько — через пробел.
+repo.http_warn	По http:// пакеты всё равно проверяются ключом, но любой посредник видит, что загружается.
+repo.f_suites	Наборы
+repo.f_suites_help	Например stable или trixie; точный путь заканчивается на / и не имеет компонентов.
+repo.f_components	Компоненты
+repo.f_components_help	Например main; через пробел.
+repo.f_archs	Архитектуры
+repo.f_archs_help	Пусто: архитектура этой системы.
+repo.f_key	Ключ подписи
+repo.f_key_help	Вставьте открытый ключ репозитория (armored) или укажите его адрес ниже.
+repo.f_key_url	Адрес ключа
+repo.f_key_url_help	Адрес ключа https://: rynas загрузит его.
+repo.read_key	Прочитать ключ
+repo.key_expires	Истекает {when}
+repo.key_expired	Истёк {when}
+repo.key_no_expiry	Не истекает
+repo.key_confirm	Отпечаток совпадает с опубликованным поставщиком
+repo.key_confirm_help	Сверьте его со страницей поставщика: именно это делает ключ доверенным.
+repo.f.no_pubkey	Нет ключа подписи.
+repo.f.expired_key	Срок действия ключа подписи истёк.
+repo.f.bad_signature	Неверная подпись: ключ репозитория мог измениться.
+repo.f.not_signed	Репозиторий не подписан.
+repo.f.expired_release	Индекс репозитория устарел.
+repo.f.not_found	Не найдено на сервере (404 или нет файла Release).
+repo.f.network	Сервер недоступен.
+repo.f.changed	Имя или выпуск репозитория изменились.
+repo.i.parse_error	apt не может прочитать этот файл: {error}
+repo.i.key_changed	Неверная подпись от {uri}: его ключ мог измениться.
+repo.i.key_expired	Срок действия ключа {uri} истёк.
+repo.i.no_pubkey	Нет ключа для {uri}: apt его не использует.
+repo.i.not_signed	{uri} не подписан: apt его не использует.
+repo.i.fetch_failed	Не удалось загрузить {uri}: {message}
+repo.i.fetch_warning	{uri}: {message}
+repo.i.insecure	{uri}: проверка подписей отключена.
+repo.i.other_distro	{uri}: пакеты другого дистрибутива, несовместимые с Debian.
+repo.i.no_signed_by	У {uri} нет Signed-By: его может подписать любой доверенный ключ.
+repo.i.key_missing	Файл ключа {key} не существует.
+repo.i.duplicate	Также настроено в {other}.
+repo.i.proposed	{suite}: пакеты ещё не полностью проверены.
+repo.i.testing	{suite} не предназначен для рабочих систем и смешивает выпуски Debian.
+repo.i.use_codename	{suite}: используйте имя выпуска ({codename}), чтобы следующий выпуск не пришёл без предупреждения.
+repo.i.old_suite	{suite} — более старый выпуск Debian.
+repo.i.next_release	{suite} — следующий выпуск Debian: только во время обновления.
+repo.i.security_suite	{suite}: начиная с Debian 11 набор безопасности называется {codename}-security.
+repo.i.security_uri	{suite} раздаётся из …/debian-security, а не из основного архива.
+repo.i.non_free_firmware	non-free используется без non-free-firmware: с Debian 12 прошивки перенесены туда.
+repo.i.no_debian	Нет включённого источника Debian для {codename}: система не получает обновлений.
+repo.i.no_security	{codename}-security не настроен: нет обновлений безопасности.
+repo.i.no_updates	{codename}-updates не настроен: срочные исправления приходят только с промежуточными выпусками.
+repo.i.mixed_suites	Включены источники Debian нескольких выпусков: {suites}.
+repo.i.legacy_keyring	{key}: его ключи доверены для всех источников (устарело).
 kch.title	Обновления ядра
 kch.refresh	Снова поискать новые ядра
 kch.uptodate	Установлено самое новое ядро серии
@@ -6400,6 +6553,8 @@ err.not_for_devices	Сопряжённому устройству это не р
 err.device_revoked	Это устройство отозвано: выполните сопряжение заново.
 err.refresh_invalid	Устройству не удалось продлить доступ: выполните сопряжение заново.
 err.clock_skew	Часы устройства и NAS расходятся больше чем на 2 минуты: установите правильное время и повторите попытку.
+err.last_debian_entry	Это последний включённый источник Debian для выпуска: без него система не получает обновлений.
+err.key_invalid	Ключ не является пригодным открытым ключом OpenPGP, или его отпечатки не совпадают с подтверждёнными.
 nav.devices	Мобильные устройства
 dev.subtitle	Телефоны, сопряжённые с этим NAS: переименование, отзыв, новое сопряжение
 dev.pair	Сопрячь устройство
@@ -6448,6 +6603,9 @@ nev.device.revoked.reason.unclaimed	телефон так и не получил
 nev.device.revoked.reason.account_replaced	учётная запись заменена другой с тем же именем
 nev.device.refresh_reuse.title	Устройство {device} пользователя {user} отозвано: токен использован дважды
 nev.device.refresh_reuse.body	Старый токен обновления мобильного устройства {device} ({user}) пришёл с адреса {ip}: где-то может быть его копия. Устройство отозвано; выполните сопряжение заново.
+nev.device.clock_skew.title	Устройство {device} отклонено: часы NAS не синхронизированы
+nev.device.clock_skew.body	Мобильное устройство {device} ({user}) прислало время, отличающееся от часов NAS более чем на 2 минуты, а часы NAS не синхронизированы: телефоны не смогут подключиться, пока это не исправлено. Проверьте серверы времени в разделе «Дата и время».
+nev.device.clock_ok.title	Мобильные устройства снова принимаются: часы совпадают
 nev.device.power.title	Питание системы с устройства {device}: {action}
 nev.device.power.action.restart	перезагрузка
 nev.device.power.action.shutdown	выключение
@@ -6547,6 +6705,10 @@ sp.preview_text.few	Удаление {n} снимков освободит {size
 sp.preview_text.many	Удаление {n} снимков освободит {size}.
 sp.preview_text.other	Удаление {n} снимка освободит {size}.
 sp.preview_at_least	Не менее {size} хранится только в этих снимках.
+sp.preview_timed_out.one	Не измерено: измерение заняло больше {n} минуты. Снимки всё равно можно удалить.
+sp.preview_timed_out.few	Не измерено: измерение заняло больше {n} минут. Снимки всё равно можно удалить.
+sp.preview_timed_out.many	Не измерено: измерение заняло больше {n} минут. Снимки всё равно можно удалить.
+sp.preview_timed_out.other	Не измерено: измерение заняло больше {n} минуты. Снимки всё равно можно удалить.
 sp.kept_title	Сохраняются:
 sp.unknown_snapshot	неизвестный снимок
 sp.freed_later	Файловая система освобождает место в фоне; задача завершится, когда место освободится.

@@ -31,6 +31,8 @@ pub const DEEP: &[(&[&str], &str, &str)] = &[
     (&["nav.network", "ts.title"], "/network/remote-access", icons::LINK),
     (&["nav.system", "upd.title"], "/system/updates", icons::DOWNLOAD),
     (&["nav.system", "upd.title", "upd.kernel"], "/system/updates#kernel", icons::CPU),
+    (&["nav.system", "repo.title"], "/system/repositories", icons::DATABASE),
+    (&["nav.system", "repo.title", "repo.debian"], "/system/repositories#debian", icons::BOX),
     (&["nav.system", "mem.title"], "/system/memory", icons::MEMORY_STICK),
     (&["nav.system", "proc.title"], "/system/processes", icons::ACTIVITY),
     (&["nav.system", "cfg.title"], "/system/configuration", icons::HISTORY),

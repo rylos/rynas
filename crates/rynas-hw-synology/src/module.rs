@@ -22,8 +22,9 @@ use rynas_module::{BootLayer, EventForward, Feedback, Module, Signal, UpsLayer, 
 
 use crate::Synology;
 
-/// USB ids of the Synology boot flash (DOM).
-pub const BOOT_FLASH_IDS: &[(&str, &str)] = &[("f400", "f400")];
+/// USB ids of the Synology boot flash (DOM): the core list, which storage and the removable
+/// drives apply also when no model is detected.
+pub const BOOT_FLASH_IDS: &[(&str, &str)] = rynas_api_types::storage::BOOT_FLASH_USB_IDS;
 /// The pre-Safe Mode hook the package ships (`packaging/modules/synology/ups-pre-safemode`).
 pub const UPS_HOOK: &str = "/usr/lib/rynas/modules/synology/ups-pre-safemode";
 /// Its link in synodeb's hook folder.
