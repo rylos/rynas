@@ -1324,7 +1324,7 @@ kbd {
 .tasks-head .status { flex: none; }
 .tasks-body { height: 300px; display: grid; grid-template-columns: minmax(0, 1fr); overflow: hidden; border-top: 1px solid var(--border); background: var(--bg-sunken); animation: grow var(--t-med) var(--ease); }
 .tasks-body.with-log { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
-.task-list { overflow: auto; min-height: 0; }
+.task-list { overflow: hidden auto; min-height: 0; }
 .task-list .table-wrap { margin: 0; overflow: visible; }
 .tasks-body.with-log .tasks-table :is(th, td):is(:nth-child(3), :nth-child(4)) { display: none; }
 .tasks-pad { padding: var(--s-2) var(--s-4); }
@@ -1341,6 +1341,10 @@ kbd {
 .row-link { display: inline-flex; align-items: center; gap: var(--s-1); max-width: 100%; color: var(--text); font-weight: 600; text-align: left; border-radius: var(--r-sm); }
 .row-link:hover { color: var(--accent); }
 .tasks-table .row-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; max-width: 280px; }
+/* the task name takes what the other columns leave and is cut with an ellipsis: no sideways scroll */
+.tasks-table { width: 100%; }
+.tasks-table td:first-child { width: 100%; max-width: 0; overflow: hidden; }
+.tasks-table td:not(:first-child), .tasks-table th { white-space: nowrap; }
 .task-log { display: flex; flex-direction: column; min-height: 0; min-width: 0; border-left: 1px solid var(--border); background: var(--surface); }
 .task-log-head { display: flex; align-items: center; gap: var(--s-2); padding: var(--s-2) var(--s-2) var(--s-2) var(--s-4); border-bottom: 1px solid var(--border); }
 .task-log-title { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: var(--fs-13); }
