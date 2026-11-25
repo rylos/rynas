@@ -1340,7 +1340,7 @@ kbd {
 .table tr.selected, .table tr.selected:hover { background: color-mix(in oklch, var(--accent) 12%, var(--surface)); }
 .row-link { display: inline-flex; align-items: center; gap: var(--s-1); max-width: 100%; color: var(--text); font-weight: 600; text-align: left; border-radius: var(--r-sm); }
 .row-link:hover { color: var(--accent); }
-.tasks-table .row-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; max-width: 280px; }
+.tasks-table .row-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; max-width: 100%; }
 /* the task name takes what the other columns leave and is cut with an ellipsis: no sideways scroll */
 .tasks-table { width: 100%; }
 .tasks-table td:first-child { width: 100%; max-width: 0; overflow: hidden; }
