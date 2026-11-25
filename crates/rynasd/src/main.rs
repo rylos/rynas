@@ -1078,6 +1078,9 @@ fn main() -> std::io::Result<()> {
         if ups.layer.is_none() && ups.talk_to_upsd {
             tokio::spawn(rynasd::ups::watch(ups.clone()));
         }
+        if !args.dry_system {
+            tokio::spawn(rynasd::disk_standby::watch(ops.clone()));
+        }
         state.ups = Some(ups);
         state.hardware = Some(Arc::new(rynasd::hardware::Hardware {
             ops: ops.clone(),

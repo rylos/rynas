@@ -125,6 +125,8 @@ impl Host for SystemHost {
 const HDIO_DRIVE_CMD: u64 = 0x031f;
 const ATA_CHECK_POWER_MODE: u8 = 0xe5;
 const ATA_CHECK_POWER_MODE_RETIRED: u8 = 0x98;
+const ATA_STANDBY_IMMEDIATE: u8 = 0xe0;
+const ATA_STANDBY_IMMEDIATE_RETIRED: u8 = 0x94;
 
 /// Meaning of the sector count register after CHECK POWER MODE (ATA8-ACS), as in `hdparm -C`.
 pub fn power_from_ata(count: u8) -> PowerState {
@@ -139,14 +141,14 @@ pub fn power_from_ata(count: u8) -> PowerState {
     }
 }
 
-fn ata_check_power_mode(dev_path: &str) -> Option<PowerState> {
+pub fn ata_check_power_mode(dev_path: &str) -> Option<PowerState> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
     // read-only + non-blocking: opening the node does not touch the medium, and closing a
     // read-only fd does not trigger a udev "change" event
     let f = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(dev_path)
         .ok()?;
     for cmd in [ATA_CHECK_POWER_MODE, ATA_CHECK_POWER_MODE_RETIRED] {
@@ -159,6 +161,28 @@ fn ata_check_power_mode(dev_path: &str) -> Option<PowerState> {
         }
     }
     None
+}
+
+/// ATA STANDBY IMMEDIATE (`hdparm -y`): spins a SATA disk down immediately, including
+/// drives with EPC enabled (e.g. Seagate SkyHawk/IronWolf) that ignore `hdparm -S`.
+pub fn ata_standby_now(dev_path: &str) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(dev_path)?;
+    let mut last_err = None;
+    for cmd in [ATA_STANDBY_IMMEDIATE, ATA_STANDBY_IMMEDIATE_RETIRED] {
+        let mut args: [u8; 4] = [cmd, 0, 0, 0];
+        // SAFETY: HDIO_DRIVE_CMD takes a pointer to 4 bytes (command, sector, feature, count).
+        let r = unsafe { libc::ioctl(f.as_raw_fd(), HDIO_DRIVE_CMD as _, args.as_mut_ptr()) };
+        if r == 0 {
+            return Ok(());
+        }
+        last_err = Some(std::io::Error::last_os_error());
+    }
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("ATA STANDBY IMMEDIATE failed")))
 }
 
 /// Whether the kernel lets rynas claim a block device exclusively (`open(O_EXCL)`): it

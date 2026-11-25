@@ -20,6 +20,7 @@ pub mod claims;
 pub mod clock;
 pub mod dedup;
 pub mod devices;
+pub mod disk_standby;
 pub mod docker;
 pub mod docker_adopt;
 pub mod docker_auto;
