@@ -4633,6 +4633,8 @@ dict! { BLOB, LENS;
     "sp.preview_text.one" => "Deleting {n} snapshot frees {size}.";
     "sp.preview_text.other" => "Deleting {n} snapshots frees {size}.";
     "sp.preview_at_least" => "At least {size} is held by these snapshots only.";
+    "sp.preview_timed_out.one" => "Not measured: measuring took longer than {n} minute. The snapshots can still be deleted.";
+    "sp.preview_timed_out.other" => "Not measured: measuring took longer than {n} minutes. The snapshots can still be deleted.";
     "sp.kept_title" => "Kept:";
     "sp.unknown_snapshot" => "not a snapshot Space knows";
     "sp.freed_later" => "The filesystem frees the space in the background; the task ends when it is free.";

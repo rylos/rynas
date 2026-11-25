@@ -8,23 +8,43 @@
 //! file deleted from the share but present in 30 hourly snapshots is "shared" in every one of
 //! them, so summing their "Exclusive" says 0 while removing all 30 frees the whole file.
 //!
-//! The walk here does what `du` does (`FS_IOC_FIEMAP` on every regular file) but keeps the
-//! physical ranges across arguments:
+//! [`measure_tree`] (the normal way) reads the subvolume trees instead of the files: a
+//! `BTRFS_IOC_TREE_SEARCH_V2` over each subvolume's tree (root privileges) gives every
+//! `EXTENT_DATA` item, i.e. every file range and the data extent it points to
+//! (`disk_bytenr`, `disk_num_bytes`). Inline data (stored in metadata) and holes are left out.
+//! The unit is the whole extent, deduplicated by its start: btrfs frees an extent only when no
+//! file range anywhere references any part of it, so
+//!
+//! - freed = bytes of the distinct extents the set references and no kept member references.
+//!
+//! No file is opened and no back reference is walked (what makes `du` and `FIEMAP`'s shared
+//! flag slow), so a subvolume with millions of files costs one pass over its metadata. Memory:
+//! 8 bytes per distinct extent of the set (capped by [`Limits::max_extents`], past which the
+//! answer is [`WalkError::TooLarge`]) and one bit per extent for the kept members' marks.
+//!
+//! Over-estimates (documented in the design): data the set also shares with subvolumes that
+//! are not in the kept list (deduplicated or reflinked into another share, or, when the
+//! caller keeps only the neighbours of the set in a line of snapshots, reflinked into a
+//! snapshot further away). Never counted, so the number can only be low by them: the
+//! metadata the set alone holds (tree blocks, inline data). Sizes are on-disk sizes
+//! (compressed extents count what they take).
+//!
+//! [`measure_set`] is the older walk, kept as the fallback when the tree search cannot be used
+//! (not root, a member that is not a subvolume): what `du` does (`FS_IOC_FIEMAP` on every
+//! regular file) but keeping the physical ranges across arguments:
 //!
 //! - extents without `FIEMAP_EXTENT_SHARED` are referenced once: removing the set frees them
 //!   for sure ([`SetMeasure::exclusive`]);
 //! - the shared extents of the set are merged into one range set `A`; the shared extents of
-//!   the kept members (the other snapshots of the same source and the live subvolume) are
-//!   clipped to `A` and merged into `K`; what the set frees is `exclusive + |A| - |A ∩ K|`.
+//!   the kept members are clipped to `A` and merged into `K`; what the set frees is
+//!   `exclusive + |A| - |A ∩ K|`.
 //!
-//! Over-estimates (documented in the design): data the set also shares with subvolumes that
-//! are not in the kept list (deduplicated or reflinked into another share), and extents of
-//! which the set and the kept members reference different, non-overlapping parts (btrfs frees
-//! an extent only when no part of it is referenced). Lengths are logical: compressed extents
-//! count their uncompressed size, as in `du`.
-//!
-//! Nested subvolumes are not entered (another `st_dev`), symbolic links are never followed,
-//! files that cannot be opened are counted in [`Walk::unreadable`].
+//! Its over-estimates: data shared outside the kept list, as above, and extents of which the
+//! set and the kept members reference different, non-overlapping parts (btrfs frees an extent
+//! only when no part of it is referenced). Its lengths are logical: compressed extents count
+//! their uncompressed size, as in `du`. Nested subvolumes are not entered (another `st_dev`),
+//! symbolic links are never followed, files that cannot be opened are counted in
+//! [`Walk::unreadable`].
 
 use std::io;
 use std::os::fd::AsRawFd;
@@ -208,8 +228,11 @@ impl Ranges {
 pub enum WalkError {
     /// The caller asked to stop (cancel, time budget).
     Stopped,
-    /// More shared ranges than the memory budget allows.
+    /// More shared ranges (or distinct extents) than the memory budget allows.
     TooLarge,
+    /// The tree search cannot be used here (not root, not a subvolume, old kernel): the
+    /// caller may walk the files instead.
+    Unsupported(String),
     Io(String),
 }
 
@@ -218,6 +241,7 @@ impl std::fmt::Display for WalkError {
         match self {
             WalkError::Stopped => f.write_str("stopped"),
             WalkError::TooLarge => f.write_str("too many shared extents to measure"),
+            WalkError::Unsupported(e) => write!(f, "tree search not usable: {e}"),
             WalkError::Io(e) => f.write_str(e),
         }
     }
@@ -232,11 +256,18 @@ pub struct Walk {
 
 /// Limits of a measurement.
 pub struct Limits<'a> {
-    /// Most ranges kept for the set and, separately, for the kept members (16 bytes each;
-    /// a vector may hold twice that while it grows, so the peak is about 4 × 16 × this).
+    /// File walk: most ranges kept for the set and, separately, for the kept members (16
+    /// bytes each; a vector may hold twice that while it grows, so the peak is about
+    /// 4 × 16 × this).
     pub max_ranges: usize,
-    /// Asked every few hundred files: `true` stops the walk.
+    /// Tree search: most distinct extents of the set (8 bytes each; with the batch not yet
+    /// deduplicated the vector holds at most about twice that, plus one bit each for the
+    /// kept members' marks).
+    pub max_extents: usize,
+    /// Asked every few hundred files or every search batch: `true` stops the walk.
     pub stop: &'a dyn Fn() -> bool,
+    /// One line per subvolume searched (task log).
+    pub progress: &'a dyn Fn(&str),
 }
 
 /// Calls `each` with the extents of every regular file below `root` (same filesystem
@@ -293,8 +324,11 @@ pub fn walk(root: &Path, stop: &dyn Fn() -> bool, each: &mut dyn FnMut(&[Extent]
 pub struct SetMeasure {
     /// Bytes given back (estimate, see the module text).
     pub freed: u64,
-    /// Bytes only one file of the set references: given back for sure.
-    pub exclusive: u64,
+    /// Bytes only one file of the set references: given back for sure (file walk only; the
+    /// tree search does not know reference counts).
+    pub exclusive: Option<u64>,
+    /// Distinct data extents of the set (tree search only).
+    pub extents: u64,
     pub files: u64,
     pub unreadable: u64,
 }
@@ -304,13 +338,14 @@ pub struct SetMeasure {
 pub fn measure_set(set: &[PathBuf], keep: &[PathBuf], lim: &Limits) -> Result<SetMeasure, WalkError> {
     let mut shared = Ranges::default();
     let mut m = SetMeasure::default();
+    let mut exclusive = 0u64;
     for p in set {
         let w = walk(p, lim.stop, &mut |ex| {
             for e in ex {
                 if e.shared {
                     shared.push(e.physical, e.length);
                 } else {
-                    m.exclusive += e.length;
+                    exclusive += e.length;
                 }
             }
             if shared.len() > lim.max_ranges {
@@ -349,8 +384,345 @@ pub fn measure_set(set: &[PathBuf], keep: &[PathBuf], lim: &Limits) -> Result<Se
         }
         kept.merge();
     }
-    m.freed = m.exclusive + shared_bytes - shared.overlap(&kept);
+    m.freed = exclusive + shared_bytes - shared.overlap(&kept);
+    m.exclusive = Some(exclusive);
     Ok(m)
+}
+
+/// `BTRFS_IOC_TREE_SEARCH_V2` = `_IOWR(0x94, 17, struct btrfs_ioctl_search_args_v2)`
+/// (104-byte search key + 8-byte buffer size).
+const IOC_TREE_SEARCH_V2: u64 = (3 << 30) | (112 << 16) | (0x94 << 8) | 17;
+/// `BTRFS_EXTENT_DATA_KEY`: the item that maps a file range to a data extent.
+const EXTENT_DATA_KEY: u32 = 108;
+/// `BTRFS_FIRST_FREE_OBJECTID`: the first inode number (the subvolume's top directory).
+const FIRST_FREE_OBJECTID: u64 = 256;
+/// `BTRFS_FILE_EXTENT_INLINE`: data stored in the item itself (in metadata).
+const FILE_EXTENT_INLINE: u8 = 0;
+/// Result buffer of one search (the kernel caps it at 16 MiB; one item is at most a leaf).
+const SEARCH_BUF: usize = 1 << 20;
+/// `struct btrfs_ioctl_search_header`.
+const SEARCH_HEADER: usize = 32;
+/// Size of a `btrfs_file_extent_item` that points to an extent (packed, little endian).
+const FILE_EXTENT_ITEM: usize = 53;
+
+/// `struct btrfs_ioctl_search_key`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SearchKey {
+    tree_id: u64,
+    min_objectid: u64,
+    max_objectid: u64,
+    min_offset: u64,
+    max_offset: u64,
+    min_transid: u64,
+    max_transid: u64,
+    min_type: u32,
+    max_type: u32,
+    nr_items: u32,
+    unused: u32,
+    unused1: [u64; 4],
+}
+
+const KEY_WORDS: usize = std::mem::size_of::<SearchKey>() / 8;
+
+/// What a `btrfs_file_extent_item` holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileExtent {
+    /// Data inside the item (metadata, no data extent).
+    Inline,
+    /// A hole (`disk_bytenr == 0`).
+    Hole,
+    /// A regular or preallocated extent: its start and on-disk size (the whole extent,
+    /// whatever part of it this file range uses), and the length of the file range.
+    Data { bytenr: u64, len: u64, num_bytes: u64 },
+}
+
+/// One file range that points to a data extent, as a tree search finds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataRef {
+    pub ino: u64,
+    /// Start of the file range (the item's key offset).
+    pub offset: u64,
+    pub bytenr: u64,
+    /// On-disk size of the whole extent.
+    pub len: u64,
+    /// Length of the file range.
+    pub num_bytes: u64,
+}
+
+/// A btrfs key `(objectid, type, offset)`.
+pub type Key = (u64, u32, u64);
+
+/// Reads a `btrfs_file_extent_item`; `None`: too short or an unknown type.
+pub fn parse_file_extent(item: &[u8]) -> Option<FileExtent> {
+    let kind = *item.get(20)?;
+    if kind == FILE_EXTENT_INLINE {
+        return Some(FileExtent::Inline);
+    }
+    if kind > 2 || item.len() < FILE_EXTENT_ITEM {
+        return None;
+    }
+    let le = |a: usize| u64::from_le_bytes(item[a..a + 8].try_into().unwrap_or([0; 8]));
+    let (bytenr, len, num_bytes) = (le(21), le(29), le(45));
+    Some(if bytenr == 0 { FileExtent::Hole } else { FileExtent::Data { bytenr, len, num_bytes } })
+}
+
+/// A data extent as one sortable number: `bytenr / 4096` in the high 48 bits,
+/// `len / 4096` in the low 16 (data extents are at most 128 MiB). `None`: a layout this
+/// does not expect (then nothing is measured rather than something wrong).
+fn pack(bytenr: u64, len: u64) -> Option<u64> {
+    if !bytenr.is_multiple_of(4096) || !len.is_multiple_of(4096) || len == 0 {
+        return None;
+    }
+    let (b, l) = (bytenr >> 12, len >> 12);
+    (b < 1 << 48 && l < 1 << 16).then_some((b << 16) | l)
+}
+
+fn packed_len(k: u64) -> u64 {
+    (k & 0xffff) << 12
+}
+
+/// The key after `(objectid, type, offset)` in btrfs key order.
+fn next_key((o, t, off): (u64, u32, u64)) -> Option<(u64, u32, u64)> {
+    if off < u64::MAX {
+        Some((o, t, off + 1))
+    } else if t < 255 {
+        Some((o, t + 1, 0))
+    } else if o < u64::MAX {
+        Some((o + 1, 0, 0))
+    } else {
+        None
+    }
+}
+
+/// Walks the items of one search result: calls `each` for the data extent items, returns
+/// the last key seen.
+fn search_items(
+    buf: &[u8],
+    nr: usize,
+    each: &mut dyn FnMut(DataRef) -> Result<(), WalkError>,
+) -> Result<Option<Key>, WalkError> {
+    let bad = || WalkError::Io("malformed tree search result".into());
+    let (mut pos, mut last) = (0usize, None);
+    for _ in 0..nr {
+        let h = buf.get(pos..pos + SEARCH_HEADER).ok_or_else(bad)?;
+        let u64_at = |a: usize| u64::from_ne_bytes(h[a..a + 8].try_into().unwrap_or([0; 8]));
+        let u32_at = |a: usize| u32::from_ne_bytes(h[a..a + 4].try_into().unwrap_or([0; 4]));
+        let (objectid, offset, kind, len) = (u64_at(8), u64_at(16), u32_at(24), u32_at(28) as usize);
+        let item = buf.get(pos + SEARCH_HEADER..pos + SEARCH_HEADER + len).ok_or_else(bad)?;
+        pos += SEARCH_HEADER + len;
+        last = Some((objectid, kind, offset));
+        if kind == EXTENT_DATA_KEY {
+            match parse_file_extent(item) {
+                Some(FileExtent::Data { bytenr, len, num_bytes }) => each(DataRef { ino: objectid, offset, bytenr, len, num_bytes })?,
+                Some(_) => {}
+                None => return Err(WalkError::Io(format!("unknown file extent item (inode {objectid})"))),
+            }
+        }
+    }
+    Ok(last)
+}
+
+/// Calls `each(disk_bytenr, disk_num_bytes)` for every data extent reference of the files
+/// of subvolume `tree_id`, read from its tree with `BTRFS_IOC_TREE_SEARCH_V2` (metadata only,
+/// no file opened; needs `CAP_SYS_ADMIN`). `fd`: any descriptor on the filesystem. Returns
+/// the references seen. A first search that fails is [`WalkError::Unsupported`].
+pub fn subvolume_extents(
+    fd: &std::fs::File,
+    tree_id: u64,
+    stop: &dyn Fn() -> bool,
+    each: &mut dyn FnMut(u64, u64) -> Result<(), WalkError>,
+) -> Result<u64, WalkError> {
+    search_extent_items(fd, tree_id, (FIRST_FREE_OBJECTID, 0, 0), (u64::MAX, 255, u64::MAX), 0, stop, &mut |r| each(r.bytenr, r.len))
+}
+
+/// Calls `each` for the data extent items of subvolume `tree_id` with keys from `min` to
+/// `max` (btrfs key order), in tree blocks written at transaction `min_transid` or later:
+/// the kernel skips every subtree older than that (what `btrfs subvolume find-new` uses).
+/// Returns the items seen. A first search that fails is [`WalkError::Unsupported`].
+pub fn search_extent_items(
+    fd: &std::fs::File,
+    tree_id: u64,
+    min: Key,
+    max: Key,
+    min_transid: u64,
+    stop: &dyn Fn() -> bool,
+    each: &mut dyn FnMut(DataRef) -> Result<(), WalkError>,
+) -> Result<u64, WalkError> {
+    let mut words = vec![0u64; KEY_WORDS + 1 + SEARCH_BUF / 8];
+    let mut min = min;
+    let (mut n, mut first) = (0u64, true);
+    loop {
+        if stop() {
+            return Err(WalkError::Stopped);
+        }
+        let key = SearchKey {
+            tree_id,
+            min_objectid: min.0,
+            max_objectid: max.0,
+            min_offset: min.2,
+            max_offset: max.2,
+            min_transid,
+            max_transid: u64::MAX,
+            min_type: min.1,
+            max_type: max.1,
+            nr_items: u32::MAX,
+            unused: 0,
+            unused1: [0; 4],
+        };
+        // SAFETY: the buffer is 8-aligned and longer than the key
+        unsafe { std::ptr::write(words.as_mut_ptr() as *mut SearchKey, key) };
+        words[KEY_WORDS] = SEARCH_BUF as u64;
+        // SAFETY: the kernel writes the key back and at most `buf_size` bytes after it
+        if unsafe { libc::ioctl(fd.as_raw_fd(), IOC_TREE_SEARCH_V2 as _, words.as_mut_ptr()) } < 0 {
+            let e = io::Error::last_os_error().to_string();
+            return Err(if first { WalkError::Unsupported(e) } else { WalkError::Io(e) });
+        }
+        first = false;
+        // SAFETY: the key the kernel wrote back
+        let nr = unsafe { std::ptr::read(words.as_ptr() as *const SearchKey) }.nr_items as usize;
+        if nr == 0 {
+            return Ok(n);
+        }
+        // SAFETY: the words after the key and the size, viewed as bytes
+        let bytes = unsafe { std::slice::from_raw_parts(words.as_ptr().add(KEY_WORDS + 1) as *const u8, SEARCH_BUF) };
+        let last = search_items(bytes, nr, &mut |r| {
+            n += 1;
+            each(r)
+        })?;
+        match last.filter(|&k| k < max).and_then(next_key) {
+            Some(k) => min = k,
+            None => return Ok(n),
+        }
+    }
+}
+
+/// Distinct extents (packed), deduplicated in batches with a bounded vector.
+#[derive(Default)]
+struct ExtentSet {
+    v: Vec<u64>,
+    merged: usize,
+}
+
+impl ExtentSet {
+    fn push(&mut self, k: u64, max: usize) -> Result<(), WalkError> {
+        if self.v.len() == self.v.capacity() {
+            self.v.reserve_exact(self.merged.max(1 << 16));
+        }
+        self.v.push(k);
+        if self.v.len() >= 2 * self.merged + (1 << 16) {
+            self.merge();
+            if self.v.len() > max {
+                return Err(WalkError::TooLarge);
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self) {
+        self.v.sort_unstable();
+        self.v.dedup();
+        self.merged = self.v.len();
+    }
+
+    /// The last merge: sorted, distinct, within `max`.
+    fn finish(&mut self, max: usize) -> Result<(), WalkError> {
+        self.merge();
+        if self.v.len() > max {
+            return Err(WalkError::TooLarge);
+        }
+        self.v.shrink_to_fit();
+        Ok(())
+    }
+}
+
+/// The subvolumes to search: `(path, open top directory, tree id)`. Anything that is not a
+/// btrfs subvolume top directory makes the whole tree search unusable.
+fn open_trees(paths: &[PathBuf]) -> Result<Vec<(&PathBuf, std::fs::File, u64)>, WalkError> {
+    paths
+        .iter()
+        .map(|p| {
+            let unsupported = |e: String| WalkError::Unsupported(format!("{}: {e}", p.display()));
+            let f = crate::ioctl::open_dir(p).map_err(|e| unsupported(e.to_string()))?;
+            if !crate::ioctl::is_subvolume(&f) {
+                return Err(unsupported("not a subvolume".into()));
+            }
+            let id = crate::ioctl::subvol_info(&f).map_err(|e| unsupported(e.to_string()))?.root_id;
+            Ok((p, f, id))
+        })
+        .collect()
+}
+
+/// The core of [`measure_tree`] on extents already read: what `set_refs` frees while
+/// `keep_refs` stay (each a list of `(disk_bytenr, disk_num_bytes)` per member).
+pub fn freed_by_extents(set_refs: &[Vec<(u64, u64)>], keep_refs: &[Vec<(u64, u64)>], max_extents: usize) -> Result<(u64, u64), WalkError> {
+    let mut set = ExtentSet::default();
+    for r in set_refs {
+        for &(b, l) in r {
+            set.push(pack(b, l).ok_or_else(|| WalkError::Io(format!("unexpected extent {b}+{l}")))?, max_extents)?;
+        }
+    }
+    set.finish(max_extents)?;
+    let mut kept = vec![0u64; set.v.len().div_ceil(64)];
+    for r in keep_refs {
+        for &(b, l) in r {
+            mark(&set.v, &mut kept, b, l);
+        }
+    }
+    Ok((unmarked_bytes(&set.v, &kept), set.v.len() as u64))
+}
+
+fn mark(keys: &[u64], kept: &mut [u64], b: u64, l: u64) {
+    // an extent that does not pack cannot be one of the set's
+    if let Some(i) = pack(b, l).and_then(|k| keys.binary_search(&k).ok()) {
+        kept[i / 64] |= 1 << (i % 64);
+    }
+}
+
+fn unmarked_bytes(keys: &[u64], kept: &[u64]) -> u64 {
+    keys.iter().enumerate().filter(|(i, _)| kept[i / 64] & (1 << (i % 64)) == 0).map(|(_, &k)| packed_len(k)).sum()
+}
+
+/// What removing `set` frees by whole data extents, read from the subvolume trees (see the
+/// module text): the bytes of the distinct extents the set's files point to that no member
+/// of `keep` points to. All paths must be subvolume top directories.
+pub fn measure_tree(set: &[PathBuf], keep: &[PathBuf], lim: &Limits) -> Result<SetMeasure, WalkError> {
+    let set_trees = open_trees(set)?;
+    let keep_trees = open_trees(keep)?;
+    let mut ext = ExtentSet::default();
+    for (p, f, id) in &set_trees {
+        let n = subvolume_extents(f, *id, lim.stop, &mut |b, l| match pack(b, l) {
+            Some(k) => ext.push(k, lim.max_extents),
+            None => Err(WalkError::Io(format!("unexpected extent {b}+{l}"))),
+        })?;
+        (lim.progress)(&format!("{}: {n} extent references", p.display()));
+    }
+    ext.finish(lim.max_extents)?;
+    let mut m = SetMeasure { extents: ext.v.len() as u64, ..SetMeasure::default() };
+    let mut kept = vec![0u64; ext.v.len().div_ceil(64)];
+    if !ext.v.is_empty() {
+        for (p, f, id) in &keep_trees {
+            let n = subvolume_extents(f, *id, lim.stop, &mut |b, l| {
+                mark(&ext.v, &mut kept, b, l);
+                Ok(())
+            })?;
+            (lim.progress)(&format!("{} (kept): {n} extent references", p.display()));
+        }
+    }
+    m.freed = unmarked_bytes(&ext.v, &kept);
+    Ok(m)
+}
+
+/// What removing `set` frees: the tree search ([`measure_tree`]), or the file walk
+/// ([`measure_set`]) when the tree search cannot be used at all.
+pub fn measure(set: &[PathBuf], keep: &[PathBuf], lim: &Limits) -> Result<SetMeasure, WalkError> {
+    match measure_tree(set, keep, lim) {
+        Err(WalkError::Unsupported(e)) => {
+            (lim.progress)(&format!("{e}; walking the files instead"));
+            measure_set(set, keep, lim)
+        }
+        r => r,
+    }
 }
 
 /// `btrfs filesystem du -s --raw` style sizes of a plain directory tree (no extent sharing
@@ -447,5 +819,122 @@ mod tests {
         }
         let r = walk(d.path(), &|| true, &mut |_| Ok(()));
         assert_eq!(r.unwrap_err(), WalkError::Stopped);
+    }
+
+    /// A `btrfs_file_extent_item` as it is on disk.
+    fn item(kind: u8, bytenr: u64, len: u64) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&7u64.to_le_bytes()); // generation
+        v.extend_from_slice(&len.to_le_bytes()); // ram_bytes
+        v.extend_from_slice(&[0, 0, 0, 0]); // compression, encryption, other_encoding
+        v.push(kind);
+        if kind == FILE_EXTENT_INLINE {
+            v.extend_from_slice(b"inline data");
+            return v;
+        }
+        v.extend_from_slice(&bytenr.to_le_bytes());
+        v.extend_from_slice(&len.to_le_bytes());
+        v.extend_from_slice(&0u64.to_le_bytes()); // offset
+        v.extend_from_slice(&len.to_le_bytes()); // num_bytes
+        assert_eq!(v.len(), FILE_EXTENT_ITEM);
+        v
+    }
+
+    #[test]
+    fn file_extent_items_are_read() {
+        assert_eq!(parse_file_extent(&item(0, 0, 0)), Some(FileExtent::Inline));
+        assert_eq!(parse_file_extent(&item(1, 0, 8192)), Some(FileExtent::Hole));
+        assert_eq!(parse_file_extent(&item(1, 1 << 30, 8192)), Some(FileExtent::Data { bytenr: 1 << 30, len: 8192, num_bytes: 8192 }));
+        // preallocated extents take space too
+        assert_eq!(parse_file_extent(&item(2, 4096, 4096)), Some(FileExtent::Data { bytenr: 4096, len: 4096, num_bytes: 4096 }));
+        // short or unknown: nothing rather than a guess
+        assert_eq!(parse_file_extent(&item(1, 4096, 4096)[..40]), None);
+        let mut odd = item(1, 4096, 4096);
+        odd[20] = 9;
+        assert_eq!(parse_file_extent(&odd), None);
+        assert_eq!(parse_file_extent(&[]), None);
+    }
+
+    #[test]
+    fn packing_keeps_order_and_size() {
+        let a = pack(4096, 128 << 20).unwrap();
+        let b = pack(8192, 4096).unwrap();
+        assert!(a < b);
+        assert_eq!(packed_len(a), 128 << 20);
+        assert_eq!(packed_len(b), 4096);
+        assert_eq!(pack(4097, 4096), None);
+        assert_eq!(pack(4096, 0), None);
+        assert_eq!(pack(4096, 256 << 20), None);
+        assert_eq!(pack(1 << 60, 4096), None);
+        assert_eq!(next_key((5, 108, 7)), Some((5, 108, 8)));
+        assert_eq!(next_key((5, 108, u64::MAX)), Some((5, 109, 0)));
+        assert_eq!(next_key((5, 255, u64::MAX)), Some((6, 0, 0)));
+        assert_eq!(next_key((u64::MAX, 255, u64::MAX)), None);
+    }
+
+    fn header(objectid: u64, kind: u32, offset: u64, len: usize) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&1u64.to_ne_bytes());
+        v.extend_from_slice(&objectid.to_ne_bytes());
+        v.extend_from_slice(&offset.to_ne_bytes());
+        v.extend_from_slice(&kind.to_ne_bytes());
+        v.extend_from_slice(&(len as u32).to_ne_bytes());
+        v
+    }
+
+    #[test]
+    fn search_results_give_the_data_extents_only() {
+        let mut buf = Vec::new();
+        let inode = vec![0u8; 160];
+        buf.extend(header(257, 1, 0, inode.len())); // INODE_ITEM
+        buf.extend(&inode);
+        for (off, it) in [(0u64, item(1, 1 << 20, 8192)), (8192, item(1, 0, 4096)), (12288, item(0, 0, 0))] {
+            buf.extend(header(257, EXTENT_DATA_KEY, off, it.len()));
+            buf.extend(it);
+        }
+        buf.extend(header(258, 12, 256, 14)); // INODE_REF
+        buf.extend([0u8; 14]);
+        let mut seen = Vec::new();
+        let last = search_items(&buf, 5, &mut |r| {
+            seen.push(r);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, vec![DataRef { ino: 257, offset: 0, bytenr: 1 << 20, len: 8192, num_bytes: 8192 }]);
+        assert_eq!(last, Some((258, 12, 256)));
+        // a result cut short is an error, never a smaller count
+        assert!(search_items(&buf[..buf.len() - 4], 5, &mut |_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn freed_counts_whole_extents_once_and_only_without_kept_references() {
+        const M: u64 = 1 << 20;
+        // two snapshots of the set share extent A; B only in the set; C also kept (another
+        // file range of it); D only kept
+        let set = vec![vec![(10 * M, M), (20 * M, 2 * M), (30 * M, 4 * M)], vec![(10 * M, M), (30 * M, 4 * M)]];
+        let keep = vec![vec![(30 * M, 4 * M), (40 * M, M)]];
+        let (freed, n) = freed_by_extents(&set, &keep, 100).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(freed, M + 2 * M);
+        // nothing kept: everything distinct
+        assert_eq!(freed_by_extents(&set, &[], 100).unwrap().0, 7 * M);
+        // more distinct extents than allowed: not measured
+        let many: Vec<(u64, u64)> = (1..=200_000u64).map(|i| (i * 4096, 4096)).collect();
+        assert_eq!(freed_by_extents(&[many], &[], 1000).unwrap_err(), WalkError::TooLarge);
+        // an extent that does not fit the expected layout: not measured
+        assert!(freed_by_extents(&[vec![(4097, 4096)]], &[], 100).is_err());
+    }
+
+    #[test]
+    fn a_folder_that_is_not_a_subvolume_falls_back_to_the_file_walk() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("f"), b"x").unwrap();
+        let lines = std::sync::Mutex::new(Vec::new());
+        let progress = |l: &str| lines.lock().unwrap().push(l.to_string());
+        let lim = Limits { max_ranges: 1000, max_extents: 1000, stop: &|| false, progress: &progress };
+        assert!(matches!(measure_tree(&[d.path().to_path_buf()], &[], &lim), Err(WalkError::Unsupported(_))));
+        let m = measure(&[d.path().to_path_buf()], &[], &lim).unwrap();
+        assert_eq!(m.files, 1);
+        assert!(lines.lock().unwrap().iter().any(|l| l.contains("walking the files")));
     }
 }

@@ -562,6 +562,7 @@ fn preview_dialog(
                 <Modal title=Signal::derive(|| t("sp.preview_title").to_string()) on_close=close foot=foot>
                     <p class="dialog-text">{i18n::tn("sp.preview_text", n as u64, &[("size", &freed)])}</p>
                     {r.freed_at_least_bytes.map(|a| view! { <p class="small muted">{tf("sp.preview_at_least", &[("size", &i18n::bytes(a))])}</p> })}
+                    {r.timed_out_minutes.map(|m| view! { <p class="small muted">{i18n::tn("sp.preview_timed_out", m as u64, &[])}</p> })}
                     {(!r.refused.is_empty()).then(|| view! {
                         <p class="small"><strong>{tr("sp.kept_title")}</strong></p>
                         <ul class="space-refused">{refused}</ul>

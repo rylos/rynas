@@ -345,6 +345,9 @@ pub struct SpacePreview {
     pub done: bool,
     #[serde(default)]
     pub error: Option<String>,
+    /// Not measured: measuring took longer than this many minutes (the preview's limit).
+    #[serde(default)]
+    pub timed_out_minutes: Option<u32>,
 }
 
 /// `POST /api/v1/space/delete`: removes the snapshots (a task). `confirm` must be the

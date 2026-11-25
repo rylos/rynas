@@ -6476,6 +6476,8 @@ sp.measuring	Misura di cosa contengono questi snapshot…
 sp.preview_text.one	Eliminare {n} snapshot libera {size}.
 sp.preview_text.other	Eliminare {n} snapshot libera {size}.
 sp.preview_at_least	Almeno {size} è tenuto solo da questi snapshot.
+sp.preview_timed_out.one	Non misurato: la misura ha richiesto più di {n} minuto. Gli snapshot si possono eliminare lo stesso.
+sp.preview_timed_out.other	Non misurato: la misura ha richiesto più di {n} minuti. Gli snapshot si possono eliminare lo stesso.
 sp.kept_title	Tenuti:
 sp.unknown_snapshot	non è uno snapshot noto a Spazio
 sp.freed_later	Il filesystem libera lo spazio in background; l'attività finisce quando è libero.
