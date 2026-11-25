@@ -61,6 +61,8 @@ struct TestEnv {
     count_at_delete: Mutex<Vec<u32>>,
     /// The kept members of every measurement.
     kept: Mutex<Vec<Vec<PathBuf>>>,
+    /// The lines of every preview measurement.
+    lines: Mutex<Vec<Vec<rynas_btrfs::freed::Line>>>,
 }
 
 impl Env for TestEnv {
@@ -80,6 +82,11 @@ impl Env for TestEnv {
         }
         progress("measured");
         Measured { freed: Some(set.len() as u64 * 100), at_least: Some(set.len() as u64 * 10), method: rynas_api_types::space::MeasureMethod::ExtentWalk }
+    }
+    fn measure_lines(&self, mount: &Path, lines: &[rynas_btrfs::freed::Line], keep: &[PathBuf], stop: &dyn Fn() -> bool, progress: &dyn Fn(&str)) -> Measured {
+        self.lines.lock().unwrap().push(lines.to_vec());
+        let set: Vec<PathBuf> = lines.iter().flatten().filter(|x| x.1).map(|x| x.0.clone()).collect();
+        self.measure(mount, &set, keep, stop, progress)
     }
     fn tree_bytes(&self, path: &Path, stop: &dyn Fn() -> bool) -> Option<u64> {
         rynas_btrfs::extents::tree_bytes(path, stop).ok().map(|x| x.0)
@@ -149,6 +156,7 @@ fn world() -> World {
         state: state_dir.clone(),
         count_at_delete: Mutex::new(Vec::new()),
         kept: Mutex::new(Vec::new()),
+        lines: Mutex::new(Vec::new()),
     });
     let thumbs = dir.path().join("thumbs");
     std::fs::create_dir_all(thumbs.join("1000")).unwrap();
@@ -439,6 +447,11 @@ async fn the_preview_keeps_only_the_neighbours_and_has_a_time_limit() {
     kept.sort();
     assert_eq!(kept, vec![p("20261002T0100"), p("20261005T0100")]);
     assert!(lines.lock().unwrap().iter().any(|l| l == "measured"));
+    // the diff gets the whole line, oldest first, the selection marked
+    let line = w.env.lines.lock().unwrap().last().cloned().unwrap();
+    let marks: Vec<(String, bool)> = line[0].iter().map(|(x, s)| (x.file_name().unwrap().to_string_lossy().into_owned(), *s)).collect();
+    let want: Vec<(String, bool)> = ["01", "02", "03", "04", "05", "06"].iter().map(|d| (format!("old.202610{d}T0100"), *d == "03" || *d == "04")).collect();
+    assert_eq!((line.len(), marks), (1, want));
 
     // past the time limit: no number, and why
     let r = w.space.run_preview_within(&set, &|| false, &log, Duration::ZERO);

@@ -99,8 +99,81 @@ The answer is cached in `<state>/space/<volume>.json` and `<state>/space/_global
 
 ### 5.2 How "freed if removed" is computed
 
-`rynas_btrfs::extents::measure(set, keep)` reads the subvolume trees, not the files
-(`measure_tree`):
+Two methods: an exact one for the deletion preview, by diffs (§5.2.1), and a full walk for the
+scan of whole sources and as the preview's fallback (§5.2.2). Quota groups go first when they
+can answer (§5.2.3).
+
+#### 5.2.1 Preview: diffs and an exact check
+
+Reading whole snapshots is the wrong shape on a small NAS. Measured on a J4125 with disks (3.6
+GB RAM, cold cache, best-effort 7): one tree search pass over a PC backup snapshot of `@` (700k
+files, 4.5 M items) took 89 s, over `@home` (3.3 M files, 19.4 M items) 341 s, its neighbour
+466 s (no cache benefit). Deleting one `@home` snapshot by full walks of it and its two
+neighbours is over 15 minutes. `rynas_btrfs::freed::measure_lines` works on what changed:
+
+1. **Candidates.** The preview groups the selection by filesystem and by **line** of snapshots
+   (the name before the time: `@` and `@home` of a PC are two lines; names without a time are
+   one line), each oldest first. Every run of selected snapshots is compared, member by member,
+   with the **adjacent** snapshot on one side, the same side for the whole run: the older one
+   when the run has one, else the newer one. A comparison gives the file ranges of the member
+   whose extent differs from what the neighbour has at the same place (inode, offset):
+   - *tree blocks since a transaction*: a `TREE_SEARCH_V2` of the member with `min_transid`,
+     where the kernel skips every older subtree (what `btrfs subvolume find-new` uses). Used
+     when every older block of the member is a block of the older neighbour: the member is a
+     snapshot of it (`parent_uuid` = its UUID: an incremental receive) and it has not changed
+     since (`generation <= member's otransid`; then `min_transid` = the member's `otransid`),
+     or both are snapshots of one subvolume and the older one has not changed since it was
+     taken (`generation <= otransid`; `min_transid` = its `otransid`). A block still in a tree
+     was in it since it was written, so a block of the member older than that transaction was
+     in the neighbour too. A changed block also holds unchanged items, so for each inode found
+     the neighbour's items for the same offsets are read and the items it has at the same
+     place (same offset, same extent) are left out. Cost: the changed part of the tree, plus
+     one small search of the neighbour per changed inode;
+   - otherwise a **no-data send**: `BTRFS_IOC_SEND` with `BTRFS_SEND_FLAG_NO_FILE_DATA` and the
+     neighbour as parent (both read-only; a writable neighbour such as the live subvolume is
+     never used). `UPDATE_EXTENT`, `WRITE` and `CLONE` give `(path, offset, length)` of the
+     member; renames later in the stream are applied to the recorded paths (a send names files
+     by where they are at that point: orphan names `o257-…`, folders not moved yet), the final
+     path is opened inside the member without following links for the inode, and a tree search
+     of that inode's `EXTENT_DATA` items gives the extents of the ranges. A recorded file
+     removed later in the stream, or a path not found, makes the method give up (below). Cost:
+     the kernel's tree compare (the changed part), its clone lookup per changed extent, then
+     one small tree search per changed file.
+
+   Why nothing is missed: take an extent `E` only selected snapshots reference, and a member
+   that references it at some place. Walk the run towards the compared side while the next
+   snapshot references `E` at the same place. Each snapshot on the way references `E`, so it
+   is selected; the walk ends at a member whose compared neighbour does not have `E` at that
+   place, and that member's comparison reports the range. It cannot step past the run's end:
+   the neighbour there is not selected, and it would reference `E`. Hence one side per run is
+   enough, and it must be the same side for the whole run.
+2. **Extents.** The candidates are deduplicated by their start (`disk_bytenr`): btrfs frees
+   an extent only when nothing references any part of it.
+3. **Exact check.** `BTRFS_IOC_LOGICAL_INO_V2` with `IGNORE_OFFSET` lists every `(inode,
+   offset, root)` referencing a candidate, across the whole filesystem. A candidate is freed
+   when every root is a selected snapshot. This is exact also for data reflinked or
+   deduplicated into other shares or other snapshots: the over-estimates of the full walk do
+   not apply. A list that does not fit 16 MiB (the buffer grows from 64 KiB) counts as kept,
+   with a line in the task log. Cost: one back-reference walk per candidate.
+
+The number is the on-disk size of the extents freed (compressed extents count what they take).
+Not counted, so it can only be low by them: the metadata only the selection holds (tree
+blocks, inline data of small files). A run with no neighbour that can be compared on either
+side (a whole line selected, or both neighbours writable or missing), a send that fails, or a
+lost path makes the preview use the full walk of §5.2.2 for that filesystem, with the selection
+as the set and, as kept members, the live subvolume and the snapshot right before and right
+after every run of selected ones.
+
+Memory: one entry per distinct candidate extent (capped at 8 Mi; more is "not measured"), a
+send stream of at most 512 MiB. Time: 5 minutes for a preview (`timed_out_minutes` past it,
+never a partial number), the task's cancel; the task log has a line per comparison and the
+count of candidates and freed extents.
+
+#### 5.2.2 Full walk (scan, preview fallback)
+
+The scan measures whole sources (all snapshots against the live subvolume, which is writable:
+nothing to compare with), so it keeps the full walk. `rynas_btrfs::extents::measure(set,
+keep)` reads the subvolume trees, not the files (`measure_tree`):
 
 1. `BTRFS_IOC_TREE_SEARCH_V2` (root privileges) over each subvolume's tree gives every
    `EXTENT_DATA` item: each file range and the data extent it points to (`disk_bytenr`,

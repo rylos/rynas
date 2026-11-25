@@ -433,9 +433,25 @@ pub enum FileExtent {
     /// A hole (`disk_bytenr == 0`).
     Hole,
     /// A regular or preallocated extent: its start and on-disk size (the whole extent,
-    /// whatever part of it this file range uses).
-    Data { bytenr: u64, len: u64 },
+    /// whatever part of it this file range uses), and the length of the file range.
+    Data { bytenr: u64, len: u64, num_bytes: u64 },
 }
+
+/// One file range that points to a data extent, as a tree search finds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataRef {
+    pub ino: u64,
+    /// Start of the file range (the item's key offset).
+    pub offset: u64,
+    pub bytenr: u64,
+    /// On-disk size of the whole extent.
+    pub len: u64,
+    /// Length of the file range.
+    pub num_bytes: u64,
+}
+
+/// A btrfs key `(objectid, type, offset)`.
+pub type Key = (u64, u32, u64);
 
 /// Reads a `btrfs_file_extent_item`; `None`: too short or an unknown type.
 pub fn parse_file_extent(item: &[u8]) -> Option<FileExtent> {
@@ -447,8 +463,8 @@ pub fn parse_file_extent(item: &[u8]) -> Option<FileExtent> {
         return None;
     }
     let le = |a: usize| u64::from_le_bytes(item[a..a + 8].try_into().unwrap_or([0; 8]));
-    let (bytenr, len) = (le(21), le(29));
-    Some(if bytenr == 0 { FileExtent::Hole } else { FileExtent::Data { bytenr, len } })
+    let (bytenr, len, num_bytes) = (le(21), le(29), le(45));
+    Some(if bytenr == 0 { FileExtent::Hole } else { FileExtent::Data { bytenr, len, num_bytes } })
 }
 
 /// A data extent as one sortable number: `bytenr / 4096` in the high 48 bits,
@@ -479,13 +495,13 @@ fn next_key((o, t, off): (u64, u32, u64)) -> Option<(u64, u32, u64)> {
     }
 }
 
-/// Walks the items of one search result: calls `each(disk_bytenr, disk_num_bytes)` for the
-/// data extent items, returns the last key seen.
+/// Walks the items of one search result: calls `each` for the data extent items, returns
+/// the last key seen.
 fn search_items(
     buf: &[u8],
     nr: usize,
-    each: &mut dyn FnMut(u64, u64) -> Result<(), WalkError>,
-) -> Result<Option<(u64, u32, u64)>, WalkError> {
+    each: &mut dyn FnMut(DataRef) -> Result<(), WalkError>,
+) -> Result<Option<Key>, WalkError> {
     let bad = || WalkError::Io("malformed tree search result".into());
     let (mut pos, mut last) = (0usize, None);
     for _ in 0..nr {
@@ -498,7 +514,7 @@ fn search_items(
         last = Some((objectid, kind, offset));
         if kind == EXTENT_DATA_KEY {
             match parse_file_extent(item) {
-                Some(FileExtent::Data { bytenr, len }) => each(bytenr, len)?,
+                Some(FileExtent::Data { bytenr, len, num_bytes }) => each(DataRef { ino: objectid, offset, bytenr, len, num_bytes })?,
                 Some(_) => {}
                 None => return Err(WalkError::Io(format!("unknown file extent item (inode {objectid})"))),
             }
@@ -517,8 +533,24 @@ pub fn subvolume_extents(
     stop: &dyn Fn() -> bool,
     each: &mut dyn FnMut(u64, u64) -> Result<(), WalkError>,
 ) -> Result<u64, WalkError> {
+    search_extent_items(fd, tree_id, (FIRST_FREE_OBJECTID, 0, 0), (u64::MAX, 255, u64::MAX), 0, stop, &mut |r| each(r.bytenr, r.len))
+}
+
+/// Calls `each` for the data extent items of subvolume `tree_id` with keys from `min` to
+/// `max` (btrfs key order), in tree blocks written at transaction `min_transid` or later:
+/// the kernel skips every subtree older than that (what `btrfs subvolume find-new` uses).
+/// Returns the items seen. A first search that fails is [`WalkError::Unsupported`].
+pub fn search_extent_items(
+    fd: &std::fs::File,
+    tree_id: u64,
+    min: Key,
+    max: Key,
+    min_transid: u64,
+    stop: &dyn Fn() -> bool,
+    each: &mut dyn FnMut(DataRef) -> Result<(), WalkError>,
+) -> Result<u64, WalkError> {
     let mut words = vec![0u64; KEY_WORDS + 1 + SEARCH_BUF / 8];
-    let mut min = (FIRST_FREE_OBJECTID, 0u32, 0u64);
+    let mut min = min;
     let (mut n, mut first) = (0u64, true);
     loop {
         if stop() {
@@ -527,13 +559,13 @@ pub fn subvolume_extents(
         let key = SearchKey {
             tree_id,
             min_objectid: min.0,
-            max_objectid: u64::MAX,
+            max_objectid: max.0,
             min_offset: min.2,
-            max_offset: u64::MAX,
-            min_transid: 0,
+            max_offset: max.2,
+            min_transid,
             max_transid: u64::MAX,
             min_type: min.1,
-            max_type: 255,
+            max_type: max.1,
             nr_items: u32::MAX,
             unused: 0,
             unused1: [0; 4],
@@ -554,11 +586,11 @@ pub fn subvolume_extents(
         }
         // SAFETY: the words after the key and the size, viewed as bytes
         let bytes = unsafe { std::slice::from_raw_parts(words.as_ptr().add(KEY_WORDS + 1) as *const u8, SEARCH_BUF) };
-        let last = search_items(bytes, nr, &mut |b, l| {
+        let last = search_items(bytes, nr, &mut |r| {
             n += 1;
-            each(b, l)
+            each(r)
         })?;
-        match last.and_then(next_key) {
+        match last.filter(|&k| k < max).and_then(next_key) {
             Some(k) => min = k,
             None => return Ok(n),
         }
@@ -812,9 +844,9 @@ mod tests {
     fn file_extent_items_are_read() {
         assert_eq!(parse_file_extent(&item(0, 0, 0)), Some(FileExtent::Inline));
         assert_eq!(parse_file_extent(&item(1, 0, 8192)), Some(FileExtent::Hole));
-        assert_eq!(parse_file_extent(&item(1, 1 << 30, 8192)), Some(FileExtent::Data { bytenr: 1 << 30, len: 8192 }));
+        assert_eq!(parse_file_extent(&item(1, 1 << 30, 8192)), Some(FileExtent::Data { bytenr: 1 << 30, len: 8192, num_bytes: 8192 }));
         // preallocated extents take space too
-        assert_eq!(parse_file_extent(&item(2, 4096, 4096)), Some(FileExtent::Data { bytenr: 4096, len: 4096 }));
+        assert_eq!(parse_file_extent(&item(2, 4096, 4096)), Some(FileExtent::Data { bytenr: 4096, len: 4096, num_bytes: 4096 }));
         // short or unknown: nothing rather than a guess
         assert_eq!(parse_file_extent(&item(1, 4096, 4096)[..40]), None);
         let mut odd = item(1, 4096, 4096);
@@ -863,15 +895,15 @@ mod tests {
         buf.extend(header(258, 12, 256, 14)); // INODE_REF
         buf.extend([0u8; 14]);
         let mut seen = Vec::new();
-        let last = search_items(&buf, 5, &mut |b, l| {
-            seen.push((b, l));
+        let last = search_items(&buf, 5, &mut |r| {
+            seen.push(r);
             Ok(())
         })
         .unwrap();
-        assert_eq!(seen, vec![(1 << 20, 8192)]);
+        assert_eq!(seen, vec![DataRef { ino: 257, offset: 0, bytenr: 1 << 20, len: 8192, num_bytes: 8192 }]);
         assert_eq!(last, Some((258, 12, 256)));
         // a result cut short is an error, never a smaller count
-        assert!(search_items(&buf[..buf.len() - 4], 5, &mut |_, _| Ok(())).is_err());
+        assert!(search_items(&buf[..buf.len() - 4], 5, &mut |_| Ok(())).is_err());
     }
 
     #[test]
