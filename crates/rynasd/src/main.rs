@@ -853,6 +853,10 @@ fn main() -> std::io::Result<()> {
             .open(&rynasd::storage_ops::health_acks_file(&args.state_dir));
         // the storage's power states keep the folder sizes from spinning up sleeping disks
         let opened = open_config(&args, system, Some(state.storage.clone()))?;
+        // the boot flash of the detected model is a system disk too (the core ids apply always)
+        state
+            .storage
+            .add_boot_flash_ids(&opened.modules.system_disk_usb_ids());
         let config = Arc::new(opened.config);
         let tasks = TaskManager::new(
             args.state_dir.join("tasks"),

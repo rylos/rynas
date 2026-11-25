@@ -481,6 +481,10 @@ pub(crate) fn check_new_disk(
     if usage.system {
         let m = format!("{name}: holds the operating system");
         fail(p, C::SystemDisk, field, Some(name), m);
+    } else if d.system {
+        // the inventory marks the boot flash (by its USB ids): lsblk sees nothing mounted
+        let m = format!("{name}: is the machine's boot flash");
+        fail(p, C::SystemDisk, field, Some(name), m);
     } else if usage.in_use {
         let m = format!("{name}: in use ({})", usage.used_by.join(", "));
         fail(p, C::DiskInUse, field, Some(name), m);
@@ -1901,6 +1905,34 @@ mod tests {
         assert!(has(PlanIssueCode::SystemDisk, "disks", Some("nvme0n1")));
         assert!(has(PlanIssueCode::NoSuchDisk, "disks", Some("sdz")));
         assert!(has(PlanIssueCode::DiskSelectedTwice, "disks", Some("sdd")));
+    }
+
+    /// The boot flash (marked by the inventory from its USB ids, nothing mounted on it) is
+    /// refused server side like the system disk, whatever the page sent.
+    #[test]
+    fn the_boot_flash_is_never_erased() {
+        let mut inv = nas_inventory();
+        let sdd = inv.disks.iter_mut().find(|d| d.name == "sdd").unwrap();
+        crate::inventory::mark_boot_flash(sdd);
+        let p = plan_volume(
+            &inv,
+            &VolumePlanRequest {
+                disks: vec!["sdd".into(), "sde".into()],
+                level: RaidLevel::Raid1,
+                encrypt: false,
+                compress: false,
+                label: "backup".into(),
+            },
+        );
+        assert!(!p.valid);
+        assert!(p.steps.is_empty());
+        assert!(
+            p.issues.iter().any(|i| i.code == PlanIssueCode::SystemDisk
+                && i.subject.as_deref() == Some("sdd")),
+            "{:?}",
+            p.issues
+        );
+        assert!(p.errors.join("\n").contains("sdd: is the machine's boot flash"));
     }
 
     #[test]

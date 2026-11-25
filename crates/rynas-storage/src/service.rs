@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::health_ack::{AckStore, DiskAcks, DriveId};
 use rynas_api_types::storage::{
-    BtrfsFilesystem, DiskDetail, DiskKind, DiskSummary, GrowPlanRequest, HealthAckCode,
+    BOOT_FLASH_USB_IDS, BtrfsFilesystem, DiskDetail, DiskKind, DiskSummary, GrowPlanRequest, HealthAckCode,
     HealthAckResult,
     MdArray, NodeKind,
     PowerState, ReplacePlanRequest, ScrubPlanRequest, StoragePlan, StorageTree, Subvolume,
@@ -114,6 +114,9 @@ pub struct Storage {
     /// The recorded volumes (`storage.volumes`), set by rynasd after each change: the
     /// flexible RAID detection checks every tier is recorded.
     records: Mutex<Option<Vec<VolumeRecord>>>,
+    /// USB `(vendor, product)` ids of the machine's own boot flash: the core list
+    /// ([`BOOT_FLASH_USB_IDS`]) and what the hardware modules add.
+    boot_flash_ids: Mutex<Vec<(String, String)>>,
 }
 
 fn asleep(p: PowerState) -> bool {
@@ -156,7 +159,51 @@ impl Storage {
             cache: Mutex::new(Cache::default()),
             acks: AckStore::memory(),
             records: Mutex::new(None),
+            boot_flash_ids: Mutex::new(
+                BOOT_FLASH_USB_IDS
+                    .iter()
+                    .map(|(v, p)| (v.to_string(), p.to_string()))
+                    .collect(),
+            ),
         }
+    }
+
+    /// Adds the boot flash USB ids of the hardware modules to the core list: such a disk is a
+    /// system disk ([`inventory::mark_boot_flash`]).
+    pub fn add_boot_flash_ids(&self, ids: &[(String, String)]) {
+        {
+            let mut cur = self.boot_flash_ids.lock().unwrap();
+            for (v, p) in ids {
+                if !inventory::usb_id_matches(&cur, v, p) {
+                    cur.push((v.to_lowercase(), p.to_lowercase()));
+                }
+            }
+        }
+        self.cache.lock().unwrap().inventory = None;
+    }
+
+    /// The USB `(vendor, product)` of the device a disk hangs off: the first directory up its
+    /// physical sysfs path with `idVendor` and `idProduct`. None for a disk not on USB.
+    fn usb_id(&self, kname: &str) -> Option<(String, String)> {
+        let mut dir = self.host.canonical(&format!("/sys/block/{kname}/device"))?;
+        for _ in 0..8 {
+            let cut = dir.rfind('/').filter(|i| *i > 0)?;
+            dir.truncate(cut);
+            if let (Some(v), Some(p)) = (
+                self.host.read(&format!("{dir}/idVendor")),
+                self.host.read(&format!("{dir}/idProduct")),
+            ) {
+                return Some((v.trim().to_string(), p.trim().to_string()));
+            }
+        }
+        None
+    }
+
+    /// The disk is the machine's own boot flash (by its USB ids).
+    fn is_boot_flash(&self, kname: &str) -> bool {
+        self.usb_id(kname).is_some_and(|(v, p)| {
+            inventory::usb_id_matches(&self.boot_flash_ids.lock().unwrap(), &v, &p)
+        })
     }
 
     /// The recorded volumes (`storage.volumes`): the next inventory checks the flexible RAID
@@ -461,6 +508,9 @@ impl Storage {
     ) -> DiskSummary {
         let mut s = inventory::summary(d, g, smart, acks, power, now, zoned);
         s.smart_unsupported = smart.is_none() && self.smart_unsupported(d);
+        if self.is_boot_flash(&d.kname) {
+            inventory::mark_boot_flash(&mut s);
+        }
         s
     }
 
@@ -1208,6 +1258,46 @@ mod tests {
         );
         let sda = disks.iter().find(|d| d.name == "sda").unwrap();
         assert_eq!(sda.health, HealthVerdict::Healthy);
+    }
+
+    /// The machine's boot flash on the USB bus, reported as a fixed disk (hotplug 0, as on a
+    /// DS2415+): known by its USB ids without any hardware module, it is a system disk and
+    /// no plan takes it. A module's ids count once added; other USB disks are untouched.
+    #[test]
+    fn the_boot_flash_is_a_system_disk() {
+        let usb = |h: &mut FakeHost, disk: &str, port: &str, vendor: &str, product: &str| {
+            let dev = format!("/sys/devices/pci0000:00/0000:00:16.0/usb1/{port}");
+            h.links.insert(
+                format!("/sys/block/{disk}/device"),
+                format!("{dev}/{port}:1.0/host6/target6:0:0/6:0:0:0"),
+            );
+            h.file(&format!("{dev}/idVendor"), &format!("{vendor}\n"));
+            h.file(&format!("{dev}/idProduct"), &format!("{product}\n"));
+        };
+        let mut h = host();
+        usb(&mut h, "sdd", "1-1", "f400", "f400");
+        usb(&mut h, "sde", "1-2", "1005", "b155");
+        let s = Storage::new(Arc::new(h));
+        let disks = s.disks().unwrap();
+        let sdd = disks.iter().find(|d| d.name == "sdd").unwrap();
+        assert!(sdd.system && !sdd.removable && !sdd.in_use, "{sdd:?}");
+        assert_eq!(sdd.used_by, [inventory::BOOT_FLASH]);
+        let sde = disks.iter().find(|d| d.name == "sde").unwrap();
+        assert!(!sde.system, "a model's id is not in the core list");
+        let req = |disk: &str| VolumePlanRequest {
+            disks: vec![disk.into()],
+            level: rynas_api_types::storage::RaidLevel::Single,
+            encrypt: false,
+            compress: false,
+            label: "vol9".into(),
+        };
+        let p = s.plan_volume(&req("sdd")).unwrap();
+        assert!(!p.valid && p.errors.iter().any(|e| e.contains("boot flash")), "{:?}", p.errors);
+        // the hardware module of the model adds its own id
+        s.add_boot_flash_ids(&[("1005".into(), "B155".into())]);
+        let sde = s.disks().unwrap().into_iter().find(|d| d.name == "sde").unwrap();
+        assert!(sde.system);
+        assert_eq!(sde.used_by, [inventory::BOOT_FLASH, "LUKS (locked)"]);
     }
 
     #[test]

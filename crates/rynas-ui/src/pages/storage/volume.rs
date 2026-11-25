@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_params_map;
 use rynas_api_types::storage::{
-    DiskSummary, FlexBlocker, FlexLayout, FlexPending, MdArray, ScrubState, ScrubStatus, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings,
+    DiskContent, DiskSummary, FlexBlocker, FlexLayout, FlexPending, MdArray, ScrubState, ScrubStatus, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings,
     VolumeSettingsState,
 };
 use rynas_api_types::{TaskInfo, TaskStarted, TaskStatus};
@@ -258,7 +258,7 @@ pub fn erase_box(names: &[String]) -> AnyView {
                 {names.iter().map(|n| {
                     let d = untrack(|| s.disk(n));
                     let facts = d.map(|d| {
-                        [d.model.trim().to_string(), d.serial.trim().to_string(), i18n::bytes_si(d.size)]
+                        [d.model.trim().to_string(), d.serial.trim().to_string(), i18n::bytes_si(d.size), contents_text(&d).unwrap_or_default()]
                             .into_iter()
                             .filter(|x| !x.is_empty())
                             .collect::<Vec<_>>()
@@ -1102,6 +1102,7 @@ pub fn disk_checklist(disks: Vec<rynas_api_types::storage::DiskSummary>, chosen:
                             <span class="pick-main">
                                 <span class="strong">{disk_title(&d)}</span>
                                 <span class="muted small mono">{d.serial.clone()}</span>
+                                {contents_text(&d).map(|what| view! { <span class="small warn-text">{tf("wiz.holds", &[("what", &what)])}</span> })}
                             </span>
                             {d.smr.then(|| view! { <span class="chip warn" title=t("sto.smr_hint")>"SMR"</span> })}
                             {(!d.used_by.is_empty()).then(|| {
@@ -1116,6 +1117,70 @@ pub fn disk_checklist(disks: Vec<rynas_api_types::storage::DiskSummary>, chosen:
         </ul>
     }
     .into_any()
+}
+
+/// One signature on a drive in words: "btrfs “data”", "LUKS", "RAID member “nas:2”",
+/// "partition sdd1" (a partition without one).
+pub fn content_text(c: &DiskContent) -> String {
+    let what = match c.fstype.as_str() {
+        "" => return tf("sto.content_part", &[("name", &c.device)]),
+        "crypto_LUKS" => t("sto.content_luks").to_string(),
+        "linux_raid_member" => t("sto.content_md").to_string(),
+        "LVM2_member" => t("sto.content_lvm").to_string(),
+        fs => fs.to_string(),
+    };
+    match &c.label {
+        Some(l) => tf("sto.content_label", &[("what", &what), ("label", l)]),
+        None => what,
+    }
+}
+
+/// What a drive that is not in use still holds, in words; None for a blank drive.
+pub fn contents_text(d: &DiskSummary) -> Option<String> {
+    (!d.contents.is_empty()).then(|| d.contents.iter().map(content_text).collect::<Vec<_>>().join(", "))
+}
+
+/// The chosen drives that still hold something, each with its own tick ("I know sdd holds
+/// btrfs “data” and everything on it will be erased"), in the look of the erase confirmation.
+/// Nothing when every chosen drive is blank.
+pub fn data_acks(chosen: Signal<Vec<String>>, acked: RwSignal<Vec<String>>) -> impl IntoView {
+    let s = super::sto();
+    move || {
+        let chosen = chosen.get();
+        // a drive no longer chosen loses its tick: choosing it again asks again
+        if acked.with_untracked(|a| a.iter().any(|x| !chosen.contains(x))) {
+            acked.update(|a| a.retain(|x| chosen.contains(x)));
+        }
+        let holding: Vec<(String, String)> = chosen
+            .into_iter()
+            .filter_map(|n| untrack(|| s.disk(&n)).and_then(|d| contents_text(&d)).map(|what| (n, what)))
+            .collect();
+        (!holding.is_empty()).then(|| view! {
+            <div class="erase-box" role="group">
+                <strong><Icon icon=icons::TRIANGLE_ALERT size=16 />{tr("wiz.erase_title")}</strong>
+                {holding.into_iter().map(|(n, what)| {
+                    let text = tf("wiz.data_ack", &[("disk", &n), ("what", &what)]);
+                    let n2 = n.clone();
+                    view! {
+                        <label class="check">
+                            <input type="checkbox"
+                                prop:checked=move || acked.with(|a| a.contains(&n))
+                                on:change=move |ev| {
+                                    let on = event_target_checked(&ev);
+                                    acked.update(|a| { a.retain(|x| x != &n2); if on { a.push(n2.clone()); } });
+                                } />
+                            <span>{text}</span>
+                        </label>
+                    }
+                }).collect_view()}
+            </div>
+        })
+    }
+}
+
+/// Every chosen drive that holds something has its tick.
+pub fn data_acked(s: Sto, chosen: &[String], acked: RwSignal<Vec<String>>) -> bool {
+    chosen.iter().all(|n| acked.with(|a| a.contains(n)) || s.disk(n).is_none_or(|d| d.contents.is_empty()))
 }
 
 fn serials_for(s: Sto, names: &[String]) -> Vec<String> {
@@ -1152,6 +1217,8 @@ fn GrowDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let chosen = RwSignal::new(Vec::<String>::new());
+    // the chosen drives that hold something, ticked as known to be erased
+    let acked = RwSignal::new(Vec::<String>::new());
     let level = RwSignal::new(String::new());
     let md = vol.md.clone().unwrap_or_default();
     let current = md_level(&md);
@@ -1193,7 +1260,7 @@ fn GrowDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
         .with_own(chosen.into());
     let foot = move || match stage.get() {
         Stage::Form => save_bar_with(SaveBar {
-            can_save: Signal::derive(move || !chosen.with(Vec::is_empty)),
+            can_save: Signal::derive(move || !chosen.with(Vec::is_empty) && chosen.with(|c| data_acked(s, c, acked))),
             ..SaveBar::new(busy, "sto.review_plan", on_close, Callback::new(review))
         }),
         _ => flow.foot(),
@@ -1204,6 +1271,7 @@ fn GrowDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
                 Stage::Form => view! {
                     <p class="muted small">{tr(if flex { "sto.grow_text_flex" } else { "sto.grow_text" })}</p>
                     {disk_checklist(free_disks(s), chosen)}
+                    {data_acks(chosen.into(), acked)}
                     {(!flex).then(|| view! {
                     <label class="field">
                         <span class="field-label">{tr("sto.level")}</span>
@@ -1276,6 +1344,9 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
     let flex = vol.flex.is_some();
     let old = RwSignal::new(options.first().map(|o| o.0.clone()).unwrap_or_default());
     let new_disk = RwSignal::new(String::new());
+    // the new drive, when it holds something, ticked as known to be erased
+    let acked = RwSignal::new(Vec::<String>::new());
+    let new_list = Signal::derive(move || vec![new_disk.get()]);
     let array = StoredValue::new(md.name.clone());
     let exec_url = StoredValue::new(vol_url(&vol.id, "replace"));
     let id = StoredValue::new(vol.id.clone());
@@ -1309,7 +1380,9 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
         .with_own(Signal::derive(move || vec![new_disk.get()]));
     let foot = move || match stage.get() {
         Stage::Form => save_bar_with(SaveBar {
-            can_save: Signal::derive(move || !new_disk.with(String::is_empty) && !old.with(String::is_empty)),
+            can_save: Signal::derive(move || {
+                !new_disk.with(String::is_empty) && !old.with(String::is_empty) && new_list.with(|n| data_acked(s, n, acked))
+            }),
             ..SaveBar::new(busy, "sto.review_plan", on_close, Callback::new(review))
         }),
         _ => flow.foot(),
@@ -1333,6 +1406,7 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
                         </select>
                     </label>
                     {free.with_value(Vec::is_empty).then(|| view! { <p class="muted small">{tr("sto.no_free")}</p> })}
+                    {data_acks(new_list, acked)}
                     {form_error(error)}
                 }
                 .into_any(),

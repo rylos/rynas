@@ -15,7 +15,7 @@ use rynas_api_types::capacity::MIN_TIER;
 
 use super::calc::CapacityCalculator;
 use super::plan::{cap_bar, plan_errors, plan_view, plan_warnings, tier_preview, tolerance_text};
-use super::volume::{RevealDialog, Stage, disk_checklist, erase_box, level_json, start_task};
+use super::volume::{RevealDialog, Stage, data_acked, data_acks, disk_checklist, erase_box, level_json, start_task};
 use super::{free_disks, level_key, loading, serial_of, use_refresh, valid_label, volumes};
 use crate::api;
 use crate::form::{form_error, spinner};
@@ -135,6 +135,8 @@ pub fn CreateVolume() -> impl IntoView {
     let s = use_refresh();
     let step = RwSignal::new(1u8);
     let chosen = RwSignal::new(Vec::<String>::new());
+    // the chosen drives that hold something, ticked as known to be erased
+    let acked = RwSignal::new(Vec::<String>::new());
     let level = RwSignal::new(RaidLevel::Single);
     let label = RwSignal::new(String::new());
     let encrypt = RwSignal::new(false);
@@ -248,7 +250,7 @@ pub fn CreateVolume() -> impl IntoView {
         }
     };
     let can_next = move || match step.get() {
-        1 => !chosen.with(Vec::is_empty),
+        1 => !chosen.with(Vec::is_empty) && chosen.with(|c| data_acked(s, c, acked)),
         2 => {
             let l = level.get();
             plans.with(|p| p.iter().any(|(x, r)| *x == l && matches!(r, Some(Ok(p)) if p.valid)))
@@ -314,7 +316,7 @@ pub fn CreateVolume() -> impl IntoView {
                 <section class="card wizard">
                     {move || match stage.get() {
                         Stage::Form | Stage::Plan(_) => match step.get() {
-                            1 => untrack(|| step_disks(chosen)).into_any(),
+                            1 => untrack(|| step_disks(chosen, acked)).into_any(),
                             2 => step_level(chosen, level, plans).into_any(),
                             3 => step_options(label, encrypt, pass1, pass2, compress, label_err, pass_err).into_any(),
                             _ => step_review(final_plan, label, typed, chosen, plan_final).into_any(),
@@ -402,7 +404,7 @@ pub fn CreateVolume() -> impl IntoView {
     }
 }
 
-fn step_disks(chosen: RwSignal<Vec<String>>) -> impl IntoView {
+fn step_disks(chosen: RwSignal<Vec<String>>, acked: RwSignal<Vec<String>>) -> impl IntoView {
     let s = super::sto();
     let free = free_disks(s);
     let in_use = s.disks.with(|d| d.as_ref().map(|d| d.len()).unwrap_or(0)) - free.len();
@@ -411,6 +413,7 @@ fn step_disks(chosen: RwSignal<Vec<String>>) -> impl IntoView {
         <h2 class="section-title"><Icon icon=icons::HARD_DRIVE size=16 />{tr("wiz.pick_disks")}</h2>
         <p class="muted small">{tr("wiz.pick_text")}</p>
         {disk_checklist(free, chosen)}
+        {data_acks(chosen.into(), acked)}
         {(in_use > 0).then(|| view! { <p class="muted small free-note"><Icon icon=icons::INFO size=14 />{tf("wiz.in_use", &[("n", &in_use.to_string())])}</p> })}
         <p class=move || if chosen.with(Vec::is_empty) { "wiz-sum muted" } else { "wiz-sum" } aria-live="polite">
             {move || match chosen.with(Vec::len) {

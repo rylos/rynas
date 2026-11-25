@@ -512,7 +512,7 @@ Types in `rynas_api_types::storage`. Nothing here changes the system: plans only
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/api/v1/storage/disks` | — | `Vec<DiskSummary>`: model, serial, WWN, size, kind (hdd/ssd/nvme), transport, bay, power state, temperature, health verdict with reasons, `used_by`, SMR |
+| GET | `/api/v1/storage/disks` | — | `Vec<DiskSummary>`: model, serial, WWN, size, kind (hdd/ssd/nvme), transport, bay, power state, temperature, health verdict with reasons, `used_by`, `in_use`, `system`, `contents` (`DiskContent` {device, fstype, label?}: the signatures on the disk and its partitions from lsblk, nothing mounted), SMR |
 | GET | `/api/v1/storage/disks/{name}` | — | `DiskDetail`: summary + `SmartInfo` (ATA attributes, NVMe health log, self-test log, life left, bytes written) + `SettingCheck` list (recommended vs current) + partitions |
 | GET | `/api/v1/storage/arrays` | — | `Vec<MdArray>`: level, members with role (active/spare/faulty/rebuilding), state, health, sync progress, bitmap, chunk, events, mismatch count |
 | GET | `/api/v1/storage/filesystems` | — | `Vec<BtrfsFilesystem>`: devices with error counters, usage and profiles, compression, mount options, quota mode, scrub status, subvolumes |
@@ -521,6 +521,20 @@ Types in `rynas_api_types::storage`. Nothing here changes the system: plans only
 | POST | `/api/v1/storage/plan/grow` | `GrowPlanRequest` {array, disks, level?} | `StoragePlan` |
 | POST | `/api/v1/storage/plan/replace` | `ReplacePlanRequest` {array, old, new_disk} | `StoragePlan` |
 | POST | `/api/v1/storage/plan/scrub` | `ScrubPlanRequest` {filesystem, md_check} | `StoragePlan` |
+
+Drives a new volume, a grow or a replace may take: not `in_use` (mounted, an assembled array, an
+open LUKS mapping, swap), not `system`, not removable. `system` is the disk of the root, `/usr`,
+`/boot` or `/boot/efi`, and the machine's own boot flash: a disk whose USB device has the ids of
+`rynas_api_types::storage::BOOT_FLASH_USB_IDS` (`f400:f400`, the same on every unit of that
+vendor, so it applies without a hardware module) or of a detected module
+(`Module::system_disk_usb_ids`, e.g. a QNAP model's flash), read from sysfs above
+`/sys/block/<disk>/device`; `used_by` then starts with "boot flash". The planners refuse a
+`system` disk (`system_disk`) whatever the page sends, also when lsblk shows nothing mounted on
+it. Leftovers on a free drive (a file system, LUKS, an md or LVM member, bare partitions) stay
+allowed, because old disks are reused: `contents` names them, the drive list shows them ("Holds
+btrfs “data”") and each such chosen drive needs its own tick ("I know sdd holds … and everything
+on it will be erased") before the plan is asked for, in Create volume, Grow and Replace. The same
+boot flash ids keep the drive out of the removable drives (never listed, mounted or powered off).
 
 `StoragePlan`: `valid`, `errors`, `warnings`, `raw_bytes`, `usable_bytes`, `fault_tolerance`,
 `wasted_bytes`, `summary`, ordered `steps` (`command` with argv and an optional named stdin secret,
