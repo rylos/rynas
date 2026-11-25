@@ -17,6 +17,7 @@ pub mod processes;
 pub mod network;
 pub mod wake;
 pub mod replication;
+pub mod repositories;
 pub mod security;
 pub mod services;
 pub mod share_crypt;

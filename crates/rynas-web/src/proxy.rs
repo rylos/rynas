@@ -312,6 +312,16 @@ pub fn routes() -> Router<AppState> {
         .route("/updates/kernel/install", post(forward))
         .route("/updates/kernel/series", post(forward))
         .route("/updates/backports", get(forward).put(forward))
+        // software repositories (D-REPOS): apt sources, checks, writes as tasks
+        .route("/repositories", get(forward))
+        .route("/repositories/entries/toggle", post(forward))
+        .route("/repositories/official", put(forward))
+        .route("/repositories/third-party", post(forward))
+        .route("/repositories/third-party/{file}", delete(forward))
+        .route("/repositories/key-preview", post(forward))
+        .route("/repositories/check", post(forward))
+        .route("/repositories/mirror-test", post(forward))
+        .route("/repositories/modernize", post(forward))
         // removable drives: state, actions as tasks, settings; changes come on /events
         // as `removable.state`
         .route("/removable", get(forward))

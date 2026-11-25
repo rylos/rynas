@@ -297,7 +297,7 @@ impl Updates {
             .map(|t| t.id)
     }
 
-    fn running_task(&self) -> Option<String> {
+    pub(crate) fn running_task(&self) -> Option<String> {
         self.ops
             .tasks
             .list(100)
@@ -531,7 +531,8 @@ pub fn router(st: UpdState) -> Router {
         .route("/v1/updates/kernel", get(kernel_get))
         .with_state(st.clone())
         .merge(crate::kernel_updates::router(st.clone()))
-        .merge(crate::backports::router(st))
+        .merge(crate::backports::router(st.clone()))
+        .merge(crate::repositories::router(st))
 }
 
 async fn status_get(State(st): State<UpdState>) -> Res<Json<UpdatesStatus>> {
@@ -775,6 +776,8 @@ pub fn spawn_scheduled_check(who: &str) -> Res<String> {
         };
         let s = me.status(false).await;
         me.notify(&s);
+        // unsupported software sources (System › Software repositories)
+        crate::repositories::notify_now(&me).await;
         // the kernel holds, and a newer kernel in the kernel policy's notify mode
         if !other {
             crate::kernel_updates::check_holds(&me, &ctx).await;
