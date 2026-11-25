@@ -58,6 +58,8 @@ rynas-backup.workspace = true
 rynas-dedup.workspace = true
 # checksums of the rynas-oans packages carried until there is an apt repository
 sha2.workspace = true
+# v4 fingerprints of third-party repository keys (Software repositories)
+sha1 = { version = "0.11.0", default-features = false }
 # Syncthing's config.xml in the adoption (byte ranges for minimal edits); small, MIT/Apache
 roxmltree = "0.21.2"
 tempfile.workspace = true
