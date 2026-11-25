@@ -400,13 +400,21 @@ fn official_form(pg: Pg, o: OfficialState) -> AnyView {
 
 // ------------------------------------------------------------------ entries
 
-fn kind_chip(e: &RepoEntry) -> AnyView {
-    let (tone, key) = match e.kind {
+fn kind_tone_key(e: &RepoEntry) -> (Tone, &'static str) {
+    match e.kind {
         RepoKind::Debian => (Tone::Ok, "repo.k_debian"),
         RepoKind::Rynas => (Tone::Info, "repo.k_rynas"),
         RepoKind::SystemLayer => (Tone::Info, "repo.k_system"),
         RepoKind::ThirdParty => (Tone::Warn, "repo.k_third"),
-    };
+    }
+}
+
+fn kind_label(e: &RepoEntry) -> String {
+    t(kind_tone_key(e).1).to_string()
+}
+
+fn kind_chip(e: &RepoEntry) -> AnyView {
+    let (tone, key) = kind_tone_key(e);
     chip(tone, text(t(key).to_string()))
 }
 
@@ -450,7 +458,10 @@ fn entry_row(pg: Pg, path: String, e: RepoEntry) -> AnyView {
             cell("repo.col_uris", "", e.uris.iter().map(|u| ui::breakable(u, "mono")).collect_view().into_any()),
             ui::text_cell("repo.col_suites", "mono", e.suites.join(" ")),
             ui::text_cell("repo.col_components", "mono", e.components.join(" ")),
-            cell("repo.col_origin", "", view! { {kind_chip(&e)}{e.origin.clone().map(|o| view! { " "<span class="small">{o}</span> })} }.into_any()),
+            // the Release file's Origin next to the kind, unless it only repeats it ("Debian")
+            cell("repo.col_origin", "", view! {
+                <span class="repo-origin">{kind_chip(&e)}{e.origin.clone().filter(|o| !o.eq_ignore_ascii_case(&kind_label(&e))).map(|o| view! { " "<span class="small">{o}</span> })}</span>
+            }.into_any()),
             cell("repo.col_state", "", state),
         ],
         cls,

@@ -2132,6 +2132,7 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .repo-file-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); font-size: var(--fs-14); margin: 0 0 var(--s-2); overflow-wrap: anywhere; }
 .repo-file-head .icon-btn { margin-left: auto; }
 .repo-table td { overflow-wrap: anywhere; }
+.repo-origin { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); }
 /* code editor (compose files, .env): line numbers + textarea, no wrapping */
 .code-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap; }
 .code-file { cursor: pointer; }
