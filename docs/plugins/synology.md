@@ -75,7 +75,7 @@ bays, 2 fans); others as synodeb adds them. Model data (bays, fan tables) comes 
 | Power button | `power_button` = poweroff / ignore / log / `command:` | selector; poweroff = clean shutdown through rynas (stops tasks/apps in order) |
 | Reset button | `reset_button` = log / ignore / `command:` | `synology.hw` `reset_button`: `network_rescue` (default on a Synology) sets `command:` to rynas' handler: **double press within 10 s → network rescue** (D-NET); `log` / `ignore`. Owned here only: the network page shows it read-only (see below) |
 | USB copy button / USB LED | uP event `` ` ``, commands `@` `A` `B` | phase 2: assign an action (e.g. run a backup plan to the USB disk, DSM "USB Copy") with LED feedback |
-| Disk standby | `disk_standby_minutes` (0–330, hdparm -S) | per-volume idle timer, linked to D-SYSTUNE per-disk options; shows what woke disks last |
+| Disk standby | `disk_standby_minutes` (0–330, hdparm -S) | also the default delay of rynasd's host-driven spin-down (`Module::disk_standby_s`, D-SYSTUNE): a disk's own `standby_s` wins; rynasd spins idle rotational ATA disks down itself, also drives that ignore the firmware timer, and skips disks running a SMART test. Later: per-volume idle timer; shows what woke disks last |
 | Wake-on-LAN | `wol` (all lan* ports, uP `l`/`k`) | toggle + MAC addresses to copy |
 | Power back after AC loss | `ac_recovery` (uP `q`/`p`) | toggle (DSM "Restart automatically when power supply issue is fixed") |
 | **Scheduled power on/off** | RTC `wakealarm` (`rtcwake -d rtc0 -m no -t <epoch>`), synohwd tells the uP at shutdown (`s`/`r`) | **Power Schedule like DSM**: weekly rules "power on at" / "power off at" per day, multiple rules; see below |
