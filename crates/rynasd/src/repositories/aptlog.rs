@@ -8,7 +8,8 @@ use rynas_api_types::repositories::{FetchError, FetchErrorKind};
 /// The kind of problem a line of apt describes.
 pub fn kind_of(text: &str) -> FetchErrorKind {
     let t = text.to_ascii_lowercase();
-    if text.contains("NO_PUBKEY") {
+    // gpgv (apt 2.x): `NO_PUBKEY <id>`; sqv (apt 3, Debian 13): `Missing key <fingerprint>, …`
+    if text.contains("NO_PUBKEY") || text.contains("Missing key ") {
         FetchErrorKind::NoPubkey
     } else if text.contains("EXPKEYSIG") || text.contains("KEYEXPIRED") || t.contains("expired key") {
         FetchErrorKind::ExpiredKey
@@ -44,13 +45,17 @@ pub fn kind_of(text: &str) -> FetchErrorKind {
     }
 }
 
-/// The key ids after `NO_PUBKEY`/`EXPKEYSIG`/`BADSIG`/`KEYEXPIRED`.
+/// The key ids after `NO_PUBKEY`/`EXPKEYSIG`/`BADSIG`/`KEYEXPIRED` (gpgv) or `Missing key`
+/// (sqv).
 fn keys_of(text: &str) -> Vec<String> {
     let w: Vec<&str> = text.split_whitespace().collect();
-    w.windows(2)
+    let mut keys: Vec<String> = w
+        .windows(2)
         .filter(|p| ["NO_PUBKEY", "EXPKEYSIG", "BADSIG", "KEYEXPIRED"].contains(&p[0]))
         .map(|p| p[1].trim_end_matches([',', '.']).to_string())
-        .collect()
+        .collect();
+    keys.extend(w.windows(3).filter(|p| p[0] == "Missing" && p[1] == "key").map(|p| p[2].trim_end_matches([',', '.']).to_string()));
+    keys
 }
 
 fn is_uri(s: &str) -> bool {
@@ -71,7 +76,7 @@ fn uri_suite(s: &str) -> Option<(String, Option<String>)> {
 
 /// The URI and suite named in a `W:`/`E:` message.
 fn locate(msg: &str) -> Option<(String, Option<String>)> {
-    for p in ["GPG error: ", "The repository '", "Repository '"] {
+    for p in ["GPG error: ", "OpenPGP signature verification failed: ", "The repository '", "Repository '"] {
         if let Some(i) = msg.find(p) {
             return uri_suite(&msg[i + p.len()..]);
         }
@@ -214,5 +219,25 @@ W: http://legacy.example/deb/dists/stable/InRelease: Key is stored in legacy tru
         let w = parse("Warning: GPG error: http://x.example/deb stable InRelease: The following signatures were invalid: KEYEXPIRED 1700000000\n");
         assert_eq!(w[0].kind, FetchErrorKind::ExpiredKey);
         assert!(parse("Hit:1 http://deb.debian.org/debian trixie InRelease\nReading package lists...\n").is_empty());
+    }
+
+    /// apt 3.0 on Debian 13 verifies with sqv, which words a missing key differently from
+    /// gpgv (output of a real `apt-get update`, a source signed with a key not in Signed-By).
+    #[test]
+    fn sqv_missing_key() {
+        let out = "Get:5 https://repo.example.com/debian trixie InRelease [8150 B]
+Err:5 https://repo.example.com/debian trixie InRelease
+  Sub-process /usr/bin/sqv returned an error code (1), error message is: Missing key 4918AABC486CA052358D778D49023CD01DE21A7B, which is needed to verify signature.
+Reading package lists...
+W: OpenPGP signature verification failed: https://repo.example.com/debian trixie InRelease: Sub-process /usr/bin/sqv returned an error code (1), error message is: Missing key 4918AABC486CA052358D778D49023CD01DE21A7B, which is needed to verify signature.
+E: The repository 'https://repo.example.com/debian trixie InRelease' is not signed.
+";
+        let v = parse(out);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].kind, FetchErrorKind::NoPubkey);
+        assert!(v[0].error);
+        assert_eq!(v[0].uri, "https://repo.example.com/debian");
+        assert_eq!(v[0].suite.as_deref(), Some("trixie"));
+        assert_eq!(v[0].keys, ["4918AABC486CA052358D778D49023CD01DE21A7B"]);
     }
 }

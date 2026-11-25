@@ -668,6 +668,8 @@ async fn add(State(st): State<UpdState>, hd: HeaderMap, body: Result<Json<AddRep
         if !failed.is_empty() {
             ctx.log("the new source does not work: removing it again");
             rollback(&u.config_root, &written);
+            // the source is gone: its problems stay in the task's log, not on the page
+            save_check(&u.state_dir, &without_source(check, &entry));
             notify_now(&u).await;
             return Err(format!(
                 "the new source was removed again: {}",
@@ -677,6 +679,14 @@ async fn add(State(st): State<UpdState>, hd: HeaderMap, body: Result<Json<AddRep
         notify_now(&u).await;
         Ok(())
     })
+}
+
+/// `check` without the problems of `e`'s URIs (a new source removed again).
+pub fn without_source(mut check: RepoCheck, e: &Entry) -> RepoCheck {
+    let ours = |uri: &str| e.uris.iter().any(|u| u.trim_end_matches('/') == uri.trim_end_matches('/'));
+    check.errors.retain(|x| !ours(&x.uri));
+    check.ok = check.errors.iter().all(|x| !x.error);
+    check
 }
 
 /// Removes the files an add wrote.

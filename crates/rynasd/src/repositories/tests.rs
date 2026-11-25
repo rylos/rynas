@@ -355,6 +355,13 @@ fn add_and_rollback() {
     // an unrelated failure does not remove it
     let other = RepoCheck { at_ms: 1, ok: false, errors: aptlog::parse("W: Failed to fetch http://bad.example/debian/dists/x/InRelease  Temporary failure resolving 'bad.example'\n") };
     assert!(new_source_failures(&entry, &other).is_empty());
+    // the check kept after the removal no longer names the removed source
+    let mixed = RepoCheck { at_ms: 1, ok: false, errors: check.errors.iter().chain(&other.errors).cloned().collect() };
+    let kept = without_source(mixed, &entry);
+    assert_eq!(kept.errors.len(), 1, "{kept:?}");
+    assert!(kept.errors[0].uri.starts_with("http://bad.example"));
+    assert!(kept.ok);
+    assert!(without_source(check.clone(), &entry).errors.is_empty());
     // an exact path
     req.suites = vec!["./".into()];
     req.components.clear();
