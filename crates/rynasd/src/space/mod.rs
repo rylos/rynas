@@ -61,6 +61,12 @@ pub const SCAN_EVERY: Duration = Duration::from_secs(24 * 3600);
 /// kept members' sets, vector growth and the merge's copy, the peak stays under 128 MiB
 /// (2 × 3 × 16 MiB); more shared extents than that are "not measured".
 pub const MAX_RANGES: usize = 1 << 20;
+/// Most distinct data extents the tree search keeps for a set (8 bytes each; the vector
+/// holds at most about twice that before a deduplication: under 128 MiB); more are "not
+/// measured".
+pub const MAX_EXTENTS: usize = 1 << 23;
+/// How long the preview of a deletion may measure before it answers "not measured".
+pub const PREVIEW_BUDGET: Duration = Duration::from_secs(5 * 60);
 /// Most snapshots the automatic thinning removes in one pass.
 pub const THIN_MAX: usize = 50;
 /// Most time one pass of the automatic thinning takes (it goes on at the next check).
@@ -89,8 +95,8 @@ pub trait Env: Send + Sync {
     /// `(total, free)` bytes of the filesystem at `mount`.
     fn space(&self, mount: &Path) -> Option<(u64, u64)>;
     fn probe(&self) -> &dyn Probe;
-    /// What removing `set` frees while `keep` stays.
-    fn measure(&self, mount: &Path, set: &[PathBuf], keep: &[PathBuf], stop: &dyn Fn() -> bool) -> Measured;
+    /// What removing `set` frees while `keep` stays; `progress` gets a line per subvolume.
+    fn measure(&self, mount: &Path, set: &[PathBuf], keep: &[PathBuf], stop: &dyn Fn() -> bool, progress: &dyn Fn(&str)) -> Measured;
     /// Allocated bytes of a plain tree.
     fn tree_bytes(&self, path: &Path, stop: &dyn Fn() -> bool) -> Option<u64>;
     /// Deletes one subvolume (not recursive: nested subvolumes make it fail).
@@ -202,7 +208,7 @@ impl Env for HostEnv {
         &discover::HostProbe
     }
 
-    fn measure(&self, mount: &Path, set: &[PathBuf], keep: &[PathBuf], stop: &dyn Fn() -> bool) -> Measured {
+    fn measure(&self, mount: &Path, set: &[PathBuf], keep: &[PathBuf], stop: &dyn Fn() -> bool, progress: &dyn Fn(&str)) -> Measured {
         if let Some(q) = qgroups(mount) {
             let ids: BTreeSet<u64> = set
                 .iter()
@@ -213,16 +219,18 @@ impl Env for HostEnv {
                 return Measured { freed: Some(x), at_least: Some(at_least), method: MeasureMethod::Qgroup };
             }
         }
-        let lim = rynas_btrfs::extents::Limits { max_ranges: MAX_RANGES, stop };
-        match rynas_btrfs::extents::measure_set(set, keep, &lim) {
+        let lim = rynas_btrfs::extents::Limits { max_ranges: MAX_RANGES, max_extents: MAX_EXTENTS, stop, progress };
+        match rynas_btrfs::extents::measure(set, keep, &lim) {
             // a file that could not be read may hold anything: no number rather than a wrong one
             Ok(m) if m.unreadable > 0 => {
                 tracing::info!("space: {} files unreadable, not measured", m.unreadable);
+                progress(&format!("not measured: {} files unreadable", m.unreadable));
                 Measured::default()
             }
-            Ok(m) => Measured { freed: Some(m.freed), at_least: Some(m.exclusive), method: MeasureMethod::ExtentWalk },
+            Ok(m) => Measured { freed: Some(m.freed), at_least: m.exclusive, method: MeasureMethod::ExtentWalk },
             Err(e) => {
                 tracing::info!("space: {}: {e}", set.first().map(|p| p.display().to_string()).unwrap_or_default());
+                progress(&format!("not measured: {e}"));
                 Measured::default()
             }
         }
@@ -280,6 +288,16 @@ impl Env for HostEnv {
             return Ok(String::new());
         }
         actions::run(c)
+    }
+}
+
+/// Work a person waits for (the preview): the lowest best-effort disk priority, not idle (an
+/// idle reader gets nothing while a backup or a scrub keeps the disks busy).
+fn waited_for_priority() {
+    // SAFETY: plain syscalls on the calling thread, no memory passed
+    unsafe {
+        libc::syscall(libc::SYS_ioprio_set, 1, 0, (2 << 13) | 7);
+        libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, 10);
     }
 }
 
@@ -665,7 +683,7 @@ impl Space {
             for s in d.sources.get(label).into_iter().flatten() {
                 let set: Vec<PathBuf> = s.snaps.iter().map(|x| x.path.clone()).collect();
                 let keep: Vec<PathBuf> = s.live.iter().filter(|l| l.exists()).cloned().collect();
-                let m = if set.is_empty() || stop() { Measured::default() } else { self.env.measure(mount, &set, &keep, &stop) };
+                let m = if set.is_empty() || stop() { Measured::default() } else { self.env.measure(mount, &set, &keep, &stop, log) };
                 let mut api = to_api(label, s, m);
                 hist.record(&api.id, now, api.freed_bytes.unwrap_or(0));
                 api.growth_7d_bytes = hist.growth(&api.id, now, 7);
@@ -836,6 +854,37 @@ impl Space {
             .unwrap_or_default();
         actions::old_kernels(&actions::parse_kernels(&out), &running, &held)
     }
+}
+
+/// The line of snapshots a name belongs to: the name before its time (`@home.20261110T0300`
+/// → `@home`); names without one (app stack snapshots) are one line.
+fn line_of(name: &str) -> &str {
+    rynas_btrfs::name::split_snapshot_name(name).map(|(p, _)| p).or_else(|| name.rsplit_once('.').map(|(p, _)| p)).unwrap_or("")
+}
+
+/// The snapshots of a source (`snaps`, newest first) that stay and can share data with `set`:
+/// in each line, the kept snapshot right before and right after every run of set members.
+/// Snapshots of one line are a linear history, so an extent lives in a contiguous run of
+/// them: if neither neighbour of a run references it, no farther snapshot does either,
+/// unless data was reflinked or deduplicated across non-adjacent snapshots (then it is
+/// counted as freed: an over-estimate, never a low number). Grouping by name can only add
+/// such over-estimates: a kept snapshot left out never makes the number smaller.
+pub fn neighbour_keep(snaps: &[discover::Snap], set: &[PathBuf]) -> Vec<PathBuf> {
+    let mut lines: BTreeMap<&str, Vec<&discover::Snap>> = BTreeMap::new();
+    for s in snaps {
+        lines.entry(line_of(&s.name)).or_default().push(s);
+    }
+    let mut out = Vec::new();
+    for line in lines.values() {
+        let in_set: Vec<bool> = line.iter().map(|s| set.contains(&s.path)).collect();
+        for (i, s) in line.iter().enumerate() {
+            let next_to_set = (i > 0 && in_set[i - 1]) || in_set.get(i + 1).copied().unwrap_or(false);
+            if !in_set[i] && next_to_set {
+                out.push(s.path.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Top-level subvolumes of the root filesystem left by system rollbacks (`btrfs subvolume
@@ -1023,9 +1072,15 @@ impl Space {
         if failed.is_empty() { Ok(()) } else { Err(format!("{} of {} not deleted", failed.len(), paths.len())) }
     }
 
-    /// Task `space.preview`: the exact number for the set.
-    pub fn run_preview(&self, paths: &[String], cancelled: &dyn Fn() -> bool) -> SpacePreview {
-        background_priority();
+    /// Task `space.preview`: the number for the set, within [`PREVIEW_BUDGET`].
+    pub fn run_preview(&self, paths: &[String], cancelled: &dyn Fn() -> bool, log: &dyn Fn(&str)) -> SpacePreview {
+        self.run_preview_within(paths, cancelled, log, PREVIEW_BUDGET)
+    }
+
+    /// [`Space::run_preview`] with its time limit: past it the answer is "not measured"
+    /// (`timed_out_minutes`), never a partial number.
+    pub fn run_preview_within(&self, paths: &[String], cancelled: &dyn Fn() -> bool, log: &dyn Fn(&str), budget: Duration) -> SpacePreview {
+        waited_for_priority();
         let mut out = SpacePreview::default();
         let d = match self.discover() {
             Ok(d) => d,
@@ -1053,23 +1108,37 @@ impl Space {
                 }
             }
         }
-        // the members of each source that stay keep sharing with the set
+        // the members of each source that stay keep sharing with the set: the live subvolume
+        // and the nearest kept snapshots around the set in each line
+        let deadline = Instant::now() + budget;
+        let late = || Instant::now() > deadline;
+        let stop = || cancelled() || late();
         let mut freed = Some(0u64);
         let mut at_least = Some(0u64);
         let mut method = MeasureMethod::ExtentWalk;
         for (id, (mount, set, mut keep)) in by_source {
             if let Some(s) = d.sources.values().flatten().find(|s| s.id == id) {
-                keep.extend(s.snaps.iter().map(|x| x.path.clone()).filter(|p| !set.contains(p)));
+                keep.extend(neighbour_keep(&s.snaps, &set));
             }
-            let m = self.env.measure(&mount, &set, &keep, cancelled);
+            log(&format!("{id}: measuring {} snapshots against {} kept", set.len(), keep.len()));
+            let m = if stop() { Measured::default() } else { self.env.measure(&mount, &set, &keep, &stop, log) };
             freed = freed.zip(m.freed).map(|(a, b)| a + b);
             at_least = at_least.zip(m.at_least).map(|(a, b)| a + b);
             if m.method != MeasureMethod::ExtentWalk {
                 method = m.method;
             }
+            if freed.is_none() {
+                // one source not measured: no total
+                break;
+            }
+        }
+        if freed.is_none() && late() {
+            let minutes = budget.as_secs().div_ceil(60) as u32;
+            log(&format!("not measured: measuring took longer than {minutes} min"));
+            out.timed_out_minutes = Some(minutes);
         }
         out.freed_bytes = freed;
-        out.freed_at_least_bytes = at_least;
+        out.freed_at_least_bytes = if freed.is_some() { at_least } else { None };
         out.method = if out.freed_bytes.is_some() { method } else { MeasureMethod::None };
         out.done = true;
         out
@@ -1782,7 +1851,7 @@ async fn preview(State(st): State<SpaceState>, h: HeaderMap, body: Result<Json<S
             let s3 = s2.clone();
             let c = ctx.clone();
             let paths = req.paths.clone();
-            let p = in_thread(move || s3.run_preview(&paths, &|| c.is_cancelled())).await?;
+            let p = in_thread(move || s3.run_preview(&paths, &|| c.is_cancelled(), &|m| c.log(m))).await?;
             ctx.log(&format!("{} snapshots can go, {} kept: {}", p.paths.len(), p.refused.len(), bytes_text(p.freed_bytes)));
             let err = p.error.clone();
             s2.keep_preview(ctx.id().to_string(), p);
@@ -2011,5 +2080,44 @@ mod unit_tests {
         assert_eq!(action_kind("journal-vacuum"), Some(SafeActionKind::JournalVacuum));
         assert_eq!(action_kind("identical_app_snapshots"), Some(SafeActionKind::IdenticalAppSnapshots));
         assert_eq!(action_kind("format-disk"), None);
+    }
+
+    fn snap(name: &str) -> discover::Snap {
+        discover::Snap {
+            path: PathBuf::from(format!("/v/pc/{name}")),
+            name: name.into(),
+            created_ms: None,
+            facts: Default::default(),
+            protected: None,
+            identical: false,
+        }
+    }
+
+    #[test]
+    fn only_the_neighbours_of_each_run_are_kept() {
+        // newest first, two lines (`@`, `@home`) interleaved as discovery sorts them by time
+        let snaps: Vec<discover::Snap> = (1..=7)
+            .rev()
+            .flat_map(|d| [snap(&format!("@home.2026110{d}T0300")), snap(&format!("@.2026110{d}T0300"))])
+            .collect();
+        let p = |n: &str| PathBuf::from(format!("/v/pc/{n}"));
+        // a run in the middle of @home (days 3-4) and the oldest @ (day 1)
+        let set = vec![p("@home.20261104T0300"), p("@home.20261103T0300"), p("@.20261101T0300")];
+        let mut keep = neighbour_keep(&snaps, &set);
+        keep.sort();
+        assert_eq!(keep, vec![p("@.20261102T0300"), p("@home.20261102T0300"), p("@home.20261105T0300")]);
+        // two runs with one kept snapshot between them: kept once
+        let set = vec![p("@.20261106T0300"), p("@.20261104T0300")];
+        let mut keep = neighbour_keep(&snaps, &set);
+        keep.sort();
+        assert_eq!(keep, vec![p("@.20261103T0300"), p("@.20261105T0300"), p("@.20261107T0300")]);
+        // the whole line: nothing kept in it
+        let all: Vec<PathBuf> = snaps.iter().filter(|s| s.name.starts_with("@.")).map(|s| s.path.clone()).collect();
+        assert!(neighbour_keep(&snaps, &all).is_empty());
+        // names without a time (app stacks) are one line; a suffix after the time stays in it
+        let stack = vec![snap("20261103T030000"), snap("20261102T030000"), snap("20261101T030000")];
+        assert_eq!(neighbour_keep(&stack, &[p("20261102T030000")]), vec![p("20261103T030000"), p("20261101T030000")]);
+        assert_eq!(line_of("@.20261110T0300_1"), "@");
+        assert_eq!(line_of("@home.20261110T0300"), "@home");
     }
 }

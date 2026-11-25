@@ -59,6 +59,8 @@ struct TestEnv {
     /// held at each deletion (it must be written after every one).
     state: PathBuf,
     count_at_delete: Mutex<Vec<u32>>,
+    /// The kept members of every measurement.
+    kept: Mutex<Vec<Vec<PathBuf>>>,
 }
 
 impl Env for TestEnv {
@@ -71,7 +73,12 @@ impl Env for TestEnv {
     fn probe(&self) -> &dyn Probe {
         &TreeProbe
     }
-    fn measure(&self, _: &Path, set: &[PathBuf], _keep: &[PathBuf], _: &dyn Fn() -> bool) -> Measured {
+    fn measure(&self, _: &Path, set: &[PathBuf], keep: &[PathBuf], stop: &dyn Fn() -> bool, progress: &dyn Fn(&str)) -> Measured {
+        self.kept.lock().unwrap().push(keep.to_vec());
+        if stop() {
+            return Measured::default();
+        }
+        progress("measured");
         Measured { freed: Some(set.len() as u64 * 100), at_least: Some(set.len() as u64 * 10), method: rynas_api_types::space::MeasureMethod::ExtentWalk }
     }
     fn tree_bytes(&self, path: &Path, stop: &dyn Fn() -> bool) -> Option<u64> {
@@ -141,6 +148,7 @@ fn world() -> World {
         receiving: Mutex::new(Vec::new()),
         state: state_dir.clone(),
         count_at_delete: Mutex::new(Vec::new()),
+        kept: Mutex::new(Vec::new()),
     });
     let thumbs = dir.path().join("thumbs");
     std::fs::create_dir_all(thumbs.join("1000")).unwrap();
@@ -410,4 +418,33 @@ async fn automatic_cleanup_one_deletion_at_a_time() {
     assert!(w.space.thin("vol1", &w.env.vol, &settings, &claim, &|_| {}).is_empty());
     assert_eq!(claims.load(Ordering::SeqCst), before);
     assert!(w.notes.take().is_empty());
+}
+
+#[tokio::test]
+async fn the_preview_keeps_only_the_neighbours_and_has_a_time_limit() {
+    let w = world();
+    for t in ["20261003T0100", "20261004T0100", "20261005T0100", "20261006T0100"] {
+        subvol(&w.env.vol.join(format!(".snapshots/old/old.{t}")), RO);
+    }
+    let p = |t: &str| w.env.vol.join(format!(".snapshots/old/old.{t}"));
+    let set: Vec<String> = [p("20261004T0100"), p("20261003T0100")].iter().map(|x| x.display().to_string()).collect();
+    let lines = Mutex::new(Vec::<String>::new());
+    let log = |l: &str| lines.lock().unwrap().push(l.to_string());
+    let r = w.space.run_preview(&set, &|| false, &log);
+    assert_eq!(r.paths.len(), 2, "{:?}", r.refused);
+    assert_eq!(r.freed_bytes, Some(200));
+    assert_eq!(r.timed_out_minutes, None);
+    // the kept snapshot on each side of the run, not the farther ones
+    let mut kept = w.env.kept.lock().unwrap().last().cloned().unwrap();
+    kept.sort();
+    assert_eq!(kept, vec![p("20261002T0100"), p("20261005T0100")]);
+    assert!(lines.lock().unwrap().iter().any(|l| l == "measured"));
+
+    // past the time limit: no number, and why
+    let r = w.space.run_preview_within(&set, &|| false, &log, Duration::ZERO);
+    assert_eq!((r.freed_bytes, r.freed_at_least_bytes), (None, None));
+    assert_eq!(r.method, rynas_api_types::space::MeasureMethod::None);
+    assert_eq!(r.timed_out_minutes, Some(0));
+    assert!(r.done && r.error.is_none());
+    assert!(lines.lock().unwrap().iter().any(|l| l.starts_with("not measured")));
 }
