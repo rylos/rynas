@@ -1098,7 +1098,7 @@ fn event_of(stack: &str, a: Alert) -> rynas_api_types::notify::NewEvent {
                 format!("syncthing:conflict:{stack}:{folder}:{}", now_ms()),
                 format!("Conflict copies in {label}"),
             );
-            ev.body = format!("{count} new conflict copies in {label}: {list}. Keep the right version and delete the copies; the Syncthing page lists them.");
+            ev.body = format!("New conflict copies in {label}: {count} ({list}). Keep the right version and delete the copies; the Syncthing page lists them.");
             field(field(field(field(code(ev, "syncthing.conflict"), "stack", stack), "folder", label), "count", count), "files", list)
         }
         Alert::FolderError { folder, label, error } => {

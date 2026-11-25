@@ -1094,6 +1094,8 @@ schema 2 added the `code` and `body_format` columns.
 | `space.low_free` / `space.free_ok` | `volume`, `free_pct`, `free` | Little free space on {volume} (below the low limit, 10 %; resolved at the recovery limit, 15 %), with a link to Storage › Space |
 | `space.snapshots_growth` | `volume`, `grown`, `top` | Snapshots on {volume} grew by {grown} in a week (weekly, above 50 GiB or 25 %), the largest sources |
 | `space.auto_freed` | `volume`, `count`, `snapshots` | Old snapshots removed on {volume} by the opt-in automatic cleanup |
+| `space.auto_free_stuck` / `space.free_ok` | `volume`, `stopped` | The automatic cleanup cannot free more space on {volume} (nothing more may go, or a deletion failed): one open problem per volume, at most one per hour, resolved quietly with `space.free_ok` |
+| `space.thin_suspended` / `space.thin_resumed` | `volume`, `grown` | Automatic cleanup suspended on {volume}: the weekly snapshot growth is more than 3 times the median of the 4 weeks before / resumed by the next normal weekly check |
 | `synodeb.<event>` | the forward's parameters | the forward's title; events and parameters in `../synodeb-integration.md` S1 |
 
 Not coded: the target test message (built in the target's language already) and events from

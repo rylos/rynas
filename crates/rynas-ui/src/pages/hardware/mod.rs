@@ -32,7 +32,7 @@ const RM_TAB: usize = 5;
 
 #[component]
 pub fn Hardware() -> impl IntoView {
-    let tab = RwSignal::new(0usize);
+    let tab = crate::ui::tab_signal(6, 0);
     // `/hardware#removable` (the removable drives menu's settings link) opens that tab
     let location = leptos_router::hooks::use_location();
     Effect::new(move || {

@@ -19,7 +19,8 @@
 //!   subvolume ([`verify_root`]), and takes a per-device lock (one receive at a time);
 //! - with `--delete`: `btrfs subvolume delete [--commit-each|--commit-after] '<root>/<name>'…`
 //!   for btrbk snapshot names directly inside the folder, subject to the NAS rules
-//!   ([`crate::receive::delete_refusal`], checked by the binary on a fresh listing); always
+//!   ([`crate::receive::delete_refusal`], checked by the binary on a fresh listing) and never
+//!   a snapshot pinned in Storage › Space (`--pinned <name>`, rewritten on every pin); always
 //!   run as `btrfs subvolume delete --commit-each` (the one form the sudoers line allows);
 //!   with `--delete-interrupted` instead, the same command only for interrupted receives;
 //! - read only: `btrfs subvolume show|list …` and `btrfs filesystem usage …` on the folder
@@ -43,6 +44,14 @@ pub struct FilterArgs {
     /// `--delete-interrupted`: deletes are accepted only for interrupted receives (the PC
     /// can only add; the NAS deletes old snapshots itself or keeps them).
     pub interrupted_only: bool,
+    /// `--pinned <name>` (repeated): snapshots pinned in Storage › Space, never deleted.
+    pub pinned: Vec<String>,
+}
+
+/// Why a delete of `name` is refused for being pinned (`None`: not pinned). Checked before
+/// the NAS's other rules ([`crate::receive::delete_refusal`]).
+pub fn pinned_refusal(a: &FilterArgs, name: &str) -> Option<String> {
+    a.pinned.iter().any(|p| p == name).then(|| format!("{name}: pinned on the NAS (Storage › Space)"))
 }
 
 pub fn parse_args(args: &[String]) -> Result<FilterArgs, String> {
@@ -63,6 +72,10 @@ pub fn parse_args(args: &[String]) -> Result<FilterArgs, String> {
             }
             "--keep-last" => a.keep_last = num(it.next(), "--keep-last")?,
             "--min-age-days" => a.min_age_days = num(it.next(), "--min-age-days")?,
+            "--pinned" => {
+                let n = it.next().filter(|n| crate::receive::pinnable_name(n)).ok_or("--pinned needs a snapshot name")?;
+                a.pinned.push(n.clone());
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -467,7 +480,7 @@ mod tests {
     use super::*;
 
     fn args(delete: bool) -> FilterArgs {
-        FilterArgs { device: "pc".into(), root: "/volume1/backup/pc".into(), delete, keep_last: 0, min_age_days: 0, interrupted_only: false }
+        FilterArgs { device: "pc".into(), root: "/volume1/backup/pc".into(), delete, keep_last: 0, min_age_days: 0, interrupted_only: false, pinned: Vec::new() }
     }
 
     #[test]
@@ -588,11 +601,26 @@ mod tests {
     #[test]
     fn arguments_round_trip() {
         let p = rynas_api_types::pcbackup::DeletePolicy { allowed: true, keep_last: 3, min_age_days: 7 };
-        let a = parse_args(&crate::receive::filter_args("pc", "/volume1/backup/pc", &p)).unwrap();
-        assert_eq!(a, FilterArgs { device: "pc".into(), root: "/volume1/backup/pc".into(), delete: true, keep_last: 3, min_age_days: 7, interrupted_only: false });
+        let pins = ["home.20261101T0100".to_string()];
+        let a = parse_args(&crate::receive::filter_args("pc", "/volume1/backup/pc", &p, &pins)).unwrap();
+        assert_eq!(
+            a,
+            FilterArgs {
+                device: "pc".into(),
+                root: "/volume1/backup/pc".into(),
+                delete: true,
+                keep_last: 3,
+                min_age_days: 7,
+                interrupted_only: false,
+                pinned: pins.to_vec()
+            }
+        );
+        assert!(parse_args(&["--pinned".into(), "../x".into()]).is_err());
+        assert!(pinned_refusal(&a, "home.20261101T0100").is_some());
+        assert!(pinned_refusal(&a, "home.20261102T0100").is_none());
         // the PC can only add: deletes reach the binary, which accepts only interrupted receives
         let p = rynas_api_types::pcbackup::DeletePolicy { allowed: false, keep_last: 3, min_age_days: 7 };
-        let a = parse_args(&crate::receive::filter_args("pc", "/volume1/backup/pc", &p)).unwrap();
+        let a = parse_args(&crate::receive::filter_args("pc", "/volume1/backup/pc", &p, &pins)).unwrap();
         assert!(a.delete && a.interrupted_only && a.keep_last == 0);
         assert!(parse_args(&["--device".into(), "pc".into()]).is_err());
         assert!(parse_args(&["--device".into(), "pc".into(), "--root".into(), "/etc/x".into()]).is_err());

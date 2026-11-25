@@ -575,7 +575,7 @@ fn run_ask_dialog(ask: RunAsk, tasks: Remote<Vec<TaskView>>, close: Callback<()>
 
 #[component]
 pub fn Scheduler() -> impl IntoView {
-    let tab = RwSignal::new(0usize);
+    let tab = crate::ui::tab_signal(3, 0);
     let tasks = Remote::<Vec<TaskView>>::with_config("/api/v1/scheduler/tasks");
     let pause = Remote::<SchedulerPause>::new("/api/v1/scheduler/pause");
     // next runs and running state move by themselves: read again every 15 s while visible

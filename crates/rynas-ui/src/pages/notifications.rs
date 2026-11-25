@@ -441,7 +441,7 @@ pub fn silence_dialog(key: String, close: Callback<()>, done: Callback<()>) -> A
 
 #[component]
 pub fn NotificationSettings() -> impl IntoView {
-    let tab = RwSignal::new(0usize);
+    let tab = crate::ui::tab_signal(3, 0);
     let targets = Remote::<Vec<NotifyTarget>>::with_config("/api/v1/notifications/targets");
     let rules = Remote::<Vec<NotifyRule>>::with_config("/api/v1/notifications/rules");
     let silences = Remote::<Vec<Silence>>::with_config("/api/v1/notifications/silences");

@@ -209,6 +209,7 @@ fn kept_text(i: &RetentionItem) -> Option<String> {
         (true, RetentionReason::Monthly) => "pcb.kept.monthly",
         (true, RetentionReason::Yearly) => "pcb.kept.yearly",
         (true, RetentionReason::Future) => "pcb.kept.future",
+        (true, RetentionReason::Pinned) => "pcb.kept.pinned",
         (true, RetentionReason::Expired) => return None,
     };
     let text = t(k).to_string();

@@ -13,7 +13,7 @@
 //! - `--dry-system`: reads go to the engine when its socket answers; changes (compose,
 //!   start/stop, apt, systemctl, copies) are only logged, folders go below the dry root.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1851,12 +1851,35 @@ pub(crate) struct DfCache {
     pub(crate) volumes: HashMap<String, (i64, i64)>,
 }
 
-/// Volumes no container (running or stopped) uses, by the engine's disk usage (Storage >
-/// Space lists them for review; `docker volume rm` refuses one taken into use meanwhile).
-pub(crate) async fn unused_volume_names(s: &Arc<DockerSvc>) -> Res<Vec<String>> {
-    let df = s.df().await?;
+/// Volumes no container (running or stopped) uses, by the engine's disk usage, without the
+/// volumes of a stack rynas knows (Storage > Space lists them for review). `fresh` reads
+/// `docker system df` again instead of the cached answer: what a removal checks right before
+/// `docker volume rm`.
+pub(crate) async fn unused_volume_names(s: &Arc<DockerSvc>, fresh: bool) -> Res<Vec<String>> {
+    let df = if fresh { s.df_read().await? } else { s.df().await? };
     let vols = s.call(move |e| async move { e.volumes(Some(&df.volumes)).await }).await?;
-    Ok(vols.into_iter().filter(|v| v.in_use == Some(0)).map(|v| v.name).collect())
+    Ok(review_volumes(&vols, &s.known_stacks()))
+}
+
+/// The volumes a person may review for removal: no container uses them (the disk usage
+/// says 0, not unknown) and they do not carry the compose project label of a stack rynas
+/// knows (a rynas stack or an adopted one): a stopped and removed stack's data is still
+/// its data.
+pub(crate) fn review_volumes(vols: &[VolumeSummary], known: &BTreeSet<String>) -> Vec<String> {
+    vols.iter()
+        .filter(|v| v.in_use == Some(0))
+        .filter(|v| !v.stack.as_ref().is_some_and(|p| known.contains(p)))
+        .map(|v| v.name.clone())
+        .collect()
+}
+
+impl DockerSvc {
+    /// The stacks rynas knows: its stack folders and the adopted stacks.
+    pub(crate) fn known_stacks(&self) -> BTreeSet<String> {
+        let mut v = self.folders().0;
+        v.extend(self.adopted.lock().unwrap().stacks.keys().cloned());
+        v
+    }
 }
 
 impl DockerSvc {
@@ -1889,7 +1912,7 @@ impl DockerSvc {
         Ok(d)
     }
 
-    async fn df_read(&self) -> Res<Arc<DfCache>> {
+    pub(crate) async fn df_read(&self) -> Res<Arc<DfCache>> {
         let df = self.call(|e| async move { e.df().await }).await?;
         Ok(Arc::new(DfCache {
             usage: model::disk_usage_of(&df),
@@ -2641,6 +2664,21 @@ pub(crate) async fn current_images(s: &DockerSvc, name: &str) -> Vec<ServiceImag
         .map(|x| &x.c)
         .collect();
     model::service_images(&mine, &imgs)
+}
+
+/// The images the services of every stack run now, by stack (one engine call); `None` when
+/// the engine does not answer.
+pub(crate) async fn all_current_images(s: &DockerSvc) -> Option<BTreeMap<String, Vec<ServiceImage>>> {
+    let e = s.engine().await.ok()?;
+    let (cs, imgs) = tokio::join!(e.containers(), e.images());
+    let (cs, imgs) = (cs.ok()?, imgs.ok()?);
+    let mut by_stack: BTreeMap<String, Vec<&ContainerSummary>> = BTreeMap::new();
+    for x in &cs {
+        if let Some(st) = x.c.stack.as_deref() {
+            by_stack.entry(st.to_string()).or_default().push(&x.c);
+        }
+    }
+    Some(by_stack.into_iter().map(|(k, v)| (k, model::service_images(&v, &imgs))).collect())
 }
 
 /// A pre-update snapshot (stack stopped first when asked); `None` when the folder is not a
@@ -3657,6 +3695,26 @@ fn docker_routes(st: DkState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_volumes_skip_used_unknown_and_known_stacks() {
+        let v = |name: &str, stack: Option<&str>, in_use: Option<u32>| VolumeSummary {
+            name: name.into(),
+            stack: stack.map(str::to_string),
+            in_use,
+            ..Default::default()
+        };
+        let vols = [
+            v("loose", None, Some(0)),
+            v("used", None, Some(1)),
+            v("unknown", None, None),
+            v("web_db", Some("web"), Some(0)),
+            v("adopted_data", Some("photos"), Some(0)),
+            v("gone_data", Some("gone"), Some(0)),
+        ];
+        let known: BTreeSet<String> = ["web".to_string(), "photos".to_string()].into();
+        assert_eq!(review_volumes(&vols, &known), ["loose", "gone_data"]);
+    }
 
     #[test]
     fn settings_ranges() {

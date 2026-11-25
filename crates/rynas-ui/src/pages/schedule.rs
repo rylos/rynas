@@ -164,7 +164,7 @@ impl Filters {
 
 #[component]
 pub fn Schedule() -> impl IntoView {
-    let tab = RwSignal::new(0usize);
+    let tab = crate::ui::tab_signal(3, 0);
     let from = midnight(0);
     let to = midnight(7) - 1;
     let ov = Remote::<SchedulerOverview>::new(format!("/api/v1/scheduler/overview?from={from}&to={to}"));

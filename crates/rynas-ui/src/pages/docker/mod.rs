@@ -88,8 +88,10 @@ fn page() -> Page {
 fn tabbed() -> AnyView {
     // `?stack=<name>` opens the Stacks tab on that stack
     let deep = leptos_router::hooks::use_query_map().with_untracked(|q| q.get("stack").is_some());
-    let tab = RwSignal::new(if deep { 2usize } else { crate::ui::tab_from_query(TABS.len(), 0) });
-    let seen = RwSignal::new([!deep, false, deep, false]);
+    let tab = crate::ui::tab_signal(TABS.len(), if deep { 2 } else { 0 });
+    let mut seen0 = [false; 4];
+    seen0[tab.get_untracked()] = true;
+    let seen = RwSignal::new(seen0);
     Effect::new(move || {
         let i = tab.get();
         if !seen.with_untracked(|s| s[i]) {

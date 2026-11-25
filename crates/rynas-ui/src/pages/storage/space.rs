@@ -138,7 +138,7 @@ fn volume_card(v: VolumeSpace) -> AnyView {
         })
         .collect_view();
     let name = crate::places::name(&v.volume);
-    let label = format!("{} {}", t("sp.used"), i18n::bytes_of(v.used_bytes, v.total_bytes));
+    let label = tf("sp.used_of", &[("size", &i18n::bytes_of(v.used_bytes, v.total_bytes))]);
     view! {
         <div class="space-vol">
             <div class="space-vol-head">
@@ -360,7 +360,7 @@ pub fn SpacePage() -> impl IntoView {
                 let n = ids.len() as u32;
                 let c = Confirm::new(
                     t("sp.review_ask_title").to_string(),
-                    tf("sp.review_ask", &[("n", &n.to_string())]),
+                    i18n::tn(if ids.iter().any(|i| i.starts_with("volume:")) { "sp.review_ask_volumes" } else { "sp.review_ask" }, u64::from(n), &[]),
                     "sp.remove_selected",
                     true,
                     Callback::new(move |_| {}),
@@ -415,10 +415,10 @@ fn source_row(
             v.push(tf("sp.keeps", &[("n", &k.to_string())]));
         }
         if let Some(n) = s.caps.max_count {
-            v.push(tf("sp.budget_count", &[("n", &n.to_string())]));
+            v.push(i18n::tn("sp.budget_count", u64::from(n), &[]));
         }
         if let Some(d) = s.caps.max_age_days {
-            v.push(tf("sp.budget_age", &[("n", &d.to_string())]));
+            v.push(i18n::tn("sp.budget_age", u64::from(d), &[]));
         }
         if let Some(b) = s.caps.max_bytes {
             v.push(tf("sp.budget_bytes", &[("size", &i18n::bytes(b))]));
@@ -507,6 +507,7 @@ fn review_row(r: ReviewItem, sel: RwSignal<BTreeSet<String>>) -> AnyView {
             </label>
             <span class="mono small space-review-label">{r.label.clone()}</span>
             <span class="tnum small row-end">{size}</span>
+            {(r.kind == ReviewKind::UnusedVolume).then(|| view! { <span class="small muted space-review-note">{tr("sp.volume_data_note")}</span> })}
         </li>
     }
     .into_any()
@@ -559,7 +560,7 @@ fn preview_dialog(
             };
             view! {
                 <Modal title=Signal::derive(|| t("sp.preview_title").to_string()) on_close=close foot=foot>
-                    <p class="dialog-text">{tf("sp.preview_text", &[("n", &n.to_string()), ("size", &freed)])}</p>
+                    <p class="dialog-text">{i18n::tn("sp.preview_text", n as u64, &[("size", &freed)])}</p>
                     {r.freed_at_least_bytes.map(|a| view! { <p class="small muted">{tf("sp.preview_at_least", &[("size", &i18n::bytes(a))])}</p> })}
                     {(!r.refused.is_empty()).then(|| view! {
                         <p class="small"><strong>{tr("sp.kept_title")}</strong></p>

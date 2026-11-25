@@ -44,7 +44,7 @@ use rynas_api_types::space::{
 use rynas_api_types::{SharesConfig, TaskStarted, error_codes};
 use rynas_btrfs::SNAPSHOTS_KEY;
 use rynas_notify::Notifier;
-use rynas_notify::event::{code, field, firing, oneshot, resolved};
+use rynas_notify::event::{code, field, firing, oneshot, quietly, resolved};
 use rynas_services::SHARES_KEY;
 use rynas_tasks::{Cmd, TaskCtx};
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,16 @@ pub const SCAN_EVERY: Duration = Duration::from_secs(24 * 3600);
 pub const MAX_RANGES: usize = 1 << 20;
 /// Most snapshots the automatic thinning removes in one pass.
 pub const THIN_MAX: usize = 50;
+/// Most time one pass of the automatic thinning takes (it goes on at the next check).
+pub const THIN_TIME_CAP: Duration = Duration::from_secs(15 * 60);
+
+/// What holds a volume for one deletion of the automatic thinning (dropped right after it).
+pub type Claim = Box<dyn Send>;
+
+/// The key of the "automatic cleanup cannot free more" problem of a volume.
+fn stuck_key(label: &str) -> String {
+    format!("space:{label}:auto_free_stuck")
+}
 
 /// What a measurement gives for a set.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -325,6 +335,9 @@ pub struct Space {
     /// Previews by task id, with when they were asked (the oldest finished ones go first).
     previews: Mutex<HashMap<String, (u64, SpacePreview)>>,
     history: Mutex<History>,
+    /// The images each app stack runs now, read before a scan and before the identical
+    /// snapshots action ([`Space::refresh_stack_images`]).
+    stack_images: Mutex<Option<BTreeMap<String, discover::ImageSet>>>,
 }
 
 /// Previews kept in memory.
@@ -399,6 +412,7 @@ impl Space {
             scanning: AtomicBool::new(false),
             previews: Mutex::new(HashMap::new()),
             history: Mutex::new(history),
+            stack_images: Mutex::new(None),
         })
     }
 
@@ -459,13 +473,14 @@ impl Space {
             .jobs
             .iter()
             .map(|j| {
-                let mut parents = BTreeSet::new();
+                let mut latest = Vec::new();
                 for t in &j.replicas {
                     if let rynas_api_types::replication::ReplicaDestination::Local { path } = &t.destination {
                         replica_dirs.push(path.clone());
                     }
-                    if let Some(l) = rynas_btrfs::replication::read_status(&self.state_dir, &j.name, &t.id).latest {
-                        parents.insert(l);
+                    // a missing or unreadable state file reads as "no replica yet": all kept
+                    if t.enabled {
+                        latest.push(rynas_btrfs::replication::read_status(&self.state_dir, &j.name, &t.id).latest);
                     }
                 }
                 let r = &j.retention;
@@ -475,7 +490,7 @@ impl Space {
                     subvolume: j.subvolume.clone(),
                     snapshot_dir: j.snapshot_dir.clone(),
                     keep_count: (keep > 0).then_some(keep),
-                    replica_parents: parents,
+                    replica_latest: latest,
                 }
             })
             .collect();
@@ -498,6 +513,7 @@ impl Space {
             pc_folders: self.pc.as_ref().map(|p| p.snapshot_folders()).unwrap_or_default(),
             replica_dirs,
             pins: self.pins.all(),
+            stack_images: self.stack_images.lock().unwrap().clone(),
             live: Vec::new(),
         }
         .with_live(shares.shares.into_iter().map(|s| s.path)))
@@ -506,10 +522,24 @@ impl Space {
     /// Finds every source and leftover now, with protections (no measurement). Fails when
     /// the configuration cannot be read.
     pub fn discover(&self) -> Result<Discovered, String> {
-        let facts = self.facts()?;
+        self.discover_in(None)
+    }
+
+    /// [`Space::discover`] of one volume only (`only`, a label): the configured sources whose
+    /// snapshot folder is on it and the walk of that volume alone (the automatic cleanup).
+    pub fn discover_in(&self, only: Option<&str>) -> Result<Discovered, String> {
+        let mut facts = self.facts()?;
         let probe = self.env.probe();
-        let volumes = self.env.volumes();
+        let mut volumes = self.env.volumes();
         let mounts: Vec<(String, PathBuf)> = volumes.iter().map(|(l, m, _)| (l.clone(), m.clone())).collect();
+        if let Some(o) = only {
+            let on = |p: &str| discover::volume_of(Path::new(p), &mounts) == Some(o);
+            facts.jobs.retain(|j| on(&j.snapshot_dir));
+            facts.system = facts.system.filter(|s| on(&s.dir));
+            facts.docker = facts.docker.filter(|d| on(&d.1));
+            facts.pc_folders.retain(|(_, f)| on(f));
+            volumes.retain(|v| v.0 == o);
+        }
         let mut all = discover::configured(&facts, probe);
         let known: BTreeSet<PathBuf> = all.iter().map(|s| s.dir.clone()).collect();
         let mut leftovers: BTreeMap<String, Vec<discover::Leftover>> = BTreeMap::new();
@@ -521,7 +551,7 @@ impl Space {
         for s in &mut all {
             let pc_parents = if s.kind == SourceKind::PcBackup { pc_parents(&s.dir) } else { BTreeSet::new() };
             let live = s.live.as_ref().and_then(|l| probe.subvol(l));
-            discover::mark_identical(s, live.as_ref());
+            discover::mark_identical(s, live.as_ref(), facts.stack_images.as_ref());
             discover::protect(s, &facts, &pc_parents);
         }
         Ok(Discovered { sources: discover::by_volume(all, &mounts), volumes, leftovers, facts })
@@ -766,16 +796,12 @@ impl Space {
         Ok(())
     }
 
-    /// The applied settings, `None` while the key was never applied.
-    fn applied_settings(&self) -> Option<SpaceSettings> {
-        self.ops.config.applied(SPACE_KEY).ok().flatten().and_then(|v| serde_json::from_value(v).ok())
-    }
-
-    /// The journal's cap in force and whether it is the administrator's.
+    /// The journal's cap in force (what journald reads now, never below the administrator's
+    /// value) and whether the administrator set one.
     pub fn journal_cap(&self) -> (Option<u64>, bool) {
         let root = self.env.root();
         let admin = domain::admin_journal_cap(&root);
-        (domain::effective_journal_cap(self.applied_settings().as_ref(), domain::journal_fs_bytes(&root), admin), admin.is_some())
+        (domain::effective_journal_cap(admin, domain::journald_cap_now(&root)), admin.is_some())
     }
 
     fn old_kernels(&self) -> Vec<actions::Kernel> {
@@ -1267,6 +1293,13 @@ impl Space {
                 } else {
                     let ev = resolved(NotifyCategory::Storage, "space", &key, format!("Enough free space on {label} again"));
                     self.notifier.emit(field(field(code(ev, "space.free_ok"), "volume", &label), "free_pct", format!("{pct:.0}")));
+                    // the cleanup's "cannot free more" problem ends with it (quietly: the
+                    // line above already tells)
+                    if self.history.lock().unwrap().stuck_notified_ms.remove(&label).is_some() {
+                        let stuck = resolved(NotifyCategory::Storage, "space", stuck_key(&label), format!("Enough free space on {label} again"));
+                        self.notifier.emit(quietly(field(code(stuck, "space.free_ok"), "volume", &label)));
+                        self.save_history();
+                    }
                 }
             }
             if low && settings.auto_free.contains(&label) {
@@ -1278,10 +1311,26 @@ impl Space {
     }
 
     /// The automatic thinning of one volume: the oldest unprotected snapshots first (budgets
-    /// first), synced every few deletions, until free space is back above the recovery
-    /// limit; every deletion logged, one notification for the pass.
-    pub fn thin(&self, label: &str, mount: &Path, settings: &SpaceSettings, log: &dyn Fn(&str)) -> Vec<String> {
+    /// first), until free space is back above the recovery limit.
+    ///
+    /// Each deletion takes the volume (`claim`, released right after it, so replication,
+    /// receives and snapshot runs get their turn between deletions), discovers that volume
+    /// again, deletes one snapshot, persists the day's count at once, then waits for the
+    /// filesystem (`btrfs subvolume sync`) and reads the free space. A pass stops at
+    /// [`THIN_MAX`] deletions, the daily cap, [`THIN_TIME_CAP`], no gain, or when nothing
+    /// more may go; every deletion is logged and one notification lists them. "Nothing more"
+    /// and failures are one open problem per volume (fixed key, at most one per hour,
+    /// resolved when free space is back) and the next pass waits an hour.
+    pub fn thin(&self, label: &str, mount: &Path, settings: &SpaceSettings, claim: &dyn Fn() -> Result<Claim, String>, log: &dyn Fn(&str)) -> Vec<String> {
+        self.thin_within(label, mount, settings, claim, log, THIN_TIME_CAP)
+    }
+
+    fn thin_within(&self, label: &str, mount: &Path, settings: &SpaceSettings, claim: &dyn Fn() -> Result<Claim, String>, log: &dyn Fn(&str), time_cap: Duration) -> Vec<String> {
         let now = now_ms();
+        if self.history.lock().unwrap().thin_suspended.contains(label) {
+            log(&format!("{label}: automatic cleanup suspended after an unusual growth of the snapshots"));
+            return Vec::new();
+        }
         let mut day = self.history.lock().unwrap().thin.get(label).cloned().unwrap_or_default();
         let allowance = match day.allowance(now) {
             Ok(n) => n.min(THIN_MAX as u32) as usize,
@@ -1290,17 +1339,33 @@ impl Space {
                 return Vec::new();
             }
         };
+        let started = Instant::now();
         let mut deleted = Vec::new();
         let mut brake = model::Brake::default();
+        let persist = |day: &model::ThinDay| {
+            self.history.lock().unwrap().thin.insert(label.to_string(), day.clone());
+            self.save_history();
+        };
         let stop = loop {
             if deleted.len() >= allowance {
                 break if day.count >= model::DAILY_CAP { model::ThinStop::DailyCap } else { model::ThinStop::PassCap };
+            }
+            if started.elapsed() >= time_cap {
+                break model::ThinStop::TimeCap;
             }
             let Some((total, free)) = self.env.space(mount) else { break model::ThinStop::Failed };
             if !model::low_state(true, free, total, settings.low_free_pct, settings.recover_pct) {
                 break model::ThinStop::Recovered;
             }
-            let d = match self.discover() {
+            // the volume, for this one deletion only
+            let held = match claim() {
+                Ok(c) => c,
+                Err(e) => {
+                    log(&format!("{label}: automatic cleanup waits: {e}"));
+                    break model::ThinStop::Busy;
+                }
+            };
+            let d = match self.discover_in(Some(label)) {
                 Ok(d) => d,
                 Err(e) => {
                     log(&e);
@@ -1314,9 +1379,12 @@ impl Space {
                 log(&e);
                 break model::ThinStop::Failed;
             }
+            drop(held);
             tracing::info!("space: {label}: automatic cleanup deleted {next}");
             deleted.push(next);
             day.count += 1;
+            // the day's count survives a crash or restart right after this deletion
+            persist(&day);
             // what the deletion gave back, once the filesystem freed it
             let _ = self.env.sync(mount);
             let after = self.env.space(mount).map(|x| x.1).unwrap_or(free);
@@ -1325,32 +1393,52 @@ impl Space {
                 break model::ThinStop::NoGain;
             }
         };
-        self.history.lock().unwrap().thin.insert(label.to_string(), day);
-        self.save_history();
+        let stuck = matches!(stop, model::ThinStop::Nothing | model::ThinStop::Failed);
+        if stuck {
+            day.cooldown_until_ms = day.cooldown_until_ms.max(now_ms() + model::STUCK_RETRY_MS);
+        }
+        persist(&day);
         log(&format!("{label}: automatic cleanup: {} snapshots deleted, stopped: {stop:?}", deleted.len()));
-        if !deleted.is_empty() || matches!(stop, model::ThinStop::NoGain | model::ThinStop::Failed | model::ThinStop::Nothing) {
+        let why = match stop {
+            model::ThinStop::Recovered => "free space is back above the recovery limit",
+            model::ThinStop::Nothing => "nothing more may be removed automatically",
+            model::ThinStop::NoGain => "the last deletions freed almost nothing: paused for 24 hours",
+            model::ThinStop::DailyCap => "the daily limit of automatic deletions is reached",
+            model::ThinStop::PassCap => "the limit of one pass is reached",
+            model::ThinStop::Failed => "a deletion failed",
+            model::ThinStop::TimeCap => "the time of one pass is used up",
+            model::ThinStop::Busy => "other work holds the volume",
+            model::ThinStop::Cooldown | model::ThinStop::Suspended => "paused",
+        };
+        let stopped = format!("{stop:?}").to_lowercase();
+        if !deleted.is_empty() {
             let list: Vec<&str> = deleted.iter().take(10).map(String::as_str).collect();
-            let why = match stop {
-                model::ThinStop::Recovered => "free space is back above the recovery limit",
-                model::ThinStop::Nothing => "nothing more may be removed automatically",
-                model::ThinStop::NoGain => "the last deletions freed almost nothing: paused for 24 hours",
-                model::ThinStop::DailyCap => "the daily limit of automatic deletions is reached",
-                model::ThinStop::PassCap => "the limit of one pass is reached",
-                model::ThinStop::Failed => "a deletion failed",
-                model::ThinStop::Cooldown => "paused",
-            };
             let sev = if matches!(stop, model::ThinStop::Recovered) { NotifySeverity::Warning } else { NotifySeverity::Error };
             let mut ev = oneshot(NotifyCategory::Storage, sev, "space", format!("space:{label}:auto_freed:{}", now_ms() / 60_000), format!("Old snapshots removed on {label} to free space"));
-            ev.body = format!(
-                "{} snapshots removed by the automatic cleanup{}{}; it stopped because {why}.",
-                deleted.len(),
-                if list.is_empty() { "" } else { ": " },
-                list.join(", ")
-            );
+            ev.body = format!("Snapshots removed by the automatic cleanup: {}: {}; it stopped because {why}.", deleted.len(), list.join(", "));
             ev.actions = vec![EventAction { label: "Open Space".into(), url: "/storage/space".into() }];
             let ev = field(field(code(ev, "space.auto_freed"), "volume", label), "count", deleted.len());
-            let ev = field(ev, "stopped", format!("{stop:?}").to_lowercase());
+            let ev = field(ev, "stopped", &stopped);
             self.notifier.emit(field(ev, "snapshots", list.join(", ")));
+        }
+        if stuck {
+            let now = now_ms();
+            let due = {
+                let mut h = self.history.lock().unwrap();
+                let last = h.stuck_notified_ms.get(label).copied().unwrap_or(0);
+                let due = now.saturating_sub(last) >= model::STUCK_NOTIFY_MS;
+                if due {
+                    h.stuck_notified_ms.insert(label.to_string(), now);
+                }
+                due
+            };
+            if due {
+                self.save_history();
+                let mut ev = firing(NotifyCategory::Storage, NotifySeverity::Error, "space", stuck_key(label), format!("The automatic cleanup cannot free more space on {label}"));
+                ev.body = format!("{label} is still low on free space and the automatic cleanup stopped because {why}. Storage > Space shows what takes room.");
+                ev.actions = vec![EventAction { label: "Open Space".into(), url: "/storage/space".into() }];
+                self.notifier.emit(field(field(code(ev, "space.auto_free_stuck"), "volume", label), "stopped", &stopped));
+            }
         }
         deleted
     }
@@ -1367,11 +1455,31 @@ impl Space {
         }
         let ov = self.overview();
         let h = self.history.lock().unwrap().clone();
+        let mut suspended = h.thin_suspended.clone();
         for v in &ov.volumes {
             let key = format!("volume:{}", v.volume);
             let Some(grown) = h.growth(&key, now, 7) else { continue };
             let before = h.series.get(&key).and_then(|s| s.iter().rev().find(|(d, _)| *d <= model::day_of(now).saturating_sub(7))).map(|x| x.1).unwrap_or(0);
-            if !settings.notify_growth || !model::growth_alarming(grown, before, &settings) {
+            let alarming = model::growth_alarming(grown, before, &settings);
+            // far more than the weeks before (a share encrypted or rewritten at once): the
+            // oldest snapshots may be the only clean copies, so the automatic cleanup stops
+            let anomalous = alarming && h.weekly_growths(&key, now, 4).is_some_and(|p| model::growth_anomalous(grown, &p));
+            let thinning = settings.auto_free.contains(&v.volume);
+            if anomalous && thinning && suspended.insert(v.volume.clone()) {
+                let mut ev = firing(NotifyCategory::Storage, NotifySeverity::Error, "space", format!("space:{}:thin_suspended", v.volume), format!("Automatic cleanup suspended on {}", v.volume));
+                ev.body = format!(
+                    "Snapshots on {} grew by {} in a week, far more than in the weeks before. The automatic cleanup stops so that older snapshots stay; check the shares for mass changes.",
+                    v.volume,
+                    rynas_api_types::units::human_bytes(grown as u64)
+                );
+                ev.actions = vec![EventAction { label: "Open Space".into(), url: "/storage/space".into() }];
+                let ev = field(code(ev, "space.thin_suspended"), "volume", &v.volume);
+                self.notifier.emit(field(ev, "grown", rynas_api_types::units::human_bytes(grown as u64)));
+            } else if !anomalous && suspended.remove(&v.volume) {
+                let ev = resolved(NotifyCategory::Storage, "space", format!("space:{}:thin_suspended", v.volume), format!("Automatic cleanup resumed on {}", v.volume));
+                self.notifier.emit(field(code(ev, "space.thin_resumed"), "volume", &v.volume));
+            }
+            if !settings.notify_growth || !alarming {
                 continue;
             }
             let top: Vec<String> = model::top_growth(&v.sources, 3).into_iter().map(|(n, g)| format!("{n} +{}", rynas_api_types::units::human_bytes(g as u64))).collect();
@@ -1381,7 +1489,11 @@ impl Space {
             let ev = field(field(code(ev, "space.snapshots_growth"), "volume", &v.volume), "grown", rynas_api_types::units::human_bytes(grown as u64));
             self.notifier.emit(field(ev, "top", top.join(", ")));
         }
-        self.history.lock().unwrap().growth_checked_ms = now;
+        {
+            let mut h = self.history.lock().unwrap();
+            h.growth_checked_ms = now;
+            h.thin_suspended = suspended;
+        }
         self.save_history();
     }
 }
@@ -1395,7 +1507,7 @@ pub async fn docker_facts(d: &crate::docker::DkState) -> DockerFacts {
     }
     if let Ok(df) = s.df().await {
         f.usage = df.usage;
-        if let Ok(names) = crate::docker::unused_volume_names(s).await {
+        if let Ok(names) = crate::docker::unused_volume_names(s, false).await {
             f.unused_volumes = names.into_iter().map(|n| {
                 let b = df.volumes.get(&n).map(|x| x.0.max(0) as u64).unwrap_or(0);
                 (n, b)
@@ -1487,6 +1599,18 @@ async fn in_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) ->
 }
 
 impl Space {
+    /// Reads the images every app stack runs now (unknown without Docker or when the engine
+    /// does not answer: then no app snapshot is "identical").
+    pub async fn refresh_stack_images(&self) {
+        let now = match self.docker.as_ref() {
+            Some(d) => crate::docker::all_current_images(d)
+                .await
+                .map(|m| m.into_iter().map(|(k, v)| (k, discover::image_set(&v))).collect()),
+            None => None,
+        };
+        *self.stack_images.lock().unwrap() = now;
+    }
+
     /// Starts task `space.scan` (one at a time).
     pub fn spawn_scan(self: &Arc<Self>, who: &str, only: Option<String>, automatic: bool) -> Res<String> {
         if self.scanning.swap(true, Ordering::AcqRel) {
@@ -1496,6 +1620,7 @@ impl Space {
         let r = self.ops.tasks.spawn("space.scan", who, move |ctx| async move {
             let s2 = s.clone();
             let docker = docker_facts(&s.docker).await;
+            s.refresh_stack_images().await;
             let c = ctx.clone();
             let r = in_thread(move || {
                 background_priority();
@@ -1527,18 +1652,17 @@ pub fn spawn_loop(s: Arc<Space>) {
             let s2 = s.clone();
             let low = in_thread(move || s2.guard(&|m| tracing::info!("space: {m}"))).await.unwrap_or_default();
             for (label, mount) in low {
-                match s.claim_volumes(std::slice::from_ref(&mount), "space.auto-free").await {
-                    Ok(claim) => {
-                        let s2 = s.clone();
-                        let _ = in_thread(move || {
-                            let _claim = claim;
-                            let settings = s2.settings();
-                            s2.thin(&label, &mount, &settings, &|m| tracing::info!("space: {m}"))
-                        })
-                        .await;
-                    }
-                    Err(e) => tracing::info!("space: {label}: automatic cleanup waits: {e}"),
-                }
+                // the volume is taken for each deletion and given back between them
+                let (s2, rt) = (s.clone(), tokio::runtime::Handle::current());
+                let _ = in_thread(move || {
+                    let settings = s2.settings();
+                    let claim = || -> Result<Claim, String> {
+                        let g = rt.block_on(s2.claim_volumes(std::slice::from_ref(&mount), "space.auto-free"))?;
+                        Ok(Box::new(g))
+                    };
+                    s2.thin(&label, &mount, &settings, &claim, &|m| tracing::info!("space: {m}"))
+                })
+                .await;
             }
             let due = last_daily.is_none_or(|t| t.elapsed() >= SCAN_EVERY);
             if due {
@@ -1695,6 +1819,8 @@ async fn action(State(st): State<SpaceState>, h: HeaderMap, UrlPath(kind): UrlPa
             }
             // deleting app snapshots takes their volume like every deletion
             let _claim = if kind == SafeActionKind::IdenticalAppSnapshots {
+                // what the stacks run now decides which snapshots are identical
+                s2.refresh_stack_images().await;
                 let dir = s2.docker.as_ref().and_then(|d| d.layout()).map(|l| l.snapshots()).unwrap_or_default();
                 let mounts = s2.mounts_of([dir.as_str()]);
                 Some(s2.claim_volumes(&mounts, "space.action").await?)
@@ -1733,11 +1859,12 @@ async fn review_delete(State(st): State<SpaceState>, h: HeaderMap, body: Result<
             }
             if !volumes.is_empty() {
                 let d = s2.docker.as_ref().ok_or("Docker is not installed")?;
-                let unused = crate::docker::unused_volume_names(d).await.map_err(|e| e.2)?;
                 for v in volumes {
+                    // a fresh disk usage right before each removal (never the cached one): a
+                    // volume taken into use, or labeled for a known stack, stops the removals
+                    let unused = crate::docker::unused_volume_names(d, true).await.map_err(|e| e.2)?;
                     if !unused.contains(&v) {
-                        ctx.log(&format!("{v}: in use now, kept"));
-                        continue;
+                        return Err(format!("{v}: in use now or part of a stack rynas knows: kept, nothing more removed"));
                     }
                     let env = s2.env.clone();
                     let v2 = v.clone();
@@ -1788,6 +1915,14 @@ async fn set_pin(st: SpaceState, h: HeaderMap, body: Result<Json<PinRequest>, Js
     }
     s.pins.set(&req.path, on).map_err(|e| Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, e))?;
     audit(&who, if on { "space.pin" } else { "space.unpin" }, &req.path);
+    // a PC fed over SSH learns its pinned snapshots from its key line
+    if let Some(pc) = s.pc.clone() {
+        let path = req.path.clone();
+        tokio::task::spawn_blocking(move || pc.pins_changed(&path))
+            .await
+            .map_err(Error::internal)?
+            .map_err(|e| Error::internal(format!("pinned, but the keys of the PC backup account were not written: {e}")))?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

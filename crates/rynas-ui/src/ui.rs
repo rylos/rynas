@@ -1101,13 +1101,49 @@ impl Folds {
     }
 }
 
-/// The tab a link asks for with `?tab=<n>` (the command palette's deep links), when below
-/// `count`; else `default`.
-pub fn tab_from_query(count: usize, default: usize) -> usize {
-    leptos_router::hooks::use_query_map()
-        .with_untracked(|q| q.get("tab").and_then(|t| t.parse::<usize>().ok()))
-        .filter(|t| *t < count)
-        .unwrap_or(default)
+/// The tab a `?tab=<n>` value names, when below `count`.
+pub fn parse_tab(v: Option<&str>, count: usize) -> Option<usize> {
+    v.and_then(|t| t.parse::<usize>().ok()).filter(|t| *t < count)
+}
+
+/// The address `path` + `search` + `hash` with `tab=<n>` in its query (other parameters kept,
+/// in order; `search` and `hash` with or without their `?` and `#`).
+pub fn tab_url(path: &str, search: &str, hash: &str, tab: usize) -> String {
+    let mut parts: Vec<&str> = search.trim_start_matches('?').split('&').filter(|p| !p.is_empty() && *p != "tab" && !p.starts_with("tab=")).collect();
+    let t = format!("tab={tab}");
+    parts.push(&t);
+    let hash = hash.trim_start_matches('#');
+    format!("{path}?{}{}{hash}", parts.join("&"), if hash.is_empty() { "" } else { "#" })
+}
+
+/// The selected tab of a page with `count` tabs, kept in the address as `?tab=<n>`: it
+/// follows the address (a deep link of the command palette changes the tab also when the
+/// page is already open), and choosing a tab writes the address (replacing the history
+/// entry, no scroll), so a tab can be bookmarked and chosen again from the palette.
+/// Without a valid `?tab=` the tab is `default`.
+pub fn tab_signal(count: usize, default: usize) -> RwSignal<usize> {
+    let query = leptos_router::hooks::use_query_map();
+    let location = leptos_router::hooks::use_location();
+    let navigate = leptos_router::hooks::use_navigate();
+    let asked = move || query.with(|q| parse_tab(q.get("tab").as_deref(), count)).unwrap_or(default);
+    let asked_now = move || query.with_untracked(|q| parse_tab(q.get("tab").as_deref(), count)).unwrap_or(default);
+    let sel = RwSignal::new(asked_now());
+    // the address changed (a link, the palette, back): show its tab
+    Effect::new(move || {
+        let t = asked();
+        if sel.get_untracked() != t {
+            sel.set(t);
+        }
+    });
+    // a tab was chosen: the address says it
+    Effect::new(move || {
+        let i = sel.get();
+        if asked_now() != i {
+            let url = tab_url(&location.pathname.get_untracked(), &location.search.get_untracked(), &location.hash.get_untracked(), i);
+            navigate(&url, leptos_router::NavigateOptions { replace: true, scroll: false, ..Default::default() });
+        }
+    });
+    sel
 }
 
 /// A folded part of a view (advanced options, history, a log, rare actions): a `<details>`
@@ -1139,6 +1175,19 @@ pub fn fold_with(title: AnyView, open: bool, body: AnyView) -> AnyView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tabs_live_in_the_address() {
+        assert_eq!(parse_tab(Some("2"), 4), Some(2));
+        assert_eq!(parse_tab(Some("4"), 4), None);
+        assert_eq!(parse_tab(Some("x"), 4), None);
+        assert_eq!(parse_tab(None, 4), None);
+        assert_eq!(tab_url("/snapshots", "", "", 1), "/snapshots?tab=1");
+        assert_eq!(tab_url("/snapshots", "?tab=3", "", 0), "/snapshots?tab=0");
+        // other parameters and the hash stay
+        assert_eq!(tab_url("/docker", "stack=web&tab=1", "#logs", 2), "/docker?stack=web&tab=2#logs");
+        assert_eq!(tab_url("/hardware", "?a=1&tab", "removable", 5), "/hardware?a=1&tab=5#removable");
+    }
 
     #[test]
     fn ryzen_1800x_tctl_at_63_is_fine() {

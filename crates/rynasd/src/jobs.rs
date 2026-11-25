@@ -373,12 +373,7 @@ fn prune_candidates(
         .iter()
         .filter(|n| rynas_btrfs::name::split_snapshot_name(n).is_some_and(|(p, _)| p == j.name))
         .filter(|n| !pinned.contains(&dir.join(n).display().to_string()))
-        .filter(|n| {
-            latest.iter().all(|l| match l {
-                None => false,
-                Some(l) => rynas_btrfs::name::compare_names(n, l) == std::cmp::Ordering::Less,
-            })
-        })
+        .filter(|n| !crate::space::discover::replica_needed(n, latest))
         .cloned()
         .collect()
 }

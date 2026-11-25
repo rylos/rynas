@@ -530,6 +530,8 @@ pub enum RetentionReason {
     Interrupted,
     /// Beyond every count.
     Expired,
+    /// Pinned in Storage › Space: never deleted while pinned.
+    Pinned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

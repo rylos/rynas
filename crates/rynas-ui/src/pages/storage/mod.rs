@@ -461,7 +461,7 @@ pub fn SubNav() -> impl IntoView {
         <nav class="subnav" aria-label=tr("sto.title")>
             {item("/storage", "sto.tab.overview", icons::LAYOUT_DASHBOARD)}
             {item("/storage/disks", "sto.disks", icons::HARD_DRIVE)}
-            {item("/storage/space", "sp.tab", icons::LAYERS)}
+            {crate::shell::is_admin().then(|| item("/storage/space", "sp.tab", icons::LAYERS))}
         </nav>
     }
 }

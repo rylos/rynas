@@ -5408,6 +5408,7 @@ pcb.kept.weekly	Tenuto: uno alla settimana
 pcb.kept.monthly	Tenuto: uno al mese
 pcb.kept.yearly	Tenuto: uno all'anno
 pcb.kept.future	Tenuto: data nel futuro
+pcb.kept.pinned	Tenuto: fissato
 pcb.goes_next	Va via alla prossima pulizia
 pcb.goes_after	va via dopo il {when}
 pcb.n_backups.one	{n} backup
@@ -6270,7 +6271,7 @@ stg.ad.stignore_changes	Modifiche a .stignore
 stg.ad.go	Adotta
 stg.ad.done	Syncthing adottato
 nev.syncthing.conflict.title	Copie in conflitto in {folder}
-nev.syncthing.conflict.body	{count} nuove copie in conflitto in {folder}: {files}. Tieni la versione giusta ed elimina le copie; la pagina Syncthing le elenca.
+nev.syncthing.conflict.body	Nuove copie in conflitto in {folder}: {count} ({files}). Tieni la versione giusta ed elimina le copie; la pagina Syncthing le elenca.
 nev.syncthing.folder_error.title	La cartella Syncthing {folder} è in errore
 nev.syncthing.folder_error.body	{error}. In questa cartella non si sincronizza nulla finché non viene risolto.
 nev.syncthing.folder_recovered.title	La cartella Syncthing {folder} funziona di nuovo
@@ -6365,7 +6366,7 @@ nev.files.job_failed.kind.sync	Sincronizzazione non riuscita
 nev.files.job_failed.body	{error}
 nt.kind.device	Dispositivo mobile
 nt.device_summary	Push al telefono abbinato
-nev.device.password_kept.title	Password di {user} cambiata: {n} dispositivi abbinati mantengono l'accesso
+nev.device.password_kept.title	Password di {user} cambiata: i dispositivi abbinati mantengono l'accesso ({n})
 nev.device.password_kept.body	Dispositivi: {devices}. Revoca quelli che non riconosci in Sicurezza › Dispositivi mobili.
 # Storage > Space (D-SPACE)
 sp.tab	Spazio
@@ -6376,7 +6377,7 @@ sp.scanning	Analisi in corso
 sp.scanned	Analizzato il {when}
 sp.never_scanned	Non ancora analizzato: la prima analisi parte in background, oppure avviala ora.
 sp.volumes	Volumi
-sp.used	Usato
+sp.used_of	Usato {size}
 sp.free	Libero
 sp.reclaimable	Liberato pulendo:
 sp.no_snapshots	nessuno snapshot misurato
@@ -6405,8 +6406,10 @@ sp.oldest	il più vecchio {when}
 sp.growth	7 giorni: {size}
 sp.over_budget	Oltre il limite
 sp.keeps	La sua conservazione ne tiene fino a {n}
-sp.budget_count	limite {n} snapshot
-sp.budget_age	limite {n} giorni
+sp.budget_count.one	limite {n} snapshot
+sp.budget_count.other	limite {n} snapshot
+sp.budget_age.one	limite {n} giorno
+sp.budget_age.other	limite {n} giorni
 sp.budget_bytes	limite {size}
 sp.select_all	Seleziona quelli eliminabili
 sp.budget	Limite…
@@ -6424,7 +6427,8 @@ sp.clear_selection	Deseleziona
 sp.preview	Anteprima
 sp.preview_title	Cosa verrebbe liberato?
 sp.measuring	Misura di cosa contengono questi snapshot…
-sp.preview_text	Eliminare {n} snapshot libera {size}.
+sp.preview_text.one	Eliminare {n} snapshot libera {size}.
+sp.preview_text.other	Eliminare {n} snapshot libera {size}.
 sp.preview_at_least	Almeno {size} è tenuto solo da questi snapshot.
 sp.kept_title	Tenuti:
 sp.unknown_snapshot	non è uno snapshot noto a Spazio
@@ -6455,7 +6459,10 @@ sp.review_text	Mai eliminati da rynas da solo: copie lasciate da ripristini e ri
 sp.review_empty	Niente da rivedere.
 sp.remove_selected	Elimina selezionati
 sp.review_ask_title	Eliminare gli elementi selezionati?
-sp.review_ask	{n} elementi vengono eliminati definitivamente.
+sp.review_ask.one	{n} elemento viene eliminato definitivamente.
+sp.review_ask.other	{n} elementi vengono eliminati definitivamente.
+sp.review_ask_volumes.one	{n} elemento viene eliminato definitivamente. Un volume Docker se ne va con i dati che un'app vi teneva.
+sp.review_ask_volumes.other	{n} elementi vengono eliminati definitivamente. I volumi Docker se ne vanno con i dati che le app vi tenevano.
 sp.removed	Eliminati
 sp.rev.rollback_copy	Copia tenuta da un ritorno alla versione precedente
 sp.rev.restore_copy	Copia tenuta da un ripristino
@@ -6467,6 +6474,7 @@ sp.rev.removed_pc_folder	Backup di un PC rimosso
 sp.rev.old_kernel	Kernel vecchio
 sp.rev.unused_image	Immagine Docker inutilizzata
 sp.rev.unused_volume	Volume Docker inutilizzato
+sp.volume_data_note	Eliminare un volume Docker cancella per sempre i dati che un'app vi teneva.
 sp.guardrails	Protezioni
 sp.notify_low_free	Avvisa quando lo spazio libero è poco
 sp.notify_low_free_help	Sotto il limite basso, finché lo spazio libero non torna sopra il limite di recupero.
@@ -6503,8 +6511,14 @@ nev.space.free_ok.body	{volume} è libero al {free_pct}%.
 nev.space.snapshots_growth.title	Gli snapshot su {volume} sono cresciuti di {grown} in una settimana
 nev.space.snapshots_growth.body	Crescita maggiore: {top}.
 nev.space.auto_freed.title	Snapshot vecchi eliminati su {volume} per liberare spazio
-nev.space.auto_freed.body	{count} snapshot eliminati dalla pulizia automatica: {snapshots}
-sp.kind.incoming_replica	Replica in arrivo
+nev.space.auto_freed.body	Snapshot eliminati dalla pulizia automatica: {count} ({snapshots})
+nev.space.auto_free_stuck.title	La pulizia automatica non può liberare altro spazio su {volume}
+nev.space.auto_free_stuck.body	{volume} ha ancora poco spazio libero e non si può eliminare altro automaticamente. Archiviazione › Spazio mostra cosa occupa spazio.
+nev.space.thin_suspended.title	Pulizia automatica sospesa su {volume}
+nev.space.thin_suspended.body	Gli snapshot su {volume} sono cresciuti di {grown} in una settimana, molto più che nelle settimane prima. La pulizia automatica si ferma perché gli snapshot più vecchi restino; controlla se le condivisioni hanno avuto modifiche di massa.
+nev.space.thin_resumed.title	Pulizia automatica ripresa su {volume}
+nev.space.thin_resumed.body	Gli snapshot su {volume} crescono di nuovo come al solito.
+sp.kind.incoming_replica	Replica ricevuta
 sp.prot.incoming_replica	Inviata da un altro NAS
 sp.rev.received_unknown_owner	Ricevuti, proprietario sconosciuto
 sp.journal_admin	Limite del registro impostato dall'amministratore: {size} (rynas non ne imposta).

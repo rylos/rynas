@@ -8,7 +8,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use rynas_api_types::pcbackup::DeletePolicy;
 use rynas_btrfs::receive::{delete_refusal, scan_dir};
-use rynas_btrfs::receive_filter::{FilterArgs, Plan, Prog, check, locate, parse_args, verify_root};
+use rynas_btrfs::receive_filter::{FilterArgs, Plan, Prog, check, locate, parse_args, pinned_refusal, verify_root};
 
 fn log(prio: libc::c_int, msg: &str) {
     let ident = c"rynas-btrbk-filter";
@@ -50,7 +50,7 @@ fn deletes_allowed(a: &FilterArgs, plan: &Plan) -> Result<(), String> {
     };
     let now = now_ms();
     for n in &plan.deletes {
-        if let Some(why) = delete_refusal(n, &entries, &policy, now) {
+        if let Some(why) = pinned_refusal(a, n).or_else(|| delete_refusal(n, &entries, &policy, now)) {
             return Err(why);
         }
     }

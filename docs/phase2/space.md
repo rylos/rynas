@@ -14,16 +14,17 @@ took the room or what could go without risk. Several sources were never cleaned 
 
 ## 2. What the best NAS software does (summary of the research)
 
-- **QNAP smart snapshot space management**: when free space falls below a trigger, the oldest
-  snapshots go first until free space is back above a second level (hysteresis); snapshots
-  marked "keep permanently" are never removed.
+- **Smart snapshot space management of a NAS system**: when free space falls below a trigger,
+  the oldest snapshots go first until free space is back above a second level (hysteresis);
+  snapshots marked "keep permanently" are never removed.
 - **snapper**: per-config algorithms (number, timeline, empty pre/post pairs), `SPACE_LIMIT`
   and `FREE_LIMIT`, snapshots marked important kept longer. It computes "freed if deleted" for a
   set with a level-1 qgroup that contains the set.
-- **Time Machine**: thins old backups automatically, never the newest.
-- **Windows Storage Sense**: per-category ages (recycle bin, downloads, temporary files).
-- **Synology Storage Analyzer**: history and trend of volume usage, but it ignores snapshots,
-  which is the main complaint of its users.
+- **A desktop backup tool**: thins old backups automatically, never the newest.
+- **A desktop OS's storage cleanup**: per-category ages (recycle bin, downloads, temporary
+  files).
+- **A NAS system's storage analyzer**: history and trend of volume usage, but it ignores
+  snapshots, which is the main complaint of its users.
 - **Docker** never removes named volumes by itself; dangling images and build cache grow until
   someone prunes them.
 - **journald** defaults to `SystemMaxUse` = 10 % of the filesystem capped at 4 GiB.
@@ -50,9 +51,9 @@ btrfs facts that shape the design:
 | "Freed if removed" | rynas's own extent walk (§5.2); qgroup level-1 numbers only when quotas are already on, full and consistent and a level-1 group matches the set exactly. rynas never enables quotas. |
 | Scan | Daily and on demand, in a thread at idle I/O priority and nice 19; volumes whose disks sleep are left for later; 45 min budget per volume. |
 | Deletions | Always a task after an explicit selection, discovery runs again first, any protected path refuses the whole request; the task ends with `btrfs subvolume sync`. |
-| Protections | Never: the newest snapshot of a job, stack or the restore points; a replication target's incremental parent; the newest complete PC backup per subvolume; the restore point the system runs from; a pinned snapshot; a writable subvolume. |
-| Pins | A persisted set of paths (`<state>/space/pins.json`). Honoured by Space, the thinning, stack pruning, restore point pruning and share job runs (btrbk `--preserve-snapshots`, rynas prunes the rest). |
-| Identical app snapshots | The stack folder's subvolume generation is not newer than the transaction that created the snapshot (`generation <= otransid`): btrbk's "onchange" rule (§5.3). |
+| Protections | Never: the newest snapshot of a job, stack or the restore points; what a replication target still needs (its latest replica and every newer snapshot; all of them while an enabled target has none or its state file is missing or unreadable); the newest complete PC backup per subvolume; the restore point the system runs from; a pinned snapshot; a writable subvolume. |
+| Pins | A persisted set of paths (`<state>/space/pins.json`). Honoured by Space, the thinning, stack pruning, restore point pruning, share job runs (btrbk `--preserve-snapshots`, rynas prunes the rest) and PC backups (the NAS's retention, and the PC's own deletes through the key line's `--pinned` names). |
+| Identical app snapshots | The stack folder's subvolume generation is not newer than the transaction that created the snapshot (`generation <= otransid`, btrbk's "onchange" rule) **and** the images the snapshot recorded are the ones the stack runs now (§5.3). |
 | Navigation | "Security" becomes a sidebar entry after Users; the command palette (Ctrl+K) indexes inner tabs and sections (static deep-link table with i18n labels). |
 
 ## 4. Inventory (what was never cleaned)
@@ -66,14 +67,14 @@ btrfs facts that shape the design:
 | System rollback copy | top-level `@rootfs.rynas-rollback-<stamp>` | kept forever | review item, deleted by subvolume id after re-listing (never the running root) |
 | Share rollback / restore copies | `<subvol>.rynas-rollback-<ts>`, `<name>.rynas-before-restore-<ts>` | kept, no API | review items (walk depth 4) |
 | Syncthing adoption copy | `<folder>.before-adopt-<ms>` | kept | review item |
-| Replicas | target folders | removed target left replicas | `.replicas/<x>` folders no configured target owns → incoming replica, fully protected (§7) |
+| Replicas | target folders | removed target left replicas | `.replicas/<x>` folders no configured target owns → "received replica", fully protected (§7); replicas another NAS sends over SSH into other folders are not recorded by the receiving side and show as "received, owner unknown" (§6) |
 | PC backups | registered folders | own retention | measured; folders of received snapshots nobody owns → "received, owner unknown", newest of each line protected (§7) |
 | Kernels | `linux-image-*` | never removed | review item (never running, newest of each series or held) |
-| Recycle bins | `#recycle` of shares and homes | cleanup only from a manual task | **daily cleanup by default** honouring `retention_days` (0 = never), homes included |
+| Recycle bins | `#recycle` of shares and homes | cleanup only from a manual task | **daily cleanup by default** honouring `retention_days` (0 = never), homes included: a change of behaviour on update, to be named in the release notes |
 | Thumbnails | `/var/cache/rynas/files/thumbs/<uid>/` | no eviction | **LRU eviction to a cap** (default 2 GiB) + safe action |
 | Journal | `/var/log/journal` | no limit from rynas | **journald drop-in** `SystemMaxUse` = min(2 GiB, 5 %) by default + safe action |
 | App catalogues | `<state>/catalog/<serial>/` | kept | safe action keeps current and previous |
-| Docker | engine data | manual prune of unused images | safe action (dangling images nothing needs + build cache), review (tagged unused images, named volumes no container uses) |
+| Docker | engine data | manual prune of unused images | safe action (dangling images nothing needs + build cache), review (tagged unused images, named volumes no container uses and no known stack labels) |
 
 ## 5. Design
 
@@ -110,7 +111,7 @@ The answer is cached in `<state>/space/<volume>.json` and `<state>/space/_global
 
 For a whole source the set is all its snapshots and `keep` is the live subvolume; for a
 preview of a selection, `keep` adds the unselected snapshots of the same source. Memory is
-bounded (8 Mi ranges, 128 MiB) and so is time (the scan budget, or the task's cancel).
+bounded (1 Mi ranges per range set, peak under 128 MiB) and so is time (the scan budget, or the task's cancel).
 
 Limits, shown as "≈": data the set also shares with subvolumes outside `keep`
 (deduplicated or reflinked into another share) is counted as freed; an extent of which the set
@@ -130,6 +131,11 @@ snapshot (`generation <= otransid`). This is btrbk's `snapshot_create onchange` 
 conservative (any change, even metadata, makes the folder "changed"), so it can only keep a
 snapshot that could have gone, never remove one that differs. `btrfs subvolume find-new` was
 rejected: it misses deletions and renames. The newest snapshot stays protected anyway.
+
+The folder is only half of an app's rollback point: the snapshot's `<id>.json` records the
+images (service and image id) the services ran. A snapshot whose recorded images differ from
+the ones the stack runs now is the way back to the older images, not "identical"; when the
+engine does not answer (images unknown) or the metadata is missing, nothing is identical.
 
 ### 5.4 Deleting
 
@@ -155,10 +161,21 @@ Configuration key `space` (`SpaceSettings`, staged and applied like every domain
   (50 GiB) or `growth_pct` (25 %) in 7 days, with the top three sources.
 - **Free space automatically** (`auto_free`, per volume, off by default): while the volume is
   low, the oldest unprotected snapshots of share jobs, app stacks and restore points are
-  deleted one at a time (sources over their budget first), `btrfs subvolume sync` every three
-  deletions, until free space is back above `recover_pct` (at most 50 per pass). PC backups,
-  orphans and replicas are never thinned automatically. Each deletion is logged; one
-  `space.auto_freed` notification per pass lists them.
+  deleted one at a time (sources over their budget first), with `btrfs subvolume sync` and a
+  free-space reading after every deletion, until free space is back above `recover_pct` (at
+  most 50 per pass, 15 minutes per pass). Each deletion takes the volume claim, discovers that
+  volume only and gives the claim back right after, so replication, receives and snapshot runs
+  get their turn between deletions; the day's count is written after every deletion. PC
+  backups, orphans and replicas are never thinned automatically. Each deletion is logged; one
+  `space.auto_freed` notification per pass lists them. A pass that finds nothing more to remove
+  or fails opens one problem per volume (`space.auto_free_stuck`, fixed key, at most one per
+  hour, resolved quietly when free space is back) and the next pass waits an hour.
+- **Suspension on anomalous growth**: when the weekly growth check finds a volume's snapshots
+  grew more than its limits **and** more than 3 times the median of the 4 weeks before (counted
+  as at least 1 GiB), the automatic cleanup of that volume stops (`space.thin_suspended`): a
+  mass change such as ransomware encrypting a share makes the newest snapshots large and the
+  oldest ones the clean copies. The next weekly check that is not anomalous resumes it
+  (`space.thin_resumed`).
 - **Budgets** per source (`max_count`, `max_age_days`, `max_bytes`): shown in the sources table,
   "over budget" flagged; the thinning takes the excess first.
 - **journald**: drop-in `/etc/systemd/journald.conf.d/50-rynas-space.conf`,
@@ -215,9 +232,18 @@ Administrators only (also checked in rynasd). Event codes: `space.low_free`, `sp
   the filesystem lock; app snapshots also take the stack's busy mark.
 - **Extent walk**: each range set is capped (1 Mi ranges, peak under 128 MiB) and a measurement
   with any unreadable file is "not measured".
-- **journald**: an administrator's `SystemMaxUse=` (journald.conf or a drop-in sorting before
-  rynas's) wins: rynas writes no drop-in, the Space tab shows it; the journal action uses the cap
-  in force (the administrator's or the applied one), never an unapplied default.
+- **journald**: rynas reads every file journald reads, as journald does: `journald.conf` (or
+  the vendor one in `/usr/lib/systemd/`), then the `*.conf` drop-ins of
+  `/etc/systemd/journald.conf.d`, `/run/systemd/journald.conf.d`,
+  `/usr/local/lib/systemd/journald.conf.d` and `/usr/lib/systemd/journald.conf.d` in lexical
+  order of their names (the first folder hiding a name in the later ones), before and after
+  rynas's own. An administrator's `SystemMaxUse=` anywhere in them wins: rynas writes no
+  drop-in, the Space tab shows it; the journal action cuts to the value journald reads now and
+  never below the administrator's, never to an unapplied default.
+- **Docker volumes**: a volume labeled with the compose project of a stack rynas knows (its own
+  stacks, adopted ones) is never in the review list; a removal reads `docker system df` again
+  right before each `docker volume rm` and stops when the volume is in use or labeled
+  meanwhile. Removing a volume deletes the app's data, which the review list says.
 - **Identical app snapshots**: checked on a real btrfs (Debian 13, kernel 7.3): a read-only
   snapshot does not bump the source's generation, so `generation <= otransid` stays the rule.
 
@@ -226,6 +252,8 @@ Administrators only (also checked in rynasd). Event codes: `space.low_free`, `sp
 - Leftovers deeper than the walk (depth 4) are not found; restore copies inside deep folders of
   a share are only seen once the restore task records them (not done).
 - Removed-PC detection is by "received snapshots nobody owns"; a folder of received snapshots
-  made by hand outside rynas shows up the same way (review only, never automatic).
+  made by hand outside rynas shows up the same way (review only, never automatic). Replicas
+  another NAS pushes over SSH outside `.replicas/` look the same: the receiving side keeps no
+  record of them yet.
 - The extent walk of a big live share is long on HDDs; the 45 min budget leaves the remaining
   sources "not measured" until the next scan.

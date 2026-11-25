@@ -1580,7 +1580,8 @@ fn snap_ms(e: &Entry) -> Option<u64> {
 /// - the NAS floor (`floor.keep_last` newest by NAS-side time, at least one, and nothing
 ///   younger than `floor.min_age_days`), as for deletes the PC asks for;
 /// - names more than a day in the future (never deleted on the NAS's own);
-/// - interrupted receives while a receive runs or for an hour after they stopped.
+/// - interrupted receives while a receive runs or for an hour after they stopped;
+/// - snapshots pinned in Storage › Space (`pinned`, names in the folder).
 ///
 /// A snapshot kept by the counts says until when (`until_ms`, the start of the period that
 /// lets it go). Folders with a snapshot name that are not subvolumes never appear.
@@ -1591,6 +1592,7 @@ pub fn retention_plan(
     expected: &BTreeSet<String>,
     receiving: bool,
     now_ms: u64,
+    pinned: &BTreeSet<String>,
 ) -> Vec<RetentionItem> {
     let parents = receive::parents(entries, now_ms);
     let floor = DeletePolicy { allowed: true, keep_last: floor.keep_last.max(1), min_age_days: floor.min_age_days };
@@ -1675,6 +1677,8 @@ pub fn retention_plan(
         let (keep, reason) = if e.incomplete() {
             let stale = receive::otime_ms(e).is_none_or(|t| now_ms >= t.saturating_add(CLEAN_INTERRUPTED_AFTER_MS));
             (receiving || !stale, RetentionReason::Interrupted)
+        } else if pinned.contains(&e.name) {
+            (true, RetentionReason::Pinned)
         } else if parents.contains(&e.name) {
             (true, RetentionReason::Parent)
         } else if receive::delete_refusal(&e.name, entries, &floor, now_ms).is_some() {
@@ -2343,7 +2347,8 @@ impl PcBackup {
             .filter(|(_, t)| !t.agent)
             .filter_map(|(d, t)| {
                 let (k, b) = receive::parse_public_key(&t.public_key).ok()?;
-                Some(receive::key_line(d, &t.path, &t.key_policy(), &k, &b))
+                let pins: Vec<String> = pinned_names(Path::new(&t.path)).into_iter().collect();
+                Some(receive::key_line(d, &t.path, &t.key_policy(), &pins, &k, &b))
             })
             .collect();
         receive::authorized_keys(&lines)
@@ -2883,7 +2888,7 @@ impl PcBackup {
         };
         let now = rynas_tasks::now_ms();
         let expected = self.expected_groups(t, root, &entries, now);
-        let items = retention_plan(&entries, &retention.gfs, floor, &expected, self.host.receiving(root), now);
+        let items = retention_plan(&entries, &retention.gfs, floor, &expected, self.host.receiving(root), now, &pinned_names(root));
         let quota = self.host.quota_sizes(root, &entries);
         let excl = |name: &str| match &quota {
             Some(q) => q.get(name).map(|x| x.1),
@@ -2925,7 +2930,8 @@ impl PcBackup {
             };
             let now = rynas_tasks::now_ms();
             let expected = self.expected_groups(&t, root, &entries, now);
-            let plan = retention_plan(&entries, &t.retention.gfs, &t.rules(), &expected, false, now);
+            // pinned snapshots (Storage › Space) stay, read under the folder's lock
+            let plan = retention_plan(&entries, &t.retention.gfs, &t.rules(), &expected, false, now, &pinned_names(root));
             let mut gone = Vec::new();
             for i in plan.iter().filter(|i| !i.keep).take(PRUNE_MAX) {
                 self.host.delete_snapshot(&lock, &i.name)?;
@@ -2983,6 +2989,33 @@ impl PcBackup {
                 Err(e) => tracing::warn!("pc backup {d}: retention: {e}"),
             }
         }
+    }
+}
+
+/// The snapshots of the PC folder `root` pinned in Storage › Space (names in the folder).
+/// The NAS's own retention keeps them and the PC's key line names them, so the filter
+/// refuses the deletes a PC asks for.
+fn pinned_names(root: &Path) -> BTreeSet<String> {
+    let all = crate::space::pins::get().map(|p| p.all()).unwrap_or_default();
+    pinned_in(&all, root)
+}
+
+/// The names of the pins (absolute paths) directly inside `root`.
+fn pinned_in(pins: &BTreeSet<String>, root: &Path) -> BTreeSet<String> {
+    pins.iter()
+        .map(Path::new)
+        .filter(|p| p.parent() == Some(root))
+        .filter_map(|p| p.file_name()?.to_str().map(str::to_string))
+        .collect()
+}
+
+impl PcBackup {
+    /// A pin changed in Storage › Space: when it is inside a PC folder fed over SSH, the keys
+    /// of the account are written again (the filter reads the pinned names from them).
+    pub fn pins_changed(&self, path: &str) -> Result<(), String> {
+        let parent = Path::new(path).parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let ssh = self.reg.lock().unwrap().targets.values().any(|t| !t.agent && t.path == parent);
+        if ssh { self.host.write_keys(&self.keys_text()) } else { Ok(()) }
     }
 }
 
@@ -3917,7 +3950,10 @@ async fn detail_get(
             let port = receive::sshd_port(&s.host.facts().sshd_config);
             let key_line = receive::parse_public_key(&t.public_key)
                 .ok()
-                .map(|(k, b)| receive::key_line(&device, &t.path, &t.key_policy(), &k, &b));
+                .map(|(k, b)| {
+                    let pins: Vec<String> = pinned_names(Path::new(&t.path)).into_iter().collect();
+                    receive::key_line(&device, &t.path, &t.key_policy(), &pins, &k, &b)
+                });
             let nas = t.retention.owner == RetentionOwner::Nas;
             let plan = if nas { s.preview(&t, &t.retention, &t.rules()).map(|p| p.items).unwrap_or_default() } else { Vec::new() };
             PcTargetDetail {
@@ -4692,7 +4728,7 @@ mod tests {
         e.insert(0, entry("root", now - 50 * day, true));
         let gfs = Retention { preset: None, hourly: 0, daily: 7, weekly: 0, monthly: 0, yearly: 0, min: "latest".into() };
         let floor = DeletePolicy { allowed: false, keep_last: 0, min_age_days: 0 };
-        let plan = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000);
+        let plan = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000, &BTreeSet::new());
         // the newest of each subvolume is the parent, however old (root only has one)
         assert_eq!(keep_of(&plan, &e[1].name), (true, RetentionReason::Parent));
         assert_eq!(keep_of(&plan, &e[0].name), (true, RetentionReason::Parent));
@@ -4700,14 +4736,22 @@ mod tests {
         assert_eq!(keep_of(&plan, &e[30].name), (false, RetentionReason::Expired));
         let kept = plan.iter().filter(|i| i.keep).count();
         assert!((7..=9).contains(&kept), "{kept} kept");
+        // a snapshot pinned in Storage › Space stays whatever the counts say
+        let root = Path::new("/volume1/pc/laptop");
+        let pins: BTreeSet<String> = [root.join(&e[30].name).display().to_string(), format!("/volume1/pc/other/{}", e[31].name)].into();
+        let pinned = pinned_in(&pins, root);
+        assert_eq!(pinned.len(), 1);
+        let plan = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000, &pinned);
+        assert_eq!(keep_of(&plan, &e[30].name), (true, RetentionReason::Pinned));
+        assert_eq!(keep_of(&plan, &e[31].name), (false, RetentionReason::Expired));
         // a floor of 100 days keeps everything
         let floor = DeletePolicy { allowed: true, keep_last: 1, min_age_days: 100 };
-        assert!(retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000).iter().all(|i| i.keep));
+        assert!(retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000, &BTreeSet::new()).iter().all(|i| i.keep));
         // min "all" keeps everything too; monthly counts keep the first of each month
         let all = Retention { min: "all".into(), ..gfs.clone() };
-        assert!(retention_plan(&e, &all, &DeletePolicy::default(), &BTreeSet::new(), false, now as u64 * 1000).iter().all(|i| i.keep));
+        assert!(retention_plan(&e, &all, &DeletePolicy::default(), &BTreeSet::new(), false, now as u64 * 1000, &BTreeSet::new()).iter().all(|i| i.keep));
         let monthly = Retention { daily: 0, monthly: 12, ..gfs };
-        let plan = retention_plan(&e, &monthly, &DeletePolicy::default(), &BTreeSet::new(), false, now as u64 * 1000);
+        let plan = retention_plan(&e, &monthly, &DeletePolicy::default(), &BTreeSet::new(), false, now as u64 * 1000, &BTreeSet::new());
         let months = plan.iter().filter(|i| i.reason == RetentionReason::Monthly).count();
         assert!((1..=3).contains(&months), "{months}");
     }
@@ -4724,7 +4768,7 @@ mod tests {
         ];
         let gfs = Retention { preset: None, hourly: 0, daily: 1, weekly: 0, monthly: 0, yearly: 0, min: "latest".into() };
         let floor = DeletePolicy::default();
-        let plan = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000);
+        let plan = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000, &BTreeSet::new());
         // a name in the future stays and is not the parent: the real newest is
         assert_eq!(keep_of(&plan, &e[0].name), (true, RetentionReason::Future));
         assert_eq!(keep_of(&plan, &e[3].name), (true, RetentionReason::Parent));
@@ -4732,7 +4776,7 @@ mod tests {
         assert_eq!(keep_of(&plan, &e[1].name), (true, RetentionReason::Interrupted));
         assert_eq!(keep_of(&plan, &e[2].name), (false, RetentionReason::Interrupted));
         assert_eq!(keep_of(&plan, &e[4].name), (false, RetentionReason::Expired));
-        let busy = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), true, now as u64 * 1000);
+        let busy = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), true, now as u64 * 1000, &BTreeSet::new());
         assert_eq!(keep_of(&busy, &e[2].name), (true, RetentionReason::Interrupted));
     }
 
@@ -4803,7 +4847,7 @@ mod tests {
         let gfs = Retention { preset: None, hourly: 0, daily: 7, weekly: 0, monthly: 0, yearly: 0, min: "latest".into() };
         let floor = DeletePolicy { allowed: false, keep_last: 0, min_age_days: 0 };
         let expected = BTreeSet::from(["@".to_string(), "@home".to_string()]);
-        let plan = retention_plan(&e, &gfs, &floor, &expected, false, now as u64 * 1000);
+        let plan = retention_plan(&e, &gfs, &floor, &expected, false, now as u64 * 1000, &BTreeSet::new());
         assert_eq!(keep_of(&plan, &e[0].name), (true, RetentionReason::Parent));
         assert_eq!(keep_of(&plan, &e[2].name), (true, RetentionReason::Daily));
         assert_eq!(keep_of(&plan, &e[3].name), (true, RetentionReason::Daily));
@@ -4814,7 +4858,7 @@ mod tests {
         assert_eq!(until, bucket_start(1, buckets(d2 as u64 * 1000).unwrap()[1] + 7).unwrap());
         assert!(plan.iter().find(|i| i.name == e[0].name).unwrap().until_ms.is_none());
         // nothing expected: every run counts as complete, so the first of the day stays
-        let loose = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000);
+        let loose = retention_plan(&e, &gfs, &floor, &BTreeSet::new(), false, now as u64 * 1000, &BTreeSet::new());
         assert_eq!(keep_of(&loose, &e[4].name), (true, RetentionReason::Daily));
         assert_eq!(keep_of(&loose, &e[2].name), (false, RetentionReason::Expired));
     }
@@ -4838,7 +4882,7 @@ mod tests {
         let gfs = Retention { preset: None, hourly: 0, daily: 7, weekly: 0, monthly: 0, yearly: 0, min: "latest".into() };
         let floor = DeletePolicy { allowed: false, keep_last: 0, min_age_days: 0 };
         let expected = BTreeSet::from(["@".to_string(), "@home".to_string()]);
-        let plan = retention_plan(&e, &gfs, &floor, &expected, false, now as u64 * 1000);
+        let plan = retention_plan(&e, &gfs, &floor, &expected, false, now as u64 * 1000, &BTreeSet::new());
         let kept = |g: &str| plan.iter().filter(|i| i.group == g && i.keep).count();
         // one @ a day for the five days, and the first @home of each day (the newest of each
         // subvolume is its parent on top)

@@ -307,7 +307,11 @@ pub fn valid_path(p: &str) -> Result<(), String> {
 
 /// Arguments of the filter for one device (also what [`crate::receive_filter::parse_args`]
 /// reads back).
-pub fn filter_args(device: &str, root: &str, policy: &DeletePolicy) -> Vec<String> {
+///
+/// `pinned`: snapshot names in the folder pinned in Storage › Space; the filter refuses to
+/// delete them. Only btrbk snapshot names made of letters, digits and `_ @ + . -` are
+/// written (the key line goes through a shell); others cannot be pinned snapshots of a PC.
+pub fn filter_args(device: &str, root: &str, policy: &DeletePolicy, pinned: &[String]) -> Vec<String> {
     let mut a = vec![
         "--device".to_string(),
         device.to_string(),
@@ -322,6 +326,9 @@ pub fn filter_args(device: &str, root: &str, policy: &DeletePolicy) -> Vec<Strin
         if policy.min_age_days > 0 {
             a.extend(["--min-age-days".into(), policy.min_age_days.to_string()]);
         }
+        for n in pinned.iter().filter(|n| pinnable_name(n)) {
+            a.extend(["--pinned".into(), n.clone()]);
+        }
     } else {
         // the PC can only add, but btrbk must still clear its own interrupted receive
         // before it sends that snapshot again
@@ -331,11 +338,18 @@ pub fn filter_args(device: &str, root: &str, policy: &DeletePolicy) -> Vec<Strin
 }
 
 /// The `authorized_keys` line of a device: its key, only the filter, nothing else.
-pub fn key_line(device: &str, root: &str, policy: &DeletePolicy, kind: &str, blob: &str) -> String {
+pub fn key_line(device: &str, root: &str, policy: &DeletePolicy, pinned: &[String], kind: &str, blob: &str) -> String {
     format!(
         "restrict,command=\"{FILTER} {}\" {kind} {blob} rynas:{device}",
-        filter_args(device, root, policy).join(" ")
+        filter_args(device, root, policy, pinned).join(" ")
     )
+}
+
+/// A snapshot name the key line may carry: a btrbk snapshot name, shell-safe characters only.
+pub fn pinnable_name(n: &str) -> bool {
+    n.len() <= 255
+        && split_snapshot_name(n).is_some()
+        && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"_@+.-".contains(&b))
 }
 
 /// The whole `authorized_keys` of the account.
@@ -694,12 +708,16 @@ mod tests {
         // the blob names another type
         assert!(parse_public_key(&ED.replace("ssh-ed25519 ", "ecdsa-sha2-nistp256 ")).is_err());
         assert!(parse_public_key(&format!("{ED}\nssh-ed25519 AAAA")).is_err());
-        let line = key_line("laptop", "/volume1/backup/laptop", &DeletePolicy { allowed: true, keep_last: 3, min_age_days: 7 }, &k, &b);
+        let line = key_line("laptop", "/volume1/backup/laptop", &DeletePolicy { allowed: true, keep_last: 3, min_age_days: 7 }, &[], &k, &b);
         assert_eq!(
             line,
             format!("restrict,command=\"{FILTER} --device laptop --root /volume1/backup/laptop --delete --keep-last 3 --min-age-days 7\" ssh-ed25519 {b} rynas:laptop")
         );
-        let line = key_line("laptop", "/v/b/l", &DeletePolicy { allowed: false, keep_last: 3, min_age_days: 7 }, &k, &b);
+        // pinned snapshots go in the line; a name that is not shell-safe never does
+        let pins = ["home.20261101T0100".to_string(), "x.20261101T0100;rm".to_string()];
+        let line = key_line("laptop", "/v/b/l", &DeletePolicy { allowed: true, keep_last: 0, min_age_days: 0 }, &pins, &k, &b);
+        assert!(line.contains("--delete --pinned home.20261101T0100\"") && !line.contains(";rm"), "{line}");
+        let line = key_line("laptop", "/v/b/l", &DeletePolicy { allowed: false, keep_last: 3, min_age_days: 7 }, &[], &k, &b);
         // the PC can only add: its own interrupted receives are all it may delete
         assert!(line.contains(" --delete-interrupted\"") && !line.contains("--delete ") && !line.contains("--keep-last"));
     }

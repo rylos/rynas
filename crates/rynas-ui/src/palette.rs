@@ -39,6 +39,9 @@ pub const DEEP: &[(&[&str], &str, &str)] = &[
     (&["nav.system", "nt.settings_title"], "/system/notifications", icons::BELL_RING),
 ];
 
+/// Entries of [`DEEP`] only administrators see.
+pub const ADMIN_ONLY: &[&str] = &["/storage/space"];
+
 /// "Storage › Space" for an entry of [`DEEP`].
 pub fn trail_text(keys: &[&'static str]) -> String {
     keys.iter().map(|k| t(k)).collect::<Vec<_>>().join(" › ")
@@ -200,6 +203,9 @@ pub fn Palette() -> impl IntoView {
     // (hidden entries stay here: the palette always reaches every page)
     let all = Signal::derive(move || {
         let mut v = entries();
+        // pages only administrators may open (their API answers 403 to the others)
+        let admin = crate::shell::is_admin();
+        v.retain(|e| !matches!(e.action, Action::Deep(i) if ADMIN_ONLY.contains(&DEEP[i].1) && !admin));
         let pins: Vec<Entry> = nav.board.with(|b| {
             b.layout
                 .pins

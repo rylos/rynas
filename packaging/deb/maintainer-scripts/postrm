@@ -29,6 +29,14 @@ if [ "$1" = "purge" ]; then
         /etc/sysctl.d/60-rynas-zram.conf /etc/systemd/zram-generator.conf.d/50-rynas.conf
     rmdir /etc/systemd/system/timers.target.d 2>/dev/null || true
     rm -rf /etc/rynas
+    # the journal's size limit of Storage › Space: journald reads its drop-ins when it starts
+    if [ -e /etc/systemd/journald.conf.d/50-rynas-space.conf ]; then
+        rm -f /etc/systemd/journald.conf.d/50-rynas-space.conf
+        rmdir /etc/systemd/journald.conf.d 2>/dev/null || true
+        if [ -d /run/systemd/system ]; then
+            systemctl try-restart systemd-journald.service >/dev/null 2>&1 || true
+        fi
+    fi
 fi
 
 #DEBHELPER#

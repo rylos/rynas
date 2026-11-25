@@ -845,6 +845,7 @@ kbd {
 .space-snaps, .space-review, .space-refused { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-1); }
 .space-snap, .space-review-item { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); min-width: 0; padding: var(--s-1) 0; border-bottom: 1px solid var(--border); }
 .space-snap-name, .space-review-label, .space-dir { overflow-wrap: anywhere; min-width: 0; }
+.space-review-note { flex-basis: 100%; }
 .space-source-tools, .space-review-foot, .space-scan-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
 .space-select-bar { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--s-2); padding: var(--s-2) 0; background: var(--surface); border-top: 1px solid var(--border); }
 .space-actions { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: var(--s-3); }

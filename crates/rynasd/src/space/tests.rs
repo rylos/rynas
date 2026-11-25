@@ -3,6 +3,7 @@
 //! safe action, the low-space notification with its hysteresis.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,7 +22,8 @@ use tower::ServiceExt;
 
 use super::discover::fake::{TreeProbe, subvol};
 use super::discover::Probe;
-use super::{Env, Measured, Space};
+use super::{Claim, Env, Measured, Space};
+use rynas_api_types::notify::EventState;
 use crate::ops::Ops;
 use crate::roles::AdminPolicy;
 use crate::server::{DaemonState, router};
@@ -53,6 +55,10 @@ struct TestEnv {
     ran: Mutex<Vec<String>>,
     /// Folders a `btrfs receive` writes into now.
     receiving: Mutex<Vec<PathBuf>>,
+    /// rynasd's state folder, and the day's count of automatic deletions the history file
+    /// held at each deletion (it must be written after every one).
+    state: PathBuf,
+    count_at_delete: Mutex<Vec<u32>>,
 }
 
 impl Env for TestEnv {
@@ -72,6 +78,8 @@ impl Env for TestEnv {
         rynas_btrfs::extents::tree_bytes(path, stop).ok().map(|x| x.0)
     }
     fn delete_subvolume(&self, path: &Path) -> Result<(), String> {
+        let h: Value = std::fs::read(self.state.join("space/history.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        self.count_at_delete.lock().unwrap().push(h["thin"]["vol1"]["count"].as_u64().unwrap_or(0) as u32);
         std::fs::remove_dir_all(path).map_err(|e| e.to_string())
     }
     fn remove_tree(&self, path: &Path) -> Result<(), String> {
@@ -125,7 +133,15 @@ fn world() -> World {
     ops.admins = AdminPolicy::new(vec!["rynas-admin".into()], groups);
     let ops = Arc::new(ops);
     let notes = Arc::new(MemoryNotifier::default());
-    let env = Arc::new(TestEnv { vol, root, space: Mutex::new((1000, 500)), ran: Mutex::new(Vec::new()), receiving: Mutex::new(Vec::new()) });
+    let env = Arc::new(TestEnv {
+        vol,
+        root,
+        space: Mutex::new((1000, 500)),
+        ran: Mutex::new(Vec::new()),
+        receiving: Mutex::new(Vec::new()),
+        state: state_dir.clone(),
+        count_at_delete: Mutex::new(Vec::new()),
+    });
     let thumbs = dir.path().join("thumbs");
     std::fs::create_dir_all(thumbs.join("1000")).unwrap();
     std::fs::write(thumbs.join("1000/a.jpg"), vec![0u8; 4096]).unwrap();
@@ -324,4 +340,74 @@ async fn settings_actions_and_low_space() {
     *w.env.space.lock().unwrap() = (1000, 200);
     w.space.guard(&|_| {});
     assert_eq!(w.notes.take().iter().filter(|e| e.code == "space.free_ok").count(), 1);
+}
+
+/// The claim of the automatic cleanup in the tests: given back when dropped.
+struct Held(Arc<AtomicBool>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn automatic_cleanup_one_deletion_at_a_time() {
+    let w = world();
+    // a share job with four snapshots (its own lock file name: tests run in parallel)
+    let job = format!("thin{}", std::process::id());
+    let snaps = w.env.vol.join(format!(".snapshots/{job}"));
+    subvol(&w.env.vol.join("docs"), r#"{"generation": 9}"#);
+    for t in ["20261001T0100", "20261002T0100", "20261003T0100", "20261004T0100"] {
+        subvol(&snaps.join(format!("{job}.{t}")), RO);
+    }
+    let cfg = json!({"jobs": [{"name": job, "subvolume": w.env.vol.join("docs"), "snapshot_dir": snaps}]});
+    let db = rusqlite::Connection::open(w._dir.path().join("state/config.db")).unwrap();
+    db.execute("INSERT OR REPLACE INTO config (key, value, rev) VALUES ('snapshots', ?1, 1)", [cfg.to_string()]).unwrap();
+    *w.env.space.lock().unwrap() = (1000, 50);
+    let settings = SpaceSettings { auto_free: vec!["vol1".into()], ..Default::default() };
+    let (held, claims) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let claim = || -> Result<Claim, String> {
+        assert!(!held.swap(true, Ordering::SeqCst), "the volume is given back between deletions");
+        claims.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(Held(held.clone())))
+    };
+    // the space never comes back: everything but the protected newest goes, one at a time
+    let gone = w.space.thin("vol1", &w.env.vol, &settings, &claim, &|_| {});
+    assert_eq!(gone.len(), 3, "{gone:?}");
+    assert!(snaps.join(format!("{job}.20261004T0100")).exists());
+    // the day's count was on disk before each next deletion
+    assert_eq!(*w.env.count_at_delete.lock().unwrap(), [0, 1, 2]);
+    assert_eq!(claims.load(Ordering::SeqCst), 4);
+    let n = w.notes.take();
+    assert_eq!(n.iter().filter(|e| e.code == "space.auto_freed").count(), 1, "{n:?}");
+    let stuck: Vec<&rynas_api_types::notify::NewEvent> = n.iter().filter(|e| e.code == "space.auto_free_stuck").collect();
+    assert_eq!(stuck.len(), 1);
+    assert_eq!(stuck[0].key.as_deref(), Some("space:vol1:auto_free_stuck"));
+    assert_eq!(stuck[0].state, EventState::Firing);
+    // the next pass waits an hour; run anyway, it notifies nothing more within the hour
+    assert!(w.space.thin("vol1", &w.env.vol, &settings, &claim, &|_| {}).is_empty());
+    assert_eq!(claims.load(Ordering::SeqCst), 4);
+    w.space.history.lock().unwrap().thin.get_mut("vol1").unwrap().cooldown_until_ms = 0;
+    assert!(w.space.thin("vol1", &w.env.vol, &settings, &claim, &|_| {}).is_empty());
+    assert!(w.notes.take().iter().all(|e| e.code != "space.auto_free_stuck"));
+    // free space back: the problem resolves, quietly
+    w.space.guard(&|_| {});
+    *w.env.space.lock().unwrap() = (1000, 200);
+    w.space.guard(&|_| {});
+    let n = w.notes.take();
+    assert!(n.iter().any(|e| e.key.as_deref() == Some("space:vol1:auto_free_stuck") && e.quiet && e.state == EventState::Resolved), "{n:?}");
+    assert!(w.space.history.lock().unwrap().stuck_notified_ms.is_empty());
+    // discovery of the affected volume only
+    assert!(w.space.discover_in(Some("vol9")).unwrap().sources.is_empty());
+    assert!(!w.space.discover_in(Some("vol1")).unwrap().sources.is_empty());
+    // a pass out of time deletes nothing; a suspended volume is not thinned
+    *w.env.space.lock().unwrap() = (1000, 50);
+    w.space.history.lock().unwrap().thin.get_mut("vol1").unwrap().cooldown_until_ms = 0;
+    let before = claims.load(Ordering::SeqCst);
+    assert!(w.space.thin_within("vol1", &w.env.vol, &settings, &claim, &|_| {}, Duration::ZERO).is_empty());
+    w.space.history.lock().unwrap().thin_suspended.insert("vol1".into());
+    assert!(w.space.thin("vol1", &w.env.vol, &settings, &claim, &|_| {}).is_empty());
+    assert_eq!(claims.load(Ordering::SeqCst), before);
+    assert!(w.notes.take().is_empty());
 }

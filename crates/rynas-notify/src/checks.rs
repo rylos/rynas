@@ -971,7 +971,7 @@ pub fn devices_kept_after_password(user: &str, devices: &[String]) -> NewEvent {
         Sev::Info,
         "devices",
         format!("device:password:{user}"),
-        format!("Password of {user} changed: {n} paired devices keep access"),
+        format!("Password of {user} changed: paired devices keep access ({n})"),
     );
     e.body = format!("Devices: {list}. Revoke any you do not recognize in Security › Mobile devices.");
     field(

@@ -1,7 +1,7 @@
 //! The pure rules of Space: daily history and growth, budgets, the low-space state with its
 //! hysteresis and the order of the automatic thinning.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rynas_api_types::space::{SnapshotSource, SourceKind, SpaceSettings};
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,26 @@ pub struct History {
     /// The automatic cleanup's daily count and pause, per volume.
     #[serde(default)]
     pub thin: BTreeMap<String, ThinDay>,
+    /// When the "automatic cleanup cannot free more" problem was last notified, per volume
+    /// (at most one per [`STUCK_NOTIFY_MS`]); cleared when free space is back.
+    #[serde(default)]
+    pub stuck_notified_ms: BTreeMap<String, u64>,
+    /// Volumes whose automatic cleanup is suspended: their snapshots grew far more than
+    /// usual in a week (a mass change such as ransomware encrypting a share), so the oldest
+    /// snapshots may be the clean ones. Cleared by the next weekly check that is not anomalous.
+    #[serde(default)]
+    pub thin_suspended: BTreeSet<String>,
 }
+
+/// At most one "cannot free more" notification per volume in this time.
+pub const STUCK_NOTIFY_MS: u64 = 3600 * 1000;
+/// After a pass that found nothing more to remove or failed, the next one waits this long.
+pub const STUCK_RETRY_MS: u64 = 3600 * 1000;
+/// Weekly snapshot growth above this many times the median of the 4 weeks before is
+/// anomalous …
+pub const ANOMALY_FACTOR: i64 = 3;
+/// … with a median counted as at least this much (a flat history makes any growth "3×").
+pub const ANOMALY_FLOOR_BYTES: i64 = 1 << 30;
 
 /// Most automatic deletions per volume and day.
 pub const DAILY_CAP: u32 = 100;
@@ -46,6 +65,12 @@ pub enum ThinStop {
     PassCap,
     Failed,
     Cooldown,
+    /// The pass used its time ([`crate::space::THIN_TIME_CAP`]).
+    TimeCap,
+    /// Other work holds the volume (replication, receive, scrub, backup, snapshot run).
+    Busy,
+    /// Suspended after anomalous growth.
+    Suspended,
 }
 
 /// The automatic cleanup of one volume today.
@@ -112,6 +137,25 @@ impl History {
         let target = today.saturating_sub(days);
         let (d, then) = *v.iter().rev().find(|(d, _)| *d <= target)?;
         (target - d <= 3).then(|| now as i64 - then as i64)
+    }
+
+    /// The newest value of `key` on `day` or at most 3 days before it.
+    fn value_at(&self, key: &str, day: u32) -> Option<u64> {
+        let (d, v) = *self.series.get(key)?.iter().rev().find(|(d, _)| *d <= day)?;
+        (day - d <= 3).then_some(v)
+    }
+
+    /// The growth of `key` in each of the last `weeks` weeks before the current one, newest
+    /// first (`None` when the history does not reach that far).
+    pub fn weekly_growths(&self, key: &str, now_ms: u64, weeks: u32) -> Option<Vec<i64>> {
+        let today = day_of(now_ms);
+        (1..=weeks)
+            .map(|k| {
+                let end = today.checked_sub(7 * k)?;
+                let start = end.checked_sub(7)?;
+                Some(self.value_at(key, end)? as i64 - self.value_at(key, start)? as i64)
+            })
+            .collect()
     }
 
     /// Drops the series of keys that are gone (removed sources), keeping volume totals.
@@ -188,6 +232,19 @@ pub fn top_growth(sources: &[SnapshotSource], n: usize) -> Vec<(String, i64)> {
     v.sort_by_key(|x| std::cmp::Reverse(x.1));
     v.truncate(n);
     v
+}
+
+/// Whether this week's snapshot growth `grown` is anomalous against the weeks before
+/// (`prior`, at least 4): more than [`ANOMALY_FACTOR`] times their median (counted as at
+/// least [`ANOMALY_FLOOR_BYTES`]). Without 4 weeks of history nothing is anomalous.
+pub fn growth_anomalous(grown: i64, prior: &[i64]) -> bool {
+    if prior.len() < 4 || grown <= 0 {
+        return false;
+    }
+    let mut v = prior[..4].to_vec();
+    v.sort();
+    let median = ((v[1] + v[2]) / 2).max(ANOMALY_FLOOR_BYTES);
+    grown > ANOMALY_FACTOR * median
 }
 
 /// Whether 7-day snapshot growth `grown` (from `before`) passes the limits.
@@ -337,5 +394,31 @@ mod tests {
         let mut g = source("job:a", SourceKind::ShareJob, &[]);
         g.growth_7d_bytes = Some(7);
         assert_eq!(top_growth(&[g], 3), [("job:a".to_string(), 7)]);
+    }
+
+    #[test]
+    fn anomalous_growth_against_the_weeks_before() {
+        const G: u64 = 1 << 30;
+        let mut h = History::default();
+        // 10 GiB a week for 5 weeks, then 100 GiB in the last one
+        let today = 400u32;
+        for d in (today - 42)..=today {
+            let weeks_back = (today - d) / 7;
+            let base = (6 - weeks_back.min(6)) as u64 * 10 * G;
+            let bytes = if d > today - 7 { base + 90 * G } else { base };
+            h.record("volume:v", u64::from(d) * D, bytes);
+        }
+        let now = u64::from(today) * D;
+        let prior = h.weekly_growths("volume:v", now, 4).unwrap();
+        assert_eq!(prior, [10 * G as i64; 4]);
+        let grown = h.growth("volume:v", now, 7).unwrap();
+        assert!(growth_anomalous(grown, &prior), "{grown}");
+        assert!(!growth_anomalous(25 * G as i64, &prior));
+        // too little history: never anomalous
+        assert!(h.weekly_growths("volume:v", now, 8).is_none());
+        assert!(!growth_anomalous(grown, &prior[..3]));
+        // a flat history counts as 1 GiB a week
+        assert!(!growth_anomalous(2 * G as i64, &[0, 0, 0, 0]));
+        assert!(growth_anomalous(4 * G as i64, &[0, 0, 0, 0]));
     }
 }

@@ -67,7 +67,7 @@ fn fail(e: &ApiErr, server: RwSignal<Option<(String, String)>>, error: RwSignal<
 
 #[component]
 pub fn Users() -> impl IntoView {
-    let tab = RwSignal::new(0usize);
+    let tab = crate::ui::tab_signal(3, 0);
     let users = Remote::<Vec<UserView>>::with_config("/api/v1/users");
     let groups = Remote::<Vec<GroupView>>::with_config("/api/v1/groups");
     let homes = Remote::<HomesState>::with_config("/api/v1/services/homes");

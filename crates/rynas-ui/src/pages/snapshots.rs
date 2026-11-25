@@ -61,7 +61,7 @@ fn deletion_reason(d: SnapshotDeletion) -> Option<&'static str> {
 
 #[component]
 pub fn Snapshots() -> impl IntoView {
-    let tab = RwSignal::new(crate::ui::tab_from_query(4, 0));
+    let tab = crate::ui::tab_signal(4, 0);
     let jobs = Remote::<Vec<SnapshotJobView>>::with_config("/api/v1/snapshots/jobs");
     let system = Remote::<SystemSnapshots>::with_config("/api/v1/snapshots/system");
     let filter = RwSignal::new(String::new());
@@ -82,7 +82,7 @@ pub fn Snapshots() -> impl IntoView {
                     2 => crate::pages::replication::add_button(jobs, edit_replica),
                     _ => ().into_any(),
                 }}
-                <a class="btn ghost" href="/storage/space"><Icon icon=icons::LAYERS size=16 /><span class="btn-label">{tr("sp.open")}</span></a>
+                {crate::shell::is_admin().then(|| view! { <a class="btn ghost" href="/storage/space"><Icon icon=icons::LAYERS size=16 /><span class="btn-label">{tr("sp.open")}</span></a> })}
             </PageHeader>
             <section class="card widget w-12">
                 {tabs("snp", &["snap.tab.snapshots", "snap.tab.jobs", "snap.tab.replication", "snap.tab.system"], tab, "snap.title")}

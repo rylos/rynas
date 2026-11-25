@@ -124,7 +124,7 @@ fn storage_card() -> AnyView {
     view! {
         <section class="card widget w-6">
             <WidgetHead icon=icons::HARD_DRIVE title="dk.disk">
-                <a class="btn ghost sm" href="/storage/space"><Icon icon=icons::LAYERS size=16 />{tr("sp.open")}</a>
+                {crate::shell::is_admin().then(|| view! { <a class="btn ghost sm" href="/storage/space"><Icon icon=icons::LAYERS size=16 />{tr("sp.open")}</a> })}
             </WidgetHead>
             {move || usage.get().map(|u| view! {
                 <div class="sub-row">

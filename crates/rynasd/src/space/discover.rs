@@ -96,8 +96,21 @@ pub struct JobFact {
     pub snapshot_dir: String,
     /// Most snapshots its retention keeps (sum of the GFS counts), when it has a limit.
     pub keep_count: Option<u32>,
-    /// Snapshot names replication targets still need as the parent of their next send.
-    pub replica_parents: BTreeSet<String>,
+    /// The newest replica of each **enabled** replication target (`None`: the target has
+    /// none yet, or its state file is missing or unreadable).
+    pub replica_latest: Vec<Option<String>>,
+}
+
+/// Whether a replication target may still need snapshot `name` of a job, by the newest
+/// replica each enabled target received (`latest`): its latest replica (the parent of the
+/// next incremental send) and every snapshot newer than it (not received yet); all of them
+/// while a target has none or its state is unknown. The same rule as rynas's own prune of
+/// jobs with pins (`jobs::prune_candidates`) and as btrbk, which keeps them.
+pub fn replica_needed(name: &str, latest: &[Option<String>]) -> bool {
+    latest.iter().any(|l| match l {
+        None => true,
+        Some(l) => rynas_btrfs::name::compare_names(name, l) != std::cmp::Ordering::Less,
+    })
 }
 
 /// The system restore points.
@@ -124,6 +137,9 @@ pub struct Facts {
     /// Folders of configured local replica targets.
     pub replica_dirs: Vec<String>,
     pub pins: BTreeSet<String>,
+    /// The images each app stack's services run now, by stack (`None`: unknown, the engine
+    /// did not answer or was not asked; then no app snapshot is "identical").
+    pub stack_images: Option<BTreeMap<String, ImageSet>>,
     /// Live folders a leftover may never be, nor hold: shares, job subvolumes, app folders,
     /// PC backup and replica folders.
     pub live: Vec<PathBuf>,
@@ -434,7 +450,7 @@ pub fn protect(s: &mut Source, f: &Facts, pc_parents: &BTreeSet<String>) {
             Some(Protection::Newest)
         } else if boot.is_some() && x.facts.uuid == boot {
             Some(Protection::BootReference)
-        } else if job.is_some_and(|j| j.replica_parents.contains(&x.name)) {
+        } else if job.is_some_and(|j| replica_needed(&x.name, &j.replica_latest)) {
             Some(Protection::ReplicationParent)
         } else if s.kind == SourceKind::PcBackup && pc_parents.contains(&x.name) {
             Some(Protection::NewestBackup)
@@ -461,15 +477,40 @@ pub fn lineage(name: &str) -> String {
 /// newer than the transaction that made the snapshot (btrbk's "onchange" rule). Only marks
 /// the flag; the newest stays protected anyway.
 ///
-/// Checked on a real btrfs (Debian 13, kernel 7.3, DS920+, 2026-11-24): taking a read-only
+/// Checked on a real btrfs (Debian 13, kernel 7.3, a 4-bay NAS, 2026-11-24): taking a read-only
 /// snapshot does not bump the source subvolume's generation (it stayed 1645 across two
 /// snapshots with otransid 1646 and 1647), and any write after a snapshot raises it above
 /// that snapshot's otransid.
-pub fn mark_identical(s: &mut Source, live: Option<&SubvolFacts>) {
+///
+/// The folder is only half of a rollback point: the snapshot's metadata (`<id>.json`) records
+/// the images the services ran. A snapshot is identical only when those images (service and
+/// image id) are also the ones the stack runs now (`images`, by stack; `None`: unknown, so
+/// nothing is identical); otherwise it is the way back to the older images.
+pub fn mark_identical(s: &mut Source, live: Option<&SubvolFacts>, images: Option<&BTreeMap<String, ImageSet>>) {
     let Some(live) = live.filter(|_| s.kind == SourceKind::AppStack) else { return };
+    let Some(images) = images else { return };
+    let empty = ImageSet::new();
+    let now = images.get(&s.name).unwrap_or(&empty);
     for x in &mut s.snaps {
-        x.identical = x.facts.readonly && x.facts.otransid > 0 && live.generation <= x.facts.otransid;
+        let same_folder = x.facts.readonly && x.facts.otransid > 0 && live.generation <= x.facts.otransid;
+        x.identical = same_folder && recorded_images(&s.dir, &x.name).is_some_and(|r| r == *now);
     }
+}
+
+/// `(service, image id)` pairs: the images a stack runs.
+pub type ImageSet = BTreeSet<(String, String)>;
+
+/// The images an app stack's services ran, from a list of them.
+pub fn image_set(v: &[rynas_api_types::docker::ServiceImage]) -> ImageSet {
+    v.iter().filter(|i| !i.image_id.is_empty()).map(|i| (i.service.clone(), i.image_id.clone())).collect()
+}
+
+/// The images a stack snapshot recorded (`<dir>/<id>.json`); `None` when the file is missing
+/// or does not read.
+fn recorded_images(dir: &Path, id: &str) -> Option<ImageSet> {
+    let t = std::fs::read_to_string(dir.join(format!("{id}.json"))).ok()?;
+    let m: rynas_docker::snapshots::SnapshotMeta = serde_json::from_str(&t).ok()?;
+    Some(image_set(&m.images))
 }
 
 /// The volume (label) a path belongs to: the longest mount point containing it.
@@ -581,7 +622,7 @@ mod tests {
                 subvolume: v.join("docs").display().to_string(),
                 snapshot_dir: v.join(".snapshots/docs").display().to_string(),
                 keep_count: Some(10),
-                replica_parents: ["docs.20261102T0100".to_string()].into(),
+                replica_latest: vec![Some("docs.20261102T0100".to_string())],
             }],
             docker: Some((v.join("docker/stacks").display().to_string(), v.join("docker/.snapshots").display().to_string(), 5)),
             pc_folders: vec![("laptop".into(), v.join("backups/laptop").display().to_string())],
@@ -662,7 +703,8 @@ mod tests {
         let mut job = conf[0].clone();
         protect(&mut job, &f, &BTreeSet::new());
         let p: Vec<Option<Protection>> = job.snaps.iter().map(|s| s.protected).collect();
-        assert_eq!(p, [Some(Protection::Newest), Some(Protection::ReplicationParent), Some(Protection::Pinned)]);
+        // the target's latest replica and everything newer (not received yet)
+        assert_eq!(p, [Some(Protection::ReplicationParent), Some(Protection::ReplicationParent), Some(Protection::Pinned)]);
         // an orphan: nothing protects the newest, only pins and writable ones
         let mut orphan = job.clone();
         orphan.kind = SourceKind::OrphanJob;
@@ -676,16 +718,60 @@ mod tests {
     }
 
     #[test]
+    fn replication_keeps_what_a_target_still_needs() {
+        let (_d, mut f) = tree();
+        let conf = configured(&f, &TreeProbe);
+        let run = |f: &Facts| {
+            let mut job = conf[0].clone();
+            protect(&mut job, f, &BTreeSet::new());
+            job.snaps.iter().map(|s| s.protected).collect::<Vec<_>>()
+        };
+        let r = Some(Protection::ReplicationParent);
+        // two targets: the older latest replica decides
+        f.jobs[0].replica_latest = vec![Some("docs.20261103T0100".into()), Some("docs.20261101T0100".into())];
+        assert_eq!(run(&f), [r, r, r]);
+        // every target has the newest: the older ones may go, the newest stays
+        f.jobs[0].replica_latest = vec![Some("docs.20261103T0100".into())];
+        assert_eq!(run(&f), [r, None, None]);
+        // a target without a replica yet (or an unreadable state file): all of them
+        f.jobs[0].replica_latest = vec![Some("docs.20261103T0100".into()), None];
+        assert_eq!(run(&f), [r, r, r]);
+        // no enabled target: only the newest
+        f.jobs[0].replica_latest = Vec::new();
+        assert_eq!(run(&f), [Some(Protection::Newest), None, None]);
+        assert!(replica_needed("docs.20261104T0100", &[Some("docs.20261103T0100".into())]));
+        assert!(!replica_needed("docs.20261102T0100", &[Some("docs.20261103T0100".into())]));
+    }
+
+    #[test]
     fn identical_stack_snapshots_follow_the_generation() {
         let (_d, f) = tree();
         let conf = configured(&f, &TreeProbe);
-        let mut stack = conf[1].clone();
-        let live = TreeProbe.subvol(stack.live.as_ref().unwrap());
-        mark_identical(&mut stack, live.as_ref());
-        protect(&mut stack, &f, &BTreeSet::new());
-        let v: Vec<(bool, Option<Protection>)> = stack.snaps.iter().map(|s| (s.identical, s.protected)).collect();
+        let live = TreeProbe.subvol(conf[1].live.as_ref().unwrap());
+        let meta = |id: &str, image_id: &str| {
+            let m = format!(r#"{{"reason":"update","created_s":1,"images":[{{"service":"app","image":"web:1","image_id":"{image_id}","digest":null}}]}}"#);
+            std::fs::write(conf[1].dir.join(format!("{id}.json")), m).unwrap();
+        };
+        meta("20261103T010000", "sha256:new");
+        meta("20261102T010000", "sha256:new");
+        meta("20261101T010000", "sha256:new");
+        let now: BTreeMap<String, ImageSet> = [("web".to_string(), [("app".to_string(), "sha256:new".to_string())].into())].into();
+        let run = |images: Option<&BTreeMap<String, ImageSet>>| {
+            let mut stack = conf[1].clone();
+            mark_identical(&mut stack, live.as_ref(), images);
+            protect(&mut stack, &f, &BTreeSet::new());
+            stack.snaps.iter().map(|s| (s.identical, s.protected)).collect::<Vec<_>>()
+        };
         // generation 7: snapshots taken at transaction 7 and 9 saw the same folder
-        assert_eq!(v, [(true, Some(Protection::Newest)), (true, None), (false, None)]);
+        assert_eq!(run(Some(&now)), [(true, Some(Protection::Newest)), (true, None), (false, None)]);
+        // the images the stack runs now are unknown: nothing is identical
+        assert_eq!(run(None), [(false, Some(Protection::Newest)), (false, None), (false, None)]);
+        // the middle one recorded older images: a rollback point, not identical
+        meta("20261102T010000", "sha256:old");
+        assert_eq!(run(Some(&now)), [(true, Some(Protection::Newest)), (false, None), (false, None)]);
+        // no metadata: not identical either
+        std::fs::remove_file(conf[1].dir.join("20261103T010000.json")).unwrap();
+        assert!(!run(Some(&now))[0].0);
     }
 
     #[test]

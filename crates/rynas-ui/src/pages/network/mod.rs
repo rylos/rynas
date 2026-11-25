@@ -72,7 +72,7 @@ impl Net {
 #[component]
 pub fn Network() -> impl IntoView {
     let net = Net::new();
-    let tab = RwSignal::new(0usize);
+    let tab = crate::ui::tab_signal(4, 0);
     view! {
         <div class="page">
             <PageHeader icon=icons::NETWORK title="net.title" subtitle="net.subtitle">

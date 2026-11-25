@@ -5870,6 +5870,7 @@ pcb.kept.weekly	Хранится: один в неделю
 pcb.kept.monthly	Хранится: один в месяц
 pcb.kept.yearly	Хранится: один в год
 pcb.kept.future	Хранится: дата в будущем
+pcb.kept.pinned	Хранится: закреплён
 pcb.goes_next	Удаляется при следующей очистке
 pcb.goes_after	удаляется после {when}
 pcb.n_backups.one	{n} копия
@@ -6427,7 +6428,7 @@ nev.files.job_failed.kind.sync	Не удалось синхронизирова�
 nev.files.job_failed.body	{error}
 nt.kind.device	Мобильное устройство
 nt.device_summary	Push на сопряжённый телефон
-nev.device.password_kept.title	Пароль {user} изменён: сопряжённые устройства ({n}) сохраняют доступ
+nev.device.password_kept.title	Пароль {user} изменён: сопряжённые устройства сохраняют доступ ({n})
 nev.device.password_kept.body	Устройства: {devices}. Отзовите незнакомые в разделе «Безопасность › Мобильные устройства».
 # Storage > Space (D-SPACE)
 sp.tab	Пространство
@@ -6438,7 +6439,7 @@ sp.scanning	Проверка
 sp.scanned	Проверено {when}
 sp.never_scanned	Ещё не проверено: первая проверка идёт в фоне, или запустите её сейчас.
 sp.volumes	Тома
-sp.used	Занято
+sp.used_of	Занято {size}
 sp.free	Свободно
 sp.reclaimable	Освободится после очистки:
 sp.no_snapshots	снимки не измерены
@@ -6467,8 +6468,14 @@ sp.oldest	самый старый {when}
 sp.growth	7 дней: {size}
 sp.over_budget	Сверх лимита
 sp.keeps	Его хранение оставляет до {n}
-sp.budget_count	лимит {n} снимков
-sp.budget_age	лимит {n} дн.
+sp.budget_count.one	лимит {n} снимок
+sp.budget_count.few	лимит {n} снимка
+sp.budget_count.many	лимит {n} снимков
+sp.budget_count.other	лимит {n} снимка
+sp.budget_age.one	лимит {n} день
+sp.budget_age.few	лимит {n} дня
+sp.budget_age.many	лимит {n} дней
+sp.budget_age.other	лимит {n} дня
 sp.budget_bytes	лимит {size}
 sp.select_all	Выбрать удаляемые
 sp.budget	Лимит…
@@ -6486,7 +6493,10 @@ sp.clear_selection	Сбросить
 sp.preview	Предпросмотр
 sp.preview_title	Что освободится?
 sp.measuring	Измерение содержимого снимков…
-sp.preview_text	Удаление снимков ({n}) освободит {size}.
+sp.preview_text.one	Удаление {n} снимка освободит {size}.
+sp.preview_text.few	Удаление {n} снимков освободит {size}.
+sp.preview_text.many	Удаление {n} снимков освободит {size}.
+sp.preview_text.other	Удаление {n} снимка освободит {size}.
 sp.preview_at_least	Не менее {size} хранится только в этих снимках.
 sp.kept_title	Сохраняются:
 sp.unknown_snapshot	неизвестный снимок
@@ -6517,7 +6527,14 @@ sp.review_text	rynas никогда не удаляет их сам: копии 
 sp.review_empty	Проверять нечего.
 sp.remove_selected	Удалить выбранное
 sp.review_ask_title	Удалить выбранные объекты?
-sp.review_ask	Объекты ({n}) будут удалены безвозвратно.
+sp.review_ask.one	{n} объект будет удалён безвозвратно.
+sp.review_ask.few	{n} объекта будут удалены безвозвратно.
+sp.review_ask.many	{n} объектов будут удалены безвозвратно.
+sp.review_ask.other	{n} объекта будут удалены безвозвратно.
+sp.review_ask_volumes.one	{n} объект будет удалён безвозвратно. Том Docker удаляется вместе с данными приложения.
+sp.review_ask_volumes.few	{n} объекта будут удалены безвозвратно. Тома Docker удаляются вместе с данными приложений.
+sp.review_ask_volumes.many	{n} объектов будут удалены безвозвратно. Тома Docker удаляются вместе с данными приложений.
+sp.review_ask_volumes.other	{n} объекта будут удалены безвозвратно. Тома Docker удаляются вместе с данными приложений.
 sp.removed	Удалено
 sp.rev.rollback_copy	Копия после отката
 sp.rev.restore_copy	Копия после восстановления
@@ -6529,6 +6546,7 @@ sp.rev.removed_pc_folder	Копии удалённого ПК
 sp.rev.old_kernel	Старое ядро
 sp.rev.unused_image	Неиспользуемый образ Docker
 sp.rev.unused_volume	Неиспользуемый том Docker
+sp.volume_data_note	Удаление тома Docker навсегда стирает данные, которые в нём хранило приложение.
 sp.guardrails	Защита
 sp.notify_low_free	Уведомлять о нехватке места
 sp.notify_low_free_help	Ниже нижнего порога, пока место не вернётся выше порога восстановления.
@@ -6565,8 +6583,14 @@ nev.space.free_ok.body	{volume} свободен на {free_pct}%.
 nev.space.snapshots_growth.title	Снимки на {volume} выросли на {grown} за неделю
 nev.space.snapshots_growth.body	Наибольший рост: {top}.
 nev.space.auto_freed.title	На {volume} удалены старые снимки для освобождения места
-nev.space.auto_freed.body	Автоочистка удалила снимков: {count}: {snapshots}
-sp.kind.incoming_replica	Входящая реплика
+nev.space.auto_freed.body	Снимков удалено автоочисткой: {count} ({snapshots})
+nev.space.auto_free_stuck.title	Автоочистка не может освободить больше места на {volume}
+nev.space.auto_free_stuck.body	На {volume} по-прежнему мало свободного места, а автоматически удалить больше нечего. Хранилище › Пространство показывает, что занимает место.
+nev.space.thin_suspended.title	Автоочистка приостановлена на {volume}
+nev.space.thin_suspended.body	Снимки на {volume} выросли на {grown} за неделю — намного больше, чем в предыдущие недели. Автоочистка остановлена, чтобы сохранить старые снимки; проверьте общие папки на массовые изменения.
+nev.space.thin_resumed.title	Автоочистка возобновлена на {volume}
+nev.space.thin_resumed.body	Снимки на {volume} снова растут как обычно.
+sp.kind.incoming_replica	Полученная реплика
 sp.prot.incoming_replica	Отправлено другим NAS
 sp.rev.received_unknown_owner	Получено, владелец неизвестен
 sp.journal_admin	Лимит журнала задан администратором: {size} (rynas свой не задаёт).
