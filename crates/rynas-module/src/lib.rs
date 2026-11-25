@@ -147,6 +147,13 @@ pub trait Module: Send + Sync {
         None
     }
 
+    /// The spin-down delay of the machine's rotational disks in seconds, from the module's
+    /// own settings (`Some(0)`: never); `None` when the module has no such setting. A disk's
+    /// own `standby_s` (storage settings) wins over it.
+    fn disk_standby_s(&self, _cfg: &Config) -> Option<u32> {
+        None
+    }
+
     /// The core's notification engine, once it is running.
     fn attach(&self, _notifier: Arc<dyn rynas_notify::Notifier>) {}
 
@@ -265,6 +272,11 @@ impl Modules {
         self.0.iter().find_map(|m| m.wake_clock())
     }
 
+    /// The first module's spin-down delay of the disks (seconds, `Some(0)`: never).
+    pub fn disk_standby_s(&self, cfg: &Config) -> Option<u32> {
+        self.0.iter().find_map(|m| m.disk_standby_s(cfg))
+    }
+
     /// The first module's boot layer (one machine boots one way).
     pub fn boot(&self) -> Option<Arc<dyn BootLayer>> {
         self.0.iter().find_map(|m| m.boot())
@@ -323,5 +335,13 @@ mod tests {
         assert!(m.hardware_control().is_none() && m.ids() == ["bare"]);
         assert!(m.boot().is_none() && m.rescue_feedback().is_none() && m.wake_clock().is_none());
         assert_eq!(m.iter().map(|m| m.id()).collect::<Vec<_>>(), ["bare"]);
+        let state = tempfile::tempdir().unwrap();
+        let cfg = Config::open(
+            rynas_config::ConfigOptions::new(state.path(), state.path()),
+            Arc::new(rynas_config::MemorySystem::new("nas")),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(m.disk_standby_s(&cfg), None);
     }
 }

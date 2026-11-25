@@ -1083,7 +1083,11 @@ fn main() -> std::io::Result<()> {
             tokio::spawn(rynasd::ups::watch(ups.clone()));
         }
         if !args.dry_system {
-            tokio::spawn(rynasd::disk_standby::watch(ops.clone()));
+            tokio::spawn(rynasd::disk_standby::watch(
+                ops.clone(),
+                opened.modules.clone(),
+                args.hw_root.clone(),
+            ));
         }
         state.ups = Some(ups);
         state.hardware = Some(Arc::new(rynasd::hardware::Hardware {
