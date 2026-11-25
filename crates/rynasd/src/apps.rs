@@ -3119,6 +3119,7 @@ mod tests {
                 "/ssd/docker/appdata".into(),
                 "/ssd/docker/appdata/app".into(),
             ],
+            ..Default::default()
         };
         let mounted = |l: &str| l == "ssd" || l == "vol1";
         let (trees, empties, kept) = uninstall_targets(

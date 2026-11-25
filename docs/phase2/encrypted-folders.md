@@ -151,6 +151,11 @@ systemd-run --unit=rynas-crypt-<place>-<name> --service-type=forking --quiet
     logged); started while locked, their bind follows the next unlock. The share set of a
     catalogue app binds encrypted shares this way, so **the Syncthing app (and any other app
     using the share) is briefly restarted when the share is locked**.
+    The names are written to `<state>/crypt/lock-stopped.json` before the stops and leave it
+    once started again: if rynasd ends in between, its next start starts them (retrying every
+    10 s for 5 minutes while the engine comes up). With `docker.service` and `docker.socket`
+    both inactive no container runs: the lock goes on instead of refusing because Docker
+    cannot be asked.
   Order: the folders of the installed Syncthing app inside the share are paused first
   (`syncthing.md` §2 decision 6) so it comes back paused, not in error; then the stops, the
   unmount, the starts. After the unmount a last check reads `/proc/<State.Pid>/mountinfo` of

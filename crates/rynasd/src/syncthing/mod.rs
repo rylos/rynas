@@ -417,7 +417,7 @@ fn foreign_dirs(dir: &Path) -> BTreeSet<String> {
             let n = e.file_name().to_string_lossy().into_owned();
             if names.contains(&n.as_str()) {
                 found.insert(n);
-            } else {
+            } else if queue.len() < FOREIGN_SCAN {
                 queue.push_back(e.path());
             }
         }
@@ -533,26 +533,10 @@ fn plan_sync(a: &AppsSvc, req: &SyncthingAdoptPreviewRequest, containers: Vec<Re
         problems.push(format!("config.xml names these folder ids twice: {}", dup.join(", ")));
     }
     p.gui_address = cfg.gui_address.clone();
+    // shown from these fields (the interface translates them), not as problem lines
     p.gui_tls_off = cfg.gui_tls;
-    if cfg.gui_tls {
-        problems.push(format!("{INFO}the old interface served HTTPS itself: the copy turns that off, rynas' proxy serves it over HTTPS"));
-    }
     p.listen_addresses = config::custom_listen(&cfg.listen);
-    if !p.listen_addresses.is_empty() {
-        problems.push(format!(
-            "{INFO}sync listen addresses other than the default: {} (the app publishes port {}): the adoption sets them back to default only when asked (reset_listen)",
-            p.listen_addresses.join(", "),
-            config::SYNC_PORT
-        ));
-    }
-    if let Some(c) = &r.compose {
-        p.compose = Some(c.clone());
-        problems.push(format!(
-            "{INFO}the container belongs to the compose project {}{}: rynas removes the container after the adoption; remove the project from the tool that manages it, or a compose up there starts it again",
-            c.project,
-            c.working_dir.as_deref().map(|d| format!(" ({d})")).unwrap_or_default()
-        ));
-    }
+    p.compose = r.compose.clone();
     p.devices = cfg.devices.iter().map(|d| AdoptDevice { id_short: d.id.chars().take(7).collect(), name: d.name.clone() }).collect();
     p.volumes = config::merge_tables(r.table.clone(), &req.volumes);
     // where folders may land: the older layout's single item, or the applied shares

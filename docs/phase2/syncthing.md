@@ -87,15 +87,27 @@ Preview steps, the same for every source:
    without it is paused after adoption and never "fixed";
 4. proposes `.stignore` changes: other systems' patterns (`#snapshot`, `@eaDir`,
    `.SynologyWorkingDirectory`, `@Recycle`, `.@__thumb`, `.streams`) out, `(?d)#recycle` in
-   (rynas snapshots live outside the share);
+   (rynas snapshots live outside the share); a pattern whose folders exist in the folder (a
+   walk of at most 20 000 folders) stays, listed as kept, so they never reach the devices;
+   the files written are put back if the adoption fails;
 5. proposes the user the app runs as: the NAS user owning most synchronized files (shown with
    how many top-level entries have another owner); the request's `run_as` overrides it. A uid
    that no NAS user has is a problem: give a NAS user that uid (the ownership remap of Users &
    Groups) or choose another user. The copied home is chowned to that user (keys 0600), each
    mapped share gets that user's read and write access (share grants with a user subject),
-   and files arriving from the devices belong to them, as on the old system. An installed app
-   keeps its user (changing it is not supported yet: uninstall and install again); the older
-   catalogue layout, updated in place, keeps the apps' account.
+   and files arriving from the devices belong to them, as on the old system. The share
+   permission entries added for that user are listed (`grants`: they also open the share to
+   the user over SMB and NFS). An installed app keeps its user and it is the proposal
+   (changing it is not supported yet: uninstall and install again); the older catalogue
+   layout, updated in place, keeps the apps' account. `run_as: "@apps"` names the apps'
+   account explicitly;
+6. the old GUI's own HTTPS is turned off in the copy (`<gui tls="false">`, rynas' proxy serves
+   HTTPS; the app's REST client speaks plain HTTP on loopback); sync listen addresses other
+   than `default`, relays or port 22000 are shown and block the adoption unless the request
+   asks to set them back to `default` (`reset_listen`), since the app publishes 22000;
+7. a container started by a compose project (labels) is named with the project and its
+   folder: rynas removes the container after the adoption, the project must be removed from
+   the tool that manages it.
 
 `POST /v1/syncthing/adopt` (task `syncthing.adopt`): the old instance is stopped first (two
 instances with one device id fight), its home copied into the app's config folder (owned by the
@@ -103,6 +115,14 @@ app user; the old one left untouched as a fallback), folder paths rewritten in `
 Syncthing stopped, the app installed or reconfigured with the shares, started, every folder
 rescanned. For the rynas app with the older layout the home stays where it is and the paths are
 changed with `PATCH /rest/config/folders/{id}` after the container is recreated.
+
+A failure after the copy rolls back only when the app was stopped and none of its containers
+runs; otherwise the adopted home stays and the old instance stays off (the error says so).
+After a success a container source is removed (`docker rm`, its volumes stay) and the old
+home, the device id's first 7 characters and the certificate's SHA-256 are remembered: every
+detection pass stops any other container or host process with that home or certificate
+(`docker update --restart=no` + `docker stop`, or its unit disabled, else `SIGTERM`) and
+notifies `syncthing.duplicate_stopped`.
 
 Test matrix: official image, linuxserver image, the old rynas layout, a host service, a copied
 DSM home, a 1.x database.
@@ -116,7 +136,11 @@ Page "Syncthing" (Services), shown when the app is installed:
   scan, devices with their completion, conflict copies count with the list;
 - devices: name, connected (address, local or relay), last seen, folders;
 - actions: pause/resume a folder, rescan, open Syncthing; settings: devices unseen alert days
-  (default 7), conflicts alert on/off.
+  (default 7), conflicts alert on/off;
+- synchronized shared folders: the share set, add one of the applied shares, remove one (the
+  folders inside it stop, nothing is deleted); the confirmation shows the plan
+  (`POST /api/v1/apps/installed/{stack}/share-set/plan`: items removed, permission entries
+  added).
 
 API: `GET /v1/syncthing` (`SyncthingState`), `POST /v1/syncthing/folders/{id}/pause|resume|rescan`,
 `GET|PUT /v1/syncthing/settings`, the adopt routes above. Admin only.
@@ -129,6 +153,8 @@ API: `GET /v1/syncthing` (`SyncthingState`), `POST /v1/syncthing/folders/{id}/pa
 | `syncthing.folder_error` | error | a folder in `error` for more than 5 minutes (one notification, then `…_recovered`) |
 | `syncthing.device_unseen` | warning | a device seen before and not connected for N days |
 | `syncthing.down` | error | the API does not answer for 10 minutes while the app runs |
+| `syncthing.duplicate_stopped` | error | another container or process ran with an adopted source's home or certificate: stopped |
+| `syncthing.compose_leftover` | warning | the adopted container came from a compose project of another tool: remove the project there |
 
 ## 6. Phases
 
@@ -138,6 +164,7 @@ API: `GET /v1/syncthing` (`SyncthingState`), `POST /v1/syncthing/folders/{id}/pa
 | S1b | rynasd client and event loop, `GET /v1/syncthing`, page. Done 2026-11-24: API and loop in `../phase1/plan.md` "API v1: Syncthing state (S1b)"; the page has the adoption dialog (candidates, a copied folder with typed volume lines, preview, user, stop and `.stignore` choices, task). Deviations: device stats also at every full read; a full read after any connection error too (a restart drops the long poll, and its new ids would never pass the old `since`); several installed stacks of the entry are supported (`?stack=`), the first by name is the default |
 | S1c | notifications and settings. Done 2026-11-24: codes in `../phase1/plan.md` "Event codes" (category `app`, source `syncthing`), evaluated every 30 s from the model; added `syncthing.device_seen` (quiet resolution), `syncthing.up` and `syncthing.folder_kept_paused` (S1d). The settings are in `<state>/syncthing/state.json`, not a configuration key: they render nothing and need no apply |
 | S1d | lock/unlock integration: pause before lock, resume after unlock and after the automatic unlock at boot; `containers_using` accepts an rslave bind of a share that follows the host. Done 2026-11-24 (tests with a fake REST server and `docker inspect` JSON): the lock finds the share and refuses it while a running container holds a private bind (`rprivate`/`private`) of it, inside it or of a folder holding it, or when Docker cannot be asked; an `rslave`/`slave` bind of a folder holding it is no obstacle. Then it marks the share "being locked" (the event loops treat it as locked until the lock ends), pauses the running Syncthing folders inside it in every instance at once (remembered first and again after each answer, per stack, in `<state>/syncthing/state.json`), waits until none scans or syncs (one deadline, 10 s; a silent Syncthing is skipped with a warning), stops the running containers with an `rslave`/`slave` bind of the share or inside it (**the Syncthing app is briefly restarted**), unmounts, checks `/proc/<pid>/mountinfo` of every running container for the gocryptfs mount (an error naming them if one still has it), and starts the stopped containers again in every case. A failed lock resumes the paused folders (unless the share stayed locked). The manual unlock and the automatic one (boot unit and rynasd start) resume, in the background, the remembered folders whose marker file is there; a missing marker leaves the folder paused with `syncthing.folder_kept_paused`. Every full read pauses the running folders of a locked share and resumes remembered ones of an unlocked share (Syncthing may start before the boot unlock, or rynasd may not watch it yet); a remembered folder found running (the user resumed it) is forgotten; a folder the user paused is never resumed |
+| S1e | release review fixes (2026-11-25): rollback only with the app surely stopped; old container removed, compose project reported, guard against a second instance with the adopted home or certificate (every detection pass); share rollback and in-place restore pause the Syncthing folders inside (left paused, never resumed by rynas; the rollback preview lists them) and restart the containers binding the share around the subvolume swap; share permission entries listed in the adoption preview and the share set plan, recorded per stack and removable at uninstall (`remove_grants`); installed user proposed, `@apps`; GUI TLS off and listen addresses; containers stopped by a lock recorded and started at the next rynasd start; Docker off = no container for the lock; `.stignore` changes restored on failure and patterns kept while their folders exist; share set editor on the page. Tests with canned `docker inspect` and `/proc` data and fakes |
 
 To verify on a test machine before S1d is called done: the whole lock with the Syncthing app
 running (pause, restart, unmount, mountinfo check, start) and the unlock that resumes its

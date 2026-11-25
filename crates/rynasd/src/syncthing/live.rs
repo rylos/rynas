@@ -349,8 +349,9 @@ impl Duplicate {
 }
 
 /// The instances that must not run next to an adopted source's app: running containers
-/// (`docker inspect` objects, the app's own `ours` excluded) with a mount of the home, of a
-/// folder inside it or holding it, or whose Syncthing home holds the same certificate
+/// (`docker inspect` objects, the app's own `ours` excluded) with a mount of the home or of a
+/// folder inside it, Syncthing containers with a mount of a folder holding it, or whose
+/// Syncthing home holds the same certificate
 /// (`cert_of(host home)` → SHA-256 hex, `exists(host file)`); host processes using the home
 /// or a home with the same certificate.
 pub fn find_duplicates(
@@ -377,13 +378,16 @@ pub fn find_duplicates(
             .into_iter()
             .map(|m| config::Mount { source: m.source, destination: m.destination })
             .collect();
+        let (image, cmd) = rynas_docker::model::inspect_image_and_command(js);
+        let syncthing = config::is_syncthing(&image, &cmd);
+        // the home itself or a folder inside it; a folder holding it (a whole volume) only
+        // for a Syncthing container
         let uses_home = mounts.iter().any(|m| {
             let s = m.source.trim_end_matches('/');
-            !s.is_empty() && (config::is_within(s, home) || config::is_within(home, s))
+            !s.is_empty() && (config::is_within(s, home) || (syncthing && config::is_within(home, s)))
         });
         let same_cert = !g.cert_sha256.is_empty() && {
-            let (image, cmd) = rynas_docker::model::inspect_image_and_command(js);
-            config::is_syncthing(&image, &cmd)
+            syncthing
                 && config::home_from_mounts(&mounts, exists)
                     .and_then(|h| cert_of(&h))
                     .is_some_and(|c| c == g.cert_sha256)
@@ -1987,6 +1991,8 @@ mod tests {
             // another Syncthing with its own identity, and an unrelated container
             inspect("mine", "syncthing/syncthing", None, &[("/vol2/mine", "/var/syncthing")]),
             inspect("web", "nginx", None, &[("/vol1/web", "/usr/share/nginx/html")]),
+            // a backup tool with the whole volume: not a second Syncthing
+            inspect("backup", "restic/restic", None, &[("/vol1", "/data")]),
         ];
         let cert_of = |home: &str| match home {
             "/vol2/copy/config" | "/vol1/docker/old-st/config" => Some("c0ffee".to_string()),
