@@ -2002,7 +2002,7 @@ dict! { BLOB, LENS;
     "sto.read_ahead" => "Read-ahead (KiB)";
     "sto.ra_invalid" => "Read-ahead must be a number from 0 to 65536.";
     "sto.standby" => "Spin down after";
-    "sto.standby_hint" => "Off unless you choose it: rynas spins the disk down after this long without reads or writes, also drives that ignore their own timer, and skips a disk running a SMART test. It pays only for disks idle for hours, such as archive or backup disks.";
+    "sto.standby_hint" => "Empty: the machine's default (off unless its hardware support sets one). rynas spins the disk down after this long without reads or writes, also drives that ignore their own timer, and skips a disk running a SMART test. It pays only for disks idle for hours, such as archive or backup disks.";
     "sto.hdd_only" => "Hard disks only.";
     "sto.not_set" => "Not set (leave the drive alone)";
     "sto.never" => "Never";
