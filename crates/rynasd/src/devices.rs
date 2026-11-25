@@ -50,7 +50,8 @@ use rynas_api_types::devices::internal::{
 };
 use rynas_api_types::devices::{
     ACCESS_TTL_S, Device, DeviceRename, DeviceSelf, INACTIVE_EXPIRY_DAYS, PAIRING_TTL_S,
-    PushRegistration, PushSubscription, REFRESH_GRACE_S, clean_name, clean_text, push_language,
+    PushRegistration, PushSubscription, REFRESH_GRACE_S, REVOKED_KEPT_DAYS, clean_name, clean_text,
+    push_language, revoke_reason,
 };
 use rynas_api_types::notify::{
     FieldMatch, NotifyCategory, NotifyLanguage, NotifyRule, NotifySeverity, TargetConfig, TargetRequest,
@@ -164,10 +165,60 @@ struct PrevToken {
     until_ms: u64,
 }
 
+/// What is left of a revoked device for [`REVOKED_KEPT_DAYS`]: its id and why, so its app
+/// hears the reason. No key, no token hash.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct Tombstone {
+    id: String,
+    /// One of [`revoke_reason`].
+    reason: String,
+    revoked_ms: u64,
+}
+
+/// Tombstones kept at most (the oldest go first).
+const MAX_TOMBSTONES: usize = 4096;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Registry {
     #[serde(default)]
     devices: Vec<Record>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    revoked: Vec<Tombstone>,
+}
+
+impl Registry {
+    fn bury(&mut self, id: &str, reason: &str, now: u64) {
+        self.revoked.retain(|t| t.id != id);
+        self.revoked.push(Tombstone {
+            id: id.to_string(),
+            reason: reason.to_string(),
+            revoked_ms: now,
+        });
+        if self.revoked.len() > MAX_TOMBSTONES {
+            self.revoked.remove(0);
+        }
+    }
+
+    fn unbury(&mut self, id: &str) {
+        self.revoked.retain(|t| t.id != id);
+    }
+
+    fn tombstone(&self, id: &str) -> Option<&Tombstone> {
+        self.revoked.iter().find(|t| t.id == id)
+    }
+
+    /// The answer of a device's own route (`devices/self`, push) whose device is not there
+    /// for its user: another user's device is 404; a revoked one is `device_revoked` with its
+    /// reason (without one once the tombstone is gone).
+    fn missing(&self, id: &str) -> Error {
+        if self.devices.iter().any(|d| d.id == id) {
+            return not_found();
+        }
+        match self.tombstone(id) {
+            Some(t) => revoked().reason(&t.reason),
+            None => revoked(),
+        }
+    }
 }
 
 pub struct DevicesSvc {
@@ -276,6 +327,14 @@ fn unavailable(what: &str) -> Error {
 
 fn not_found() -> Error {
     Error::not_found("no such device")
+}
+
+/// The revocation reason of an account that is gone or disabled.
+fn account_reason(a: Account) -> &'static str {
+    match a {
+        Account::Disabled => revoke_reason::ACCOUNT_DISABLED,
+        _ => revoke_reason::ACCOUNT_REMOVED,
+    }
 }
 
 fn valid_sha(s: &str) -> bool {
@@ -609,11 +668,10 @@ impl DevicesSvc {
         let lang = lang.and_then(|l| NotifyLanguage::new(push_language(l)));
         let view = {
             let mut reg = self.lock();
-            let r = reg
-                .devices
-                .iter_mut()
-                .find(|d| d.id == id && d.user == who)
-                .ok_or_else(not_found)?;
+            let Some(i) = reg.devices.iter().position(|d| d.id == id && d.user == who) else {
+                return Err(reg.missing(id));
+            };
+            let r = &mut reg.devices[i];
             r.push = Some(sub);
             let view = Self::view(r);
             self.save(&reg)?;
@@ -629,12 +687,10 @@ impl DevicesSvc {
     pub fn clear_push(&self, who: &str, id: &str) -> Res<()> {
         {
             let mut reg = self.lock();
-            let r = reg
-                .devices
-                .iter_mut()
-                .find(|d| d.id == id && d.user == who)
-                .ok_or_else(not_found)?;
-            if r.push.take().is_some() {
+            let Some(i) = reg.devices.iter().position(|d| d.id == id && d.user == who) else {
+                return Err(reg.missing(id));
+            };
+            if reg.devices[i].push.take().is_some() {
                 self.save(&reg)?;
             }
         }
@@ -824,8 +880,10 @@ impl DevicesSvc {
         Ok(view)
     }
 
-    /// Revokes the device `id`: it is gone from the store (its refresh token with it).
+    /// Revokes the device `id`: it is gone from the store (its refresh token with it); its
+    /// tombstone keeps `reason` (one of [`revoke_reason`]).
     pub fn revoke(&self, who: &str, id: &str, reason: &str) -> Res<()> {
+        let now = self.clock.now_ms();
         let rec = {
             let mut reg = self.lock();
             let i = reg
@@ -834,7 +892,9 @@ impl DevicesSvc {
                 .position(|d| d.id == id && self.may_manage(who, d))
                 .ok_or_else(not_found)?;
             let rec = reg.devices.remove(i);
+            reg.bury(id, reason, now);
             if let Err(e) = self.save(&reg) {
+                reg.unbury(id);
                 reg.devices.insert(i, rec);
                 return Err(e);
             }
@@ -851,11 +911,15 @@ impl DevicesSvc {
 
     /// Removes the devices `drop` picks, with one notification each.
     fn revoke_where(&self, reason: &str, pick: impl Fn(&Record) -> bool) -> Vec<String> {
+        let now = self.clock.now_ms();
         let gone: Vec<Record> = {
             let mut reg = self.lock();
             let (gone, keep): (Vec<Record>, Vec<Record>) =
                 std::mem::take(&mut reg.devices).into_iter().partition(|d| pick(d));
             reg.devices = keep;
+            for r in &gone {
+                reg.bury(&r.id, reason, now);
+            }
             if !gone.is_empty()
                 && let Err(e) = self.save(&reg)
             {
@@ -885,11 +949,13 @@ impl DevicesSvc {
         }
         let (user, key, uid) = {
             let reg = self.lock();
-            let r = reg
-                .devices
-                .iter()
-                .find(|d| d.id == c.device_id)
-                .ok_or_else(|| revoked().field(GUESS_DEVICE_ID))?;
+            let Some(r) = reg.devices.iter().find(|d| d.id == c.device_id) else {
+                // revoked: the app hears why (not a guess); never known: a guess, no reason
+                return Err(match reg.tombstone(&c.device_id) {
+                    Some(t) => revoked().reason(&t.reason),
+                    None => revoked().field(GUESS_DEVICE_ID),
+                });
+            };
             (r.user.clone(), b64u_decode(&r.public_key).unwrap_or_default(), r.uid)
         };
         let msg = refresh_message(&sid, &c.device_id, c.ts, &c.refresh_sha);
@@ -902,17 +968,18 @@ impl DevicesSvc {
         }
         match (self.account)(&user) {
             Account::Ok => {}
-            Account::Gone | Account::Disabled => {
-                self.revoke_where("account", |d| d.user == user);
-                return Err(revoked());
+            a @ (Account::Gone | Account::Disabled) => {
+                let reason = account_reason(a);
+                self.revoke_where(reason, |d| d.user == user);
+                return Err(revoked().reason(reason));
             }
             Account::Unknown => return Err(unavailable("the account check failed")),
         }
         let groups = match (self.lookup)(&user) {
             Ok(Some(g)) => g,
             Ok(None) => {
-                self.revoke_where("account", |d| d.user == user);
-                return Err(revoked());
+                self.revoke_where(revoke_reason::ACCOUNT_REMOVED, |d| d.user == user);
+                return Err(revoked().reason(revoke_reason::ACCOUNT_REMOVED));
             }
             Err(e) => {
                 tracing::warn!("devices: refresh of {}: {e}", c.device_id);
@@ -922,8 +989,8 @@ impl DevicesSvc {
         let now_uid = match (self.uid_of)(&user) {
             Ok(Some(u)) => u,
             Ok(None) => {
-                self.revoke_where("account", |d| d.user == user);
-                return Err(revoked());
+                self.revoke_where(revoke_reason::ACCOUNT_REMOVED, |d| d.user == user);
+                return Err(revoked().reason(revoke_reason::ACCOUNT_REMOVED));
             }
             Err(e) => {
                 tracing::warn!("devices: refresh of {}: {e}", c.device_id);
@@ -932,8 +999,10 @@ impl DevicesSvc {
         };
         // the name now belongs to another account (removed and made again)
         if uid.is_some_and(|u| u != now_uid) {
-            self.revoke_where("account_replaced", |d| d.user == user && d.uid.is_some_and(|u| u != now_uid));
-            return Err(revoked());
+            self.revoke_where(revoke_reason::ACCOUNT_REPLACED, |d| {
+                d.user == user && d.uid.is_some_and(|u| u != now_uid)
+            });
+            return Err(revoked().reason(revoke_reason::ACCOUNT_REPLACED));
         }
         // the account may sign in to the web interface (today: administrators), by rynasd's
         // groups and by rynas-web's: a token is never rotated for an answer rynas-web drops
@@ -943,7 +1012,12 @@ impl DevicesSvc {
         }
         let mut reg = self.lock();
         let Some(i) = reg.devices.iter().position(|d| d.id == c.device_id) else {
-            return Err(revoked());
+            // revoked meanwhile
+            let reason = reg.tombstone(&c.device_id).map(|t| t.reason.clone());
+            return Err(match reason {
+                Some(r) => revoked().reason(r),
+                None => revoked(),
+            });
         };
         let r = &mut reg.devices[i];
         // an old or replayed request: refused, the device stays
@@ -968,6 +1042,7 @@ impl DevicesSvc {
         }
         if !current && !previous {
             let rec = reg.devices.remove(i);
+            reg.bury(&rec.id, revoke_reason::REFRESH_REUSE, now);
             if let Err(e) = self.save(&reg) {
                 tracing::error!("devices: {}", e.2);
             }
@@ -985,7 +1060,7 @@ impl DevicesSvc {
             if rec.push.is_some() {
                 self.remove_target(&rec.id);
             }
-            return Err(revoked());
+            return Err(revoked().reason(revoke_reason::REFRESH_REUSE));
         }
         // the replaced token stays good for the grace window (a lost answer, a second refresh
         // sent at the same time); every token of the window keeps its own end
@@ -1023,7 +1098,7 @@ impl DevicesSvc {
                 .devices
                 .iter()
                 .find(|d| d.id == id && d.user == who)
-                .ok_or_else(not_found)?;
+                .ok_or_else(|| reg.missing(id))?;
             Self::view(r)
         };
         device.current = true;
@@ -1048,12 +1123,25 @@ impl DevicesSvc {
     /// Expires devices without a refresh for [`INACTIVE_EXPIRY_DAYS`], revokes devices never
     /// refreshed [`UNCLAIMED_AFTER_MS`] after their approval, and the devices of removed or
     /// disabled accounts or of a name that now belongs to another uid (blocking: PAM, NSS).
-    /// Returns the revoked ids.
+    /// Drops tombstones older than [`REVOKED_KEPT_DAYS`]. Returns the revoked ids.
     pub fn check(&self) -> Vec<String> {
         let now = self.clock.now_ms();
+        {
+            let mut reg = self.lock();
+            let before = reg.revoked.len();
+            reg.revoked
+                .retain(|t| now.saturating_sub(t.revoked_ms) < REVOKED_KEPT_DAYS * DAY_MS);
+            if reg.revoked.len() != before
+                && let Err(e) = self.save(&reg)
+            {
+                tracing::error!("devices: {}", e.2);
+            }
+        }
         let limit = INACTIVE_EXPIRY_DAYS * DAY_MS;
-        let mut out = self.revoke_where("inactive", |d| now.saturating_sub(d.last_refresh_ms) >= limit);
-        out.extend(self.revoke_where("unclaimed", |d| {
+        let mut out = self.revoke_where(revoke_reason::INACTIVE, |d| {
+            now.saturating_sub(d.last_refresh_ms) >= limit
+        });
+        out.extend(self.revoke_where(revoke_reason::UNCLAIMED, |d| {
             d.last_ts == 0 && now.saturating_sub(d.created_ms) >= UNCLAIMED_AFTER_MS
         }));
         let users: BTreeSet<String> = self.lock().devices.iter().map(|d| d.user.clone()).collect();
@@ -1061,15 +1149,15 @@ impl DevicesSvc {
             match (self.account)(&u) {
                 Account::Ok => match (self.uid_of)(&u) {
                     Ok(Some(uid)) => {
-                        out.extend(self.revoke_where("account_replaced", |d| {
+                        out.extend(self.revoke_where(revoke_reason::ACCOUNT_REPLACED, |d| {
                             d.user == u && d.uid.is_some_and(|x| x != uid)
                         }));
                     }
                     Ok(None) => {}
                     Err(e) => tracing::warn!("devices: the uid of {u}: {e}: checked again later"),
                 },
-                Account::Gone | Account::Disabled => {
-                    out.extend(self.revoke_where("account", |d| d.user == u));
+                a @ (Account::Gone | Account::Disabled) => {
+                    out.extend(self.revoke_where(account_reason(a), |d| d.user == u));
                 }
                 Account::Unknown => {
                     tracing::warn!("devices: the account check of {u} failed: its devices stay, checked again later");
@@ -1247,10 +1335,11 @@ async fn revoke_delete(
     let s = svc(&st)?;
     let who = user(&h)?;
     let reason = match q.reason.as_deref() {
-        None | Some("user") => "user",
-        Some("self") => "self",
-        Some("unclaimed") => "unclaimed",
-        Some(_) => return Err(Error::bad_request("reason: user, self or unclaimed")),
+        None => revoke_reason::USER,
+        Some(r) => [revoke_reason::USER, revoke_reason::SELF, revoke_reason::UNCLAIMED]
+            .into_iter()
+            .find(|x| *x == r)
+            .ok_or_else(|| Error::bad_request("reason: user, self or unclaimed"))?,
     };
     blocking(move || s.revoke(&who, &id, reason)).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1354,6 +1443,8 @@ mod tests {
         let account: AccountCheck = Arc::new(move |u: &str| {
             if f.lock().unwrap().iter().any(|x| x == u) {
                 Account::Unknown
+            } else if u == "locked" {
+                Account::Disabled
             } else if g.lock().unwrap().iter().any(|x| x == u) || groups(u).is_none() {
                 Account::Gone
             } else {
@@ -1579,8 +1670,11 @@ mod tests {
         assert_eq!((e.0, e.1, e.3), (StatusCode::UNAUTHORIZED, error_codes::DEVICE_REVOKED, None));
         assert!(r.svc.ids().is_empty());
         assert_eq!(r.events.take()[0].code, "device.refresh_reuse");
-        // unknown device: marked as a guess
+        // the revoked device again: its reason, not a guess
         let e = check(&r, &key, &d.id, "R4", "R5").unwrap_err();
+        assert_eq!((e.1, e.3, e.4.as_deref()), (error_codes::DEVICE_REVOKED, None, Some("refresh_reuse")));
+        // a device never known: marked as a guess
+        let e = check(&r, &key, "d_unknown", "R4", "R5").unwrap_err();
         assert_eq!((e.1, e.3.as_deref()), (error_codes::DEVICE_REVOKED, Some(GUESS_DEVICE_ID)));
     }
 
@@ -1802,6 +1896,55 @@ mod tests {
             .map(|s| s.parse().unwrap())
             .collect();
         assert_eq!(lan_urls(&a, 8443), vec!["https://192.168.1.10:8443".to_string()]);
+    }
+
+    #[test]
+    fn revoked_devices_hear_why_for_30_days() {
+        let r = rig();
+        let reason = |e: Error| {
+            assert_eq!((e.0, e.1), (StatusCode::UNAUTHORIZED, error_codes::DEVICE_REVOKED));
+            assert_eq!(e.3, None, "not a guess");
+            e.4
+        };
+        // revoked in the web interface (or by the app)
+        let ku = Key::new();
+        let du = register(&r, "alice", &ku, "U1");
+        r.svc.revoke("alice", &du.id, revoke_reason::USER).unwrap();
+        assert_eq!(reason(check(&r, &ku, &du.id, "U1", "U2").unwrap_err()).as_deref(), Some("user"));
+        // a reuse: that answer, and the same on every later try
+        let k = Key::new();
+        let d = register(&r, "alice", &k, "R1");
+        check(&r, &k, &d.id, "R1", "R2").unwrap();
+        check(&r, &k, &d.id, "R2", "R3").unwrap();
+        r.clock.advance_ms(61_000);
+        assert_eq!(reason(check(&r, &k, &d.id, "R1", "R9").unwrap_err()).as_deref(), Some("refresh_reuse"));
+        assert_eq!(reason(check(&r, &k, &d.id, "R3", "R4").unwrap_err()).as_deref(), Some("refresh_reuse"));
+        // removed and disabled accounts
+        let kc = Key::new();
+        let dc = register(&r, "carol", &kc, "C1");
+        assert_eq!(reason(check(&r, &kc, &dc.id, "C1", "C2").unwrap_err()).as_deref(), Some("account_removed"));
+        assert_eq!(reason(check(&r, &kc, &dc.id, "C1", "C2").unwrap_err()).as_deref(), Some("account_removed"));
+        let kl = Key::new();
+        let dl = register(&r, "locked", &kl, "L1");
+        assert_eq!(reason(check(&r, &kl, &dl.id, "L1", "L2").unwrap_err()).as_deref(), Some("account_disabled"));
+        // a device's own routes answer the same (its access token outlived the revocation)
+        let e = r.svc.clear_push("alice", &d.id).unwrap_err();
+        assert_eq!((e.1, e.4.as_deref()), (error_codes::DEVICE_REVOKED, Some("refresh_reuse")));
+        let e = r.svc.set_push("alice", &du.id, sub(), None).unwrap_err();
+        assert_eq!((e.1, e.4.as_deref()), (error_codes::DEVICE_REVOKED, Some("user")));
+        // the tombstones hold no key or token hash
+        let text = std::fs::read_to_string(r._dir.path().join("devices/devices.json")).unwrap();
+        assert!(!text.contains(&k.spki()) && !text.contains(&sha_b64u("R3")));
+        assert!(text.contains("\"refresh_reuse\""));
+        // never paired: no reason, and a guess
+        let e = check(&r, &k, "d_never", "X1", "X2").unwrap_err();
+        assert_eq!((e.1, e.3.as_deref(), e.4), (error_codes::DEVICE_REVOKED, Some(GUESS_DEVICE_ID), None));
+        // 30 days later the tombstones are gone: no reason any more
+        r.clock.advance_ms(REVOKED_KEPT_DAYS * DAY_MS);
+        r.svc.check();
+        assert!(r.svc.lock().revoked.is_empty());
+        let e = check(&r, &ku, &du.id, "U1", "U2").unwrap_err();
+        assert_eq!((e.1, e.4), (error_codes::DEVICE_REVOKED, None));
     }
 
     #[test]

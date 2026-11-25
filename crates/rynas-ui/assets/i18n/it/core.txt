@@ -6334,6 +6334,8 @@ nev.device.revoked.body	Il dispositivo mobile {device} di {user} non può più a
 nev.device.revoked.reason.user	revocato dall'interfaccia web
 nev.device.revoked.reason.self	disabbinato dall'app
 nev.device.revoked.reason.account	l'account è stato rimosso o disattivato
+nev.device.revoked.reason.account_removed	l'account è stato rimosso
+nev.device.revoked.reason.account_disabled	l'account è stato disattivato
 nev.device.revoked.reason.inactive	nessun accesso da 180 giorni
 nev.device.revoked.reason.unclaimed	mai ritirato dal telefono
 nev.device.revoked.reason.account_replaced	l'account è stato sostituito da un altro con lo stesso nome

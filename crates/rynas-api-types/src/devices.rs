@@ -29,6 +29,41 @@ pub const INACTIVE_EXPIRY_DAYS: u64 = 180;
 pub const REAUTH_WINDOW_S: u64 = 600;
 /// Longest device name (characters, after trimming).
 pub const MAX_NAME: usize = 64;
+/// A revoked device's id and reason are kept this long: its refresh (or a call of its app
+/// that reaches the store) is answered `device_revoked` with the `reason`; later without.
+pub const REVOKED_KEPT_DAYS: u64 = 30;
+
+/// `reason` of a `device_revoked` answer and of the `device.revoked` event: why the device was
+/// revoked. Absent for a device the NAS does not know (never paired, or revoked more than
+/// [`REVOKED_KEPT_DAYS`] ago).
+pub mod revoke_reason {
+    /// Unpaired from the app itself.
+    pub const SELF: &str = "self";
+    /// Revoked by a user (its owner or an administrator) in the web interface.
+    pub const USER: &str = "user";
+    /// Approved but never picked up by the phone, or never refreshed after the pairing.
+    pub const UNCLAIMED: &str = "unclaimed";
+    /// The user name now belongs to another account (another uid).
+    pub const ACCOUNT_REPLACED: &str = "account_replaced";
+    /// The account no longer exists.
+    pub const ACCOUNT_REMOVED: &str = "account_removed";
+    /// The account is locked or expired.
+    pub const ACCOUNT_DISABLED: &str = "account_disabled";
+    /// An old refresh token came back: a copy may exist elsewhere.
+    pub const REFRESH_REUSE: &str = "refresh_reuse";
+    /// No refresh for [`super::INACTIVE_EXPIRY_DAYS`].
+    pub const INACTIVE: &str = "inactive";
+    pub const ALL: &[&str] = &[
+        SELF,
+        USER,
+        UNCLAIMED,
+        ACCOUNT_REPLACED,
+        ACCOUNT_REMOVED,
+        ACCOUNT_DISABLED,
+        REFRESH_REUSE,
+        INACTIVE,
+    ];
+}
 
 /// Routes a device may not call (403 `not_for_devices`): `(method, path prefix)` relative to
 /// `/api/v1`, `"*"` for any method. A device acts as its user in v1, so the list is empty; it

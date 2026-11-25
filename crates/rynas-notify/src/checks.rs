@@ -905,8 +905,9 @@ pub fn device_renamed(user: &str, id: &str, old: &str, new: &str) -> NewEvent {
     field(field(field(code(e, "device.renamed"), "user", user), "old", old), "new", new)
 }
 
-/// A paired device revoked. `reason`: `user` (from the web interface), `self` (unpaired from
-/// the app), `account` (the account was removed or disabled), `inactive` (no refresh for 180
+/// A paired device revoked. `reason` (`rynas_api_types::devices::revoke_reason`): `user` (from
+/// the web interface), `self` (unpaired from the app), `account_removed`, `account_disabled`
+/// (older events: `account`), `inactive` (no refresh for 180
 /// days), `unclaimed` (approved, never picked up by the phone, or never refreshed after the
 /// pairing), `account_replaced` (the user name now belongs to another uid).
 pub fn device_revoked(user: &str, id: &str, device: &str, reason: &str) -> NewEvent {

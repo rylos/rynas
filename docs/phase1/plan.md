@@ -121,7 +121,7 @@ only goes to the debug log (A13).
 | 410 | `pairing_expired` | mobile devices: the pairing expired before its approval (the phone's poll) |
 | 403 | `reauth_required` | the action needs a password (and TOTP) check in the last 10 minutes: `POST /auth/reauth` |
 | 403 | `not_for_devices` | a route refused to paired devices (the list is empty in v1) |
-| 401 | `device_revoked` | mobile devices: the device is unknown or revoked; the app forgets the pairing |
+| 401 | `device_revoked` | mobile devices: the device is unknown or revoked; the app forgets the pairing. `reason` in the body (`ApiError::reason`, one of `devices::revoke_reason`) for 30 days after the revocation |
 | 401 | `refresh_invalid` | mobile devices: a refresh with a bad signature, a `ts` not newer than the last accepted one, an account that may not sign in, or the token replaced most recently after its grace window (the device stays) |
 | 400 | `clock_skew` | mobile devices: the signed `ts` of a claim (valid code and signature) or refresh (valid device signature) is more than 120 s from the NAS' clock |
 
@@ -2039,6 +2039,11 @@ the sign-in's delays, apart from the sign-in's tables) and log only guesses (unk
 code or token, bad signature, unknown device) as `device authentication failure from IP`
 for the fail2ban filter `packaging/fail2ban/filter.d/rynas-devices.conf`; details in
 `../phase2/mobile-devices.md` §3.
+
+`device_revoked` answers carry `reason` (`self`, `user`, `unclaimed`, `account_replaced`,
+`account_removed`, `account_disabled`, `refresh_reuse`, `inactive`) while rynasd keeps the
+device's tombstone (30 days); an unknown id gets none. `ApiError::reason` is optional and
+absent on every other error.
 
 ## API v1: Wake-on-LAN
 Module `rynasd::wol` (`send`: magic packet, interface choice, sockets; `probe`: status

@@ -33,6 +33,7 @@ fn rejected(status: StatusCode, code: &str, message: String, field: Option<Strin
             code: code.into(),
             message,
             field,
+            reason: None,
         },
     )
 }
@@ -239,6 +240,7 @@ fn plain_rejection(status: StatusCode, text: &str) -> ApiError {
             code: code.into(),
             message,
             field,
+            reason: None,
         };
     }
     let message = match status {

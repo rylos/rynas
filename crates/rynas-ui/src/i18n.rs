@@ -700,6 +700,8 @@ dict! { BLOB, LENS;
     "nev.device.revoked.reason.user" => "revoked from the web interface";
     "nev.device.revoked.reason.self" => "unpaired from the app";
     "nev.device.revoked.reason.account" => "the account was removed or disabled";
+    "nev.device.revoked.reason.account_removed" => "the account was removed";
+    "nev.device.revoked.reason.account_disabled" => "the account was disabled";
     "nev.device.revoked.reason.inactive" => "no sign-in for 180 days";
     "nev.device.revoked.reason.unclaimed" => "never picked up by the phone";
     "nev.device.revoked.reason.account_replaced" => "the account was replaced by another one with the same name";

@@ -285,7 +285,7 @@ pub fn json(out: &mut impl Write, status: u16, value: &impl Serialize) -> io::Re
 }
 
 pub fn error(out: &mut impl Write, err: &ApiError) -> io::Result<()> {
-    let body = rynas_api_types::ApiError { code: err.code.into(), message: err.message.clone(), field: err.field.clone() };
+    let body = rynas_api_types::ApiError { code: err.code.into(), message: err.message.clone(), field: err.field.clone(), reason: None };
     json(out, err.status, &body)
 }
 

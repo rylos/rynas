@@ -17,11 +17,19 @@ pub struct Error(
     pub(crate) &'static str,
     pub(crate) String,
     pub(crate) Option<String>,
+    /// [`ApiError::reason`] (a revoked device's reason).
+    pub(crate) Option<String>,
 );
 
 impl Error {
     pub fn new(status: StatusCode, code: &'static str, msg: String) -> Self {
-        Error(status, code, msg, None)
+        Error(status, code, msg, None, None)
+    }
+
+    /// Says why ([`ApiError::reason`]).
+    pub fn reason(mut self, reason: impl Into<String>) -> Self {
+        self.4 = Some(reason.into());
+        self
     }
 
     /// 400 `invalid_value` about the request field `field` (its JSON name).
@@ -77,6 +85,7 @@ impl IntoResponse for Error {
                 code: self.1.into(),
                 message: self.2,
                 field: self.3,
+                reason: self.4,
             }),
         )
             .into_response()
@@ -96,7 +105,7 @@ impl From<rynas_http::Rejected> for Error {
             .copied()
             .find(|c| *c == e.code)
             .unwrap_or(error_codes::BAD_REQUEST);
-        Error(status, code, e.message, e.field)
+        Error(status, code, e.message, e.field, e.reason)
     }
 }
 

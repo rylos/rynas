@@ -34,7 +34,8 @@ use rynas_api_types::devices::internal::{
 use rynas_api_types::devices::{
     ACCESS_TTL_S, ClaimRequest, Device, DeviceRename, DeviceSelf, NasRef, PROTOCOL_VERSION,
     PairingApprove, PairingCreated, PairingState, PairingStatus, Ping, PollApproved, PollPending,
-    PollRequest, REAUTH_WINDOW_S, RefreshRequest, RefreshResponse, clean_name,
+    PollRequest, REAUTH_WINDOW_S, REVOKED_KEPT_DAYS, RefreshRequest, RefreshResponse, clean_name,
+    revoke_reason,
 };
 use rynas_api_types::{UserInfo, error_codes};
 use rynas_auth::device::{ClaimError, PairingError, PollOutcome, b64u, sha_b64u};
@@ -63,8 +64,15 @@ pub struct DeviceHub {
     /// Devices revoked through rynas-web since it started (the web interface, the app's
     /// unpairing, unclaimed pairings): an access token issued while such a revocation was on
     /// its way is dropped right after it is made ([`DeviceHub::issue`]). rynasd's own
-    /// revocations only end sessions ([`apply_live`]).
-    revoked: Mutex<std::collections::VecDeque<String>>,
+    /// revocations only end sessions ([`apply_live`]). With the reason and when: the reason
+    /// goes with a `device_revoked` answer for [`REVOKED_KEPT_DAYS`], like rynasd's tombstones.
+    revoked: Mutex<std::collections::VecDeque<Revoked>>,
+}
+
+struct Revoked {
+    id: String,
+    reason: String,
+    at: std::time::Instant,
 }
 
 impl Default for DeviceHub {
@@ -83,12 +91,17 @@ impl DeviceHub {
         }
     }
 
-    /// The device `id` is revoked: its sessions end, and any made later are dropped at once.
-    pub fn revoked(&self, sessions: &SessionStore, id: &str) {
+    /// The device `id` was revoked through rynas-web for `reason` (one of
+    /// [`revoke_reason`]): its sessions end, and any made later are dropped at once.
+    pub fn revoked(&self, sessions: &SessionStore, id: &str, reason: &str) {
         {
             let mut r = self.revoked.lock().unwrap_or_else(|e| e.into_inner());
-            if !r.iter().any(|x| x == id) {
-                r.push_back(id.to_string());
+            if !r.iter().any(|x| x.id == id) {
+                r.push_back(Revoked {
+                    id: id.to_string(),
+                    reason: reason.to_string(),
+                    at: std::time::Instant::now(),
+                });
                 if r.len() > MAX_REVOKED {
                     r.pop_front();
                 }
@@ -103,7 +116,19 @@ impl DeviceHub {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .any(|x| x == id)
+            .any(|x| x.id == id)
+    }
+
+    /// The reason recorded for the device `id` revoked through rynas-web, while it is kept
+    /// ([`REVOKED_KEPT_DAYS`]).
+    pub fn revoked_reason(&self, id: &str) -> Option<String> {
+        let keep = Duration::from_secs(REVOKED_KEPT_DAYS * 86_400);
+        self.revoked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|x| x.id == id && x.at.elapsed() < keep)
+            .map(|x| x.reason.clone())
     }
 
     /// A device session for `device` of `user`: the access token handed to the phone, or
@@ -352,8 +377,11 @@ async fn poll(
     }
 }
 
-fn revoked_answer() -> Response {
-    err(StatusCode::UNAUTHORIZED, error_codes::DEVICE_REVOKED, "device unknown or revoked")
+/// 401 `device_revoked`, with the reason when one is known.
+fn revoked_answer(reason: Option<String>) -> Response {
+    let mut e = Error::new(StatusCode::UNAUTHORIZED, error_codes::DEVICE_REVOKED, "device unknown or revoked");
+    e.1.reason = reason;
+    e.into_response()
 }
 
 async fn refresh(
@@ -402,13 +430,17 @@ async fn refresh(
             if matches!(e.field.as_deref(), Some(GUESS_DEVICE_ID | GUESS_SIGNATURE)) {
                 limiter.record_failure(ip, &key);
             }
-            e.field = None;
             if e.code == error_codes::DEVICE_REVOKED {
                 // rynasd revoked it (or never had it): nothing can refresh it again, so its
-                // sessions end without a permanent entry
+                // sessions end without a permanent entry. rynasd's reason goes on unchanged;
+                // without one, the reason of a revocation made here, if any
                 st.auth.sessions().remove_device(&req.device_id);
                 st.devices.forget(&req.device_id);
+                if e.reason.is_none() {
+                    e.reason = st.devices.revoked_reason(&req.device_id);
+                }
             }
+            e.field = None;
             return Error(status, e).into_response();
         }
         Err(e) => return Error::from(e).into_response(),
@@ -430,7 +462,7 @@ async fn refresh(
         role,
     };
     let Some(access) = st.devices.issue(st.auth.sessions(), user, &ok.device) else {
-        return revoked_answer();
+        return revoked_answer(st.devices.revoked_reason(&ok.device.id));
     };
     st.devices.seen(&ok.device.id, ip, st.auth.pairings().now_ms());
     Json(RefreshResponse {
@@ -555,7 +587,7 @@ async fn pairing_approve(
     let sid = sid(&st).await.unwrap_or_default();
     let Some(access) = st.devices.issue(st.auth.sessions(), s.user.clone(), &device) else {
         st.auth.pairings().approve_failed(&id);
-        return revoked_answer();
+        return revoked_answer(st.devices.revoked_reason(&device.id));
     };
     st.auth.pairings().approved(
         &id,
@@ -642,7 +674,7 @@ async fn revoke_device(st: &AppState, s: &SessionData, id: &str, reason: &str) -
             None::<&()>,
         )
         .await?;
-    st.devices.revoked(st.auth.sessions(), id);
+    st.devices.revoked(st.auth.sessions(), id, reason);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -661,7 +693,7 @@ async fn revoke(
     Extension(CurrentSession(s)): Extension<CurrentSession>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, Error> {
-    revoke_device(&st, &s, &id, "user").await
+    revoke_device(&st, &s, &id, revoke_reason::USER).await
 }
 
 fn device_only() -> Error {
@@ -705,7 +737,7 @@ async fn self_delete(
     Extension(CurrentSession(s)): Extension<CurrentSession>,
 ) -> Result<StatusCode, Error> {
     let id = current_device(&s).ok_or_else(device_only)?.to_string();
-    revoke_device(&st, &s, &id, "self").await
+    revoke_device(&st, &s, &id, revoke_reason::SELF).await
 }
 
 /// `PUT /devices/self/push`: the device's Web Push subscription (rynasd checks it and makes
@@ -773,7 +805,7 @@ pub async fn sweep(st: &AppState) {
             .await;
         match r {
             // revoked here: the access token made at the approval ends too
-            Ok(()) => st.devices.revoked(st.auth.sessions(), &id),
+            Ok(()) => st.devices.revoked(st.auth.sessions(), &id, revoke_reason::UNCLAIMED),
             Err(e) => tracing::warn!("devices: unclaimed device {id} not revoked: {e:?}"),
         }
     }
@@ -849,7 +881,9 @@ mod tests {
         let t = hub.issue(s, admin(), &device("d_1")).unwrap();
         assert!(s.get_bearer(&t).is_some());
         // the revocation lands between rynasd's answer and the session: no token survives
-        hub.revoked(s, "d_1");
+        hub.revoked(s, "d_1", revoke_reason::USER);
+        assert_eq!(hub.revoked_reason("d_1").as_deref(), Some("user"));
+        assert_eq!(hub.revoked_reason("d_2"), None);
         assert!(s.get_bearer(&t).is_none());
         assert!(hub.issue(s, admin(), &device("d_1")).is_none());
         assert!(s.device_ids().is_empty(), "the session made is gone again");

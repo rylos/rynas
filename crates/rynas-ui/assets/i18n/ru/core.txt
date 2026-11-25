@@ -6396,6 +6396,8 @@ nev.device.revoked.body	Мобильное устройство {device} пол�
 nev.device.revoked.reason.user	отозвано в веб-интерфейсе
 nev.device.revoked.reason.self	сопряжение снято в приложении
 nev.device.revoked.reason.account	учётная запись удалена или отключена
+nev.device.revoked.reason.account_removed	учётная запись удалена
+nev.device.revoked.reason.account_disabled	учётная запись отключена
 nev.device.revoked.reason.inactive	нет входов 180 дней
 nev.device.revoked.reason.unclaimed	телефон так и не получил его
 nev.device.revoked.reason.account_replaced	учётная запись заменена другой с тем же именем

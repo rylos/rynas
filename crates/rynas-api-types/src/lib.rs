@@ -287,6 +287,10 @@ pub struct ApiError {
     /// translated `code` under that field instead of in the form banner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
+    /// Why, when the code alone does not say it and the client acts on it: today only
+    /// `device_revoked` (one of [`devices::revoke_reason`]; absent for an unknown device).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl ApiError {
@@ -295,6 +299,7 @@ impl ApiError {
             code: code.into(),
             message: message.into(),
             field: None,
+            reason: None,
         }
     }
 }

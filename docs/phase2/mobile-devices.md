@@ -101,6 +101,17 @@ Details of the implementation:
   `UNCLAIMED_AFTER_MS`) is revoked `unclaimed` by the 10-minute check (a restart of rynas-web
   loses the waiting tokens). **The app refreshes once right after pairing**, before its first
   access token runs out.
+- Revocation reason: whenever rynasd revokes a device it keeps a tombstone `{id, reason,
+  revoked_ms}` in `devices.json` for 30 days (`REVOKED_KEPT_DAYS`; dropped by the 10-minute
+  check; no key, no token hash). A refresh of that id, or a call of the app that rynasd
+  answers for it (`devices/self`, push), is 401 with
+  `{"code": "device_revoked", "message": "…", "reason": "<reason>"}` (`ApiError::reason`).
+  Reasons (`rynas_api_types::devices::revoke_reason`): `self`, `user`, `unclaimed`,
+  `account_replaced`, `account_removed`, `account_disabled`, `refresh_reuse`, `inactive`.
+  An unknown id (never paired, or tombstone expired) gets `device_revoked` without `reason`.
+  rynas-web passes rynasd's reason on unchanged; for a revocation it made itself (its
+  permanent list: web interface, app unpairing, unclaimed pairings) it adds the reason it
+  recorded when rynasd's answer has none.
 - Replaced accounts: the owner's uid is kept with the device at the pairing (records from
   before get it at their next successful refresh). A refresh or the 10-minute check that finds
   the name under another uid (the account removed and made again) revokes the device
@@ -217,8 +228,9 @@ oneshot event (source `files`, key `files:job:<id>`, category `files`):
 ## 5. Events
 
 Notifications (category security) and SSE (`notification` events): `device.paired` (notice),
-`device.renamed` (info), `device.revoked` (notice, `reason`: `user`, `self`, `account`,
-`account_replaced`, `inactive`, `unclaimed`), `device.refresh_reuse` (warning: the device was revoked),
+`device.renamed` (info), `device.revoked` (notice, `reason`: the `revoke_reason` values
+except `refresh_reuse`, which raises `device.refresh_reuse`; older events may say
+`account`), `device.refresh_reuse` (warning: the device was revoked),
 `device.power` (info: a restart, shutdown or cancellation asked from a device),
 `device.password_kept` (info: the user's password changed; lists the devices that keep access).
 

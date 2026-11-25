@@ -346,6 +346,7 @@ async fn pairing_tokens_rotation_reuse() {
     rig.app.clock.advance_ms(1_000);
     let r = public(app, "/api/v1/auth/device/refresh", phone.refresh(&sid, &dev.id, &ok.refresh_token, rig.ts())).await;
     assert_eq!((r.status, r.code()), (StatusCode::UNAUTHORIZED, error_codes::DEVICE_REVOKED.to_string()));
+    assert_eq!(r.json::<rynas_api_types::ApiError>().reason.as_deref(), Some("refresh_reuse"));
     assert_eq!(bearer(app, Method::GET, "/api/v1/system", &r3.access_token, None).await.status, StatusCode::UNAUTHORIZED);
     let r = public(app, "/api/v1/auth/device/refresh", phone.refresh(&sid, &dev.id, &r3.refresh_token, rig.ts())).await;
     assert_eq!(r.code(), error_codes::DEVICE_REVOKED);
@@ -372,13 +373,29 @@ async fn revoke_rename_and_expiry() {
     assert_eq!(bearer(app, Method::GET, "/api/v1/devices/self", &ok.access_token, None).await.status, StatusCode::UNAUTHORIZED);
     let sid = rig.svc.sid().unwrap();
     let r = public(app, "/api/v1/auth/device/refresh", phone.refresh(&sid, &ok.device_id, &ok.refresh_token, rig.ts())).await;
-    assert_eq!(r.code(), error_codes::DEVICE_REVOKED);
+    let e: rynas_api_types::ApiError = r.json();
+    assert_eq!((e.code.as_str(), e.reason.as_deref(), e.field), ("device_revoked", Some("user"), None));
 
     // unpaired from the app itself
-    let ok = pair(&rig, &creds, &Phone::new()).await;
+    let self_phone = Phone::new();
+    let ok = pair(&rig, &creds, &self_phone).await;
     let r = bearer(app, Method::DELETE, "/api/v1/devices/self", &ok.access_token, None).await;
     assert_eq!(r.status, StatusCode::NO_CONTENT);
     assert!(rig.svc.ids().is_empty());
+    let r = public(app, "/api/v1/auth/device/refresh", self_phone.refresh(&sid, &ok.device_id, &ok.refresh_token, rig.ts())).await;
+    assert_eq!(r.json::<rynas_api_types::ApiError>().reason.as_deref(), Some("self"));
+
+    // revoked by rynasd on its own while the access token lives: a bearer call rynasd answers
+    // for the device carries the reason through rynas-web unchanged
+    let ok = pair(&rig, &creds, &Phone::new()).await;
+    rig.svc.revoke("admin", &ok.device_id, "inactive").unwrap();
+    let r = bearer(app, Method::GET, "/api/v1/devices/self", &ok.access_token, None).await;
+    let e: rynas_api_types::ApiError = r.json();
+    assert_eq!((r.status, e.code.as_str(), e.reason.as_deref()), (StatusCode::UNAUTHORIZED, "device_revoked", Some("inactive")));
+    // a device never paired: no reason
+    let r = public(app, "/api/v1/auth/device/refresh", self_phone.refresh(&sid, "d_never", "x", rig.ts())).await;
+    let e: rynas_api_types::ApiError = r.json();
+    assert_eq!((e.code.as_str(), e.reason, e.field), ("device_revoked", None, None));
 
     // the access token lasts 15 minutes
     let ok = pair(&rig, &creds, &Phone::new()).await;

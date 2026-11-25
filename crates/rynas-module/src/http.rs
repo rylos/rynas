@@ -87,6 +87,7 @@ impl IntoResponse for Error {
                 code: self.1.into(),
                 message: self.2,
                 field: self.3,
+                reason: None,
             }),
         )
             .into_response()
