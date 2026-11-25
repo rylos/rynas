@@ -305,6 +305,13 @@ impl Module for SynologyModule {
         self.hardware.as_ref().map(|_| WAKE_CLOCK)
     }
 
+    /// `synology.hw` `disk_standby_minutes` as applied (0: never); `None` without the key.
+    fn disk_standby_s(&self, cfg: &Config) -> Option<u32> {
+        let v = cfg.applied(crate::domain::SYNOLOGY_KEY).ok().flatten()?;
+        let s = crate::domain::settings_of(&v).ok()?;
+        Some(u32::from(s.disk_standby_minutes) * 60)
+    }
+
     fn router(&self, ctx: &rynas_module::http::Ctx) -> Option<axum::Router> {
         Some(crate::http::router(ctx.clone(), self.hardware.clone()))
     }
@@ -403,6 +410,14 @@ mod tests {
         assert_eq!((b.configured, b.pending), (false, Some(true)));
         let b = m.reset_button(&cfg, "other").unwrap().unwrap();
         assert_eq!(b.pending, None, "another user's changeset");
+        // the disks' spin-down delay is the applied value, not a staged one
+        assert_eq!(m.disk_standby_s(&cfg), None, "nothing applied");
+        let s = SynologySettings { disk_standby_minutes: 20, ..Default::default() };
+        cfg.stage("admin", crate::domain::SYNOLOGY_KEY, Some(serde_json::to_value(&s).unwrap()))
+            .unwrap();
+        assert_eq!(m.disk_standby_s(&cfg), None, "staged only");
+        cfg.apply("admin", "admin", "standby", &|_| {}, &|| false).unwrap();
+        assert_eq!(m.disk_standby_s(&cfg), Some(1200));
     }
 
     #[test]

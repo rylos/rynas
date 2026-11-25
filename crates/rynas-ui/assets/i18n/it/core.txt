@@ -1286,7 +1286,7 @@ sto.default_v	Predefinito ({v})
 sto.read_ahead	Read-ahead (KiB)
 sto.ra_invalid	Il read-ahead deve essere un numero da 0 a 65536.
 sto.standby	Standby dopo
-sto.standby_hint	Spento finché non lo scegli: fermare il disco conviene solo se resta inattivo per ore, come un disco di archivio o di backup.
+sto.standby_hint	Vuoto: il valore predefinito della macchina (spento, salvo che il supporto hardware ne imposti uno). rynas ferma il disco dopo questo tempo senza letture né scritture, anche quelli che ignorano il proprio timer, e salta un disco con un test SMART in corso. Conviene solo se resta inattivo per ore, come un disco di archivio o di backup.
 sto.hdd_only	Solo dischi rigidi.
 sto.not_set	Non impostato (lascia il disco com'è)
 sto.never	Mai

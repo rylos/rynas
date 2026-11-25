@@ -3795,6 +3795,7 @@ dependencies = [
  "rynas-tasks",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

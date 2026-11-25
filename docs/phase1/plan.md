@@ -664,6 +664,20 @@ Rules:
   only), md `stripe_cache_size` per array only when chosen (proposal: largest power of two
   ≤ 8192 within 2% of RAM); checked with `udevadm verify`, then `udevadm control --reload` and
   a `change` trigger of the disks.
+- **Host-driven spin-down** (`rynasd::disk_standby`, not under `--dry-system`): drives with
+  Extended Power Conditions ignore the `hdparm -S` timer, and periodic temperature reads reset
+  it on many models, so rynasd also spins disks down itself. Every 30 s it reads
+  `/proc/diskstats` (below `--hw-root`, like sysfs and `/run/udev/data`); a whole `sd*` disk
+  that is rotational and sits behind an ATA port (USB flash drives and boot DOMs that report
+  rotational are left alone) and has had no completed read or write for its delay gets ATA
+  CHECK POWER MODE, then STANDBY IMMEDIATE (`hdparm -y`) only when it is awake. The delay is
+  the disk's `standby_s` resolved as for the udev rules (type default, then the override by
+  `ID_SERIAL_SHORT`; 0 = never), else the hardware module's default (`Module::disk_standby_s`,
+  the Synology module's `disk_standby_minutes`); only applied values are read. A disk running
+  a SMART self-test is skipped (STANDBY IMMEDIATE would abort it and a long test makes no block
+  I/O): a long test the scheduler started and still follows (its disk claim), else the drive's
+  "Self-test execution status" from `smartctl -n standby -c`. After each attempt the idle timer
+  starts again. A spin-down is logged at info, failures at debug.
 - **Subvolumes**: names `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` (`.snapshots`, `@rynas-cache` are
   never touched); compression off = property `compression none`; read-only = `ro true`;
   DELETE refuses a subvolume a share uses (409) and a non-empty one without
