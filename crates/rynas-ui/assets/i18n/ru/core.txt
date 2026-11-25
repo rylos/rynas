@@ -6448,6 +6448,9 @@ nev.device.revoked.reason.unclaimed	телефон так и не получил
 nev.device.revoked.reason.account_replaced	учётная запись заменена другой с тем же именем
 nev.device.refresh_reuse.title	Устройство {device} пользователя {user} отозвано: токен использован дважды
 nev.device.refresh_reuse.body	Старый токен обновления мобильного устройства {device} ({user}) пришёл с адреса {ip}: где-то может быть его копия. Устройство отозвано; выполните сопряжение заново.
+nev.device.clock_skew.title	Устройство {device} отклонено: часы NAS не синхронизированы
+nev.device.clock_skew.body	Мобильное устройство {device} ({user}) прислало время, отличающееся от часов NAS более чем на 2 минуты, а часы NAS не синхронизированы: телефоны не смогут подключиться, пока это не исправлено. Проверьте серверы времени в разделе «Дата и время».
+nev.device.clock_ok.title	Мобильные устройства снова принимаются: часы совпадают
 nev.device.power.title	Питание системы с устройства {device}: {action}
 nev.device.power.action.restart	перезагрузка
 nev.device.power.action.shutdown	выключение

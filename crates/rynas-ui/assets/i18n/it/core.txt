@@ -6380,6 +6380,9 @@ nev.device.revoked.reason.unclaimed	mai ritirato dal telefono
 nev.device.revoked.reason.account_replaced	l'account è stato sostituito da un altro con lo stesso nome
 nev.device.refresh_reuse.title	Dispositivo {device} di {user} revocato: un token è stato usato due volte
 nev.device.refresh_reuse.body	Un vecchio token di rinnovo del dispositivo mobile {device} ({user}) è tornato da {ip}: potrebbe esisterne una copia altrove. Il dispositivo è stato revocato; abbinalo di nuovo.
+nev.device.clock_skew.title	Dispositivo {device} rifiutato: l'orologio del NAS non è sincronizzato
+nev.device.clock_skew.body	Il dispositivo mobile {device} ({user}) ha inviato un'ora che differisce di oltre 2 minuti da quella del NAS, e l'orologio del NAS non è sincronizzato: i telefoni non possono collegarsi finché non lo è. Controlla i server dell'ora in Data e ora.
+nev.device.clock_ok.title	Dispositivi mobili di nuovo accettati: gli orologi coincidono
 nev.device.power.title	Alimentazione del sistema dal dispositivo {device}: {action}
 nev.device.power.action.restart	riavvio
 nev.device.power.action.shutdown	spegnimento

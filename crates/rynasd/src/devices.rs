@@ -51,7 +51,7 @@ use rynas_api_types::devices::internal::{
 use rynas_api_types::devices::{
     ACCESS_TTL_S, Device, DeviceRename, DeviceSelf, INACTIVE_EXPIRY_DAYS, PAIRING_TTL_S,
     PushRegistration, PushSubscription, REFRESH_GRACE_S, REVOKED_KEPT_DAYS, clean_name, clean_text,
-    push_language, revoke_reason,
+    clock_skew_reason, push_language, revoke_reason,
 };
 use rynas_api_types::notify::{
     FieldMatch, NotifyCategory, NotifyLanguage, NotifyRule, NotifySeverity, TargetConfig, TargetRequest,
@@ -65,7 +65,9 @@ use rynas_auth::device::{
     refresh_message, ts_ok, verify,
 };
 use rynas_notify::Notifier;
-use rynas_notify::checks::{device_paired, device_refresh_reuse, device_renamed, device_revoked};
+use rynas_notify::checks::{
+    device_clock_ok, device_clock_skew, device_paired, device_refresh_reuse, device_renamed, device_revoked,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
@@ -235,11 +237,27 @@ pub struct DevicesSvc {
     account: AccountCheck,
     trust: TrustProvider,
     clock: Arc<dyn Clock>,
+    /// Whether the NAS clock is synchronized ([`host_clock_synced`]; replaced in tests).
+    sync_probe: Mutex<SyncProbe>,
+    /// A [`device_clock_skew`] alarm is open.
+    skew_open: std::sync::atomic::AtomicBool,
     /// The notification engine: one `device` target per push subscription.
     engine: std::sync::OnceLock<rynas_notify::engine::Engine>,
 }
 
 pub type DevState = Option<Arc<DevicesSvc>>;
+
+/// Answers whether the NAS clock is synchronized.
+pub type SyncProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// The kernel's view (`adjtimex`, read only): synchronized unless `STA_UNSYNC` is set or the
+/// state is `TIME_ERROR`, as `timedatectl` reports it.
+pub fn host_clock_synced() -> bool {
+    // SAFETY: modes 0 only reads; the struct is plain data
+    let mut t: libc::timex = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::adjtimex(&mut t) };
+    r >= 0 && r != libc::TIME_ERROR && t.status & libc::STA_UNSYNC == 0
+}
 
 /// The engine's view of the push subscriptions ([`PushDirectory`]).
 struct PushDir(std::sync::Weak<DevicesSvc>);
@@ -472,6 +490,8 @@ impl DevicesSvc {
             account,
             trust,
             clock,
+            sync_probe: Mutex::new(Arc::new(host_clock_synced)),
+            skew_open: std::sync::atomic::AtomicBool::new(false),
             engine: std::sync::OnceLock::new(),
         });
         Ok(svc)
@@ -947,7 +967,7 @@ impl DevicesSvc {
         if !valid_sha(&c.refresh_sha) || !valid_sha(&c.new_refresh_sha) {
             return Err(refresh_invalid());
         }
-        let (user, key, uid) = {
+        let (user, key, uid, name) = {
             let reg = self.lock();
             let Some(r) = reg.devices.iter().find(|d| d.id == c.device_id) else {
                 // revoked: the app hears why (not a guess); never known: a guess, no reason
@@ -956,7 +976,7 @@ impl DevicesSvc {
                     None => revoked().field(GUESS_DEVICE_ID),
                 });
             };
-            (r.user.clone(), b64u_decode(&r.public_key).unwrap_or_default(), r.uid)
+            (r.user.clone(), b64u_decode(&r.public_key).unwrap_or_default(), r.uid, r.name.clone())
         };
         let msg = refresh_message(&sid, &c.device_id, c.ts, &c.refresh_sha);
         if !verify(&key, &msg, &c.sig) {
@@ -964,8 +984,9 @@ impl DevicesSvc {
         }
         // the device's own key signed a time far from ours: its clock (or ours) is wrong
         if !ts_ok(c.ts, now) {
-            return Err(clock_skew());
+            return Err(self.clock_refused(&user, &name));
         }
+        self.clock_accepted();
         match (self.account)(&user) {
             Account::Ok => {}
             a @ (Account::Gone | Account::Disabled) => {
@@ -1088,6 +1109,33 @@ impl DevicesSvc {
             groups,
             grace: previous,
         })
+    }
+
+    /// Replaces the probe of the NAS clock's synchronization (tests).
+    pub fn set_sync_probe(&self, probe: SyncProbe) {
+        *self.sync_probe.lock().unwrap_or_else(|e| e.into_inner()) = probe;
+    }
+
+    /// The `clock_skew` answer, with the side that is likely wrong as `reason`: the NAS when
+    /// its clock is not synchronized (then an alarm opens, once for all the devices), else the
+    /// device.
+    fn clock_refused(&self, user: &str, device: &str) -> Error {
+        let probe = self.sync_probe.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if probe() {
+            return clock_skew().reason(clock_skew_reason::DEVICE);
+        }
+        if !self.skew_open.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            tracing::warn!("devices: {device} of {user} refused: the NAS clock is not synchronized");
+            self.notifier.emit(device_clock_skew(user, device));
+        }
+        clock_skew().reason(clock_skew_reason::NAS)
+    }
+
+    /// A device's time accepted: an open [`device_clock_skew`] alarm closes.
+    fn clock_accepted(&self) {
+        if self.skew_open.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.notifier.emit(device_clock_ok());
+        }
     }
 
     /// The device `id` as its own app sees it, with the TLS pins and base URLs.
@@ -1728,6 +1776,47 @@ mod tests {
         r.gone.lock().unwrap().push("alice".into());
         assert_eq!(check(&r, &key, &d.id, "R1", "R2").unwrap_err().1, error_codes::DEVICE_REVOKED);
         assert_eq!(r.svc.ids(), vec![db.id.clone()]);
+    }
+
+    #[test]
+    fn clock_skew_names_the_clock_likely_wrong() {
+        let r = rig();
+        let key = Key::new();
+        let d = register(&r, "alice", &key, "R1");
+        let sid = r.svc.sid().unwrap();
+        let sha = sha_b64u("R1");
+        let ask = |ts: i64| {
+            r.svc.refresh(&RefreshCheck {
+                device_id: d.id.clone(),
+                ts,
+                sig: key.sign(&refresh_message(&sid, &d.id, ts, &sha)),
+                refresh_sha: sha.clone(),
+                new_refresh_sha: sha_b64u("R2"),
+                ip: String::new(),
+                admin_groups: Vec::new(),
+            })
+        };
+        let skewed = (T0 / 1000) as i64 - 500;
+        r.events.take();
+        // the NAS clock synchronized: the device is off, nothing notified
+        r.svc.set_sync_probe(Arc::new(|| true));
+        let e = ask(skewed).unwrap_err();
+        assert_eq!((e.1, e.4.as_deref()), (error_codes::CLOCK_SKEW, Some(clock_skew_reason::DEVICE)));
+        assert!(r.events.take().is_empty());
+        // not synchronized: the NAS is named and one alarm opens for repeated refusals
+        r.svc.set_sync_probe(Arc::new(|| false));
+        for _ in 0..3 {
+            let e = ask(skewed).unwrap_err();
+            assert_eq!(e.4.as_deref(), Some(clock_skew_reason::NAS));
+        }
+        let ev = r.events.take();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].code, "device.clock_skew");
+        assert_eq!(ev[0].actions[0].url, "/system/time");
+        // a time accepted again closes it
+        ask((T0 / 1000) as i64 + 1).unwrap();
+        let ev = r.events.take();
+        assert_eq!(ev.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), vec!["device.clock_ok"]);
     }
 
     #[test]

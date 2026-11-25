@@ -1037,6 +1037,7 @@ schema 2 added the `code` and `body_format` columns.
 | `device.refresh_reuse` | `user`, `device`, `ip` | Device {device} of {user} revoked: a token was used twice |
 | `device.power` | `user`, `device`, `action` (`restart`, `shutdown`, `cancel`) | System power by device {device}: {action} |
 | `device.password_kept` | `user`, `n`, `devices` | Password of {user} changed: {n} paired devices keep access |
+| `device.clock_skew` / `device.clock_ok` | `user`, `device` | Device {device} refused: the NAS clock is not synchronized / Mobile devices accepted again: the clocks agree |
 | `files.job_done` / `files.job_failed` | `job_id`, `state` (`done`, `failed`, `canceled`), `user`, `kind`, `op`, `name` or `count`, `dest`, `size`, `minutes`, `error` (failed) | Copy finished / Copy failed (per kind; category `files`; only transfers longer than 30 s; body "Film.mkv → /Video · 45.8 GiB in 7 min", or the first error, not translated) |
 | `power.shutdown` / `power.shutdown_skipped` | `rule`, `reasons` (skipped) | Scheduled shutdown {rule} (skipped) |
 | `net.confirmed` | `revision`, `interfaces` | Network change confirmed (revision {revision}) |

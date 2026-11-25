@@ -35,7 +35,7 @@ use rynas_api_types::devices::{
     ACCESS_TTL_S, ClaimRequest, Device, DeviceRename, DeviceSelf, NasRef, PROTOCOL_VERSION,
     PairingApprove, PairingCreated, PairingState, PairingStatus, Ping, PollApproved, PollPending,
     PollRequest, REAUTH_WINDOW_S, REVOKED_KEPT_DAYS, RefreshRequest, RefreshResponse, clean_name,
-    revoke_reason,
+    clock_skew_reason, revoke_reason,
 };
 use rynas_api_types::{UserInfo, error_codes};
 use rynas_auth::device::{ClaimError, PairingError, PollOutcome, b64u, sha_b64u};
@@ -325,12 +325,25 @@ async fn claim(
     }
 }
 
+/// 400 `clock_skew`, with the side likely wrong as `reason` (as rynasd answers a refresh).
 fn clock_skew() -> Response {
-    err(
+    let mut e = Error::new(
         StatusCode::BAD_REQUEST,
         error_codes::CLOCK_SKEW,
         "the device's clock is more than 120 s away from the NAS'",
-    )
+    );
+    e.1.reason = Some(
+        if host_clock_synced() { clock_skew_reason::DEVICE } else { clock_skew_reason::NAS }.to_string(),
+    );
+    e.into_response()
+}
+
+/// The kernel's view of the NAS clock (`adjtimex`, read only), as `timedatectl` reports it.
+fn host_clock_synced() -> bool {
+    // SAFETY: modes 0 only reads; the struct is plain data
+    let mut t: libc::timex = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::adjtimex(&mut t) };
+    r >= 0 && r != libc::TIME_ERROR && t.status & libc::STA_UNSYNC == 0
 }
 
 async fn poll(
