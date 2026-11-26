@@ -553,7 +553,8 @@ async fn run_now(
     Ok(started(spawn_transfer(&p, &job, &id, &who).await?))
 }
 
-/// Task `replication.run` of one target (scheduler task or "Replicate now").
+/// Task `replication.run` of one target (scheduler task or "Replicate now"), subject
+/// `<job>/<target>` (the page finds it with it); while one runs for the target, its id.
 pub async fn spawn_transfer(p: &Arc<Protection>, job: &str, id: &str, user: &str) -> Res<String> {
     let (j, i) = (job.to_string(), id.to_string());
     let (job, t) = blocking(p, move |p| applied(p, &j, &i)).await?;
@@ -563,13 +564,14 @@ pub async fn spawn_transfer(p: &Arc<Protection>, job: &str, id: &str, user: &str
             format!("replica target {}/{} is off", job.name, t.id),
         ));
     }
+    let subject = format!("{}/{}", job.name, t.id);
     let p = p.clone();
-    Ok(p.ops
-        .tasks
-        .clone()
-        .spawn("replication.run", user, move |ctx| async move {
-            transfer(&ctx, &p, &job, &t).await.map(|_| ())
-        })?)
+    let spawned = p.ops.tasks.clone().spawn_once("replication.run", &subject, user, move |ctx| async move {
+        transfer(&ctx, &p, &job, &t).await.map(|_| ())
+    })?;
+    Ok(match spawned {
+        rynas_tasks::Spawned::New(id) | rynas_tasks::Spawned::Running(id) => id,
+    })
 }
 
 /// The targets that follow the snapshots of `job`, one after the other, after its snapshot

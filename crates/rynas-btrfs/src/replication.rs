@@ -354,16 +354,24 @@ pub fn snapshot_cmd(job: &SnapshotJob, timeout: Duration) -> Cmd {
 
 /// `btrbk clean <group>`: deletes interrupted receives (btrbk-named, without
 /// `received_uuid`) in the target directory, so the next send starts that replica again.
+/// Lowest CPU and I/O priority (nobody waits for it); stopped after [`CLEAN_STALL`] without
+/// output (an unreachable target, a hung ssh) instead of at a fixed time while it still works,
+/// the 24 h of a transfer as the last resort.
 pub fn clean_cmd(job: &str, id: &str) -> Cmd {
     Cmd::new("btrbk")
+        .heavy()
         .arg("-c")
         .arg(conf_path(job))
         .args(["clean", "--format=raw"])
         .arg(group(id))
         .env_clear()
         .env("PATH", BTRBK_PATH)
-        .timeout(Duration::from_secs(3600))
+        .timeout(TRANSFER_TIMEOUT)
+        .stall_timeout(CLEAN_STALL)
 }
+
+/// See [`clean_cmd`] (the stall limit of rynasd's heavy commands).
+pub const CLEAN_STALL: Duration = Duration::from_secs(10 * 60);
 
 /// `btrbk resume --preserve-snapshots <group>`: sends the missing replicas (incremental from
 /// the latest common parent, full the first time) and applies the target retention; the

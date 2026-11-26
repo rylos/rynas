@@ -156,7 +156,6 @@ pub fn panel(jobs: Remote<Vec<SnapshotJobView>>, edit: RwSignal<Option<Option<Re
     let list = Remote::<Vec<ReplicaView>>::with_config("/api/v1/snapshots/replication");
     let replicas = RwSignal::new(None::<ReplicaView>);
     let del = RwSignal::new(None::<ReplicaView>);
-    let running = RwSignal::new(None::<String>);
     let reload = Callback::new(move |_| list.reload());
     let no_jobs = move || jobs.data.with(|l| l.as_ref().is_some_and(Vec::is_empty));
     let table = move || {
@@ -168,7 +167,7 @@ pub fn panel(jobs: Remote<Vec<SnapshotJobView>>, edit: RwSignal<Option<Option<Re
             let text = if no_jobs() { "repl.none_no_jobs" } else { "repl.none_text" };
             return view! { <EmptyState icon=icons::FOLDER_SYNC title=Signal::derive(|| t("repl.none").to_string()) text=Signal::derive(move || t(text).to_string()) /> }.into_any();
         }
-        ui::table("", &["repl.col.target", "snap.col.job", "repl.col.when", "repl.col.last", "col.status", ""], rows.into_iter().map(|v| target_row(v, edit, replicas, del, running, reload)).collect::<Vec<_>>())
+        ui::table("", &["repl.col.target", "snap.col.job", "repl.col.when", "repl.col.last", "col.status", ""], rows.into_iter().map(|v| target_row(v, edit, replicas, del, reload)).collect::<Vec<_>>())
     };
     let delete_dialog = move || {
         del.get().map(|v| {
@@ -224,10 +223,11 @@ fn target_row(
     edit: RwSignal<Option<Option<ReplicaView>>>,
     replicas: RwSignal<Option<ReplicaView>>,
     del: RwSignal<Option<ReplicaView>>,
-    running: RwSignal<Option<String>>,
     reload: Callback<()>,
 ) -> AnyView {
-    let key = format!("{}/{}", v.job, v.target.id);
+    // the server's task of this target (subject `<job>/<target>`), whoever started it: also
+    // after a reload, and its end is said here
+    let task = tasks::use_task("replication.run", Signal::stored(Some(format!("{}/{}", v.job, v.target.id))));
     let local = v.target.destination.is_local();
     let s = v.status.clone();
     let when = if v.target.after_snapshots { t("repl.after_snapshots").to_string() } else { v.schedule.as_ref().map(trigger_text).unwrap_or_default() };
@@ -268,7 +268,7 @@ fn target_row(
         let warnings = if s.failing { Vec::new() } else { v.warnings.clone() };
         view! {
             <div class="cell-main" title=s.error.clone().unwrap_or_default()>
-                <div class="chips">{chips}</div>
+                <div class="chips">{chips}{move || task.running.get().then(|| ui::status(Tone::Info, t("task.st.running").to_string()))}</div>
                 {known.map(|h| view! { <span class="cell-sub">{ui::text_code(t(hint_key(h)))}</span> })}
                 {err.map(|e| view! { <span class="cell-sub mono small danger-text bk-wrap">{e}</span> })}
                 {(held > 0).then(|| view! { <span class="cell-sub warn-text">{i18n::tn("repl.held", u64::from(held), &[])}</span> })}
@@ -279,34 +279,25 @@ fn target_row(
     };
     let (v1, v2, v3) = (v.clone(), v.clone(), v.clone());
     let (job, id) = (v.job.clone(), v.target.id.clone());
-    let busy_key = key.clone();
-    let is_busy = move || running.get().as_deref() == Some(busy_key.as_str());
+    task.on_end(move |t| {
+        if t.status == TaskStatus::Ok && t.partial.is_none() {
+            toast(Tone::Ok, crate::i18n::t("repl.run_done").to_string());
+        } else if t.status != TaskStatus::Cancelled {
+            toast(Tone::Err, tasks::task_error(&t));
+        }
+        reload.try_run(());
+    });
+    let is_busy = move || task.running.get();
+    let starting = RwSignal::new(false);
     let run = move |_| {
         let url = format!("/api/v1/snapshots/replication/{}/{}/run", api::encode(&job), api::encode(&id));
-        let key = key.clone();
-        running.set(Some(key.clone()));
+        starting.set(true);
         spawn_local(async move {
-            let started = api::start_task(&url, None).await;
-            let r = match started {
-                Ok(id) => tasks::follow(&id).await.ok(),
-                // not started: said here, the row has no place for it
-                Err(e) => {
-                    toast(Tone::Err, e.text());
-                    None
-                }
-            };
-            // another target started meanwhile keeps its own mark
-            let _ = running.try_update(|cur| {
-                if cur.as_deref() == Some(key.as_str()) {
-                    *cur = None;
-                }
-            });
-            match r {
-                Some(task) if task.status == TaskStatus::Ok => toast(Tone::Ok, t("repl.run_done").to_string()),
-                Some(task) => toast(Tone::Err, tasks::task_error(&task)),
-                None => {}
+            // not started: said here, the row has no place for it
+            if let Err(e) = api::start_task(&url, None).await {
+                toast(Tone::Err, e.text());
             }
-            reload.try_run(());
+            let _ = starting.try_set(false);
         });
     };
     let applied = v.pending != Some(rynas_api_types::PendingOp::Add);
@@ -326,7 +317,7 @@ fn target_row(
             ui::cell("repl.col.last", "tnum", last),
             ui::cell("col.status", "", status),
             ui::actions(view! {
-                <button class="icon-btn sm" title=tr("run_now") aria-label=ui::verb_name("run_now", &v.target.id) disabled=move || !can_run || is_busy() on:click=run>
+                <button class="icon-btn sm" title=tr("run_now") aria-label=ui::verb_name("run_now", &v.target.id) disabled=move || !can_run || is_busy() || starting.get() on:click=run>
                     <Icon icon=icons::PLAY size=16 />
                 </button>
                 <button class="icon-btn sm" title=move || if local { t("repl.replicas") } else { t("repl.replicas_remote") } aria-label=ui::verb_name("repl.replicas", &v.target.id) disabled=!local || !applied on:click=move |_| replicas.set(Some(v1.clone()))>
