@@ -2500,6 +2500,24 @@ pub struct PcBackup {
     /// folder's disks sleep (nothing arrived then: a receive wakes them), so the check reads
     /// nothing from a sleeping volume.
     last_views: Mutex<BTreeMap<String, PcTarget>>,
+    /// Since when the hourly retention pass of a device waits for its folder's disks.
+    prune_deferred: Mutex<BTreeMap<String, u64>>,
+    /// Whether a folder's disks spin (`None`: [`crate::disk_standby::path_awake`]; tests set
+    /// their own).
+    awake_probe: Mutex<Option<AwakeProbe>>,
+}
+
+/// See [`PcBackup::set_awake_probe`].
+pub type AwakeProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// How long the hourly retention pass of a folder waits for its sleeping disks before it runs
+/// anyway (a receive runs the pass at once: this is the backstop).
+pub const PRUNE_ASLEEP_DEADLINE_MS: u64 = 24 * 3_600_000;
+
+/// Whether the hourly retention pass runs now: the folder's disks are awake, or it has waited
+/// for them since `deferred_since` for [`PRUNE_ASLEEP_DEADLINE_MS`].
+pub fn prune_now(awake: bool, deferred_since: Option<u64>, now_ms: u64) -> bool {
+    awake || deferred_since.is_some_and(|s| now_ms.saturating_sub(s) >= PRUNE_ASLEEP_DEADLINE_MS)
 }
 
 /// Most manifests remembered (a few per device).
@@ -2554,6 +2572,8 @@ impl PcBackup {
             facts: Mutex::new(BTreeMap::new()),
             measuring: Mutex::new(BTreeMap::new()),
             last_views: Mutex::new(BTreeMap::new()),
+            prune_deferred: Mutex::new(BTreeMap::new()),
+            awake_probe: Mutex::new(None),
         })
     }
 
@@ -3092,11 +3112,14 @@ impl PcBackup {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         for (d, t) in all {
-            // the folder's disks sleep: its last view still holds (lateness is counted from
-            // `now`), nothing is read
+            // the folder's disks sleep: its last view (refreshed after every agent receive)
+            // still holds and nothing is read, unless it would change an alert: an alert is
+            // never raised or kept from a view that may be old (a btrbk receive over SSH does
+            // not tell rynasd), so the folder is read then
             let cached = self.last_views.lock().unwrap().get(&d).cloned();
+            let missed = self.missed(&d).is_some();
             let v = match cached {
-                Some(v) if !crate::disk_standby::path_awake(&t.path) => v,
+                Some(v) if !t.alerted && freshness_alert(&v, missed, now) == (false, false) && !self.folder_awake(&t.path) => v,
                 _ => {
                     let v = self.view(&d, &t, now).target;
                     self.last_views.lock().unwrap().insert(d.clone(), v.clone());
@@ -3104,7 +3127,7 @@ impl PcBackup {
                 }
             };
             let hours = v.alert_after_hours();
-            let (late, quiet) = freshness_alert(&v, self.missed(&d).is_some(), now);
+            let (late, quiet) = freshness_alert(&v, missed, now);
             if (late || quiet) != t.alerted {
                 let key = format!("pcbackup:late:{d}");
                 let ev = if quiet {
@@ -3475,25 +3498,62 @@ impl PcBackup {
             .filter(|(_, t)| t.retention.owner == RetentionOwner::Nas)
             .map(|(d, t)| (d.clone(), t.path.clone()))
             .collect();
+        let now = rynas_tasks::now_ms();
         for (d, path) in devices {
-            // asleep: nothing arrived (a receive wakes them) and nothing else writes there, so
-            // what expired meanwhile frees nothing anyone waits for: it goes at the first
-            // hourly pass with the disks awake. No deadline: waking them only to delete would
-            // be work for nothing
-            if !crate::disk_standby::path_awake(&path) {
+            // asleep: nothing arrived by the agent (its receive runs the pass at once), so the
+            // pass waits for the first hourly turn with the disks awake, and runs anyway after
+            // a day (a btrbk receive over SSH does not tell rynasd)
+            let awake = self.folder_awake(&path);
+            let since = (!awake).then(|| *self.prune_deferred.lock().unwrap().entry(d.clone()).or_insert(now));
+            if !prune_now(awake, since, now) {
                 tracing::debug!("pc backup {d}: the folder's disks sleep, retention left for when they are awake");
                 continue;
             }
-            match self.prune(&d, &|l| tracing::info!("pc backup {d}: {l}")) {
-                Ok(r) if r.deleted > 0 || r.error.is_some() => {
-                    if r.deleted > 0 {
-                        crate::space::snapshots_changed(Some(Path::new(&path)));
-                    }
-                    tracing::info!("pc backup {d}: retention deleted {} ({})", r.deleted, r.error.unwrap_or_default())
+            self.prune_deferred.lock().unwrap().remove(&d);
+            self.prune_logged(&d, &path);
+        }
+    }
+
+    /// One retention pass of `device`, logged; Space follows what it deleted.
+    fn prune_logged(&self, d: &str, path: &str) {
+        match self.prune(d, &|l| tracing::info!("pc backup {d}: {l}")) {
+            Ok(r) if r.deleted > 0 || r.error.is_some() => {
+                if r.deleted > 0 {
+                    crate::space::snapshots_changed(Some(Path::new(path)));
                 }
-                Ok(_) => {}
-                Err(e) => tracing::warn!("pc backup {d}: retention: {e}"),
+                tracing::info!("pc backup {d}: retention deleted {} ({})", r.deleted, r.error.unwrap_or_default())
             }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("pc backup {d}: retention: {e}"),
+        }
+    }
+
+    /// Whether the disks of the folder at `path` spin ([`Self::set_awake_probe`]).
+    fn folder_awake(&self, path: &str) -> bool {
+        let probe = self.awake_probe.lock().unwrap().clone();
+        match probe {
+            Some(f) => f(path),
+            None => crate::disk_standby::path_awake(path),
+        }
+    }
+
+    /// Replaces how a folder's disks are asked about (tests).
+    pub fn set_awake_probe(&self, f: AwakeProbe) {
+        *self.awake_probe.lock().unwrap() = Some(f);
+    }
+
+    /// After a receive of `device` ended, received or not (its disks are awake): the retention
+    /// pass (a new backup is what puts old ones past the counts; one that failed for lack of
+    /// room wants it), then the view the hourly freshness check reuses while the disks sleep.
+    pub fn after_receive(&self, device: &str) {
+        let Ok(t) = self.stored(device) else { return };
+        if t.retention.owner == RetentionOwner::Nas {
+            self.prune_deferred.lock().unwrap().remove(device);
+            self.prune_logged(device, &t.path);
+        }
+        if let Ok(t) = self.stored(device) {
+            let v = self.view(device, &t, rynas_tasks::now_ms()).target;
+            self.last_views.lock().unwrap().insert(device.to_string(), v);
         }
     }
 }
@@ -4141,6 +4201,14 @@ impl PcBackup {
             }
             Err(e) => tracing::warn!("pc backup: {device}: receive refused or failed: {}", e.2),
         }
+        // received or not: the retention pass and the freshness view (one change at a time,
+        // like the hourly pass)
+        let (s, d) = (self.clone(), device.to_string());
+        tokio::spawn(async move {
+            let _g = s.change.lock().await;
+            let s2 = s.clone();
+            let _ = tokio::task::spawn_blocking(move || s2.after_receive(&d)).await;
+        });
         out
     }
 }
@@ -5108,6 +5176,15 @@ async fn snapshot_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retention_waits_a_day_at_most_for_sleeping_disks() {
+        let now = 10 * PRUNE_ASLEEP_DEADLINE_MS;
+        assert!(prune_now(true, None, now));
+        assert!(!prune_now(false, Some(now), now));
+        assert!(!prune_now(false, Some(now - PRUNE_ASLEEP_DEADLINE_MS + 1), now));
+        assert!(prune_now(false, Some(now - PRUNE_ASLEEP_DEADLINE_MS), now));
+    }
 
     #[test]
     fn mounts() {

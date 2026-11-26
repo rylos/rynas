@@ -157,15 +157,16 @@ const DISK_TEST_DEFAULT_MIN: u64 = 120;
 
 /// Asks the drive about its self-test (`smartctl -n standby -c -l selftest`: a drive that
 /// spun down is never woken for it, and a sleeping drive runs no test).
-fn self_test(p: &Protection, disk: &str) -> crate::claims::SelfTest {
+/// The second value: the drive was in standby (no test runs; one that ran was aborted).
+fn self_test(p: &Protection, disk: &str) -> (crate::claims::SelfTest, bool) {
     let dev = format!("/dev/{disk}");
     match p.ops.config.system().output(&Cmd::new("smartctl").args(["-n", "standby", "-c", "-l", "selftest", &dev]).env_clear()) {
-        Ok(o) if asleep_answer(&o.stdout) => crate::claims::SelfTest { in_progress: Some(false), ..Default::default() },
+        Ok(o) if asleep_answer(&o.stdout) => (crate::claims::SelfTest { in_progress: Some(false), ..Default::default() }, true),
         // smartctl's exit code is a bit mask of disk states: read the output whatever it is
-        Ok(o) => crate::claims::parse_self_test(&o.stdout),
+        Ok(o) => (crate::claims::parse_self_test(&o.stdout), false),
         Err(e) => {
             tracing::debug!("smartctl -c {dev}: {e}");
-            crate::claims::SelfTest::default()
+            (crate::claims::SelfTest::default(), false)
         }
     }
 }
@@ -179,7 +180,10 @@ fn asleep_answer(out: &str) -> bool {
 /// After the unit of a SMART long test of `disk` ended: keep its disk claimed while the drive
 /// runs the test (unless the drive says it is not running).
 pub fn hold_disk_test(p: &Protection, task: &ScheduledTask, disk: &str) {
-    let st = self_test(p, disk);
+    let (st, asleep) = self_test(p, disk);
+    if asleep {
+        tracing::info!("scheduler: task {}: {disk} is in standby: its long SMART test is assumed aborted, disk not held", task.id);
+    }
     if st.in_progress == Some(false) {
         return;
     }
@@ -206,11 +210,16 @@ fn disk_tests_tick(p: &Protection, now: u64) {
         .cloned()
         .collect();
     for d in due {
-        let done = d.until_ms <= now || self_test(p, &d.disk).in_progress == Some(false);
+        let (st, asleep) = if d.until_ms <= now { (crate::claims::SelfTest::default(), false) } else { self_test(p, &d.disk) };
+        let done = d.until_ms <= now || st.in_progress == Some(false);
         let mut m = p.gate.disk_tests.lock().unwrap();
         if done {
             m.remove(&d.disk);
-            tracing::info!("scheduler: the long SMART test of {} ended: disk free", d.disk);
+            if asleep {
+                tracing::info!("scheduler: {} is in standby: its long SMART test is assumed aborted, disk free", d.disk);
+            } else {
+                tracing::info!("scheduler: the long SMART test of {} ended: disk free", d.disk);
+            }
         } else if let Some(x) = m.get_mut(&d.disk) {
             x.checked = Instant::now();
         }
@@ -781,7 +790,7 @@ impl Gate {
                 .unwrap_or_default();
             for t in applied {
                 if let TaskAction::SmartTest { disk, test: rynas_api_types::scheduler::SmartTestKind::Long } = &t.action
-                    && self_test(&p3, disk).in_progress == Some(true)
+                    && self_test(&p3, disk).0.in_progress == Some(true)
                 {
                     hold_disk_test(&p3, &t, disk);
                 }

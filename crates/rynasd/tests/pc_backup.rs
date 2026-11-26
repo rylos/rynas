@@ -475,6 +475,54 @@ async fn nas_retention_keeps_the_parent_and_the_pc_can_only_add() {
     assert!(keys(&e).contains("--delete --keep-last 1"));
 }
 
+/// The hourly pass waits while the folder's disks sleep; the end of a receive runs it at once.
+#[tokio::test]
+async fn retention_waits_for_sleeping_disks_and_follows_each_receive() {
+    let e = env();
+    let path = "/volume1/backup/pc";
+    folder(&e, path, (1..=20).flat_map(|d| [snap_u("home", d), snap_u("root", d)]).collect());
+    let retention = json!({"owner": "nas", "gfs": {"hourly": 0, "daily": 6, "weekly": 0, "monthly": 0, "yearly": 0, "min": "latest"}});
+    let t = task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": path, "adopt": true, "public_key": KEY, "retention": retention}))).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    let asleep = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let a = asleep.clone();
+    e.svc.set_awake_probe(Arc::new(move |_| !a.load(std::sync::atomic::Ordering::SeqCst)));
+    e.svc.prune_all();
+    e.svc.prune_all();
+    assert!(e.host.deleted.lock().unwrap().is_empty(), "nothing read or deleted while asleep");
+    // a receive ended (its disks are awake): the pass runs at once
+    e.svc.after_receive("pc");
+    assert_eq!(e.host.deleted.lock().unwrap().len(), 30);
+    // awake: the hourly pass runs (nothing more to delete)
+    asleep.store(false, std::sync::atomic::Ordering::SeqCst);
+    e.svc.prune_all();
+    assert_eq!(e.host.deleted.lock().unwrap().len(), 30);
+}
+
+/// While the disks sleep the freshness check uses the view of the last receive: a backup that
+/// arrived is never reported late from an older view.
+#[tokio::test]
+async fn freshness_while_asleep_follows_the_last_receive() {
+    let e = env();
+    let path = "/volume1/backup/pc";
+    e.host.folders.lock().unwrap().insert(path.into(), (true, vec![snap("home", 5)]));
+    task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": path, "adopt": true, "alert_days": 2}))).await;
+    let asleep = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let a = asleep.clone();
+    e.svc.set_awake_probe(Arc::new(move |_| !a.load(std::sync::atomic::Ordering::SeqCst)));
+    e.svc.check_freshness();
+    assert_eq!(e.notifier.0.lock().unwrap().last().map(|x| x.code.clone()).as_deref(), Some("pcbackup.quiet"));
+    // a new backup, then the disks sleep: the alert closes from the receive's view
+    e.host.folders.lock().unwrap().get_mut(&PathBuf::from(path)).unwrap().1.insert(0, snap("home", 0));
+    e.svc.after_receive("pc");
+    asleep.store(true, std::sync::atomic::Ordering::SeqCst);
+    e.svc.check_freshness();
+    e.svc.check_freshness();
+    let evs = e.notifier.0.lock().unwrap();
+    assert_eq!(evs.len(), 2, "{evs:?}");
+    assert_eq!((evs[1].code.as_str(), evs[1].state), ("pcbackup.resumed", EventState::Resolved));
+}
+
 #[tokio::test]
 async fn sizes_bare_metal_and_the_new_alerts() {
     let e = env();

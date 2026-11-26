@@ -593,9 +593,42 @@ impl Storage {
             devs.extend(g.with_fs_uuid(u).into_iter().map(|d| d.kname.clone()));
         }
         devs.iter()
-            .flat_map(|d| g.disks_under(d))
+            .flat_map(|d| self.data_disks_under(&g, d))
             .filter_map(|k| g.get(&k))
             .any(|d| asleep(self.power_of(d)))
+    }
+
+    /// The disks holding the data of `kname`: [`BlockGraph::disks_under`] without the hot
+    /// spares and failed members of the md arrays on the way (sysfs member state): they hold
+    /// nothing anyone reads and may sleep for good, which would keep the volume "asleep".
+    fn data_disks_under(&self, g: &BlockGraph, kname: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![kname.to_string()];
+        let mut seen = HashSet::new();
+        while let Some(k) = stack.pop() {
+            if !seen.insert(k.clone()) {
+                continue;
+            }
+            let Some(d) = g.get(&k) else { continue };
+            if d.is_disk() {
+                out.push(k);
+                continue;
+            }
+            let idle: HashSet<String> = if d.is_md() {
+                md::read_sysfs(self.host.as_ref(), &d.kname)
+                    .members
+                    .into_iter()
+                    .filter(|(_, (state, _, _))| state.split(',').any(|s| s == "spare" || s == "faulty"))
+                    .map(|(m, _)| m)
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            stack.extend(d.parents.iter().filter(|p| !idle.contains(*p)).cloned());
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// `GET /api/v1/storage/disks`
@@ -1365,6 +1398,19 @@ mod tests {
         let s = Storage::new(h.clone());
         assert!(s.mount_asleep("/vol1"));
         assert!(!h.ran().iter().any(|c| c.contains("/dev/sd")), "{:?}", h.ran());
+        // sdb is md2's hot spare: it holds nothing read, its sleep does not count
+        let mut h = host();
+        h.power.insert("/dev/sdb".into(), PowerState::Standby);
+        h.file("/sys/block/md2/md/dev-sdb1/state", "spare\n");
+        h.file("/sys/block/md2/md/dev-sda1/state", "in_sync\n");
+        let s = Storage::new(Arc::new(h));
+        assert!(!s.mount_asleep("/vol1"));
+        // a data member asleep still counts
+        let mut h = host();
+        h.power.insert("/dev/sda".into(), PowerState::Standby);
+        h.file("/sys/block/md2/md/dev-sdb1/state", "spare\n");
+        let s = Storage::new(Arc::new(h));
+        assert!(s.mount_asleep("/vol1"));
     }
 
     #[test]

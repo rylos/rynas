@@ -457,7 +457,9 @@ pub struct Space {
     stack_images: Mutex<Option<BTreeMap<String, discover::ImageSet>>>,
     /// What the neighbour comparisons found out per snapshot UUID (`<state>/space/known.json`):
     /// a later scan compares only the pairs that changed.
-    known: Mutex<BTreeMap<String, Known>>,
+    /// By volume, then snapshot UUID; a volume's map holds only the snapshots it had at its
+    /// last update.
+    known: Mutex<BTreeMap<String, BTreeMap<String, Known>>>,
     /// Volumes whose snapshots changed since their last numbers.
     pending: Mutex<BTreeSet<String>>,
     /// Volumes with an update waiting for their disks.
@@ -776,13 +778,14 @@ impl Space {
     /// What a full scan of `d` (one volume with `only`) would compare and search, and about
     /// how long that takes.
     fn plan_of(&self, d: &Discovered, only: Option<&str>) -> SpaceScanPlan {
-        let (known, pc) = (self.known.lock().unwrap().clone(), self.pc_known());
+        let (all, pc) = (self.known.lock().unwrap().clone(), self.pc_known());
         let (bps, pair_ms, here) = self.speeds();
         let mut p = SpaceScanPlan { measured_here: here, ..SpaceScanPlan::default() };
         for (label, sources) in &d.sources {
             if only.is_some_and(|o| o != label) {
                 continue;
             }
+            let known = all.get(label).cloned().unwrap_or_default();
             for s in sources.iter().filter(|s| !s.snaps.is_empty()) {
                 let live = has_live(s);
                 let lines = source_lines(s, live, &known, &pc);
@@ -817,9 +820,10 @@ impl Space {
     /// [`ScanMode::Changes`] a line without a live folder never measured): [`ScanMode::Full`]
     /// then walks the files as before, [`ScanMode::Changes`] keeps the last numbers. `part`
     /// gets the expected milliseconds of each part as it begins (the progress).
-    fn measure_by_lines(&self, s: &Source, mode: ScanMode, pc: &BTreeMap<String, Known>, stop: &dyn Fn() -> bool, log: &dyn Fn(&str), part: &dyn Fn(u64)) -> Result<Option<Measured>, WalkError> {
+    #[allow(clippy::too_many_arguments)]
+    fn measure_by_lines(&self, label: &str, s: &Source, mode: ScanMode, pc: &BTreeMap<String, Known>, stop: &dyn Fn() -> bool, log: &dyn Fn(&str), part: &dyn Fn(u64)) -> Result<Option<Measured>, WalkError> {
         let live = has_live(s);
-        let known = self.known.lock().unwrap().clone();
+        let known = self.known.lock().unwrap().get(label).cloned().unwrap_or_default();
         let lines = source_lines(s, live, &known, pc);
         if lines.is_empty() || lines.iter().any(|l| !l.cheap) {
             return Ok(None);
@@ -848,7 +852,8 @@ impl Space {
                 Err(e) => return Err(e),
             };
             {
-                let mut k = self.known.lock().unwrap();
+                let mut all = self.known.lock().unwrap();
+                let k = all.entry(label.to_string()).or_default();
                 for (x, kn) in l.snaps.iter().zip(&r.known) {
                     k.insert(x.uuid.clone(), kn.clone());
                 }
@@ -895,6 +900,7 @@ impl Space {
         let mut review: Vec<ReviewItem> = Vec::new();
         let mut recycle_old = (0u64, 0u32);
         let mut stopped: Vec<String> = Vec::new();
+        let mut updated: Vec<String> = Vec::new();
         let identical: Vec<&discover::Snap> =
             d.sources.values().flatten().filter(|s| s.kind == SourceKind::AppStack).flat_map(|s| s.snaps.iter()).filter(|x| x.identical && x.protected.is_none()).collect();
         let shares: SharesConfig = self.ops.config.applied(SHARES_KEY).ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
@@ -913,6 +919,7 @@ impl Space {
             }
             // changes from now on make the volume pending again
             self.pending.lock().unwrap().remove(label);
+            updated.push(label.clone());
             let prev = read_prev(label);
             let prev_cat = |c: SpaceCategory| prev.as_ref().and_then(|v| v.categories.iter().find(|x| x.category == c)).map(|x| (x.bytes, x.reclaimable_bytes)).unwrap_or_default();
             let started = Instant::now();
@@ -926,7 +933,7 @@ impl Space {
             for s in d.sources.get(label).into_iter().flatten() {
                 let set: Vec<PathBuf> = s.snaps.iter().map(|x| x.path.clone()).collect();
                 let keep: Vec<PathBuf> = s.live.iter().filter(|l| l.exists()).cloned().collect();
-                let by_lines = if set.is_empty() || stop() { Ok(None) } else { self.measure_by_lines(s, mode, &pc, &stop, log, &part) };
+                let by_lines = if set.is_empty() || stop() { Ok(None) } else { self.measure_by_lines(label, s, mode, &pc, &stop, log, &part) };
                 let m = match by_lines {
                     Ok(Some(m)) => Some(m),
                     Ok(None) if set.is_empty() => Some(Measured::default()),
@@ -1073,13 +1080,18 @@ impl Space {
             self.write_json(&format!("{label}.json"), &v);
             log(&format!("{label}: done in {} s", v.scan_s));
         }
-        // what the comparisons learnt (a full scan of every volume forgets snapshots gone)
+        // what the comparisons learnt: each volume updated keeps only the snapshots it has now,
+        // and volumes that went are forgotten
         {
             let mut k = self.known.lock().unwrap();
-            if only.is_none() && full {
-                let seen: BTreeSet<&str> = d.sources.values().flatten().flat_map(|s| s.snaps.iter()).filter_map(|x| x.facts.uuid.as_deref()).collect();
-                k.retain(|u, _| seen.contains(u.as_str()));
+            for label in &updated {
+                let seen: BTreeSet<&str> = d.sources.get(label).into_iter().flatten().flat_map(|s| s.snaps.iter()).filter_map(|x| x.facts.uuid.as_deref()).collect();
+                if let Some(m) = k.get_mut(label) {
+                    m.retain(|u, _| seen.contains(u.as_str()));
+                }
             }
+            let vols: BTreeSet<String> = self.env.volumes().into_iter().map(|v| v.0).collect();
+            k.retain(|v, m| vols.contains(v) && !m.is_empty());
             let k = k.clone();
             self.write_json("known.json", &k);
         }

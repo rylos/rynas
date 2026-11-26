@@ -131,7 +131,7 @@ ended "ok").
 
 - `disks_awake(mount)`: every disk under the volume mounted there spins (the storage service's
   `mount_asleep`: lsblk/sysfs, mountinfo, ATA CHECK POWER MODE on a read-only non-blocking
-  descriptor; NVMe counts as awake; unknown counts as awake). `path_awake(path)` resolves the
+  descriptor; NVMe counts as awake; unknown counts as awake; hot spares and failed md members, sysfs state `spare`/`faulty`, are left out: they may sleep for good). `path_awake(path)` resolves the
   longest mount point first.
 - `when_awake(mount, deadline)`: returns `Awake` at once or after a turn of the standby watcher
   (every 30 s, reading `/proc/diskstats`) saw block I/O on a rotational disk, i.e. after someone
@@ -153,7 +153,7 @@ ended "ok").
   before; Docker, the leftovers and the recycle bins keep their last sizes.
 
 Each line of snapshots is measured by neighbours (`rynas_btrfs::pcspace`, the same method as the
-PC backups' measure, numbers per snapshot UUID in `<state>/space/known.json`, the PC backups'
+PC backups' measure, numbers per volume and snapshot UUID in `<state>/space/known.json`, pruned to the snapshots present at each update of a volume, the PC backups'
 numbers reused): with a live folder, what removing the line frees ≈ the `died` of every snapshot
 but the newest + what the newest holds alone (no full search ever); without one, the line's
 union (one full search of the newest the first time, on request only). Lines that cannot be
@@ -178,7 +178,7 @@ disk, `/var/lib/rynas`, `/run`, `/proc`, `/sys`):
 | Space recycle-bin cleanup | daily | walked every bin on every volume | per volume once its disks are awake (deadline: the next day's turn, then skipped for that day: a bin's retention is in days) |
 | Space pin pruning | daily | `stat` of every pinned path | per volume once its disks are awake (same deadline) |
 | Space thumbnail eviction | daily | system disk | unchanged |
-| `pcbackup.retention` (scheduler, hourly) | 1 h | each PC folder: lock, readdir, subvolume info, deletes; then the freshness check scanned every folder again | a folder whose disks sleep is skipped (nothing arrived: a receive wakes them; no deadline); the freshness check uses the folder's last view while its disks sleep (lateness still counts from now) |
+| `pcbackup.retention` (scheduler, hourly) | 1 h | each PC folder: lock, readdir, subvolume info, deletes; then the freshness check scanned every folder again | the end of every agent receive (received or failed, e.g. out of space) runs the device's retention pass and refreshes its freshness view; the hourly pass waits while the folder's disks sleep, at most 24 h (a btrbk receive over SSH does not tell rynasd), then runs anyway; the freshness check uses the last view while the disks sleep, but reads the folder whenever that view would raise an alert or one is open (alerts never come from an old view) |
 | `docker.update-check` (scheduler, daily) | 24 h | registry checks, then read every stack's compose and `.env` for the app updates | the app-update part is skipped while the stacks' disks sleep (last candidates stay) |
 | Syncthing detection | 60 s and Docker hints | read every stack's compose and `.env` (even without Syncthing) | while the stacks' disks sleep the stacks found last stay; Docker still says what runs |
 | Gate: long SMART test follow-up | 5 min while a scheduled long test is held | `smartctl -c -l selftest` (wakes a drive that spun down after its test) | `smartctl -n standby …`; a sleeping drive counts as "test over" |
