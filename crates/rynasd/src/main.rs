@@ -1133,6 +1133,11 @@ fn main() -> std::io::Result<()> {
                 args.hw_root.clone(),
             ));
         }
+        // work that can wait asks whether a volume's disks spin (never waking them)
+        {
+            let st = state.storage.clone();
+            rynasd::disk_standby::set_sleep_probe(Box::new(move |m| st.mount_asleep(m)));
+        }
         state.ups = Some(ups);
         state.hardware = Some(Arc::new(rynasd::hardware::Hardware {
             ops: ops.clone(),

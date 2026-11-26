@@ -30,6 +30,71 @@ use crate::ops::Ops;
 
 const TICK: Duration = Duration::from_secs(30);
 
+// ---------------------------------------------------------------------------------------------
+// "are the disks awake?" for work that can wait (docs/phase1/tasks.md, "A NAS at rest")
+// ---------------------------------------------------------------------------------------------
+
+/// Bumped by the watcher's turn (every [`TICK`]) when a disk did block I/O since the last
+/// turn: work deferred while its disks slept looks again then (piggyback on the first I/O).
+static ACTIVITY: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> = std::sync::LazyLock::new(|| tokio::sync::watch::channel(0).0);
+
+/// Whether a disk under the filesystem mounted at a path sleeps (set once at start: the
+/// storage service's `mount_asleep`, which reads sysfs, mountinfo and the ATA power mode and
+/// never wakes a disk).
+type SleepProbe = Box<dyn Fn(&str) -> bool + Send + Sync>;
+static SLEEP_PROBE: std::sync::OnceLock<SleepProbe> = std::sync::OnceLock::new();
+
+/// Sets how [`disks_awake`] asks (once, at start).
+pub fn set_sleep_probe(f: SleepProbe) {
+    let _ = SLEEP_PROBE.set(f);
+}
+
+/// The disks of the volume mounted at `mount` are all spinning: reading it now wakes nothing.
+/// `true` when it cannot be told (no probe, an unknown mount, no rotational disk). Blocking
+/// (sysfs, ioctls): call it from a blocking thread.
+pub fn disks_awake(mount: &str) -> bool {
+    SLEEP_PROBE.get().is_none_or(|f| !f(mount))
+}
+
+/// [`disks_awake`] of the filesystem holding `path` (the longest mount point containing it).
+pub fn path_awake(path: &str) -> bool {
+    mount_of(path).is_none_or(|m| disks_awake(&m))
+}
+
+/// The mount point of the filesystem holding `path` (mountinfo; `None`: unknown).
+pub fn mount_of(path: &str) -> Option<String> {
+    let mounts = rynas_storage::mounts::parse_mountinfo(&crate::places::mountinfo());
+    mounts.into_iter().filter(|m| rynas_services::folders::is_within(path, &m.mountpoint)).max_by_key(|m| m.mountpoint.len()).map(|m| m.mountpoint)
+}
+
+/// What [`when_awake`] waited for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Woke {
+    /// The disks were awake (at once, or after other work woke them).
+    Awake,
+    /// The deadline passed with the disks still asleep: run anyway if it must.
+    Deadline,
+}
+
+/// Waits until the disks of the volume at `mount` are awake, or until `deadline`. No loop of
+/// its own: it checks at once, then after each turn of the standby watcher that saw block I/O
+/// (the first read of anyone else spins the disks up; the job rides on that).
+pub async fn when_awake(mount: &str, deadline: tokio::time::Instant) -> Woke {
+    let mut rx = ACTIVITY.subscribe();
+    loop {
+        let m = mount.to_string();
+        if tokio::task::spawn_blocking(move || disks_awake(&m)).await.unwrap_or(true) {
+            return Woke::Awake;
+        }
+        tokio::select! {
+            // the sender is a static: it never closes (without a watcher nothing is sent and
+            // only the deadline ends the wait)
+            _ = rx.changed() => {}
+            _ = tokio::time::sleep_until(deadline) => return Woke::Deadline,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DiskSample {
     major: u32,
@@ -124,6 +189,8 @@ fn resolve_timeout(
 #[derive(Debug, Default)]
 struct Tracker {
     disks: HashMap<String, (u64, u64, Instant)>,
+    /// Reads and writes of every disk at the last turn.
+    io_total: Option<u64>,
 }
 
 impl Tracker {
@@ -224,6 +291,16 @@ fn tick(ops: &Ops, modules: &Modules, hw_root: &Path, tracker: &mut Tracker, now
     let samples = parse_diskstats(&text);
     if samples.is_empty() {
         return;
+    }
+    // block I/O on a spinning disk since the last turn: deferred work looks again (SSDs and
+    // flash never sleep here, their I/O says nothing)
+    let io: u64 = samples
+        .iter()
+        .filter(|(dev, _)| is_rotational_ata(hw_root, dev))
+        .map(|(_, s)| s.reads.wrapping_add(s.writes))
+        .fold(0, u64::wrapping_add);
+    if tracker.io_total.replace(io).is_some_and(|before| before != io) {
+        ACTIVITY.send_modify(|n| *n = n.wrapping_add(1));
     }
     // applied values only (a database read): nothing is imported from files on every turn
     let tuning = ops
