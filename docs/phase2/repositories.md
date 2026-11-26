@@ -46,10 +46,16 @@ Per entry, in this order:
 2. **System layer** — with a hardware module's system layer (UPS or boot layer), a file a
    package ships as a conffile (`/var/lib/dpkg/info/*.conffiles`) or named `synodeb*`.
    Read-only: "managed by the hardware support".
-3. **Debian** — `Origin: Debian…` in the cached `InRelease`/`Release`, else every URI on
+3. **Local media** (`local_media`) — every URI on the machine itself: the installation disc
+   (`cdrom:[Debian GNU/Linux 13.x …]/`, which d-i leaves in `sources.list`, usually
+   commented out) or a local folder (`file:`, `copy:`). Shown as "Installation disc" or
+   "Local folder". Checked before Debian, because a disc's cached Release file says
+   `Origin: Debian`. Never unsupported; an enabled disc entry gets the `cdrom_enabled`
+   warning instead (apt stops and asks for the disc).
+4. **Debian** — `Origin: Debian…` in the cached `InRelease`/`Release`, else every URI on
    Debian's hosts (`deb`, `security`, `ftp`, `ftp.<cc>`, `snapshot`, `httpredir`, the CDN).
    On a system with a system layer the Debian entries are read-only too.
-4. **Third party** — everything else.
+5. **Third party** — everything else.
 
 Origin is the Release file's `Origin`; last download = the oldest Release file mtime of its
 suites. A file a package ships is never removable here (its entries may be disabled).
@@ -77,6 +83,7 @@ file/entry it is about. Status = the highest level (good / warning / critical).
 | `other_distro` | critical | another distribution's archive or a PPA |
 | `insecure` | critical | `Trusted`/`Allow-Insecure`/`Allow-Weak`/`Allow-Downgrade-To-Insecure` |
 | `no_signed_by` | warning | a third-party entry without `Signed-By` |
+| `cdrom_enabled` | warning | an enabled installation disc entry (`cdrom:`): apt asks for the disc at every update |
 | `key_missing` | warning | `Signed-By` names a file that does not exist |
 | `duplicate` | warning | the same type/URI/suite/component twice |
 | `legacy_keyring` | warning | keys in `/etc/apt/trusted.gpg(.d)` (Debian's own fragments excepted) |
@@ -150,7 +157,12 @@ visible switches with a one-line explanation each; turning `non-free` on also tu
 `non-free-firmware`; the same components go to every official suite (release, security,
 updates, backports). Source packages switch (`deb-src`). Mirror: `deb.debian.org` (default)
 or any http(s) mirror typed or chosen; "Test mirrors" fetches the Release file of
-`deb.debian.org` and up to five more, 5 s each, 8 s in all.
+`deb.debian.org` and up to five more, in parallel. Each mirror's name is resolved first
+(at most 3 s, so a slow or broken resolver shows as a DNS problem), then the request runs
+on those addresses (at most 5 s), 9 s per mirror in all; a late mirror does not erase the
+others' results. A failure is a code, `MirrorError {code, status?, detail?}` with `code`
+one of `timeout`, `dns`, `connect`, `tls`, `http` (with `status`), `other`; the UI shows
+`repo.me.<code>` and the English `detail` as a tooltip.
 
 Saving shows a preview first. The task writes one deb822
 `/etc/apt/sources.list.d/debian.sources` (marker comment, main + `-updates` +

@@ -379,7 +379,10 @@ fn official_form(pg: Pg, o: OfficialState) -> AnyView {
                             <span class="mono">{r.uri.clone()}</span>" · "
                             {match (r.ms, r.error) {
                                 (Some(ms), _) => view! { <span class="tnum">{tf("repo.ms", &[("n", &i18n::num(ms as f64, 0))])}</span> }.into_any(),
-                                (None, e) => view! { <span class="tone-text err">{e.unwrap_or_default()}</span> }.into_any(),
+                                (None, e) => {
+                                    let detail = e.as_ref().and_then(|e| e.detail.clone());
+                                    view! { <span class="tone-text err" title=detail>{mirror_error_text(e.as_ref())}</span> }.into_any()
+                                }
                             }}
                             {r.ms.is_some().then(|| view! { " "<button type="button" class="btn ghost sm" on:click=move |_| mirror.set(uri.clone())>{tr("repo.use")}</button> })}
                         </li>
@@ -398,6 +401,19 @@ fn official_form(pg: Pg, o: OfficialState) -> AnyView {
     .into_any()
 }
 
+/// Why a mirror failed, in the UI's language (`repo.me.<code>`).
+fn mirror_error_text(e: Option<&MirrorError>) -> String {
+    let Some(e) = e else { return t("repo.me.other").to_string() };
+    match e.code {
+        MirrorErrorCode::Timeout => t("repo.me.timeout").to_string(),
+        MirrorErrorCode::Dns => t("repo.me.dns").to_string(),
+        MirrorErrorCode::Connect => t("repo.me.connect").to_string(),
+        MirrorErrorCode::Tls => t("repo.me.tls").to_string(),
+        MirrorErrorCode::Http => tf("repo.me.http", &[("status", &e.status.map(|s| s.to_string()).unwrap_or_else(|| "?".into()))]),
+        MirrorErrorCode::Other => t("repo.me.other").to_string(),
+    }
+}
+
 // ------------------------------------------------------------------ entries
 
 fn kind_tone_key(e: &RepoEntry) -> (Tone, &'static str) {
@@ -405,6 +421,8 @@ fn kind_tone_key(e: &RepoEntry) -> (Tone, &'static str) {
         RepoKind::Debian => (Tone::Ok, "repo.k_debian"),
         RepoKind::Rynas => (Tone::Info, "repo.k_rynas"),
         RepoKind::SystemLayer => (Tone::Info, "repo.k_system"),
+        RepoKind::LocalMedia if e.uris.iter().any(|u| u.trim_start().to_ascii_lowercase().starts_with("cdrom:")) => (Tone::Unknown, "repo.k_disc"),
+        RepoKind::LocalMedia => (Tone::Unknown, "repo.k_local"),
         RepoKind::ThirdParty => (Tone::Warn, "repo.k_third"),
     }
 }

@@ -773,8 +773,18 @@ async fn download_key(url: &str) -> Res<Vec<u8>> {
 
 // ------------------------------------------------------------------ mirror test
 
-const MIRROR_TIMEOUT: Duration = Duration::from_secs(5);
-const MIRROR_TOTAL: Duration = Duration::from_secs(8);
+/// The time limits of one mirror: the name lookup alone (so a slow resolver reports `dns`, not
+/// a generic timeout), the HTTP request (connect, TLS, answer), and the whole test.
+#[derive(Debug, Clone, Copy)]
+struct MirrorLimits {
+    dns: Duration,
+    http: Duration,
+    total: Duration,
+}
+
+/// 3 s covers a resolver retry after a lost reply (glibc with `timeout:2`); 3 + 5 s bounds the
+/// test of every mirror (they run in parallel) to 9 s.
+const MIRROR_LIMITS: MirrorLimits = MirrorLimits { dns: Duration::from_secs(3), http: Duration::from_secs(5), total: Duration::from_secs(9) };
 
 async fn mirror_test(State(st): State<UpdState>, hd: HeaderMap, body: Result<Json<MirrorTestRequest>, JsonRejection>) -> Res<Json<MirrorTest>> {
     let (u, _) = admin(&st, &hd)?;
@@ -802,34 +812,93 @@ async fn mirror_test(State(st): State<UpdState>, hd: HeaderMap, body: Result<Jso
 }
 
 async fn test_mirrors(list: Vec<String>, codename: &str) -> Vec<MirrorResult> {
-    let client = match reqwest::Client::builder()
-        .connect_timeout(MIRROR_TIMEOUT)
-        .timeout(MIRROR_TIMEOUT)
-        .user_agent(concat!("rynas/", env!("CARGO_PKG_VERSION")))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return list.into_iter().map(|uri| MirrorResult { uri, ms: None, error: Some(e.to_string()) }).collect(),
-    };
+    test_mirrors_with(list, codename, MIRROR_LIMITS).await
+}
+
+async fn test_mirrors_with(list: Vec<String>, codename: &str, lim: MirrorLimits) -> Vec<MirrorResult> {
     let one = |uri: String| {
-        let client = client.clone();
         let url = format!("{uri}/dists/{codename}/Release");
         async move {
-            let t = std::time::Instant::now();
-            match client.get(&url).send().await {
-                Ok(r) if r.status().is_success() => MirrorResult { uri, ms: Some(t.elapsed().as_millis() as u64), error: None },
-                Ok(r) => MirrorResult { uri, ms: None, error: Some(format!("HTTP {}", r.status().as_u16())) },
-                Err(e) => MirrorResult { uri, ms: None, error: Some(if e.is_timeout() { "no answer in time".into() } else { e.to_string() }) },
+            // a mirror that is late keeps its own verdict; the others keep theirs
+            let r = match tokio::time::timeout(lim.total, test_mirror(&url, lim)).await {
+                Ok(r) => r,
+                Err(_) => Err(MirrorError::new(MirrorErrorCode::Timeout, format!("no answer within {} s", lim.total.as_secs_f32()))),
+            };
+            match r {
+                Ok(ms) => MirrorResult { uri, ms: Some(ms), error: None },
+                Err(e) => MirrorResult { uri, ms: None, error: Some(e) },
             }
         }
     };
-    let all = futures_util::future::join_all(list.iter().cloned().map(one));
-    let mut results = match tokio::time::timeout(MIRROR_TOTAL, all).await {
-        Ok(r) => r,
-        Err(_) => list.into_iter().map(|uri| MirrorResult { uri, ms: None, error: Some("no answer in time".into()) }).collect(),
-    };
+    let mut results = futures_util::future::join_all(list.into_iter().map(one)).await;
     results.sort_by_key(|r| r.ms.unwrap_or(u64::MAX));
     results
+}
+
+/// The milliseconds to the Release file at `url` (name lookup and request), or why it failed.
+async fn test_mirror(url: &str, lim: MirrorLimits) -> Result<u64, MirrorError> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| MirrorError::new(MirrorErrorCode::Other, e.to_string()))?;
+    let host = parsed.host_str().unwrap_or("").to_string();
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let mut builder = reqwest::Client::builder().connect_timeout(lim.http).timeout(lim.http).user_agent(concat!("rynas/", env!("CARGO_PKG_VERSION")));
+    let mut spent = Duration::ZERO;
+    if host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_err() {
+        let t = std::time::Instant::now();
+        let addrs: Vec<std::net::SocketAddr> = match tokio::time::timeout(lim.dns, tokio::net::lookup_host((host.as_str(), port))).await {
+            Err(_) => return Err(MirrorError::new(MirrorErrorCode::Dns, format!("the resolver did not answer within {} s", lim.dns.as_secs_f32()))),
+            Ok(Err(e)) => return Err(MirrorError::new(MirrorErrorCode::Dns, e.to_string())),
+            Ok(Ok(a)) => a.collect(),
+        };
+        if addrs.is_empty() {
+            return Err(MirrorError::new(MirrorErrorCode::Dns, format!("{host} has no address")));
+        }
+        spent = t.elapsed();
+        // the request uses these addresses: no second lookup
+        builder = builder.resolve_to_addrs(&host, &addrs);
+    }
+    let client = builder.build().map_err(|e| MirrorError::new(MirrorErrorCode::Other, error_detail(&e)))?;
+    let t = std::time::Instant::now();
+    let resp = client.get(url).send().await.map_err(|e| reqwest_mirror_error(&e))?;
+    if !resp.status().is_success() {
+        return Err(MirrorError::http(resp.status().as_u16()));
+    }
+    Ok((spent + t.elapsed()).as_millis() as u64)
+}
+
+/// The causes of a reqwest error, without the request's URL (which could name "tls" or "ssl").
+fn error_detail(e: &reqwest::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        let m = s.to_string();
+        if !parts.iter().any(|p| p.contains(&m)) {
+            parts.push(m);
+        }
+        src = s.source();
+    }
+    if parts.is_empty() { e.to_string() } else { parts.join(": ") }
+}
+
+fn reqwest_mirror_error(e: &reqwest::Error) -> MirrorError {
+    let detail = error_detail(e);
+    MirrorError::new(mirror_error_code(e.is_timeout(), e.is_connect(), &detail), detail)
+}
+
+/// The code of a failed request from reqwest's flags and its causes.
+fn mirror_error_code(timeout: bool, connect: bool, detail: &str) -> MirrorErrorCode {
+    let d = detail.to_ascii_lowercase();
+    let tls = ["ssl", "tls", "certificate", "handshake"].iter().any(|w| d.contains(w));
+    if timeout || d.contains("timed out") {
+        MirrorErrorCode::Timeout
+    } else if d.contains("dns error") || d.contains("failed to lookup address") {
+        MirrorErrorCode::Dns
+    } else if tls {
+        MirrorErrorCode::Tls
+    } else if connect {
+        MirrorErrorCode::Connect
+    } else {
+        MirrorErrorCode::Other
+    }
 }
 
 #[cfg(test)]

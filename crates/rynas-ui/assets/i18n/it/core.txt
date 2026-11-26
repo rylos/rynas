@@ -6148,6 +6148,12 @@ repo.mirror	Mirror
 repo.mirror_help	deb.debian.org sceglie da solo un server vicino; si può scrivere o scegliere un mirror nazionale.
 repo.test_mirrors	Prova i mirror
 repo.ms	{n} ms
+repo.me.timeout	Nessuna risposta in tempo
+repo.me.dns	Il nome non si risolve (o il server DNS non risponde)
+repo.me.connect	Impossibile connettersi
+repo.me.tls	Connessione sicura non riuscita (certificato o TLS)
+repo.me.http	Il server ha risposto con l'errore {status}
+repo.me.other	Test non riuscito
 repo.use	Usa
 repo.deb_save	Salva…
 repo.no_change	Niente da cambiare.
@@ -6164,6 +6170,8 @@ repo.k_debian	Debian
 repo.k_rynas	rynas
 repo.k_system	Supporto hardware
 repo.k_third	Terze parti
+repo.k_disc	Disco di installazione
+repo.k_local	Cartella locale
 repo.ro_rynas	Gestita da rynas in un'altra pagina.
 repo.ro_system	Gestita dal supporto hardware.
 repo.ro_debian_system	Il supporto hardware gestisce le sorgenti Debian.
@@ -6239,6 +6247,7 @@ repo.i.next_release	{suite} è la prossima versione di Debian: solo durante l'ag
 repo.i.security_suite	{suite}: da Debian 11 la suite di sicurezza si chiama {codename}-security.
 repo.i.security_uri	{suite} si trova in …/debian-security, non nell'archivio principale.
 repo.i.non_free_firmware	non-free è usato senza non-free-firmware: da Debian 12 i firmware sono lì.
+repo.i.cdrom_enabled	Il disco di installazione è attivo: apt chiede il disco a ogni aggiornamento. Disattiva questa voce.
 repo.i.no_debian	Nessuna sorgente Debian attiva per {codename}: il sistema non riceve aggiornamenti.
 repo.i.no_security	{codename}-security non è configurata: niente aggiornamenti di sicurezza.
 repo.i.no_updates	{codename}-updates non è configurata: le correzioni urgenti arrivano solo con i rilasci minori.
