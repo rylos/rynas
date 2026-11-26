@@ -1111,7 +1111,7 @@ impl AppsSvc {
             secrets: BTreeMap::new(),
             share_set,
             run_as: req.run_as.clone().filter(|u| !u.is_empty()),
-            user_photos: Vec::new(),
+            user_photos: None,
             user_photos_key: None,
         };
         // the NAS user the app runs as (entries with run_as)
@@ -1596,8 +1596,10 @@ pub(crate) async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob)
     let provided = a.provided(&j.layout, &j.stack, &j.bind, ids);
     let mut request = j.request.clone();
     if app.manifest.user_photos.is_some() {
-        // the users' Photos folders of now, made and opened to the apps' account first
-        request.user_photos = crate::photos::prepare_folders(a, ctx).await;
+        // the staging folder where rynasd mounts the chosen users' Photos folders (none yet:
+        // an administrator chooses them on the app's page)
+        request.user_photos = Some(crate::photos::prepare_staging(s, app, &j.stack)?);
+        ctx.log("Photos folders: none yet (choose the users on the app's page)");
     }
     let r = rynas_apps::render::render(app, &cat.source, &provided, &request)
         .map_err(|e| e.to_string())?;
@@ -1905,7 +1907,7 @@ async fn grant_shares(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, stack: &str, a
             use rynas_services::idremap::{self, DryRemap, GroupGrant, HostRemap, RemapFs};
             let fs: &dyn RemapFs = if dry { &DryRemap } else { &HostRemap };
             let real = rynas_docker::under(&root, &path);
-            let c = idremap::grant(fs, &[real], GroupGrant { gid: id, user, write }, &|| cancel.is_cancelled());
+            let c = idremap::grant(fs, &[real], GroupGrant { gid: id, user, write, owner: None }, &|| cancel.is_cancelled());
             log.log(&format!(
                 "{path}: {} access for {sname} on {} of {} entries",
                 if write { "read and write" } else { "read" },
@@ -2582,6 +2584,8 @@ async fn uninstall_post(
         let s = &s2;
         ctx.log(&format!("stopping and removing the containers of {n2}"));
         compose_run(s, &ctx, &n2, &l, ComposeAction::Down).await?;
+        // the users' Photos folders mounted for the app (never into a folder being deleted)
+        crate::photos::release(s, &ctx, &n2, req.delete_data).await;
         if let Some(w) = web {
             let (n3, log) = (n2.clone(), ctx.clone());
             match blocking(move || w.remove_stack_routes(&who2, &n3, &|m| log.log(m))).await {

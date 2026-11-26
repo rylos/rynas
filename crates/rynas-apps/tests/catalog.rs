@@ -504,7 +504,7 @@ fn lint_checks_share_sets_and_long_binds() {
 }
 
 #[test]
-fn user_photos_mount_each_folder_read_only() {
+fn user_photos_bind_the_staging_folder_read_only() {
     let c = catalog();
     for (id, service, target) in [("immich", "immich-server", "/mnt/photos"), ("pigallery2", "pigallery2", "/app/data/images")] {
         let app = c.get(id).unwrap();
@@ -513,18 +513,19 @@ fn user_photos_mount_each_folder_read_only() {
         let p = Provided::example(id);
         let r = render::render(app, "rynas", &p, &app.test_request()).unwrap();
         check_rendered(app, &r);
-        assert_eq!(r.env["USER_PHOTOS"], "ann=/home/ann/Photos;bob=/volume1/homes/bob/Photos");
+        let root = format!("/var/lib/rynas/docker/photos/{id}");
+        assert_eq!(r.env["USER_PHOTOS"], root);
         let doc: Value = yaml_serde::from_str(&String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap()).unwrap();
-        for (user, src) in [("ann", "/home/ann/Photos"), ("bob", "/volume1/homes/bob/Photos")] {
-            let b = bind_of(&doc, service, &format!("{target}/{user}")).unwrap_or_else(|| panic!("{id}: bind of {user}"));
-            assert_eq!(b["source"].as_str(), Some(src));
-            assert_eq!(b["read_only"].as_bool(), Some(true), "{id}: never writable");
-            assert!(b.get("bind").is_none());
-            if let Value::Mapping(m) = b {
-                compose::long_volume_ok(m).unwrap();
-            }
+        let b = bind_of(&doc, service, target).unwrap_or_else(|| panic!("{id}: staging bind"));
+        assert_eq!(b["source"].as_str(), Some(root.as_str()));
+        assert_eq!(b["read_only"].as_bool(), Some(true), "{id}: never writable");
+        assert_eq!(b["bind"]["propagation"].as_str(), Some("rslave"), "{id}: users' mounts appear without a restart");
+        if let Value::Mapping(m) = b {
+            compose::long_volume_ok(m).unwrap();
         }
-        // the folders are not the app's to make nor to own
+        // never a home, never a per-user bind: rynasd mounts the folders itself
+        let text = String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap();
+        assert!(!text.contains("/home/") && !text.contains("Photos"), "{text}");
         assert!(!r.folders.iter().any(|f| f.env.starts_with("USER_PHOTOS")));
         // read back from .env by an update, the API key included
         let mut req = app.test_request();
@@ -533,19 +534,22 @@ fn user_photos_mount_each_folder_read_only() {
         }
         let r = render::render(app, "rynas", &p, &req).unwrap();
         let back = render::request_from_env(app, id, &r.env);
-        assert_eq!(back.user_photos, app.test_request().user_photos);
+        assert_eq!(back.user_photos.as_deref(), Some(root.as_str()));
         assert_eq!(back.user_photos_key, req.user_photos_key);
-        // none: no extra bind
-        req.user_photos.clear();
+        // none: no bind
+        req.user_photos = None;
         let r = render::render(app, "rynas", &p, &req).unwrap();
         assert_eq!(r.env["USER_PHOTOS"], "");
-        // never a name that is not a user, a stack folder or a followed mount
-        for bad in [("Ann", "/home/Ann/Photos", false), ("ann", "./photos", false), ("ann", "/home/ann/Photos", true), ("a/b", "/x", false)] {
+        let doc: Value = yaml_serde::from_str(&String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap()).unwrap();
+        assert!(bind_of(&doc, service, target).is_none());
+        // never a relative or odd path
+        for bad in ["./photos", "relative", "/a;b", "/x/../etc"] {
             let mut req = app.test_request();
-            req.user_photos = vec![render::ShareSetItem { name: bad.0.into(), path: bad.1.into(), follow: bad.2 }];
+            req.user_photos = Some(bad.into());
             assert!(matches!(render::render(app, "rynas", &p, &req), Err(RenderError::InvalidValue { field, .. }) if field == "USER_PHOTOS"), "{bad:?}");
         }
     }
+    assert_eq!(c.get("pigallery2").unwrap().manifest.user_photos.as_ref().unwrap().mountpoints, ["Shared"]);
     // the Immich key: kept unquoted, never anything that could break the line
     let im = c.get("immich").unwrap();
     let r = render::render(im, "rynas", &Provided::example("immich"), &im.test_request()).unwrap();
@@ -570,7 +574,7 @@ fn pigallery2_2_moves_the_shared_folder() {
     let pg = c.get("pigallery2").unwrap();
     let p = Provided::example("pigallery2");
     let mut req = pg.test_request();
-    req.user_photos.clear();
+    req.user_photos = None;
     let now = render::render(pg, "rynas", &p, &req).unwrap();
     let text = String::from_utf8(now.file("compose.yaml").unwrap().contents.clone()).unwrap();
     assert!(text.contains("${PHOTOS}:/app/data/images/Shared:ro"), "{text}");
@@ -593,11 +597,11 @@ fn lint_checks_user_photos() {
     let t = fs::read_to_string(dst.join("app.toml")).unwrap();
     let broken = t
         .replace("service = \"immich-server\"\ntarget = \"/mnt/photos\"", "service = \"nope\"\ntarget = \"mnt/../photos\"")
-        .replace("key_env = \"PHOTOS_API_KEY\"", "key_env = \"DB_PASSWORD\"");
+        .replace("key_env = \"PHOTOS_API_KEY\"", "key_env = \"DB_PASSWORD\"\nmountpoints = [\"ann\"]");
     assert_ne!(broken, t);
     fs::write(dst.join("app.toml"), broken).unwrap();
     let text = CatalogApp::load(&dst).unwrap_err().to_string();
-    for needle in ["user_photos: `DB_PASSWORD` is declared twice", "user_photos: target `mnt/../photos` must be an absolute container folder", "names service `nope`"] {
+    for needle in ["user_photos: `DB_PASSWORD` is declared twice", "user_photos: target `mnt/../photos` must be an absolute container folder", "names service `nope`", "mount point `ann` must start with an upper-case letter"] {
         assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
     }
 }

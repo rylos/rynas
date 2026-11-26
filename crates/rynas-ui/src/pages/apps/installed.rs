@@ -5,7 +5,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::TaskStatus;
-use rynas_api_types::apps::{AppRollbackRequest, AppUninstallRequest, AppUpdatePlan, AppUpdateRequest, ImageChangeKind, InstalledApp, InstalledAppDetail, PhotosKeyRequest, PhotosLibrary, PhotosState};
+use rynas_api_types::apps::{AppRollbackRequest, AppUninstallRequest, AppUpdatePlan, AppUpdateRequest, ImageChangeKind, InstalledApp, InstalledAppDetail, PhotosKeyRequest, PhotosLibrary, PhotosState, PhotosUserRequest};
 use rynas_api_types::docker::{DockerSettingsState, StackSnapshot};
 
 use super::{AppDetail, app_icon, apps, open_href};
@@ -476,23 +476,45 @@ fn photos_section(stack: String) -> AnyView {
             }
         });
     };
+    // choose a user (with an API: confirm `account`) or leave them out; a sync follows
+    let choose = move |user: String, include: bool, account: Option<String>| {
+        let url = inst_url(&s.get_value(), &format!("/photos/users/{}", api::encode(&user)));
+        let body = serde_json::to_string(&PhotosUserRequest { include, account }).ok();
+        crate::tasks::run_and_report(async move { api::start_task(&url, body).await }, t("apps.ph.synced").to_string(), busy, error, Callback::new(move |_| p.reload()));
+    };
     let content = move || {
         let Some(st) = p.data.get() else { return ().into_any() };
-        let wired = st.users.iter().filter(|u| u.mounted && st.api.as_ref().is_none_or(|_| u.library == Some(PhotosLibrary::Linked))).count();
+        let api_app = st.api.is_some();
+        let wired = st.users.iter().filter(|u| u.mounted).count();
         let rows = st
             .users
             .iter()
             .map(|u| {
-                let state = match (u.mounted, u.library) {
-                    (false, _) => "apps.ph.not_mounted",
-                    (true, None) => "apps.ph.mounted",
-                    (true, Some(PhotosLibrary::Linked)) => "apps.ph.lib.linked",
-                    (true, Some(PhotosLibrary::Missing)) => "apps.ph.lib.missing",
-                    (true, Some(PhotosLibrary::NoAccount)) => "apps.ph.lib.no-account",
-                    (true, Some(PhotosLibrary::Ambiguous)) => "apps.ph.lib.ambiguous",
-                    (true, Some(PhotosLibrary::OtherOwner)) => "apps.ph.lib.other-owner",
+                let state = match (u.included, u.mounted, u.library) {
+                    (false, _, _) => "apps.ph.left_out",
+                    (true, _, Some(PhotosLibrary::OtherOwner)) => "apps.ph.lib.other-owner",
+                    (true, false, _) => "apps.ph.not_mounted",
+                    (true, true, Some(PhotosLibrary::Linked)) => "apps.ph.lib.linked",
+                    (true, true, Some(PhotosLibrary::Missing)) => "apps.ph.lib.missing",
+                    (true, true, Some(PhotosLibrary::NoAccount)) => "apps.ph.lib.no-account",
+                    (true, true, _) => "apps.ph.mounted",
                 };
-                view! { <li><strong>{u.user.clone()}</strong>" · "{tr(state)}<br /><span class="mono muted">{u.folder.clone()}</span></li> }
+                let who = u.account.as_ref().or(u.proposed.as_ref()).map(|a| if a.email.is_empty() { a.name.clone() } else { a.email.clone() });
+                let (user, prop) = (u.user.clone(), u.proposed.as_ref().map(|a| a.id.clone()));
+                let action = match (u.included, api_app, prop) {
+                    (true, _, _) => Some(("apps.ph.leave_out", false, None)),
+                    (false, false, _) => Some(("apps.ph.include", true, None)),
+                    (false, true, Some(id)) => Some(("apps.ph.confirm", true, Some(id))),
+                    (false, true, None) => None,
+                };
+                view! {
+                    <li>
+                        <strong>{u.user.clone()}</strong>" · "{tr(state)}{who.map(|w| format!(" · {w}"))}
+                        {u.problem.clone().map(|e| view! { <br /><span class="muted">{e}</span> })}
+                        <br /><span class="mono muted">{u.folder.clone()}</span>
+                        {action.map(|(k, inc, acc)| view! { " " <button class="btn ghost sm" disabled=move || busy.get() on:click=move |_| choose(user.clone(), inc, acc.clone())>{tr(k)}</button> })}
+                    </li>
+                }
             })
             .collect_view();
         view! {

@@ -400,12 +400,15 @@ pub struct ShareSet {
     pub access: Access,
 }
 
-/// `[user_photos]`: the `Photos` folder of each NAS user's home (where the RyNAS app's photo
-/// backup writes, `YYYY/MM` below it), mounted read-only at `<target>/<user>` of `service`.
-/// rynas fills the list from the NAS users (never the whole homes) and keeps it in `.env`
-/// under `env` like a share set ([`crate::render::encode_share_set`]); the compose file does
-/// not mention it. `key_env` names an `.env` variable that keeps an API key an administrator
-/// gives rynas to wire the app (never referenced by compose, never generated).
+/// `[user_photos]`: the `Photos` folder of the NAS users an administrator chose (where the
+/// RyNAS app's photo backup writes, `YYYY/MM` below it), each at `<target>/<user>` of
+/// `service`, read-only. The compose file does not mention it: the render appends one bind
+/// of a root-owned staging folder (kept in `.env` under `env`) to `target`, read-only and
+/// `rslave`; rynasd mounts each user's folder inside it itself (never a path the user could
+/// change, never a whole home). `key_env` names an `.env` variable that keeps an API key an
+/// administrator gives rynas to wire the app (never referenced by compose, never generated).
+/// `mountpoints` are folders rynasd keeps in the staging folder for other binds of the
+/// service below `target` (a read-only bind cannot get new mount points).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserPhotos {
@@ -419,6 +422,10 @@ pub struct UserPhotos {
     /// The `.env` variable keeping the app's API key for rynas (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_env: Option<String>,
+    /// Folder names kept in the staging folder as mount points of other binds (never a user
+    /// name: they start with an upper-case letter).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mountpoints: Vec<String>,
 }
 
 /// Who an app may run as besides the `docker-apps` account.
@@ -727,6 +734,12 @@ impl AppManifest {
             }
             if up.description.trim().is_empty() {
                 err("user_photos: description must not be empty".into());
+            }
+            for mp in &up.mountpoints {
+                let ok = mp.starts_with(|c: char| c.is_ascii_uppercase()) && mp.len() <= 64 && mp.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_');
+                if !ok {
+                    err(format!("user_photos: mount point `{mp}` must start with an upper-case letter ([A-Za-z0-9_-])"));
+                }
             }
         }
 

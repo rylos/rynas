@@ -73,7 +73,7 @@ env = "USER_PHOTOS"
 service = "immich-server"
 target = "/mnt/photos"
 key_env = "PHOTOS_API_KEY"
-description = "The Photos folder of each NAS user's home, where the RyNAS app backs up the phone's photos, read-only at /mnt/photos/<user>. With an API key, rynas adds each folder to Immich as an external library of that user's account and scans it after each backup"
+description = "The Photos folder of each NAS user whose Immich account an administrator confirmed, where the RyNAS app backs up the phone's photos, read-only at /mnt/photos/<user>. With an API key, rynas adds each folder to Immich as an external library of that account and scans it after each backup"
 
 [[secrets]]
 env = "DB_PASSWORD"
@@ -110,4 +110,4 @@ text = "The first visitor creates the admin account: open Immich right after ins
 
 [[notes]]
 level = "info"
-text = "Phones back up with the RyNAS app into each user's Photos folder. Immich reads those folders read-only: give rynas an Immich API key on the app's page and every user with an Immich account gets their folder as an external library, scanned after each backup. Immich's own mobile upload keeps working as well."
+text = "Phones back up with the RyNAS app into each user's Photos folder. Immich reads those folders read-only: give rynas an Immich API key on the app's page and confirm each user's Immich account there: that account gets the user's folder as an external library, scanned after each backup. Immich's own mobile upload keeps working as well."

@@ -4655,21 +4655,24 @@ apps.inst.catalog	Catalogo
 apps.inst.title	App {name}
 apps.inst.no_snaps	Ancora nessuno snapshot: il primo aggiornamento ne crea uno.
 apps.ph.title	Foto dall'app RyNAS
-apps.ph.text	I telefoni fanno il backup nella cartella Photos di ogni utente. L'app legge queste cartelle in sola lettura e non le modifica né le cancella mai.
+apps.ph.text	I telefoni fanno il backup nella cartella Photos di ogni utente. Scegli gli utenti la cui cartella l'app mostra: l'app le legge in sola lettura e non le modifica né le cancella mai.
 apps.ph.wired	Utenti collegati: {n} su {total}
 apps.ph.sync	Sincronizza
 apps.ph.synced	Cartelle Photos sincronizzate
 apps.ph.mounted	montata
-apps.ph.not_mounted	non ancora montata: sincronizza
+apps.ph.not_mounted	scelto, non ancora montata: vedi il log dell'attività
 apps.ph.lib.linked	libreria pronta
 apps.ph.lib.missing	nessuna libreria: sincronizza
-apps.ph.lib.no-account	nessun account con l'email o il nome dell'utente
-apps.ph.lib.ambiguous	più account corrispondono: imposta l'email dell'utente
-apps.ph.lib.other-owner	letta dalla libreria di un altro account
+apps.ph.lib.no-account	l'account confermato non esiste più
+apps.ph.lib.other-owner	la libreria di un altro account legge questa cartella: risolvi nell'app
 apps.ph.allow	Ogni account della galleria vede tutte le cartelle finché non ha un elenco di cartelle consentite. Nelle impostazioni della galleria (Users) dai a ogni account un elenco di cartelle consentite con corrispondenza glob sulla sua cartella, per esempio {value}.
 apps.ph.key_hint	Per creare la libreria di ogni utente, dai a rynas una chiave API di un amministratore di Immich (Impostazioni account, Chiavi API) con i permessi adminUser.read, library.read, library.create e library.update.
 apps.ph.key_set	rynas ha una chiave API. Inseriscine una nuova per sostituirla.
 apps.ph.key_save	Salva chiave
+apps.ph.left_out	non nell'app
+apps.ph.include	Mostra nell'app
+apps.ph.leave_out	Escludi
+apps.ph.confirm	Conferma questo account
 apps.in_docker	Mostra in Docker
 apps.proxy	Sposta dietro il proxy
 apps.proxy_title	Spostare l'app dietro il proxy?

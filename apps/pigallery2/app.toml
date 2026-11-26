@@ -73,7 +73,8 @@ fallback = "photos"
 env = "USER_PHOTOS"
 service = "pigallery2"
 target = "/app/data/images"
-description = "The Photos folder of each NAS user's home, where the RyNAS app backs up the phone's photos, read-only as the folder named after the user"
+mountpoints = ["Shared"]
+description = "The Photos folder of each NAS user an administrator chose on the app's page, where the RyNAS app backs up the phone's photos, read-only as the folder named after the user"
 
 [[notes]]
 level = "warning"
@@ -81,4 +82,4 @@ text = "Sign in with admin / admin and change the password right away: the galle
 
 [[notes]]
 level = "info"
-text = "To back up a phone, use the photo backup of the RyNAS app: it writes into the user's Photos folder, which the gallery shows as a folder named after the user. Every gallery account sees every folder until you give it a directory allow list in the gallery's settings (Users); the app's page in rynas lists the values to enter."
+text = "To back up a phone, use the photo backup of the RyNAS app: it writes into the user's Photos folder. No user's folder is shown at first: choose the users on the app's page in rynas. Every gallery account sees every chosen folder until you give it a directory allow list in the gallery's settings (Users); the app's page lists the values to enter."

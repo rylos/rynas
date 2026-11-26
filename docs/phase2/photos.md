@@ -1,7 +1,7 @@
 # Photos from the RyNAS app (D-PHOTOS, 2026-11-26)
 
-Status: implemented 2026-11-26 (folders, mounts, Immich libraries, rescan after uploads, app
-page section). Not yet tried against a live Immich or PiGallery2: the API client is tested
+Status: implemented 2026-11-26, revised the same day after a review (staging folder and
+mounts from descriptors, administrator's choice, confirmed accounts). Not yet tried against a live Immich or PiGallery2: the API client is tested
 against a fake server built from Immich's OpenAPI document.
 
 ## 1. Decision
@@ -13,8 +13,10 @@ name=Photos parents=1`). The photo apps of the catalogue never receive uploads f
 phones: they **read** those folders, read-only, and rynas wires them.
 
 Rules:
-- A container never sees a whole home: only the `Photos` folder of each user, each as its own
-  read-only bind.
+- A container never sees a whole home, nor any path a user can change: rynasd mounts each
+  chosen user's `Photos` folder read-only into a root-owned staging folder the app binds.
+- Nobody is shown in an app until an administrator chooses them (with an API: confirms the
+  user's account in the app once).
 - Nothing is ever deleted by the wiring: the binds are read-only, rynas never deletes nor
   changes an app's library (deleting an Immich library deletes its assets in Immich).
 - Secrets (the Immich API key) live in the stack's `.env` (0600, root) like every app secret,
@@ -59,25 +61,49 @@ and routes (<https://github.com/bpatrik/pigallery2/blob/3.8.0/src/backend/routes
   overwrites an existing one.
 - So rynas **cannot** set per-user allow lists without the gallery administrator's password,
   which it never has (the gallery starts with `admin`/`admin` and the user changes it). It
-  mounts the folders and the app page lists the value to enter for each account.
+  mounts the chosen folders and the app page lists the value to enter for each account.
 
-## 3. Folders (`rynasd::photos`)
+## 3. Folders and mounts (`rynasd::photos`, `rynasd::photos_mount`)
 
-- Users: the NAS users of `/etc/passwd` (uid 1000-59999, not root, a system account or
-  `docker-apps`) whose home field is absolute. Their real home is the passwd home with links
-  resolved (the links are root's: `/srv/rynas/homes/<user>` → `<volume>/homes/<user>`); it
-  must be a folder of the user.
-- The folder is `<real home>/Photos`. When missing, the install and "Sync" make it, owner the
-  user and their primary group, mode 0700 like the home. A `Photos` that is a link, not a
-  folder or not the user's is refused (logged, the user is left out): a bind of a link would
-  expose whatever it points at.
-- The apps' account (`docker-apps`) gets read access through ACLs (`idremap::grant`: only bits
-  added, a default ACL on folders so new photos inherit it, no link followed, one file
-  system), so apps that run as that account (PiGallery2) read the folders; Immich's server runs
-  as root in its container and does not need it.
-- Known limit: the user owns their home and could swap `Photos` for a link between rynas'
-  check and the container's start (the bind resolves links on the host). The check makes it
-  a race, not a free choice; a bind through a file descriptor is not possible with compose.
+Review 2026-11-26 (H1): the first version bound `<home>/Photos` in the compose file. The user
+owns the home and can replace `Photos` with a link (to `/`) at any time; Docker resolves the
+bind source on every container start, and Immich's server runs as root, so the whole host
+would have been imported into that user's library. No path a user can change is ever bound
+now:
+
+- Each photo stack has a **staging folder**, `<state>/docker/photos/<stack>`
+  (`/var/lib/rynas/docker/photos/<stack>`), made by rynasd, root, 0755, with one empty folder
+  per chosen user and the entry's `mountpoints`. It is outside the stack folder, so stack
+  snapshots, backups of the stack and an uninstall that deletes the data never walk into it.
+- The compose file binds the staging folder **read-only** at `[user_photos].target`, with
+  `bind.propagation: rslave`: mounts rynasd makes in it later appear in the running app, and
+  one it takes away goes, without a restart. (The host's `/var/lib` must be on a shared mount,
+  the systemd default.)
+- rynasd mounts each chosen user's folder at `<staging>/<user>` with `rynasd photos-mount`, run
+  in a transient unit (`rynas_tasks::Outside`: rynasd's own sandbox has no mount calls). The
+  helper opens the real home (links of its parents resolved by rynasd; they are root's)
+  without following its last component, checks it is a folder of the user, opens `Photos`
+  below it with `O_NOFOLLOW` and checks it is a folder of the user, checks the target is a
+  root folder nobody else may change, and mounts **from that descriptor**: `open_tree` +
+  `mount_setattr` (read-only, nosuid, nodev, noexec, private) + `move_mount`, so the mount is
+  read-only before it is attached; kernels without these calls get a bind of
+  `/proc/self/fd/N` and a read-only remount. A link swapped in after the check changes
+  nothing: the mount holds the folder, not its name.
+- A failed check (no `Photos` yet, a link, a file, a home on a volume not mounted yet) changes
+  nothing at the target: a user mounted before **stays mounted** (an app that loses a folder
+  trashes its photos after a while) and the task log says why; a user not mounted yet stays an
+  empty root folder, and the app starts as usual. The same folder mounted already is left as
+  it is; a new `Photos` (same user, another folder) replaces the old mount.
+- Mounts are made again when rynasd starts (`photos::spawn`, after the catalogue): the apps'
+  containers may already run; their `rslave` binds pick the mounts up.
+- Users leave the mounts only when they leave passwd (logged: the app may move the photos to
+  its trash) or when an administrator leaves them out.
+- The apps' account (`docker-apps`) gets read access through ACLs (`idremap::grant` with an
+  `owner`: only files and folders of the user, never a regular file with several hard links,
+  only bits added, default ACLs on folders), walked from the checked descriptor, so apps
+  that run as that account (PiGallery2) read the folders; Immich's server runs as root.
+- Uninstall: the mounts are taken away after the containers stop; with the data, the
+  staging folder (only empty folders are removed) and the choices go too.
 
 ## 4. Catalogue: `[user_photos]`
 
@@ -85,74 +111,99 @@ A new optional table of `app.toml` (§6.2 of `docker-apps.md`):
 
 | Key | Meaning |
 |---|---|
-| `env` | `.env` variable keeping the list (`user=path;…`, the share set encoding); never referenced by compose |
-| `service` | the compose service the folders are mounted into |
+| `env` | `.env` variable keeping the staging folder; never referenced by compose |
+| `service` | the compose service the staging folder is bound into |
 | `target` | absolute container folder; each user's folder is `<target>/<user>` |
 | `description` | shown with the entry |
 | `key_env` | optional: `.env` variable keeping an API key the administrator gives rynas (never referenced by compose, never generated) |
+| `mountpoints` | optional: folders kept in the staging folder for other binds of the service below `target` (names start with an upper-case letter, never a user name) |
 
-The render appends one long-syntax bind per user, always `read_only: true`, never following
-host mounts; item names must be NAS user names and paths absolute (`check_user_photos`). The
-list is filled by rynasd, never by the install request. An update keeps the list stored in
-`.env` (`request_from_env`); "Sync" fills it again.
+The render appends one long-syntax bind of the staging folder, `read_only: true`,
+`bind.propagation: rslave`; the folder is filled by rynasd, never by the install request. An
+update keeps it (`request_from_env`); "Sync" binds it when it is missing.
 
 Entries:
 - **Immich 1.1.0**: `target = "/mnt/photos"`, `key_env = "PHOTOS_API_KEY"`, service
   `immich-server`. The optional `EXTERNAL_LIBRARY` share stays at `/mnt/external`.
-- **PiGallery2 2.0.0**: the images folder holds the shared folder as `/app/data/images/Shared`
-  (it was the whole images folder in 1.x) and each user's folder as `/app/data/images/<user>`
-  (user names are lowercase, so `Shared` never collides). A nested bind inside a read-only
-  bind cannot be made, hence the move; the 2.0.0 migration says that the gallery indexes again
-  and shared links must be made again. The install note no longer points phones to another
-  sync tool: it points to the RyNAS app's backup.
+- **PiGallery2 2.0.0**: the images folder is the staging folder; the shared folder is bound at
+  `/app/data/images/Shared` (`mountpoints = ["Shared"]`: a read-only bind cannot get a new
+  mount point, so rynasd keeps the folder there), each chosen user is
+  `/app/data/images/<user>`. The 2.0.0 migration says that the gallery indexes again and
+  shared links must be made again. The install note points phones to the RyNAS app's backup.
 
-## 5. Immich wiring
+## 5. Who: chosen by an administrator
 
-With a key (`POST /api/v1/apps/installed/{stack}/photos/key` `{key}`: checked first with
-`GET /api/admin/users` and `GET /api/libraries`, then written to `.env`; empty forgets it; no
-restart, compose never references it), **Sync** creates for each mounted user with an Immich
-account a library owned by that account, named "Photos from the RyNAS app", whose only import
-path is `/mnt/photos/<user>`, and queues its scan.
+Review 2026-11-26 (M2, M5): nobody is mounted at install. Every account of a fresh PiGallery2
+(`admin`/`admin` first) would otherwise see every user's photos, and matching Immich accounts
+by name is spoofable (users rename themselves). The choices are kept per stack in
+`<state>/docker/photos/<stack>.json` (root, 0600): `{users: {<user>: {account?, blocked?}}}`.
 
-Account match: the account with the NAS user's email (when the user has one in rynas), else
-the account named like the user or whose email's local part is the user name (case does not
-matter, deleted accounts never). Several matches choose none (the page says to set the email).
-A library already reading the path is left as it is: "library ready" when it belongs to the
-user's account, "read by another account's library" otherwise. Immich's own mobile upload
-keeps working; OIDC accounts (phase 3) match the same way.
+- PiGallery2 (no API): the administrator shows a user in the app or leaves them out
+  (`POST …/photos/users/{user}` `{include}`); the page says that every gallery account sees
+  every chosen folder until it has a directory allow list.
+- Immich: a user is mounted only with an account an administrator **confirmed** once
+  (`{include: true, account: <Immich user id>}`, checked against `GET /api/admin/users`).
+  rynas proposes one (the account with the user's email in rynas, else the only account with
+  the user's name; never the email's local part, never a deleted account) and never confirms
+  nor changes it by itself: a renamed account keeps its user, a new account with a matching
+  name changes nothing.
+
+## 6. Immich wiring
+
+With a key (`POST /api/v1/apps/installed/{stack}/photos/key` `{key}`: the stack is marked busy
+first, the files read after that, the key checked with `GET /api/admin/users` and
+`GET /api/libraries`, then written to `.env`; empty forgets it; no restart, compose never
+references it), **Sync** creates for each mounted, confirmed user without a library a library
+owned by the confirmed account, named "Photos from the RyNAS app", whose only import path is
+`/mnt/photos/<user>`, and queues its scan.
+
+Review 2026-11-26 (M3): a library of **another** account on the user's path (a user name used
+again, a library made by hand) blocks the user: the folder is unmounted, the block kept in the
+choices (and honoured at start and while Immich does not answer) and shown on the page until
+an administrator resolves it in Immich. A library of the confirmed account is left as it is.
+Immich's own mobile upload keeps working; OIDC accounts (phase 3) are confirmed the same way.
 
 The client talks to `http://127.0.0.1:<web port>` (the port is published on loopback or on
 every address, both reach it). Errors never carry the key.
 
-## 6. Rescan after uploads
+## 7. Rescan after uploads
 
 The files gateway (`rynasd::files`) tells `photos::uploaded(user, dir)` about every successful
 `upload` request; one whose folder is `/home/Photos` or below queues the user. A user's batch
 is over after 45 s without another upload, or 10 minutes after its first upload while uploads
-keep coming (`Debounce`); then rynas asks every photo app with a key that mounts the user's
-folder to scan the user's library (`POST /api/libraries/{id}/scan`). A missed one is caught by
-Immich's daily scan. Nothing is persisted: a restart forgets a pending batch.
+keep coming (`Debounce`); then rynas asks every Immich where the user is confirmed and not
+blocked to scan **the library of the confirmed account on the user's path** (`scan_target`),
+and no other. A missed one is caught by Immich's daily scan. Nothing is persisted: a restart
+forgets a pending batch.
 
-## 7. API
+## 8. API
 
 Admin only, under `/api/v1/apps/installed/{stack}/photos` (409 for an app without
 `[user_photos]`):
-- `GET` → `PhotosState { users: [{user, folder, mounted, library?}], api?: {key, error?},
-  allow_list? }` (`library`: `linked`, `missing`, `no-account`, `ambiguous`, `other-owner`;
-  `allow_list` is PiGallery2's per-user value, `/{user}/*`).
-- `POST …/sync` → task `apps.photos-sync`: folders and ACLs, a new render and `up` only when the
-  list changed (the previous files come back on a failure), then the libraries. 409 when the
-  installed version differs from the catalogue's (update first).
+- `GET` → `PhotosState { users: [{user, folder, included, mounted, problem?, library?,
+  account?, proposed?}], api?: {key, error?}, allow_list? }` (`library`: `linked`, `missing`,
+  `unconfirmed`, `no-account`, `other-owner`; `allow_list` is PiGallery2's per-user value,
+  `/{user}/*`).
+- `POST …/users/{user}` `{include, account?}` → task `apps.photos-sync` (400 for a user who is
+  not a NAS user with a home, or without `account` for an app with an API; 409 without a key).
+- `POST …/sync` → task `apps.photos-sync`: the staging folder (a new render and `up` only when
+  the stack does not bind it yet, the previous files back on a failure), the mounts as
+  planned (`photos::plan`), then the libraries.
 - `POST …/key` `{key}` → 204.
 
 `InstalledApp.user_photos` tells the UI to show the section ("Photos from the RyNAS app" in
-the installed app's drawer: users wired, one line per user, the key field for Immich, the
-allow-list hint for PiGallery2, Sync).
+the installed app's drawer: users wired, one line per user with its state and a button to
+show, confirm or leave out, the key field for Immich, the allow-list hint for PiGallery2,
+Sync).
 
-## 8. Open points
+## 9. Open points
 
-- New users are mounted at the next Sync (or install/update of the app); rynas does not yet
-  sync by itself when a user is created.
-- An update keeps the stored list: after updating PiGallery2 from 1.x the folders appear after
-  a Sync.
+- At boot, the apps' containers may start before rynasd mounts the folders: for that moment
+  the users' folders are empty in the app. Immich only trashes photos it finds missing during
+  a scan (its daily scan runs at midnight by default) and takes them back when they return; a
+  unit ordered before Docker would close the gap.
+- After updating PiGallery2 from 1.x the staging folder is bound at the first Sync.
 - Per-user allow lists in PiGallery2 stay manual (no API key there).
+- The mount itself is not exercised by the tests (it needs root and a mount namespace); the
+  checks it depends on (`open_photos`, the link swapped after the check, the target, the
+  mount table) are.

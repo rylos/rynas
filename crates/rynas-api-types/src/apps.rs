@@ -939,28 +939,61 @@ pub struct PhotosUser {
     pub user: String,
     /// The host folder (`<home>/Photos`).
     pub folder: String,
+    /// An administrator chose the user for this app (with an API: confirmed the account).
+    pub included: bool,
     /// Mounted (read-only) into the app now.
     pub mounted: bool,
+    /// Why the folder is not mounted although chosen, or what was kept (English, rynasd).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
     /// The app's library of the folder (apps with an API).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<PhotosLibrary>,
+    /// The app account confirmed for the user (apps with an API).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<PhotosAccount>,
+    /// The account rynas proposes (same email, else same name), never used before an
+    /// administrator confirms it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<PhotosAccount>,
+}
+
+/// An account of a photo app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PhotosAccount {
+    pub id: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 /// Where a user's folder stands in an app's libraries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum PhotosLibrary {
-    /// A library of the user's account reads the folder.
+    /// A library of the confirmed account reads the folder.
     Linked,
-    /// The user has an account; "Sync" creates the library.
+    /// The account is confirmed; "Sync" creates the library.
     #[default]
     Missing,
-    /// No account of the app matches the user (same email, else same name).
+    /// No account is confirmed for the user yet.
+    Unconfirmed,
+    /// The confirmed account no longer exists in the app.
     NoAccount,
-    /// Several accounts match: none is chosen.
-    Ambiguous,
-    /// A library of another account reads the folder (left as it is).
+    /// A library of another account reads the folder's path: the folder stays unmounted
+    /// until an administrator resolves it in the app.
     OtherOwner,
+}
+
+/// `POST /api/v1/apps/installed/{stack}/photos/users/{user}`: choose a user for the app or
+/// leave them out (task `apps.photos-sync` follows). Apps with an API need `account`, the
+/// app account the administrator confirms for the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PhotosUserRequest {
+    pub include: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// `POST /api/v1/apps/installed/{stack}/photos/key`: the API key rynas keeps for the app

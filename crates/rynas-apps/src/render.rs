@@ -104,10 +104,11 @@ pub struct InstallRequest {
     /// keeps the name in `.env` ([`crate::manifest::RUN_AS_ENV`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_as: Option<String>,
-    /// The users' `Photos` folders of an entry with `[user_photos]`: name = the NAS user,
-    /// path = the real folder (filled by rynasd, never by the caller's choice).
-    #[serde(default)]
-    pub user_photos: Vec<ShareSetItem>,
+    /// The staging folder of an entry with `[user_photos]` (filled by rynasd, never by the
+    /// caller): a root-owned folder where rynasd mounts each chosen user's `Photos` folder
+    /// read-only; the app sees it at `[user_photos].target`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_photos: Option<String>,
     /// The API key kept under `[user_photos].key_env` (`None`: empty).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_photos_key: Option<String>,
@@ -172,22 +173,6 @@ pub fn check_share_set(field: &str, items: &[ShareSetItem]) -> Result<(), Render
         }
         if !paths.insert(it.path.trim_end_matches('/')) {
             return Err(bad(format!("{} is chosen twice", it.path)));
-        }
-    }
-    Ok(())
-}
-
-/// Checks the users' `Photos` folders of `[user_photos]`: a share set whose names are NAS
-/// user names and whose paths are absolute host folders, never following host mounts.
-pub fn check_user_photos(field: &str, items: &[ShareSetItem]) -> Result<(), RenderError> {
-    check_share_set(field, items)?;
-    let bad = |reason: String| RenderError::InvalidValue { field: field.to_owned(), reason };
-    for it in items {
-        if !crate::manifest::is_user_name(&it.name) {
-            return Err(bad(format!("`{}` is not a user name", it.name)));
-        }
-        if it.path.starts_with("./") || it.follow {
-            return Err(bad(format!("{}: `{}` must be an absolute folder", it.name, it.path)));
         }
     }
     Ok(())
@@ -275,6 +260,32 @@ fn add_share_set_volumes(doc: &mut Value, service: &str, target: &str, ro: bool,
         }
         seq.push(Value::Mapping(m));
     }
+    Ok(())
+}
+
+/// The bind of `[user_photos]`: the staging folder, read-only, following the mounts rynasd
+/// makes in it later (`rslave`: a user's folder appears or goes without a restart of the app).
+fn add_user_photos_volume(doc: &mut Value, service: &str, target: &str, root: &str) -> Result<(), RenderError> {
+    let svc = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut(service))
+        .and_then(Value::as_mapping_mut)
+        .ok_or_else(|| RenderError::Compose(format!("user_photos service `{service}` is not in the compose file")))?;
+    if !svc.contains_key("volumes") {
+        svc.insert("volumes".into(), Value::Sequence(Vec::new()));
+    }
+    let Some(Value::Sequence(seq)) = svc.get_mut("volumes") else {
+        return Err(RenderError::Compose(format!("service `{service}`: volumes is not a list")));
+    };
+    let mut m = Mapping::new();
+    m.insert("type".into(), "bind".into());
+    m.insert("source".into(), Value::String(compose_literal(root)));
+    m.insert("target".into(), Value::String(target.trim_end_matches('/').to_string()));
+    m.insert("read_only".into(), Value::Bool(true));
+    let mut b = Mapping::new();
+    b.insert("propagation".into(), "rslave".into());
+    m.insert("bind".into(), Value::Mapping(b));
+    seq.push(Value::Mapping(m));
     Ok(())
 }
 
@@ -449,7 +460,7 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
     if m.share_set.is_none() && !req.share_set.is_empty() {
         return Err(RenderError::UnknownValue("share_set".into()));
     }
-    if m.user_photos.is_none() && (!req.user_photos.is_empty() || req.user_photos_key.is_some()) {
+    if m.user_photos.is_none() && (req.user_photos.is_some() || req.user_photos_key.is_some()) {
         return Err(RenderError::UnknownValue("user_photos".into()));
     }
     match (&req.run_as, m.run_as) {
@@ -523,8 +534,11 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
         }
     }
     if let Some(up) = &m.user_photos {
-        check_user_photos(&up.env, &req.user_photos)?;
-        env.push((up.env.clone(), encode_share_set(&req.user_photos)));
+        let root = req.user_photos.clone().unwrap_or_default();
+        if !root.is_empty() && !(share_set_path_ok(&root) && !root.starts_with("./")) {
+            return Err(RenderError::InvalidValue { field: up.env.clone(), reason: "must be an absolute path".into() });
+        }
+        env.push((up.env.clone(), root));
         if let Some(k) = &up.key_env {
             let key = req.user_photos_key.clone().unwrap_or_default();
             if !key.is_empty() && !valid_api_key(&key) {
@@ -547,9 +561,10 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
     if let Some(ss) = &m.share_set {
         add_share_set_volumes(&mut doc, &ss.service, &ss.target, ss.access == crate::manifest::Access::Ro, &req.share_set)?;
     }
-    if let Some(up) = &m.user_photos {
-        // always read-only: an app never changes nor deletes what a phone backed up
-        add_share_set_volumes(&mut doc, &up.service, &up.target, true, &req.user_photos)?;
+    if let Some(up) = &m.user_photos
+        && let Some(root) = req.user_photos.as_deref().filter(|r| !r.is_empty())
+    {
+        add_user_photos_volume(&mut doc, &up.service, &up.target, root)?;
     }
     for r in compose::refs(&doc).map_err(RenderError::Compose)? {
         if !env_map.contains_key(&r.name) {
@@ -659,8 +674,7 @@ pub fn request_from_env(app: &CatalogApp, stack: &str, env: &BTreeMap<String, St
         req.share_set = split_share_set(v).unwrap_or_else(|_| vec![ShareSetItem { name: String::new(), path: v.clone(), follow: false }]);
     }
     if let Some(up) = &m.user_photos {
-        // a broken line is dropped: rynasd fills the list again from the users
-        req.user_photos = env.get(&up.env).and_then(|v| decode_share_set(v).ok()).unwrap_or_default();
+        req.user_photos = env.get(&up.env).filter(|v| v.starts_with('/')).cloned();
         req.user_photos_key = up.key_env.as_ref().and_then(|k| env.get(k)).filter(|k| !k.is_empty()).cloned();
     }
     for (name, field) in &app.form.properties {

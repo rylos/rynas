@@ -386,6 +386,7 @@ pub fn routes() -> Router<AppState> {
         .route("/apps/installed/{stack}/photos", get(forward))
         .route("/apps/installed/{stack}/photos/sync", post(forward))
         .route("/apps/installed/{stack}/photos/key", post(forward))
+        .route("/apps/installed/{stack}/photos/users/{user}", post(forward))
         .route("/apps/installed/{stack}/{action}", post(forward))
         // Syncthing adoption (docs/phase2/syncthing.md §3)
         .route("/syncthing/adopt/preview", post(forward))

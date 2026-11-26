@@ -96,9 +96,9 @@ pub struct TestValues {
     /// The `[share_set]` items (`[[share_set]]` tables with name, path, follow).
     #[serde(default)]
     pub share_set: Vec<crate::render::ShareSetItem>,
-    /// The `[user_photos]` folders (`[[user_photos]]` tables with name = user, path).
+    /// The `[user_photos]` staging folder (a top-level `user_photos = "/..."`).
     #[serde(default)]
-    pub user_photos: Vec<crate::render::ShareSetItem>,
+    pub user_photos: Option<String>,
 }
 
 impl TestValues {
