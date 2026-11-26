@@ -32,15 +32,23 @@ pub async fn spawn(p: &Arc<Protection>, t: &ScheduledTask, user: &str) -> Res<St
         }
         TaskAction::Scrub { filesystem } => {
             let cmd = Cmd::new("btrfs")
-                .args(["scrub", "start", "-B", "-d"])
+                .args(["scrub", "start", "-B", "-d", "-c", "3"])
                 .arg(filesystem)
                 .env_clear()
                 .timeout(SCRUB_TIMEOUT);
             let fs = filesystem.clone();
-            Ok(p.ops.tasks.spawn("btrfs.scrub", user, move |ctx| async move {
+            Ok(p.ops.tasks.spawn_on("btrfs.scrub", Some(filesystem.as_str()), user, move |ctx| async move {
                 // deduplication of the filesystem gives way (D-DEDUP)
                 let _fs = crate::fslock::FsLocks::global().heavy_paths(&[&fs], "btrfs.scrub").await;
-                ctx.run(&cmd).await.map(|_| ()).map_err(|e| e.to_string())
+                let run = ctx.run(&cmd);
+                tokio::pin!(run);
+                let mut tick = scrub_ticker();
+                loop {
+                    tokio::select! {
+                        r = &mut run => return r.map(|_| ()).map_err(|e| e.to_string()),
+                        _ = tick.tick() => scrub_progress(&ctx, &fs).await,
+                    }
+                }
             })?)
         }
         TaskAction::SmartTest { disk, test } => {
@@ -163,7 +171,8 @@ pub async fn plan(p: &Arc<Protection>, t: &ScheduledTask) -> Res<Option<JobPlan>
             }
             let verb = if resume { "resume" } else { "start" };
             Ok(Some(JobPlan {
-                argv: ["btrfs", "scrub", verb, "-B", "-d"]
+                // `-c 3`: the idle I/O class, the disks serve everything else first
+                argv: ["btrfs", "scrub", verb, "-B", "-d", "-c", "3"]
                     .iter()
                     .map(|s| s.to_string())
                     .chain([filesystem.clone()])
@@ -246,13 +255,25 @@ pub fn track(p: &Arc<Protection>, t: &ScheduledTask) {
         .gate
         .attach_tracker(&t.id, || crate::gate::holder_of(p, t), tx);
     let p2 = p.clone();
-    let r = p.ops.tasks.spawn(kind, crate::scheduler::SCHEDULER_USER, move |ctx| async move {
+    // a scrub's progress, read from the kernel as the Storage page's scrub does
+    let scrub_fs = match &t.action {
+        TaskAction::Scrub { filesystem } => Some(filesystem.clone()),
+        _ => None,
+    };
+    let subject = scrub_fs.clone();
+    let r = p.ops.tasks.spawn_on(kind, subject.as_deref(), crate::scheduler::SCHEDULER_USER, move |ctx| async move {
         ctx.log(&format!("runs in {unit}"));
         let mut feed = journal_lines(&inv);
         let mut rx = rx;
         let mut stopping = false;
+        let mut tick = scrub_ticker();
         loop {
             tokio::select! {
+                _ = tick.tick(), if scrub_fs.is_some() && !stopping => {
+                    if let Some(fs) = &scrub_fs {
+                        scrub_progress(&ctx, fs).await;
+                    }
+                }
                 end = &mut rx => {
                     // the last lines journald still had
                     if let Some((_, lines)) = feed.as_mut() {
@@ -287,6 +308,28 @@ pub fn track(p: &Arc<Protection>, t: &ScheduledTask) {
     });
     if let Err(e) = r {
         tracing::warn!("scheduler: task {}: task panel entry: {e}", t.id);
+    }
+}
+
+/// How often a running scrub is asked how far it is (an ioctl: no disk I/O).
+const SCRUB_POLL: Duration = Duration::from_secs(10);
+
+/// The ticks of [`scrub_progress`]: the first one after [`SCRUB_POLL`], a late one never
+/// bunched up.
+fn scrub_ticker() -> tokio::time::Interval {
+    let mut t = tokio::time::interval_at(tokio::time::Instant::now() + SCRUB_POLL, SCRUB_POLL);
+    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    t
+}
+
+/// The task's progress from `btrfs scrub status -R` of the running scrub of `fs` (bytes
+/// scrubbed of the bytes used), as the Storage page's scrub reads it; nothing logged.
+async fn scrub_progress(ctx: &rynas_tasks::TaskCtx, fs: &str) {
+    let cmd = Cmd::new("btrfs").args(["scrub", "status", "-R"]).arg(fs).env_clear().timeout(Duration::from_secs(30));
+    let Ok(out) = cmd.run(None, None).await else { return };
+    let st = rynas_storage::btrfs::parse_scrub(&out.stdout);
+    if let Some(f) = rynas_storage::btrfs::scrub_fraction(&st) {
+        ctx.progress((f * 100.0).clamp(0.0, 99.0) as u8);
     }
 }
 

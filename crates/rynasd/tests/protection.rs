@@ -662,7 +662,7 @@ async fn heavy_work_queues_per_volume_and_a_scrub_yields() {
     let (s, body) = call_peer(&e, Some(0), "POST", "/v1/scheduler/tasks/scrub-b/execute", Some(json!({"plan": true}))).await;
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let plan: rynasd::jobs::JobPlan = serde_json::from_slice(&body).unwrap();
-    assert_eq!(plan.argv, ["btrfs", "scrub", "resume", "-B", "-d", "/"]);
+    assert_eq!(plan.argv, ["btrfs", "scrub", "resume", "-B", "-d", "-c", "3", "/"]);
     assert_eq!(plan.ok_codes, [2]);
     // the resumed run holds a normal lease: no longer shown as given way, and it gives way
     // again when more urgent work comes
