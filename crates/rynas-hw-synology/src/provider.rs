@@ -53,9 +53,12 @@ impl Synology {
 
     pub fn new(root: impl Into<PathBuf>, product: impl Into<String>) -> Self {
         let root = root.into();
+        let product = product.into();
+        // a model named by synohwd where the DMI name is a placeholder: not "Insyde MohonPeak"
+        let model = if rynas_hw::dmi(&root).1 == product { rynas_hw::dmi_model(&root) } else { format!("Synology {product}") };
         Self {
-            model: rynas_hw::dmi_model(&root),
-            product: product.into(),
+            model,
+            product,
             status_path: rynas_hw::under(&root, STATUS),
             commander: cmd::Commander::under(&root),
             identifier: leds::Identifier::new(&root),

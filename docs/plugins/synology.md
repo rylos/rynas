@@ -45,6 +45,20 @@ kernel card shows `/boot` only, a root rollback is a console procedure, the resc
 silent, the power schedule arms `rtc0`; the Synology tab, texts and hook do not exist. Audit:
 `../quality/module-boundary-2026-11-06.md` (nothing left to move).
 
+Synology hardware (`model::detect`) means synodeb's platform driver bound
+(`/sys/devices/platform/synology-nas`, or `synology-ds923` in older kernels), never less: it
+binds only on the DMI names of the models synodeb supports. With it, the model is the DMI
+`product_name` when the vendor names Synology or the product is a known model (`KNOWN_MODELS`:
+the keys of synohwd's `MODEL_BAYS`, DS415+, DS423+, DS920+, DS923+, DS1522+). Boards with a
+placeholder DMI (Avoton: `Insyde` / `MohonPeak` on the DS415+ and DS2415+) take the model synohwd
+names in `status.json` (`model`: the DMI name, or the `MODEL` of synodeb's board file where the
+DMI name is a placeholder), read below the hardware root like the rest of the status; before
+synohwd writes its first status (at boot) `/usr/lib/synodeb/board MODEL` is asked directly (10 s
+at most; exit 1 on an unknown NAS). Only a known model counts: a placeholder name, a model without
+data here or a synohwd without the field leaves the machine undetected. That model names the
+tables (fan curves, bays) and the hardware status reads "Synology <model>" instead of the DMI
+names.
+
 Requirements (2026-11-05). Implements the `rynas-hw` provider for Synology NAS running
 [synodeb](https://github.com/rylos/synodeb). Rule: **the plugin exposes every feature of synohwd and
 synodeb's hardware tools in the UI; synohwd stays the executor** (it owns fans, LEDs, the
@@ -54,7 +68,9 @@ microcontroller and the RTC handshake). The plugin reads `/run/synohwd/status.js
 commands through the synohwd FIFO (later its control socket, S8 in `../synodeb-integration.md`).
 
 Supported models: DS920+ (reference, Celeron J4125, 4 bays, 2 fans) and DS923+ (Ryzen R1600, 4
-bays, 2 fans); others as synodeb adds them. Model data (bays, fan tables) comes from synohwd/DMI.
+bays, 2 fans); others as synodeb adds them (DS423+ with its own fan curves, DS1522+ with 5 bays,
+DS415+ with the DS923+ curves, as synohwd). Model data (bays, fan tables) is copied from synohwd
+and chosen by the detected model.
 
 ## Feature map (synohwd → rynas UI)
 
