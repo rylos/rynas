@@ -309,6 +309,8 @@ impl SessionStore {
             expires_ms,
             idle_expires_ms: (s.last_seen_ms + idle).min(expires_ms),
             idle_timeout_s: self.cfg.idle_timeout.as_secs(),
+            // rynas-web fills them (it asks rynasd)
+            sections: None,
         }
     }
 }

@@ -43,7 +43,11 @@ pub fn Dashboard() -> impl IntoView {
     let live = use_live();
     let layout = RwSignal::new(layout::decode(&storage_get(LAYOUT_KEY).unwrap_or_default()));
     let has_hw = Memo::new(move |_| live.hardware.with(|h| h.as_ref().is_some_and(|h| h.provider.is_some())));
-    let has_docker = Memo::new(move |_| crate::docker::docker().status.with(|s| s.as_ref().is_some_and(|s| s.installed)));
+    // before Docker's status arrives, the sections the shell knows (no widget popping in)
+    let has_docker = Memo::new(move |_| match crate::docker::docker().status.with(|s| s.as_ref().map(|s| s.installed)) {
+        Some(installed) => installed,
+        None => crate::sections::has(rynas_api_types::sections::DOCKER).unwrap_or(false),
+    });
     // widgets whose source is missing here (no hardware provider, no Docker) do not exist
     let available = move |w: W| match w {
         W::Hardware => has_hw.get(),

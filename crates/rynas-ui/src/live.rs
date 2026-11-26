@@ -552,6 +552,7 @@ impl Live {
                 spawn_local(async move {
                     match api::get::<Session>("/api/v1/auth/session").await {
                         Ok(s) => {
+                            crate::sections::from_session(&s);
                             auth().session.set(Some(s));
                             if !stream_open() {
                                 self.open_stream();

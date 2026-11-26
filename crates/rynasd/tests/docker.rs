@@ -269,6 +269,32 @@ async fn changes_need_an_administrator() {
     assert_eq!(s, StatusCode::FORBIDDEN, ".env holds secrets");
 }
 
+/// The interface's optional sections (rynas-web's session answer): Docker and Syncthing only
+/// while Docker is installed; internal, so no user is needed.
+#[tokio::test]
+async fn ui_sections_follow_the_installation() {
+    let sections = |b: &[u8]| serde_json::from_slice::<rynas_api_types::UiSections>(b).unwrap().sections;
+    let e = env();
+    let req = Request::builder().uri("/v1/ui/sections").body(Body::empty()).unwrap();
+    let r = e.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let b = to_bytes(r.into_body(), 1 << 16).await.unwrap();
+    assert!(sections(&b).is_empty(), "no Docker here");
+
+    // the engine's binary on the host: installed
+    let e = env();
+    let bin = e.dir.path().join("host/usr/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("docker"), "").unwrap();
+    let (s, b) = call_as(&e, "bob", "GET", "/v1/ui/sections", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(sections(&b), ["docker", "syncthing"]);
+    // the same answer as the status the interface reads afterwards
+    let (_, b) = call(&e, "GET", "/v1/docker/status", None).await;
+    let st: DockerStatus = serde_json::from_slice(&b).unwrap();
+    assert!(st.installed);
+}
+
 #[tokio::test]
 async fn settings_apply_writes_the_engine_files() {
     let e = env();

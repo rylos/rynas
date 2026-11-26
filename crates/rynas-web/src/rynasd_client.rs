@@ -64,6 +64,11 @@ pub const PC_BTRFS_DEADLINE: Duration = Duration::from_secs(48 * 3600);
 /// PC backup: pairing (creates a repository: two key derivations), the plan's long poll
 /// (55 s), the console's reads and downloads of a repository (the worker has 110 s).
 pub const PC_AGENT_DEADLINE: Duration = Duration::from_secs(120);
+/// The interface's optional sections for the session answer ([`RynasdClient::ui_sections`]):
+/// the shell waits for that answer, so never long (rynasd answers from caches in a few ms).
+pub const SECTIONS_DEADLINE: Duration = Duration::from_millis(300);
+/// How long the last sections rynasd gave stand in when it does not answer in time.
+pub const SECTIONS_KEEP: Duration = Duration::from_secs(60);
 /// Largest answer read into memory by [`RynasdClient::call`] (pass-through answers stream).
 pub const MAX_ANSWER: usize = 8 << 20;
 
@@ -72,6 +77,8 @@ pub const MAX_ANSWER: usize = 8 << 20;
 pub fn deadline(path: &str) -> Duration {
     if path.starts_with("/v1/authenticate") || path.starts_with("/v1/totp/") {
         AUTH_DEADLINE
+    } else if path == "/v1/ui/sections" {
+        SECTIONS_DEADLINE
     } else if path.starts_with("/v1/storage/") {
         STORAGE_DEADLINE
     } else if path.starts_with("/v1/notifications/targets/") && path.ends_with("/test") {
@@ -143,6 +150,8 @@ pub struct RynasdClient {
     socket: PathBuf,
     /// Upper bound on every deadline (tests).
     cap: Option<Duration>,
+    /// The last sections rynasd gave and when ([`RynasdClient::ui_sections`]).
+    sections: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
 }
 
 impl RynasdClient {
@@ -150,6 +159,28 @@ impl RynasdClient {
         Self {
             socket: socket.into(),
             cap: None,
+            sections: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The interface's optional sections present now ([`rynas_api_types::sections`]), for the
+    /// session answer: rynasd's `GET /v1/ui/sections` within [`SECTIONS_DEADLINE`]; when it
+    /// does not answer in time, its last answer if younger than [`SECTIONS_KEEP`]; else `None`
+    /// (unknown: the interface uses what it remembers, then its own reads).
+    pub async fn ui_sections(&self, user: &str) -> Option<Vec<String>> {
+        let r = self
+            .call::<rynas_api_types::UiSections>(Method::GET, "/v1/ui/sections", Some(user), None::<&()>)
+            .await;
+        let mut last = self.sections.lock().unwrap_or_else(|e| e.into_inner());
+        match r {
+            Ok(a) => {
+                *last = Some((std::time::Instant::now(), a.sections.clone()));
+                Some(a.sections)
+            }
+            Err(e) => {
+                tracing::debug!("interface sections: {e:?}");
+                last.as_ref().filter(|(at, _)| at.elapsed() < SECTIONS_KEEP).map(|(_, s)| s.clone())
+            }
         }
     }
 

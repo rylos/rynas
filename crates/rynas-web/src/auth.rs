@@ -380,7 +380,7 @@ pub async fn login(
                     .remove(&rynas_auth::session::session_id(old));
             }
             let max_age = st.auth.sessions().config().absolute_timeout.as_secs();
-            let mut r = Json(st.auth.sessions().to_api(&s)).into_response();
+            let mut r = Json(session_answer(&st, &s).await).into_response();
             r.headers_mut().insert(
                 header::SET_COOKIE,
                 cookie(&token, max_age, is_https(&st, &headers, tls.is_some())),
@@ -455,7 +455,16 @@ pub async fn session(
     let s = session_token(&headers)
         .and_then(|t| st.auth.sessions().get(t, touch))
         .ok_or_else(unauthenticated)?;
-    Ok(Json(st.auth.sessions().to_api(&s)))
+    Ok(Json(session_answer(&st, &s).await))
+}
+
+/// The public view of a session with the interface's optional sections (the shell draws its
+/// navigation from this answer: no entry appears a moment later). Asking rynasd costs at most
+/// [`crate::rynasd_client::SECTIONS_DEADLINE`]; unknown sections are left out.
+async fn session_answer(st: &AppState, s: &SessionData) -> Session {
+    let mut a = st.auth.sessions().to_api(s);
+    a.sections = st.rynasd.ui_sections(&s.user.username).await;
+    a
 }
 
 pub async fn logout(
