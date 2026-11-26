@@ -1,0 +1,22 @@
+# rynas: Simplified Chinese, notify. A UTF-8 key<TAB>text table (docs/i18n.md).
+notify.notifications	通知
+notify.footer	来自 rynas，设备
+notify.resolved	已解决
+notify.reminder	提醒
+notify.test_title	测试通知
+notify.test_body	收到这条消息表示通知渠道可以正常使用。
+notify.severity.info	信息
+notify.severity.notice	提示
+notify.severity.warning	警告
+notify.severity.error	错误
+notify.severity.critical	严重
+notify.category.storage	存储
+notify.category.hardware	硬件
+notify.category.ups	UPS
+notify.category.system	系统
+notify.category.security	安全
+notify.category.update	更新
+notify.category.backup	备份
+notify.category.app	应用
+notify.category.task	任务
+notify.category.files	文件

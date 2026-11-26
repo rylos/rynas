@@ -1,0 +1,759 @@
+# rynas: Simplified Chinese, files. A UTF-8 key<TAB>text table (docs/i18n.md).
+files.conns.login	登录
+files.editor.syntax_colors_not_available_reload	语法高亮暂不可用，请刷新页面后重试。
+files.actions.editor_cannot_opened_reload_page	无法打开编辑器，请刷新页面后重试。
+files.conns.starting_folder	起始文件夹
+files.sidebar.server_shared_folders	服务器上的共享文件夹
+files.conns.server_key_k	服务器主机密钥：{k}
+files.conns.public_key_add_ssh_authorized	将此公钥添加到服务器上的 ~/.ssh/authorized_keys
+files.sidebar.connection_deleted	已删除连接
+files.conns.connection_renamed	已重命名连接
+files.conns.connecting	正在连接…
+files.sidebar.connections	连接
+files.conns.connected_in_ms_ms_n	连接用时 {ms} ms，在 {p} 中找到 {n} 项。
+files.common.copy_address	复制地址
+files.conns.create_key	生成密钥
+files.conns.domain	SMB 域
+files.sidebar.delete_connection	删除连接
+files.sidebar.delete_connection_ask	删除此连接？
+files.sidebar.name_cannot_empty	名称不能为空
+files.conns.server_address	服务器地址
+files.conns.edit_connection	编辑连接
+files.sidebar.edit	编辑…
+files.conns.no_key_yet_create_copy	尚未生成密钥。请生成密钥，并将公钥添加到服务器。
+files.common.name_in_sidebar	侧边栏显示名称
+files.common.new_connection	新建连接
+files.conns.port	端口
+files.conns.test	测试
+files.sidebar.rename_connection	重命名连接
+files.sidebar.rename	重命名…
+files.common.save	保存
+files.sidebar.smb_sftp_servers_server_in	在路径栏输入 \\server，或点击 + 添加 SMB 或 SFTP 连接。
+files.pane.remote_connections_folder_filter_only	远程连接仅支持筛选当前文件夹。
+files.conns.user	用户名
+files.conns.forget_changed	清除旧主机密钥（服务器密钥已更换）
+files.conns.e_g_nas_nas_folder	例如 nas、\\nas\folder 或 sftp://user@server
+files.conns.optional_e_g_company	可选，例如 COMPANY
+files.conns.saved_leave_empty_keep	密码已保存，留空将继续使用原密码
+files.conns.empty_list_shared_folders	留空时显示共享文件夹列表
+files.conns.empty_user_home	留空时使用用户主目录
+files.sidebar.n_leaves_sidebar_saved_password	「{n}」将从侧边栏移除，已保存的密码也会删除。服务器上的文件会保留。
+files.sidebar.move_up	向上移动
+files.sidebar.move_down	向下移动
+files.ui.ok	确定
+files.common.cancel	取消
+files.common.close	关闭
+files.settings.done	完成
+files.actions.create	创建
+files.common.open	打开
+files.transfers.details	详细信息
+files.common.name	名称
+files.actions.new_name	新名称
+files.common.invalid_name	名称无效
+files.transfers.of_total	/ {total}
+files.common.nas	NAS
+files.sidebar.volume	存储卷
+files.sidebar.personal	个人文件
+files.sidebar.system	系统
+files.sidebar.home_u	主目录（{u}）
+files.sidebar.favorites	收藏夹
+files.common.shared_folders	共享文件夹
+files.sidebar.ctrl_d_adds_open_folder	按 Ctrl+D 收藏当前文件夹
+files.sidebar.encrypted_folder	加密文件夹
+files.sidebar.not_available	不可用
+files.common.space_analysis	空间分析
+files.space.analyzing_p	正在分析 {p}…
+files.space.open_in_list	在列表中打开
+files.space.incomplete_analysis_time_ran_out	分析超时，结果不完整
+files.space.smaller_files	较小的文件
+files.space.f_files_in_d_folders	在 {s} 秒内读取了 {d} 个文件夹中的 {f} 个文件
+files.space.count.smaller_items.other	{n} 个较小的项目
+files.space.n_unreadable	有 {n} 项无法读取
+files.sidebar.hidden_on_network	在网络中隐藏
+files.sidebar.hidden_badge	已隐藏
+files.common.count.items.other	{n} 项
+files.common.count.files.other	{n} 个文件
+files.uploads.folder_hint	文件夹
+files.common.count.folders.other	{n} 个文件夹
+files.transfers.count.errors.other	{n} 个错误
+files.transfers.count.queued.other	有 {n} 个传输任务排队
+files.pane.count.selected.other	已选中 {n} 项
+files.common.count.items_selected.other	已选中 {n} 项
+files.pane.n_items	{n} 项
+files.common.n_more	还有 {n} 项
+files.format.just_now	刚才
+files.fmt.ago	{time}前
+files.dur.d	{d} 天
+files.dur.h	{h} 小时
+files.dur.m	{m} 分钟
+files.dur.s	{s} 秒
+files.dur.hm	{h} 小时 {m} 分钟
+files.dur.ms	{m} 分钟 {s} 秒
+files.fmt.of	{part} / {total}
+files.fmt.unit.b	B
+files.fmt.unit.kib	KiB
+files.fmt.unit.mib	MiB
+files.fmt.unit.gib	GiB
+files.fmt.unit.tib	TiB
+files.fmt.unit.pib	PiB
+files.fmt.unit.eib	EiB
+files.fmt.unit.kb	kB
+files.fmt.unit.mb	MB
+files.fmt.unit.gb	GB
+files.fmt.unit.tb	TB
+files.fmt.unit.pb	PB
+files.fmt.unit.eb	EB
+files.fmt.rate	{size}/s
+files.pane.fps	{n} fps
+files.pane.resize_column	调整「{column}」列的宽度
+files.pane.khz	{n} kHz
+files.pane.kbps	{n} kb/s
+files.common.folder	文件夹
+files.pane.folders	文件夹
+files.common.file	文件
+files.icons.link_folder	链接到文件夹
+files.icons.symbolic_link	符号链接
+files.icons.link_out_shared_folder	指向共享文件夹外的链接
+files.icons.special_file	特殊文件
+files.icons.executable	可执行文件
+files.icons.image	图片
+files.common.video	视频
+files.common.audio	音频
+files.icons.lossless_audio	无损音频
+files.icons.key_signature	密钥或签名
+files.icons.document	文档
+files.common.archive	压缩包
+files.icons.temporary_file	临时文件
+files.icons.compiled_file	已编译文件
+files.icons.build_file	构建文件
+files.icons.source_code	源代码
+files.pane.back	返回
+files.pane.forward	前进
+files.common.parent_folder	上级文件夹
+files.common.refresh	刷新
+files.pane.click_empty_space_type_path	点击路径栏的空白处即可输入路径
+files.pane.filter	筛选
+files.pane.subfolders	子文件夹
+files.pane.search_every_subfolder_words_in	搜索所有子文件夹，可输入文件名关键词或通配式（如 *.mkv）
+files.pane.search_in_p	在 {p} 中搜索
+files.pane.all_folders	所有文件夹
+files.common.list	列表
+files.pane.grid	网格
+files.pane.hidden_files	隐藏文件
+files.common.dual_pane	双栏视图
+files.common.info_panel	详细信息
+files.pane.new	新建
+files.pane.more	更多
+files.common.permissions	权限
+files.common.size	大小
+files.common.modified	修改时间
+files.common.type	类型
+files.common.columns	显示列
+files.common.reset_widths	重置列宽
+files.pane.no_results	无结果
+files.pane.nothing_matches_filter	没有符合筛选条件的项目
+files.pane.empty_folder	空文件夹
+files.pane.n_hidden	有 {n} 项已隐藏
+files.pane.searching	正在搜索…
+files.pane.n_items_scanned	已扫描 {n} 项
+files.pane.partial_results	部分结果
+files.common.f_free_t	可用 {f}，总计 {t}
+files.pane.items	项目
+files.pane.free_space	空闲空间
+files.pane.file_size	文件大小
+files.pane.compute_total_size	计算总大小
+files.pane.compute	计算
+files.pane.contents	所含项目
+files.pane.owner	所有者
+files.pane.path	路径
+files.common.download	下载
+files.common.preview	预览
+files.common.copy_path	复制路径
+files.pane.target	目标
+files.common.close_tab	关闭标签页
+files.common.new_tab	新建标签页
+files.main.hidden_files_shown	已显示隐藏文件
+files.main.hidden_files_not_shown	已关闭隐藏文件显示
+files.common.open_in_new_tab	在新标签页中打开
+files.common.open_in_other_pane	在另一栏打开
+files.sidebar.open_recycle_bin	打开回收站
+files.common.remove_favorites	从收藏夹移除
+files.common.add_favorites	添加到收藏夹
+files.sidebar.removed_favorites	已从收藏夹移除
+files.sidebar.added_favorites	已添加到收藏夹
+files.actions.n_ready_move_paste_ctrl	已标记 {n} 项待移动。按 Ctrl+V 粘贴到目标文件夹。
+files.actions.n_ready_copy_paste_ctrl	已将 {n} 项加入剪贴板。按 Ctrl+V 复制到目标文件夹。
+files.pane.n_move	{n} 项待移动
+files.pane.n_copy	{n} 项待复制
+files.actions.items_already_in_folder	这些项目已经在此文件夹中
+files.actions.folder_cannot_go_inside_itself	无法将文件夹移入自身或其子文件夹。
+files.actions.move_n	将 {n} 移动到…
+files.actions.copy_n	将 {n} 复制到…
+files.actions.move_n_verification	将 {n} 移动到…并校验
+files.actions.copy_n_verification	将 {n} 复制到…并校验
+files.menus.copy_verification	复制到…并校验
+files.menus.move_verification	移动到…并校验
+files.common.paste_verification	粘贴并校验
+files.menus.paste_verification_move_n	粘贴并校验（移动 {n} 项）
+files.menus.paste_verification_n	粘贴并校验（{n} 项）
+files.dnd.copy_here_verification	复制到此处并校验
+files.dnd.move_here_verification	移动到此处并校验
+files.transfers.copy_complete_verified	复制完成，校验已通过
+files.transfers.move_complete_verified	移动完成，校验已通过
+files.settings.copy_move_verification	复制和移动时校验
+files.common.move_here	移动到此处
+files.common.copy_here	复制到此处
+files.actions.open_dual_pane_f3	按 F3 打开双栏视图
+files.actions.move_recycle_bin	移入回收站？
+files.actions.delete_permanently	永久删除？
+files.common.empty_recycle_bin	清空回收站
+files.actions.empty_recycle_bin	清空回收站？
+files.actions.recycle_bin_already_empty	回收站已为空。
+files.actions.recycle_bin_shared_folder_off	此共享文件夹的回收站已关闭。
+files.common.move_recycle_bin	移入回收站
+files.common.delete	删除
+files.common.delete_permanently	永久删除
+files.common.rename	重命名
+files.common.new_folder	新建文件夹
+files.actions.computing_sizes	正在计算大小…
+files.actions.open_shared_folder_first	请先打开一个共享文件夹
+files.menus.upload_files	上传文件…
+files.menus.upload_folder	上传文件夹…
+files.settings.upload_files	上传文件
+files.menus.paste_move_n	粘贴（移动 {n} 项）
+files.menus.paste_n	粘贴（{n} 项）
+files.common.select_all	全选
+files.menus.hide_hidden_files	不显示隐藏文件
+files.common.show_hidden_files	显示隐藏文件
+files.menus.compute_folder_sizes	计算文件夹大小
+files.menus.copy_folder_path	复制文件夹路径
+files.common.copy	复制
+files.common.cut	剪切
+files.menus.paste	粘贴到
+files.menus.copy	复制到…
+files.menus.move	移动到…
+files.menus.choose_folder	选择文件夹…
+files.menus.compute_size	计算大小
+files.menus.copy_network_path_nas	复制网络路径（\\NAS）
+files.menus.copy_smb_address	复制 smb:// 地址
+files.menus.properties	属性
+files.common.invert_selection	反选
+files.common.paste	粘贴
+files.menus.sort	排序方式
+files.common.folders_first	文件夹优先
+files.common.sidebar	侧边栏
+files.menus.keyboard_shortcuts	键盘快捷键
+files.common.settings	设置
+files.ui.copied_clipboard	已复制到剪贴板
+files.ui.no_subfolders	无子文件夹
+files.common.loading	正在加载…
+files.transfers.op.copy	复制
+files.transfers.copying	正在复制
+files.transfers.copy_complete	复制完成
+files.transfers.moving	正在移动
+files.transfers.move_complete	移动完成
+files.transfers.move	移动
+files.transfers.deleting	正在删除
+files.transfers.deletion_complete	删除完成
+files.transfers.deletion	删除
+files.transfers.uploading	正在上传
+files.transfers.upload_complete	上传完成
+files.transfers.upload	上传
+files.transfers.state.queued	已排入队列
+files.transfers.state.running	进行中
+files.transfers.state.paused	已暂停
+files.transfers.state.conflict	需要处理冲突
+files.common.state.done	已完成
+files.common.state.failed	失败
+files.common.state.canceled	已取消
+files.transfers.scan	扫描
+files.transfers.phase.verify	校验
+files.transfers.done	完成
+files.transfers.phase.count	统计
+files.transfers.sending	正在发送
+files.transfers.op_n	{op} {n}
+files.transfers.op_x	{op}「{x}」
+files.transfers.deleted_permanently	永久删除
+files.transfers.recycle_bin	回收站
+files.transfers.computer	此电脑
+files.common.transfers	传输任务
+files.transfers.transfers_n_running_p	传输任务 · {n} 个进行中 · {p}%
+files.transfers.no_transfers	暂无传输任务
+files.transfers.minimize_keeps_running	最小化（任务继续运行）
+files.transfers.legend_speed	当前速度
+files.transfers.legend_average	平均速度
+files.transfers.limit	限速
+files.transfers.none	无
+files.transfers.start_now	立即开始
+files.transfers.open_destination	打开目标文件夹
+files.transfers.scanning_f_files_b_found	正在扫描，已找到 {f} 个文件，共 {b}…
+files.transfers.b_files	已处理 {a} / {b} 个文件
+files.transfers.waiting_another_transfer_finish	等待另一项传输完成
+files.transfers.paused	已暂停
+files.transfers.waiting_choice	等待选择
+files.transfers.counting_files_folders	正在统计文件和文件夹…
+files.transfers.n_without_copying_data_reflink	{n} 项通过 reflink 克隆或重命名直接完成，无需复制数据
+files.transfers.btrfs_reflink	Btrfs reflink 克隆
+files.transfers.data_copy	复制数据
+files.transfers.speed	速度
+files.transfers.average	平均速度
+files.transfers.peak	峰值速度
+files.transfers.elapsed	已用时间
+files.transfers.remaining	剩余时间
+files.transfers.expected_end	预计完成时间
+files.transfers.estimating	正在估算…
+files.transfers.n_s	{n}/s
+files.transfers.method_verify	校验
+files.transfers.writing_disks	正在写入磁盘
+files.transfers.in_d	{d}后
+files.transfers.average_s	平均速度 {s}
+files.transfers.n_skipped	已跳过 {n} 项
+files.transfers.pause	暂停
+files.transfers.resume	继续
+files.common.item_name_already_exists	已存在同名项目
+files.transfers.newer	较新
+files.transfers.incoming	传入的项目
+files.transfers.in_destination	目标文件夹中的项目
+files.common.overwrite	覆盖
+files.common.skip	跳过
+files.common.keep_both	保留两者
+files.common.overwrite_newer	仅在源文件较新时覆盖
+files.transfers.apply_all	应用到所有冲突
+files.transfers.keep_both_saves_new_one	选择「保留两者」会将传入的项目另存为「{n}」。
+files.transfers.axis_progress	按进度显示
+files.transfers.waiting_first_data	等待传输数据…
+files.transfers.chart_no_data	无数据
+files.transfers.chart_no_data_for	{n} 秒内无数据
+files.transfers.no_data_for	{n} 秒内无数据
+files.transfers.canceling	正在取消…
+files.transfers.b_verified	已校验 {a} / {b}
+files.transfers.axis_time	按时间显示
+files.uploads.some_items_already_exist	存在同名项目
+files.uploads.destination_folder_already_n_items	目标文件夹中已有 {n} 个同名项目。
+files.uploads.already_exists	已存在
+files.uploads.connection_lost	连接已断开
+files.preview.open_in_new_browser_tab	在浏览器的新标签页中打开
+files.preview.browser_cannot_play_format	浏览器无法播放此格式。
+files.preview.no_preview_kind_file	此类文件暂不支持预览
+files.preview.first_512_kib_s_shown	（文件大小为 {s}，仅显示前 512 KiB）
+files.settings.appearance	外观
+files.settings.behavior	行为
+files.settings.shortcuts	快捷键
+files.settings.reset_defaults	重置为默认值
+files.settings.file_icons	文件图标
+files.settings.eza_icons_nerd_font_type	使用 eza 的图标（Nerd Font），按类型和名称区分
+files.settings.name_colors	文件名颜色
+files.settings.eza_colors_blue_folders_purple	采用 eza 的配色。文件夹为蓝色，图片为紫色，压缩包为红色。
+files.settings.system_folders_in_gray	用灰色显示系统文件夹
+files.settings.recycle_snapshot_recycle_bin_lost	包括 #recycle、#snapshot、$RECYCLE.BIN、lost+found 等。手动设置的颜色会保留。
+files.settings.ll_style_columns	ll 风格的列样式
+files.settings.permissions_sizes_dates_colored_like	参照 eza -l 为权限、大小和日期着色
+files.settings.text_size	字号
+files.settings.small	小
+files.common.normal	常规
+files.settings.large	大
+files.settings.row_density	列表行距
+files.settings.compact	紧凑
+files.settings.like_eza_group_directories_first	与 eza 的 --group-directories-first 选项效果相同。
+files.settings.those_starting_dot_ctrl_h	显示名称以点号（.）开头的项目（Ctrl+H）
+files.settings.binary_sizes	使用二进制容量单位
+files.settings.kib_mib_gib_1024_instead	使用 1024 进位的 KiB、MiB、GiB。十进制单位 kB、MB、GB 以 1000 进位。
+files.settings.relative_dates	显示相对时间
+files.settings.relative_dates_hint	例如将「10 月 29 日 21:45」显示为「3 小时前」。
+files.settings.full_dates	始终显示完整日期和时间
+files.settings.full_dates_hint	对所有文件显示年月日和时间。默认格式对最近六个月的文件显示时间，对更早的文件显示年份。
+files.settings.permissions_column	权限列
+files.settings.size_column	大小列
+files.settings.modified_column	修改时间列
+files.settings.type_column	类型列
+files.settings.open_one_click	单击打开
+files.settings.otherwise_double_click	关闭后需双击打开。
+files.settings.vim_keys	Vim 快捷键
+files.settings.j_k_move_h_go	j/k 移动选择，h 返回上级，l 打开，gg 转到顶部，G 转到底部。
+files.settings.confirm_before_deleting	删除前确认
+files.settings.item_already_exists	存在同名项目时
+files.settings.starting_choice_copies_moves_uploads	复制、移动和上传时的默认处理方式
+files.settings.ask	询问
+files.common.speed_limit	限速
+files.settings.can_changed_during_transfer	可以在传输过程中更改。
+files.settings.none	无
+files.settings.open_dialog_on_start	传输开始时打开对话框
+files.settings.otherwise_transfer_starts_in_background	关闭后，传输会在后台开始。
+files.settings.browser_notification_end	传输结束时显示浏览器通知
+files.settings.page_not_in_front	仅在此页面不处于前台时通知。
+files.key.ctrl	Ctrl
+files.key.backspace	Backspace
+files.key.insert	Insert
+files.key.tab	Tab
+files.key.shift	Shift
+files.key.alt	Alt
+files.key.enter	Enter
+files.key.space	Space
+files.key.del	Del
+files.key.pgdn	PgDn
+files.key.pgup	PgUp
+files.key.letters	字母键
+files.settings.next_tab	下一个标签页
+files.settings.previous_tab	上一个标签页
+files.settings.go_tab	切换到指定标签页
+files.settings.reopen_closed_tab	重新打开已关闭的标签页
+files.settings.other_pane_dual_pane	在双栏视图中切换到另一栏
+files.settings.copy_move_other_pane	复制或移动到另一栏
+files.settings.back_forward	返回或前进
+files.settings.quick_look	快速预览
+files.settings.show_hide_hidden_files	显示或隐藏隐藏文件
+files.settings.type_path	输入路径
+files.settings.fuzzy_filter_folder	模糊筛选当前文件夹
+files.settings.search_subfolders	搜索子文件夹
+files.settings.copy_cut_paste	复制、剪切、粘贴
+files.settings.select_move_on	切换当前项的选中状态并跳到下一项
+files.settings.jump_name_starting_like	跳到名称以所输入字符开头的项目
+files.settings.vim_keys_on	Vim 快捷键（开启时）
+files.actions.download_started_zip_archive	已开始下载 .zip 压缩包
+files.actions.create_archive	创建压缩包
+files.actions.n_archive_in_same_folder	将 {n} 打包到当前文件夹中的一个压缩包。
+files.actions.format	格式
+files.actions.zip_opens_anywhere	ZIP（通用格式）
+files.actions.tar_zst_faster_smaller_keeps	tar.zst（速度更快、体积更小，保留权限和链接）
+files.actions.archive_name	压缩包名称
+files.common.compression	压缩
+files.actions.fast	快速
+files.actions.none_store_only_fastest	不压缩（仅打包，速度最快）
+files.actions.best_slow	最高压缩率（较慢）
+files.actions.photos_videos_music_archives_stored	照片、视频、音乐和已有压缩包会直接打包，因为再次压缩难以节省空间。
+files.actions.photos_videos_music_archives_not	使用 zstd 处理照片、视频、音乐和已有压缩包时，速度影响很小，但通常无法进一步减小体积。
+files.actions.compress	压缩
+files.actions.extract_x	将「{x}」解压到…
+files.common.extract_here	解压到此处
+files.menus.extract_x	解压到「{x}」
+files.menus.extract	解压到…
+files.menus.compress	压缩…
+files.menus.download_zip	下载为 .zip 压缩包
+files.transfers.compressing	正在压缩
+files.transfers.archive_created	已创建压缩包
+files.transfers.extracting	正在解压
+files.transfers.extraction_complete	解压完成
+files.transfers.extraction	解压
+files.transfers.zip_deflate	ZIP（Deflate 压缩）
+files.transfers.zip_no_compression	ZIP（不压缩）
+files.transfers.archive_password_protected	此压缩包有密码保护
+files.common.password	密码
+files.transfers.extract	解压
+files.preview.zoom_out	缩小
+files.preview.zoom_in	放大
+files.preview.fit_window	适应窗口
+files.pane.total_size	总大小
+files.preview.open_folder	作为文件夹打开
+files.pane.archive_read_only	压缩包 · 只读
+files.actions.inside_archive_only_single_files	在压缩包内可以下载单个文件。若要提取多个文件或文件夹，请使用「复制到…」。
+files.archive.archives_open_read_only_change	压缩包以只读方式打开。要更改其中的文件，请先解压。
+files.common.retry	重试
+files.preview.s_unpacked	解压后共 {s}
+files.settings.on_start_open	启动时打开
+files.settings.otherwise_last_ones_used_apply	关闭后，所有文件夹使用最近一次选择的视图和排序。
+files.settings.current_folder	当前文件夹
+files.settings.chosen_folder	指定文件夹
+files.settings.ctrl_t_tab_bar	适用于 Ctrl+T 和标签栏上的 +
+files.settings.highlight_today_dates	高亮显示今天的日期
+files.settings.hidden_files_last	隐藏文件排在最后
+files.settings.the_chosen_folder	指定文件夹
+files.settings.last_tabs	上次打开的标签页
+files.settings.in_modified_column	在「修改时间」列中显示。
+files.settings.new_tabs_open_in	新标签页打开位置
+files.settings.shown_after_others	显示隐藏文件时，将它们排在其他项目之后。
+files.settings.remember_view_sort_each_folder	记住每个文件夹的视图和排序
+files.settings.choose	选择…
+files.settings.use_folder	使用此文件夹
+files.sidebar.default_order	默认顺序
+files.settings.volume_names	存储卷名称
+files.settings.volume_names_hint	显示存储卷的名称（如「HDD」）。关闭后显示编号（如「存储卷 1」）。
+files.settings.show_favorites	显示收藏夹
+files.settings.favorites_section_sidebar_stay_saved	在侧边栏显示收藏夹。隐藏时会保留收藏记录。
+files.conns.load_file	从文件加载…
+files.conns.loaded_k	已加载 {k}
+files.conns.private_key_openssh_pem	私钥（OpenSSH 或 PEM）
+files.conns.my_key	使用自有密钥
+files.conns.not_private_key_file_too	文件太大，无法作为私钥加载。
+files.conns.passphrase_key_one	密钥口令（如有）
+files.conns.empty_keep_one_loaded	留空时继续使用已加载的密钥
+files.pane.change_icon	更改图标
+files.iconpick.search_icon	搜索图标…
+files.sidebar.icon	图标…
+files.iconpick.automatic_icon	自动选择图标
+files.iconpick.no_icon_found	未找到图标
+files.iconpick.default	默认
+files.iconpick.folder_only	仅此文件夹
+files.iconpick.every_n	所有名为「{n}」的文件夹
+files.iconpick.red	红色
+files.iconpick.yellow	黄色
+files.iconpick.green	绿色
+files.iconpick.cyan	青色
+files.iconpick.pink	粉红色
+files.iconpick.white	白色
+files.iconpick.gray	灰色
+files.sidebar.transfers_running_on_s_wait	「{s}」上还有传输任务，请等任务完成或先取消。
+files.sidebar.d_ejected_can_unplugged	已安全弹出「{d}」，现在可以拔出设备。
+files.sidebar.eject_d	弹出「{d}」？
+files.common.eject	弹出
+files.sidebar.drive_s_not_appear_connected	「{s}」所在的硬盘似乎未连接。
+files.sidebar.drive_shared_folders_not_available	硬盘弹出后，其中的共享文件夹将在下次接入时恢复访问。
+files.editor.find_prompt	查找：
+files.editor.ctrl_g_editor_keys	按 Ctrl+G 查看编辑器快捷键
+files.editor.e_overwrite_y_n	{e} 要覆盖文件吗？（y 确认，n 取消）
+files.common.edit	编辑
+files.editor.not_saved	未保存
+files.editor.q_not_found	未找到「{q}」
+files.editor.save_changes_n_before_closing	关闭前保存对「{n}」的修改？（y 保存，n 放弃，Esc 取消）
+files.editor.saving	正在保存…
+files.editor.saved_path	已保存 {path}
+files.common.read_only	只读
+files.editor.read_only_don_t_permission	只读。当前账号没有写入此文件的权限。
+files.editor.go_line_prompt	转到行号：
+files.editor.word_wrap	自动换行
+files.editor.find	查找
+files.editor.copy_line	复制当前行
+files.editor.redo	重做
+files.editor.previous_match	上一处匹配
+files.editor.next_match	下一处匹配
+files.editor.keys	快捷键
+files.editor.go_line	转到指定行
+files.editor.copy_cut_no_selection_line	复制或剪切（未选中文本时操作当前行）
+files.editor.duplicate_line	创建当前行的副本
+files.editor.indent_unindent	增加或减少缩进
+files.editor.next_previous_match	下一处或上一处匹配
+files.editor.move_line	移动当前行
+files.editor.cut_line	剪切当前行
+files.health.open_in_separate_window	在单独窗口中打开
+files.sidebar.description	说明…
+files.common.permissions_menu	权限…
+files.api.error_n	错误 {n}
+files.health.drop_upload	松开鼠标以上传到
+files.health.clear_finished	清除已完成的任务
+files.health.places	位置
+files.pane.dimensions	尺寸
+files.pane.resolution	分辨率
+files.pane.duration	时长
+files.pane.subtitles	字幕
+files.pane.bitrate	比特率
+files.pane.camera	相机
+files.pane.lens	镜头
+files.pane.exposure	曝光
+files.pane.date_taken	拍摄日期
+files.pane.location	位置
+files.pane.n_tracks	{n} 条轨道
+files.settings.list_grid_columns	列表、网格与显示列
+files.common.nas_unreachable	无法连接 NAS
+files.conns.rynas_key	使用 Rynas 密钥
+files.health.browser_blocked_window_allow_pop	浏览器已拦截窗口。请允许此站点打开弹出窗口。
+files.health.transfer_service_not_running_copies	传输服务尚未运行，暂时无法复制、移动或删除文件。
+files.health.no_access_files_ask_administrator	当前账号没有文件管理器访问权限，请联系管理员。
+files.health.file_service_not_installed_on	此系统尚未安装文件服务。
+files.health.files_cannot_reach_nas	文件管理器无法连接 NAS。
+files.health.session_expired_sign_in_again	会话已过期，请重新登录后继续。
+files.uploads.session_expired	会话已过期
+files.health.tabs	标签页
+files.settings.files_settings	文件管理器设置
+files.sidebar.cannot_eject_d_e_may	无法弹出「{d}」（{e}）。此设备可能仍在使用。
+files.err.session_expired_sign_in_again	会话已过期，请重新登录。
+files.err.session_changed_in_another_tab	会话已在另一个标签页中更改，请刷新此页面。
+files.err.not_allowed	没有权限执行此操作
+files.transfers.permission_denied	访问权限不足
+files.transfers.check_shared_folder_permissions	请检查共享文件夹的权限
+files.err.not_found_may_been_moved	找不到项目，可能已被移动或删除
+files.err.file_changed_in_meantime	文件已被修改
+files.err.busy_try_again_shortly	服务繁忙，请稍后重试
+files.err.invalid_value	输入的值无效
+files.err.invalid_request	无效的请求
+files.err.too_large	内容过大
+files.err.volume_full	存储卷空间不足
+files.err.quota_exceeded	超过配额
+files.err.shared_folder_cannot_moved_renamed	无法在文件管理器中移动、重命名或删除共享文件夹本身
+files.err.link_leads_out_shared_folder	此链接指向共享文件夹之外，无法访问目标
+files.err.archive_needs_password	打开压缩包需要密码
+files.err.program_needed_missing_on_nas	NAS 缺少此操作所需的程序
+files.err.remote_server_refused_login	远程服务器拒绝登录
+files.err.remote_server_key_changed	远程服务器的主机密钥已更改
+files.err.format_not_supported	不支持格式
+files.err.not_available_on_system	本系统不可用
+files.err.too_many_requests_try_again	请求过于频繁，请稍后重试
+files.err.not_available_here	此处不可用
+files.err.remote_connection_unreachable	无法连接远程服务器
+files.err.file_service_not_answer	文件服务无响应
+files.err.file_service_did_not_answer	文件服务响应超时
+files.err.internal_error_on_nas	NAS 内部错误
+files.err.read_only	只读
+files.sidebar.apps	应用
+files.common.app_data	应用数据
+files.sidebar.n_folders	{n} 个文件夹
+files.common.backups	电脑备份
+files.backups.root	root
+files.sidebar.overlaps_backup_folder_pc_pc	与电脑 {pc} 的备份文件夹重叠。在为备份指定独立文件夹前，此处为只读。
+files.backups.backups_read_only_change_file	备份为只读。请先将文件复制到共享文件夹，再编辑副本。
+files.appdata.s_may_need_restart_see	可能需要重启 {s}，应用才能读取更改后的文件。
+files.appdata.restart	重启
+files.appdata.restarting_s	正在重启 {s}
+files.transfers.interrupted_restart_nas	传输因 NAS 重启而中断
+files.transfers.transfer_speed_chart	传输速度曲线
+files.select.select_pattern_menu	按匹配规则选择…
+files.select.deselect_pattern_menu	按匹配规则取消选择…
+files.select.select_pattern	按匹配规则选择
+files.select.deselect_pattern	按匹配规则取消选择
+files.select.select_deselect_pattern	按匹配规则选择或取消选择
+files.select.select_differences	选择差异
+files.select.select_differences_panes	选中左右两栏中不同的项目
+files.select.pattern	匹配规则
+files.select.pattern_hint	* 匹配任意文本，? 匹配单个字符，[abc] 匹配其中任意一个字符，[!abc] 匹配这些字符之外的字符。多个规则用英文分号「;」分隔。
+files.select.regex	正则表达式
+files.select.invalid_regex	无效的正则表达式
+files.select.files_only	仅匹配文件
+files.select.add	添加
+files.select.only_these	仅保留匹配项
+files.select.remove	移除
+files.select.select	选择
+files.select.deselect	取消选择
+files.select.count.matches.other	有 {n} 项匹配
+files.select.differences_a_b	差异项目为左侧 {a}，右侧 {b}。
+files.select.same_items	两个文件夹中的项目相同
+files.pane.checksum	校验和
+files.pane.algorithm	算法
+files.pane.paste_checksum_compare	粘贴校验和以比较
+files.pane.checksum_match	一致
+files.pane.checksum_different	不一致
+files.pane.incomplete_answer	结果不完整
+files.undo.undo_s	撤销：{s}
+files.undo.undone_s	已撤销「{s}」
+files.undo.nothing_to_undo	暂无可撤销的操作
+files.undo.undo_last	撤销上次重命名、新建文件夹、移动或复制操作
+files.undo.undo_copy_ask	撤销此次复制？
+files.undo.copy_n_d	将 {n} 复制到「{d}」
+files.undo.move_n_d	将 {n} 移动到「{d}」
+files.undo.new_folder_n	新建文件夹「{n}」
+files.undo.rename_a_b	将「{a}」重命名为「{b}」
+files.undo.transfer_still_running	传输仍在进行中
+files.undo.folder_n_not_empty	「{n}」中已有内容
+files.undo.nothing_left_n	「{n}」中已找不到本次操作涉及的项目
+files.rename.rename_n	重命名 {n}
+files.rename.rename_n_menu	重命名 {n}…
+files.rename.extension	扩展名
+files.rename.tok_name	名称
+files.rename.tok_chars	名称的第 1 至 3 个字符
+files.rename.tok_ext	扩展名
+files.rename.tok_counter	序号
+files.rename.tok_date	日期
+files.rename.tok_time	时间
+files.rename.tok_folder	文件夹
+files.rename.find	查找
+files.rename.replace_with	替换为
+files.rename.match_case	匹配大小写
+files.rename.case	大小写
+files.rename.case_keep	保持原样
+files.rename.case_lower	小写
+files.rename.case_upper	大写
+files.rename.case_title	单词首字母大写
+files.rename.counter_from	起始序号
+files.rename.step	步长
+files.rename.digits	位数
+files.rename.before	原名称
+files.rename.after	新名称
+files.rename.reset	重置
+files.rename.invalid_name	名称无效
+files.rename.too_long	名称过长
+files.rename.duplicate	名称重复
+files.rename.exists	名称已存在
+files.rename.remote_swap	远程服务器不支持互换名称
+files.rename.n_to_fix	重命名前需先修正 {n} 项
+files.rename.count.changes.other	将更改 {n} 个名称
+files.rename.nothing_changes	暂无名称需要更改
+files.rename.n_not_renamed	有 {n} 项未能重命名（{e}）
+files.rename.count.renamed.other	已重命名 {n} 项
+files.pane.flat_view_nas_folders	平面视图仅适用于 NAS 上的文件夹。
+files.pane.reading_subfolders	正在读取子文件夹…
+files.pane.flat_view	平面视图
+files.menus.flat_view	平面视图（汇总子文件夹中的文件）
+files.settings.flat_view_keys	平面视图（汇总子文件夹中的文件）
+files.sidebar.subfolders	子文件夹
+files.dupes.find_duplicates	查找重复文件…
+files.dupes.duplicates_in_x	「{x}」中的重复文件
+files.dupes.compare	比较
+files.dupes.by_content	按文件内容比较（更准确）
+files.dupes.by_name	按名称和大小比较（更快）
+files.dupes.minimum_size	最小文件大小
+files.dupes.any_size	不限
+files.dupes.find	查找
+files.dupes.select	选择：
+files.dupes.all_but_oldest	每组除最旧文件外全选
+files.dupes.all_but_newest	每组除最新文件外全选
+files.dupes.all_but_shortest	每组除路径最短的文件外全选
+files.dupes.none	取消全部选择
+files.dupes.n_copies_of_s	{n} 个副本，每个 {s}
+files.dupes.show_in_folder	在文件夹中显示
+files.dupes.one_copy_stays	每组重复项保留一个副本
+files.dupes.reading_folders	正在读取文件夹…
+files.dupes.reading_folders_n	正在读取文件夹，已找到 {n} 个文件
+files.dupes.comparing_a_of_b	正在比较内容，已处理 {a} / {b}
+files.dupes.groups_g_files_n_s	已扫描 {n} 个文件，找到 {g}，可释放 {s}
+files.dupes.count.groups.other	{n} 组重复文件
+files.dupes.biggest_only	只显示占用空间最大的几组
+files.dupes.none_among_n	在 {n} 个文件中未找到重复项
+files.sync.sync_folders	同步文件夹
+files.sync.sync_folders_menu	同步文件夹…
+files.sync.swap	交换左右两栏
+files.sync.update	更新 →
+files.sync.mirror	镜像 →
+files.sync.both	双向 ↔
+files.sync.update_hint	将左侧新增或较新的项目复制到右侧。
+files.sync.mirror_hint	使右侧与左侧一致。右侧多出的项目会被删除，启用回收站时可从中恢复。
+files.sync.both_hint	双向复制新增项目。文件有多个版本时，优先复制较新的版本。
+files.sync.compare	比较
+files.sync.synchronize	同步
+files.sync.only_left	仅左侧有
+files.sync.only_right	仅右侧有
+files.sync.newer_left	左侧版本较新
+files.sync.newer_right	右侧版本较新
+files.sync.same_date_other_size	修改时间相同，大小不同，请选择如何处理
+files.sync.file_and_folder	同名项目类型不同，一侧是文件，另一侧是文件夹
+files.sync.n_to_right	{n} 项待复制到右侧
+files.sync.n_to_left	{n} 项待复制到左侧
+files.sync.n_off_right	右侧有 {n} 项待删除
+files.sync.comparing	正在比较…
+files.sync.comparing_n	正在比较，已扫描 {n} 个文件夹
+files.sync.count.differences.other	{n} 处差异
+files.sync.first_only	仅显示前一部分差异
+files.sync.folders_same	两个文件夹的内容一致
+files.sync.nothing_to_do	没有需要同步的项目
+files.transfers.syncing	正在同步
+files.transfers.sync_complete	同步完成
+files.transfers.op.sync	同步
+files.rename.kept_as_n	当前名称为「{n}」
+files.rename.recovered_n	重新命名中断后，已恢复这些原名称：{n}
+files.rename.too_many_n	一次最多重命名同一文件夹中的 {n} 个项目
+files.dupes.by_name_list_only	仅按名称和大小列出重复项。这里无法删除所列项目。
+files.dupes.n_odd_names_skipped	已跳过 {n} 个非 UTF-8 编码的名称
+files.sync.unreadable	无法读取，已跳过
+files.sync.n_unreadable	有 {n} 项无法读取，已跳过
+files.sync.sync_ask	确认同步这两个文件夹？
+files.undo.not_recorded	系统未记录此次传输所产生的项目，无法撤销
+files.transfers.destination_gone	目标路径已不可用。请检查硬盘是否已拔出或网络是否断开。
+files.transfers.source_gone	源路径已不可用。请检查硬盘是否已拔出或网络是否断开。
+files.transfers.stopped_unexpectedly	复制进程意外停止
+files.transfers.cleaning_up	正在清理临时文件…
+files.actions.count.go_recycle.other	{n} 项将移入共享文件夹的回收站，可从中恢复。
+files.actions.count.deleted_permanently.other	将永久删除 {n} 项，删除后无法恢复。
+files.sync.count.extra_go_recycle.other	右侧有 {n} 项在左侧不存在，将移入右侧共享文件夹的回收站，可从中恢复。
+files.sync.count.replaced_go_recycle.other	将替换 {n} 项。原有版本会移入回收站，可从中恢复。
+files.sync.count.replaced_lost.other	将替换 {n} 项，原有版本无法恢复。
+files.dupes.count.selected_s.other	已选中 {n} 项 · {s}
+files.dupes.groups_left_g_s	还剩 {g} 待处理，可释放 {s}
+files.dupes.none_left	已无重复文件
+files.menus.checksum	校验和…
+files.sync.open_dual_pane	按 F3 打开双栏视图，再分别打开要同步的两个文件夹。
+files.sync.only_nas_folders	同步仅支持 NAS 上两个可写的文件夹。远程连接、压缩包及电脑备份不在同步范围内。
+files.sync.same_folder	左右两栏打开了同一个文件夹
+files.sync.nested	两个文件夹存在嵌套关系，请选择互不包含的文件夹
+files.dupes.nas_folder_only	仅在 NAS 上的文件夹中查找重复项。顶层目录、压缩包、远程服务器和整机备份不在搜索范围内。
+files.select.open_dual_pane	打开双栏视图（F3）以比较两个文件夹
+files.actions.two_items_named_n	存在两个名为「{n}」的项目。放到同一文件夹时会发生覆盖。
+files.settings.expand_folders	允许在列表中展开文件夹
+files.settings.expand_folders_hint	列表视图中可用箭头就地展开文件夹（→ 展开，← 收起）
+files.pane.expand_folder	展开
+files.pane.collapse_folder	收起
