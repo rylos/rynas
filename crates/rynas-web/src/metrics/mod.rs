@@ -1,5 +1,7 @@
-//! Live metrics: a collector thread samples `/proc` and `/sys` once per second into a ring
-//! buffer (one hour) and broadcasts every sample, already serialized, to the SSE clients.
+//! Live metrics: a collector thread samples `/proc` and `/sys` into a ring buffer (3600
+//! samples) and broadcasts every sample, already serialized, to the SSE clients: once per
+//! second while a client listens, every [`IDLE_INTERVAL`] while nobody does (the history
+//! stays, coarser; a first client wakes the thread at once).
 //! The same thread reads the hardware provider (it needs the bay temperatures anyway) and
 //! broadcasts its status when it changes ([`Store::push_hardware`]), so no client polls
 //! `/api/v1/hardware`.
@@ -30,7 +32,11 @@ use procfs::{CpuTimes, DiskCounters};
 /// One hour at one sample per second (hard cap; the oldest sample is dropped). Packed, the
 /// full ring is ~1.5 MB on a DS920+ ([`ring`]).
 pub const RING_CAPACITY: usize = 3600;
+/// Sampling period while someone listens to the samples (a dashboard, the app)...
 pub const INTERVAL: Duration = Duration::from_secs(1);
+/// ...and while nobody does: the history keeps growing (coarser), the hardware status
+/// still follows, and the NAS is woken ten times less.
+pub const IDLE_INTERVAL: Duration = Duration::from_secs(10);
 /// An unchanged hardware status is broadcast again after this long, so that clients see
 /// `age_s` grow when the provider stops updating.
 pub const HW_REPEAT: Duration = Duration::from_secs(60);
@@ -47,6 +53,8 @@ pub struct Store {
     hw_last: Mutex<Option<(HardwareStatus, Instant)>>,
     hw_json: RwLock<Option<Arc<str>>>,
     hw_tx: broadcast::Sender<Arc<str>>,
+    /// The collector thread, unparked when a first listener comes ([`Store::subscribe`]).
+    collector: Mutex<Option<std::thread::Thread>>,
 }
 
 impl Store {
@@ -62,6 +70,7 @@ impl Store {
             hw_last: Mutex::new(None),
             hw_json: RwLock::new(None),
             hw_tx,
+            collector: Mutex::new(None),
         })
     }
 
@@ -139,15 +148,31 @@ impl Store {
             .clone()
     }
 
+    /// The samples from now on. A first listener wakes the collector: it samples every
+    /// second while someone listens, every [`IDLE_INTERVAL`] otherwise.
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<str>> {
-        self.tx.subscribe()
+        let rx = self.tx.subscribe();
+        if let Some(t) = self.collector.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            t.unpark();
+        }
+        rx
     }
 
-    /// The last `n` samples, averaged down to at most `max_points`. Samples are unpacked one
-    /// bucket at a time, so the transient memory is one bucket, not the whole hour.
-    pub fn history(&self, n: usize, max_points: usize) -> Vec<MetricsSample> {
+    /// Someone listens to the samples (a dashboard, the app).
+    pub fn listening(&self) -> bool {
+        self.tx.receiver_count() > 0
+    }
+
+    /// The samples of the last `window` (by their time: the collector samples every second
+    /// only while someone listens), averaged down to at most `max_points`. Samples are
+    /// unpacked one bucket at a time, so the transient memory is one bucket, not the whole
+    /// ring.
+    pub fn history(&self, window: Duration, max_points: usize) -> Vec<MetricsSample> {
         let ring = self.ring.read().unwrap_or_else(|e| e.into_inner());
-        let start = ring.len().saturating_sub(n);
+        let newest = ring.back().map_or(0, ring::Packed::ts_ms);
+        // (from, newest]: ten minutes at one per second are 600 samples
+        let from = newest.checked_sub(window.as_millis() as u64);
+        let start = from.map_or(0, |from| ring.partition_point(|p| p.ts_ms() <= from));
         let len = ring.len() - start;
         let mut out: Vec<MetricsSample> = history::buckets(len, max_points)
             .into_iter()
@@ -258,21 +283,40 @@ impl Collector {
             .name("metrics".into())
             .stack_size(256 * 1024)
             .spawn(move || {
+                *self.store.collector.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current());
                 let start = Instant::now();
                 self.sample(start);
                 std::thread::sleep(INTERVAL);
                 self.sample(Instant::now());
-                let mut n: u32 = 2;
+                let mut last = Instant::now();
                 loop {
-                    let next = start + INTERVAL * n;
+                    let listening = self.store.listening();
+                    let due = last + if listening { INTERVAL } else { IDLE_INTERVAL };
                     let now = Instant::now();
-                    if next > now {
-                        std::thread::sleep(next - now);
-                    } else if now - next > INTERVAL * 5 {
+                    if due > now {
+                        if listening {
+                            std::thread::sleep(due - now);
+                            last = due;
+                        } else {
+                            // a first listener unparks the thread: a sample at once, then
+                            // one every second
+                            std::thread::park_timeout(due - now);
+                            let woke = Instant::now();
+                            if woke < due {
+                                if !self.store.listening() {
+                                    continue;
+                                }
+                                last = woke;
+                            } else {
+                                last = due;
+                            }
+                        }
+                    } else if now - due > INTERVAL * 5 {
                         // suspended or starved: resynchronize instead of bursting
-                        n = ((now - start).as_secs_f64() / INTERVAL.as_secs_f64()) as u32;
+                        last = now;
+                    } else {
+                        last = due;
                     }
-                    n += 1;
                     let s = self.sample(Instant::now());
                     self.store.push(s);
                 }
@@ -431,7 +475,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        let h = store.history(60, 600);
+        let h = store.history(Duration::from_secs(60), 600);
         assert_eq!(h.len(), 3);
         for old in &h[..2] {
             assert!(old.cpu_per_thread.is_empty() && old.temps.is_empty(), "{old:?}");

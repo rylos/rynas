@@ -564,7 +564,7 @@ const MOUNTS_SETTLE: Duration = Duration::from_secs(3);
 /// Starts the rescan worker and the mount watcher, and mounts the chosen users' folders again
 /// (once, with the app catalogue; the apps' binds follow the mounts made after they started).
 /// Nothing runs on a timer: the worker sleeps until an upload is queued and then only until
-/// the batch is due; the watcher sleeps in `poll(2)` until the mount table changes.
+/// the batch is due; mount changes come from the system watcher ([`crate::sysevents`]).
 pub fn spawn(apps: Arc<AppsSvc>) {
     let p = Arc::new(Photos { apps, queue: Mutex::new(Debounce::default()), queued: tokio::sync::Notify::new() });
     if PHOTOS.set(p.clone()).is_err() {
@@ -589,18 +589,12 @@ pub fn spawn(apps: Arc<AppsSvc>) {
             }
         }
     });
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
-    std::thread::Builder::new()
-        .name("photos-mounts".into())
-        .spawn(move || watch_mounts(&tx))
-        .map(|_| ())
-        .unwrap_or_else(|e| tracing::warn!("photos: no mount watcher: {e}"));
+    // the mount table's changes come from the one system watcher (crate::sysevents)
+    let mut rx = crate::sysevents::subscribe();
     tokio::spawn(async move {
         restore(&p.apps, false).await;
-        while rx.recv().await.is_some() {
-            // a burst of changes (a container starting) is one check
-            tokio::time::sleep(MOUNTS_SETTLE).await;
-            while rx.try_recv().is_ok() {}
+        // a burst of changes (a container starting) is one check
+        while crate::sysevents::next_burst(&mut rx, MOUNTS_SETTLE, |e| *e == crate::sysevents::SysEvent::Mounts).await {
             let Ok(users) = users_checked(&passwd(&p.apps)) else { continue };
             let worth = missing_anywhere(&photos_dir(&p.apps.docker), &p.apps.docker.root, &users, &FAILURES.lock().unwrap());
             if worth {
@@ -608,34 +602,6 @@ pub fn spawn(apps: Arc<AppsSvc>) {
             }
         }
     });
-}
-
-/// Blocks in `poll(2)` on `/proc/self/mountinfo` and sends one message per change of the mount
-/// table (the kernel signals `POLLPRI`/`POLLERR`; no wakeup otherwise).
-fn watch_mounts(tx: &tokio::sync::mpsc::Sender<()>) {
-    use std::io::{Read, Seek};
-    use std::os::fd::AsRawFd;
-    let Ok(mut f) = std::fs::File::open("/proc/self/mountinfo") else { return };
-    let mut buf = Vec::new();
-    loop {
-        // reading the table to its end arms the next event
-        buf.clear();
-        if f.rewind().is_err() || f.read_to_end(&mut buf).is_err() {
-            return;
-        }
-        let mut pfd = libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLPRI | libc::POLLERR, revents: 0 };
-        // SAFETY: poll on one valid descriptor, no timeout
-        let r = unsafe { libc::poll(&mut pfd, 1, -1) };
-        if r < 0 {
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            return;
-        }
-        if tx.try_send(()).is_err() && tx.is_closed() {
-            return;
-        }
-    }
 }
 
 /// Whether a chosen folder of any photo stack is not mounted (only the choices files and the

@@ -84,6 +84,12 @@ impl Ops {
             pc_agent: std::sync::OnceLock::new(),
         }
     }
+
+    /// [`Config::pending_generation`] after every change of a changeset: stage, discard,
+    /// apply (which writes a revision), restore, import.
+    pub fn subscribe_pending(&self) -> tokio::sync::broadcast::Receiver<u64> {
+        self.pending.subscribe()
+    }
 }
 
 /// Root user tasks are for administrators (rynasd's own check, [`crate::roles`]): `who` may
@@ -641,6 +647,24 @@ struct TaskStreamQuery {
     /// `1` or `true`: also the Docker events (`docker_stats`, the latest sample first, and
     /// `docker_changed`). The stats sampler runs only while such a stream listens.
     docker: Option<String>,
+    /// `1` or `true`: also `storage_changed` (data `{}`): disks, partitions, arrays or
+    /// block-device mounts changed ([`crate::sysevents::storage_changes`]); re-read the
+    /// storage overview.
+    storage: Option<String>,
+}
+
+/// Event of the task stream (with `?storage=1`): the storage overview may have changed.
+pub const STORAGE_CHANGED: &str = "storage_changed";
+
+/// The storage half of the task stream: `storage_changed` after every settled burst of
+/// storage events (a lag is one more).
+fn storage_events() -> impl Stream<Item = Result<Event, Infallible>> {
+    stream::unfold(crate::sysevents::storage_changes(), |mut rx| async move {
+        match rx.recv().await {
+            Ok(()) | Err(RecvError::Lagged(_)) => Some((Ok(Event::default().event(STORAGE_CHANGED).data("{}")), rx)),
+            Err(RecvError::Closed) => None,
+        }
+    })
 }
 
 /// The Docker half of the task stream: `docker_stats` (data `DockerStats`, the latest first),
@@ -727,6 +751,7 @@ async fn task_stream(
     let docker = matches!(q.docker.as_deref(), Some("1" | "true"))
         .then(|| docker_events(&ops))
         .flatten();
+    let storage = matches!(q.storage.as_deref(), Some("1" | "true")).then(storage_events);
     let events = stream::select(
         tasks,
         stream::select(
@@ -734,7 +759,7 @@ async fn task_stream(
                 stream::iter(config).flatten(),
                 stream::iter(removable).flatten(),
             ),
-            stream::iter(docker).flatten(),
+            stream::select(stream::iter(docker).flatten(), stream::iter(storage).flatten()),
         ),
     );
     Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))

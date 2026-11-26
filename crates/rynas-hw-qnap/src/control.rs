@@ -21,8 +21,12 @@ use crate::disks::BayState;
 use crate::gpio::{Direction, Gpio};
 use crate::model::{self, Chip, Line, Model};
 
-/// Button poll and the vendor's blink step (the status and USB LEDs toggle every 125 ms).
+/// Button poll and the vendor's blink step (the status and USB LEDs toggle every 125 ms),
+/// while something moves ([`Controller::tick`])...
 const POLL: Duration = Duration::from_millis(125);
+/// ...and the button poll on a quiet box (no blink, no press): 4 wake-ups a second instead
+/// of 8 (a Bay Trail box with a freeze history). A press shorter than this may be missed.
+const IDLE_POLL: Duration = Duration::from_millis(250);
 /// Ticks per slow toggle (the vendor's alternate green/red: every 500 ms).
 const SLOW_TICKS: u64 = 4;
 /// Ticks between attempts at writes that failed.
@@ -212,6 +216,12 @@ struct Button {
     count: u8,
     since: Option<Instant>,
     last_notified: Option<Instant>,
+}
+
+/// The button is held, or its level changed and is not stable yet: polled fast until it
+/// settles (a press is caught at the idle pace, measured at the fast one).
+fn button_moving(b: &Button) -> bool {
+    b.pressed == Some(true) || b.seen != b.pressed
 }
 
 /// A press has been released: how long it was held. The state of the button decides: a button
@@ -587,11 +597,15 @@ impl Controller {
     }
 
     /// One poll: buttons, blink, retries, the alarm's repeat. The worker calls it every [`POLL`].
-    pub fn tick(&self, now: Instant) {
+    /// One step of the worker; returns how long to wait before the next one: [`POLL`] while
+    /// an LED blinks, a write must be retried or a button is moving (pressed, or a level
+    /// not yet stable), [`IDLE_POLL`] otherwise (fewer wake-ups on a quiet box).
+    pub fn tick(&self, now: Instant) -> Duration {
         let n = self.tick_no.fetch_add(1, Ordering::Relaxed);
         let m = self.confirmed.model();
         let mut events = Vec::new();
         let mut sound = false;
+        let busy;
         {
             let mut g = self.inner.lock().unwrap();
             if self.confirmed.gpio_loaded() && !self.paused.load(Ordering::Acquire) {
@@ -617,6 +631,9 @@ impl Controller {
                 g.alarm_at = Some(now);
                 sound = true;
             }
+            let polling = self.confirmed.gpio_loaded() && !self.paused.load(Ordering::Acquire);
+            busy = polling
+                && (g.any_blink || g.write_failed || button_moving(&g.reset) || (m.usb_copy_button_fitted && button_moving(&g.usb_copy)));
         }
         if sound {
             // the vendor's broken-drive alert (mode 0xE); disk failure itself has no pattern in
@@ -626,6 +643,7 @@ impl Controller {
         for e in events {
             (self.notify)(&e);
         }
+        if busy { POLL } else { IDLE_POLL }
     }
 
     fn poll(
@@ -837,8 +855,8 @@ fn play(speaker: &dyn Speaker, kind: BeepKind, hz: u32, stop: &AtomicBool) {
 pub fn spawn(ctl: Arc<Controller>) {
     let run = move || {
         loop {
-            ctl.tick(Instant::now());
-            std::thread::sleep(POLL);
+            let wait = ctl.tick(Instant::now());
+            std::thread::sleep(wait);
         }
     };
     if let Err(e) = std::thread::Builder::new().name("qnap-hw".into()).stack_size(128 << 10).spawn(run) {
@@ -1179,6 +1197,36 @@ pub mod tests {
             gpio.set_level(label, line, *high);
             c.tick(t + Duration::from_millis(125 * i as u64));
         }
+    }
+
+    #[test]
+    fn the_worker_slows_down_on_a_quiet_box() {
+        let gpio = fake_gpio();
+        let m = &MODELS[0];
+        let label = chip_label(m.reset_button);
+        gpio.set_direction(&label, m.reset_button.offset, Direction::Input);
+        gpio.set_direction(&chip_label(m.usb_copy_button), m.usb_copy_button.offset, Direction::Input);
+        gpio.set_level(&chip_label(m.usb_copy_button), m.usb_copy_button.offset, true);
+        let (c, _, _) = ctl(&gpio);
+        c.apply(QnapSettings::default());
+        let t = Instant::now();
+        // released (active low: high) and stable: the idle pace, unless an LED blinks
+        gpio.set_level(&label, m.reset_button.offset, true);
+        let mut wait = POLL;
+        for i in 0..4 {
+            wait = c.tick(t + Duration::from_millis(250 * i));
+        }
+        let blinking = c.inner.lock().unwrap().any_blink;
+        assert_eq!(wait, if blinking { POLL } else { IDLE_POLL });
+        // pressed: fast until released and stable again
+        gpio.set_level(&label, m.reset_button.offset, false);
+        assert_eq!(c.tick(t + Duration::from_millis(1000)), POLL);
+        assert_eq!(c.tick(t + Duration::from_millis(1125)), POLL);
+        assert!(!button_moving(&Button { pressed: Some(false), seen: Some(false), ..Default::default() }));
+        assert!(button_moving(&Button { pressed: Some(false), seen: Some(true), ..Default::default() }));
+        assert!(button_moving(&Button { pressed: Some(true), seen: Some(true), ..Default::default() }));
+        // a line that cannot be read never keeps the worker fast
+        assert!(!button_moving(&Button::default()));
     }
 
     #[test]

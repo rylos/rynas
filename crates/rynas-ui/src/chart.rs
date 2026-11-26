@@ -144,7 +144,9 @@ impl Snap {
     /// Sample spacing in ms: the median of the recent gaps, rounded to 10 ms (1 s when unknown).
     /// Stable from one sample to the next, so the horizontal scale never twitches.
     fn step_ms(&self) -> f64 {
-        let mut gaps: Vec<f64> = self.ts.windows(2).rev().take(31).map(|w| w[1] - w[0]).collect();
+        // the newest gaps: the server samples every 10 s while nobody watches and every second
+        // once a dashboard listens, so the step follows within a few seconds
+        let mut gaps: Vec<f64> = self.ts.windows(2).rev().take(9).map(|w| w[1] - w[0]).collect();
         if gaps.is_empty() {
             return 1000.0;
         }

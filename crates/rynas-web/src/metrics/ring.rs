@@ -107,6 +107,10 @@ impl Packed {
         }
     }
 
+    pub fn ts_ms(&self) -> u64 {
+        self.ts_ms
+    }
+
     pub fn series(&self) -> &Arc<Series> {
         &self.series
     }

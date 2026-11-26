@@ -3,8 +3,10 @@
 //! volumes and the notifications.
 //!
 //! - **Watcher**: a dedicated thread owns the [`Scanner`] (sysfs, udev database, mount table
-//!   below `--hw-root`); every [`TICK`] the async loop asks it for a reading (a read that hangs
-//!   on a dead device only blocks that thread). When the drives change, the new
+//!   below `--hw-root`); the async loop asks it for a reading when the system watcher
+//!   ([`crate::sysevents`]: udev block events, mount table) reports a change, and at least
+//!   every [`TICK`] as a safety net (a read that hangs on a dead device only blocks that
+//!   thread). When the drives change, the new
 //!   [`RemovableState`] goes to the task stream's `removable` events (`?removable=1`, which
 //!   rynas-web forwards on `/api/v1/events` as `removable.state`).
 //! - **Actions** are immediate (not staged) and run as tasks `removable.<verb>`; the request
@@ -50,8 +52,12 @@ use crate::ops::{Error, Ops, Res, user};
 use crate::services::{docs, stage};
 
 pub const REMOVABLE_KEY: &str = "removable";
-/// Period of the watcher.
-pub const TICK: Duration = Duration::from_secs(2);
+/// Safety net of the watcher: a reading at least this often even without events.
+pub const TICK: Duration = Duration::from_secs(60);
+/// The pace without any system events (the watcher thread could not start).
+pub const LOST_TICK: Duration = Duration::from_secs(2);
+/// A burst of block and mount events is one reading once it was quiet this long.
+pub const SETTLE: Duration = Duration::from_millis(700);
 /// Longest wait for a reading of the scanner thread.
 const SCAN_WAIT: Duration = Duration::from_secs(10);
 /// Drives already plugged in are mounted automatically when rynasd starts this soon after
@@ -608,10 +614,14 @@ fn ntfs_event(
     field(ev, "mount_point", mount_point)
 }
 
-/// The watcher loop: a reading every [`TICK`], settings changes at once.
+/// The watcher loop: a reading when the system watcher ([`crate::sysevents`]) reports a block
+/// device or mount change (a burst settled for [`SETTLE`]), at least every [`TICK`] as a
+/// safety net (a fake `--hw-root`, an event the kernel dropped), settings changes at once.
 pub fn spawn_watch(s: Arc<RemovableSvc>) {
     tokio::spawn(async move {
         let mut settings = s.settings.clone();
+        let mut events = crate::sysevents::subscribe();
+        let mut watching = true;
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -620,6 +630,19 @@ pub fn spawn_watch(s: Arc<RemovableSvc>) {
                     if let Err(e) = s.refresh(false).await {
                         tracing::debug!("removable drives: {}", e.2);
                     }
+                }
+                alive = crate::sysevents::next_burst(&mut events, SETTLE, |e| !matches!(e, crate::sysevents::SysEvent::Md)), if watching => {
+                    if !alive {
+                        // no watcher: the safety net alone, at the old pace
+                        tracing::warn!("removable drives: no system events, looking every {} s", LOST_TICK.as_secs());
+                        watching = false;
+                        tick = tokio::time::interval(LOST_TICK);
+                        continue;
+                    }
+                    if let Err(e) = s.refresh(false).await {
+                        tracing::debug!("removable drives: {}", e.2);
+                    }
+                    tick.reset();
                 }
                 r = settings.changed() => {
                     if r.is_err() {

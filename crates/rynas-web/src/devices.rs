@@ -49,8 +49,10 @@ use crate::error::Error;
 use crate::rynasd_client::UpstreamError;
 
 /// How often finished pairings are dropped and access tokens of devices revoked by rynasd
-/// itself (expired, removed accounts, reuse) or of users who lost the role are ended.
-pub const SWEEP_EVERY: Duration = Duration::from_secs(10);
+/// itself (expired, removed accounts, reuse) or of users who lost the role are ended. rynasd
+/// is asked only while some device has a session ([`sweep`]); revocations made through
+/// rynas-web end the sessions at once, not at the next sweep.
+pub const SWEEP_EVERY: Duration = Duration::from_secs(60);
 /// Revoked device ids remembered (the newest; older ones are long past any refresh in flight).
 const MAX_REVOKED: usize = 4096;
 
@@ -833,6 +835,10 @@ pub async fn sweep(st: &AppState) {
             Ok(()) => st.devices.revoked(st.auth.sessions(), &id, revoke_reason::UNCLAIMED),
             Err(e) => tracing::warn!("devices: unclaimed device {id} not revoked: {e:?}"),
         }
+    }
+    // no device session: nothing rynasd could have revoked here (no call, no wakeup there)
+    if st.auth.sessions().device_ids().is_empty() {
+        return;
     }
     // sessions made from now on may belong to devices this list does not know yet
     let asked_ms = st.auth.pairings().now_ms();

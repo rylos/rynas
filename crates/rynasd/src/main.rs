@@ -1468,12 +1468,18 @@ fn main() -> std::io::Result<()> {
         // the scheduler tasks of rynas's own jobs (updates check, Docker, app catalog, PC
         // backups, deduplication windows): created on the first start after the upgrade from
         // the features' settings, and kept in line with the applied settings afterwards (a
-        // restored revision, an imported archive, a rollback: checked every minute)
+        // restored revision, an imported archive, a rollback): checked when a new revision
+        // was written (the pending-changes events say when to look), at least every hour
         {
             let cfg = ops.config.clone();
             let agent = state.pc_agent.clone();
+            let mut pending = ops.subscribe_pending();
             tokio::spawn(async move {
+                let head = |c: &rynas_config::Config| c.revisions(1).ok().and_then(|r| r.first().map(|r| r.id));
+                let mut seen = None;
                 loop {
+                    let c = cfg.clone();
+                    seen = tokio::task::spawn_blocking(move || head(&c)).await.ok().flatten().or(seen);
                     let (cfg2, pc_hour) = (cfg.clone(), agent.as_ref().map(|a| a.snapshot().settings.maintenance_hour));
                     let r = tokio::task::spawn_blocking(move || {
                         if let Err(e) = rynasd::schedule_view::migrate_window(&cfg2, &|l| tracing::info!("scheduler: {l}")) {
@@ -1488,7 +1494,26 @@ fn main() -> std::io::Result<()> {
                         Ok(Err(e)) => tracing::warn!("scheduler: tasks of rynas's jobs: {e}"),
                         Err(e) => tracing::warn!("scheduler: tasks of rynas's jobs: {e}"),
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    // until a revision newer than the one looked at (its own apply included:
+                    // the next look finds nothing to do), or the hourly safety net
+                    let safety = tokio::time::sleep(std::time::Duration::from_secs(3600));
+                    tokio::pin!(safety);
+                    loop {
+                        tokio::select! {
+                            _ = &mut safety => break,
+                            r = pending.recv() => {
+                                if matches!(r, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                                    safety.as_mut().await;
+                                    break;
+                                }
+                                let c = cfg.clone();
+                                let now = tokio::task::spawn_blocking(move || head(&c)).await.ok().flatten();
+                                if now != seen {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             });
         }

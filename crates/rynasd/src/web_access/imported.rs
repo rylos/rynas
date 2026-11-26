@@ -10,8 +10,9 @@
 //!   [`Active`] and writes the engine copies from that snapshot (review 2026-11-07, M3).
 //! - **Watched folder.** `/var/lib/rynas-cert-drop/<id>/` (`2770 root:rynas-cert-drop` in a
 //!   base `0750 root:rynas-cert-drop`, usable as an sshd `ChrootDirectory`): another tool
-//!   writes `fullchain.pem` and `privkey.pem` there. rynasd polls the two files every
-//!   [`POLL`] (a `stat` through descriptors), waits until they have stayed unchanged for
+//!   writes `fullchain.pem` and `privkey.pem` there. rynasd looks at the two files (a `stat`
+//!   through descriptors) when inotify reports a change in the folder ([`spawn_watch`]: a
+//!   thread only while some import has a watched folder), waits until they have stayed unchanged for
 //!   [`SETTLE`] (acme.sh's ssh deploy rewrites the files in place with `echo >`, one after the
 //!   other, so a rename-based trigger alone would catch half-written pairs), then validates.
 //!   Files are opened below the folder without following symlinks, regular files with one
@@ -71,7 +72,7 @@ pub const FULLCHAIN: &str = "fullchain.pem";
 pub const PRIVKEY: &str = "privkey.pem";
 /// Largest PEM file read from a watched folder.
 pub const MAX_PEM: u64 = 64 * 1024;
-/// How often the watched folders are looked at.
+/// How often the watched folders are looked at where inotify is missing.
 pub const POLL: Duration = Duration::from_secs(2);
 /// How long both files must stay unchanged before they are read.
 pub const SETTLE: Duration = Duration::from_secs(3);
@@ -177,6 +178,11 @@ pub struct WatchState {
 #[derive(Debug, Default)]
 pub struct ImportMem {
     pub watch: BTreeMap<String, WatchState>,
+    /// The folder watcher thread runs ([`spawn_watch`]); it ends when no import has a
+    /// watched folder.
+    watcher: bool,
+    /// Rung when an import was saved or deleted: the watcher may have to start.
+    kick: Arc<tokio::sync::Notify>,
 }
 
 /// What reading a watched folder led to.
@@ -1195,7 +1201,35 @@ impl WebAccessSvc {
             );
         }
         self.reload_engine("an imported certificate changed");
+        self.kick_drop_watch();
         self.import_one(&req.id)
+    }
+
+    /// An import was saved or deleted: the folder watcher starts if a folder needs it (and
+    /// ends by itself when none does).
+    fn kick_drop_watch(&self) {
+        self.lock_imports().kick.notify_one();
+    }
+
+    /// When the next look at the watched folders is due: a folder whose files changed and
+    /// must stay unchanged for [`SETTLE`] first, a held pair that starts later. `None`:
+    /// nothing is due until the files change.
+    pub fn next_drop_due(&self, at: Instant) -> Option<Duration> {
+        let now_ms = rynas_tls::now();
+        let mem = self.lock_imports();
+        mem.watch
+            .values()
+            .filter_map(|w| {
+                let wait = w.wait_until_ms.map(|t| Duration::from_millis(t.saturating_sub(now_ms).max(0) as u64));
+                let settle = match (w.seen, w.since) {
+                    // files that moved while read, or a folder that went: looked at again
+                    (None, _) | (Some(_), None) => Some(SETTLE),
+                    (Some(sig), _) if sig == [None, None] || w.done == Some(sig) => None,
+                    (Some(_), Some(s)) => Some((s + SETTLE).saturating_duration_since(at)),
+                };
+                [wait, settle].into_iter().flatten().min()
+            })
+            .min()
     }
 
     fn folder_meta(&self, id: &str) -> Res<Meta> {
@@ -1285,22 +1319,104 @@ impl WebAccessSvc {
             }
         }
         self.reload_engine("an imported certificate was removed");
+        self.kick_drop_watch();
         Ok(())
+    }
+
+    fn folder_ids(&self) -> Vec<String> {
+        self.import_index().into_iter().filter(|m| m.source == ImportSource::Folder).map(|m| m.id).collect()
     }
 }
 
-/// Polls the watched folders every [`POLL`] (a thread: two `stat`s per folder).
+/// The watched folders, without a timer: a task that sleeps until an import is saved or
+/// deleted ([`ImportMem::kick`]) starts the watcher thread ([`watch_drops`]) while some
+/// import has a watched folder; the thread ends when none has.
 pub fn spawn_watch(svc: Arc<WebAccessSvc>) {
-    std::thread::Builder::new()
-        .name("cert-drop".into())
-        .spawn(move || {
-            loop {
-                svc.scan_drops_at(Instant::now());
-                std::thread::sleep(POLL);
+    let kick = svc.lock_imports().kick.clone();
+    tokio::spawn(async move {
+        loop {
+            let start = {
+                let mut mem = svc.lock_imports();
+                let start = !mem.watcher && !svc.folder_ids().is_empty();
+                if start {
+                    mem.watcher = true;
+                }
+                start
+            };
+            if start {
+                let s = svc.clone();
+                if let Err(e) = std::thread::Builder::new().name("cert-drop".into()).stack_size(256 << 10).spawn(move || watch_drops(&s)) {
+                    tracing::error!("web access: watched certificate folders: {e}");
+                    svc.lock_imports().watcher = false;
+                }
             }
-        })
-        .map(|_| ())
-        .unwrap_or_else(|e| tracing::error!("web access: watched certificate folders: {e}"));
+            kick.notified().await;
+        }
+    });
+}
+
+/// The watcher thread: sleeps in `poll(2)` on an inotify descriptor (the base folder and
+/// each watched folder) until their files change or a settle window ends
+/// ([`WebAccessSvc::next_drop_due`]), then looks ([`WebAccessSvc::scan_drops_at`], two
+/// `stat`s per folder). Without inotify it looks every [`POLL`], as before.
+fn watch_drops(svc: &Arc<WebAccessSvc>) {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    // SAFETY: inotify_init1(2); the descriptor is owned right after
+    let ino = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+    let ino = (ino >= 0).then(|| unsafe { OwnedFd::from_raw_fd(ino) });
+    if ino.is_none() {
+        tracing::warn!("web access: no inotify ({}), watched folders are looked at every {} s", io::Error::last_os_error(), POLL.as_secs());
+    }
+    let mut buf = vec![0u8; 8 << 10];
+    loop {
+        let ids = svc.folder_ids();
+        if ids.is_empty() {
+            let mut mem = svc.lock_imports();
+            // saved meanwhile: go on (the kick of that save found the thread running)
+            if svc.folder_ids().is_empty() {
+                mem.watcher = false;
+                return;
+            }
+            continue;
+        }
+        let mut watched = 0;
+        if let Some(fd) = &ino {
+            let add = |p: &Path, mask: u32| {
+                let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else { return false };
+                // SAFETY: inotify_add_watch(2) on a NUL-terminated path; the same path again
+                // only updates its watch
+                unsafe { libc::inotify_add_watch(fd.as_raw_fd(), c.as_ptr(), mask) >= 0 }
+            };
+            let base = svc.drop_base();
+            watched += usize::from(add(&base, libc::IN_CREATE | libc::IN_DELETE | libc::IN_MOVED_TO | libc::IN_MOVED_FROM | libc::IN_ONLYDIR));
+            for id in &ids {
+                let mask = libc::IN_CLOSE_WRITE | libc::IN_MODIFY | libc::IN_ATTRIB | libc::IN_CREATE | libc::IN_DELETE | libc::IN_MOVED_TO | libc::IN_MOVED_FROM | libc::IN_ONLYDIR;
+                watched += usize::from(add(&base.join(id), mask));
+            }
+        }
+        svc.scan_drops_at(Instant::now());
+        // a folder that cannot be watched (missing base) is looked at now and then
+        let fallback = if watched > ids.len() { None } else { Some(POLL.max(Duration::from_secs(60))) };
+        let wait = [svc.next_drop_due(Instant::now()).map(|d| d + Duration::from_millis(50)), fallback]
+            .into_iter()
+            .flatten()
+            .min()
+            .map(|d| d.min(Duration::from_secs(3600)));
+        let Some(fd) = &ino else {
+            std::thread::sleep(POLL);
+            continue;
+        };
+        let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let ms = wait.map_or(-1, |d| d.as_millis().min(i32::MAX as u128) as i32);
+        // SAFETY: poll(2) on one valid descriptor
+        let r = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if r > 0 {
+            // a writer rewrites both files: gather its events into one look
+            std::thread::sleep(Duration::from_millis(200));
+            // SAFETY: read(2) into a buffer of the given length (non-blocking descriptor)
+            while unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+        }
+    }
 }
 
 #[cfg(test)]

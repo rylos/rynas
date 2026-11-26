@@ -106,7 +106,10 @@ async fn history(
     RawQuery(q): RawQuery,
 ) -> ApiResult<Vec<MetricsSample>> {
     let minutes = parse_minutes(q.as_deref()).map_err(Error::bad_request)?;
-    Ok(Json(st.store.history(minutes as usize * 60, MAX_POINTS)))
+    Ok(Json(st.store.history(
+        std::time::Duration::from_secs(u64::from(minutes) * 60),
+        MAX_POINTS,
+    )))
 }
 
 async fn hardware(State(st): State<AppState>) -> ApiResult<HardwareStatus> {
