@@ -596,13 +596,15 @@ pub fn spawn(apps: Arc<AppsSvc>) {
         .map(|_| ())
         .unwrap_or_else(|e| tracing::warn!("photos: no mount watcher: {e}"));
     tokio::spawn(async move {
-        restore(&p.apps).await;
+        restore(&p.apps, false).await;
         while rx.recv().await.is_some() {
             // a burst of changes (a container starting) is one check
             tokio::time::sleep(MOUNTS_SETTLE).await;
             while rx.try_recv().is_ok() {}
-            if missing_anywhere(&photos_dir(&p.apps.docker), &p.apps.docker.root) {
-                restore(&p.apps).await;
+            let Ok(users) = users_checked(&passwd(&p.apps)) else { continue };
+            let worth = missing_anywhere(&photos_dir(&p.apps.docker), &p.apps.docker.root, &users, &FAILURES.lock().unwrap());
+            if worth {
+                restore(&p.apps, true).await;
             }
         }
     });
@@ -638,14 +640,57 @@ fn watch_mounts(tx: &tokio::sync::mpsc::Sender<()>) {
 
 /// Whether a chosen folder of any photo stack is not mounted (only the choices files and the
 /// mount table are read: most mount changes are not about photos).
-pub fn missing_anywhere(dir: &Path, root: &Path) -> bool {
+pub fn missing_anywhere(dir: &Path, root: &Path, users: &[NasUser], failures: &Failures) -> bool {
     let mi = mountinfo();
     std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
         let p = e.path();
         let Some(stack) = p.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".json")) else { return false };
         let store = load_store(&p);
-        installed(&store, root) && !to_restore(&store, &mounted_users(&mi, &dir.join(stack))).is_empty()
+        installed(&store, root)
+            && to_restore(&store, &mounted_users(&mi, &dir.join(stack)))
+                .iter()
+                .filter_map(|n| users.iter().find(|u| &u.name == n))
+                .any(|u| !failures.skip(stack, &u.name, &source_id(root, u)))
     })
+}
+
+/// The last failed mount of each (stack, user) with the identity its source had then: a
+/// change of the mount table does not try again (and spawn a helper) until the source
+/// changes. A start of rynasd or a sync tries everything again.
+#[derive(Debug, Default)]
+pub struct Failures(BTreeMap<(String, String), String>);
+
+impl Failures {
+    pub const fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+    /// The source is as it was when the mount failed.
+    pub fn skip(&self, stack: &str, user: &str, id: &str) -> bool {
+        self.0.get(&(stack.to_string(), user.to_string())).is_some_and(|f| f == id)
+    }
+    pub fn failed(&mut self, stack: &str, user: &str, id: String) {
+        self.0.insert((stack.to_string(), user.to_string()), id);
+    }
+    pub fn ok(&mut self, stack: &str, user: &str) {
+        self.0.remove(&(stack.to_string(), user.to_string()));
+    }
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+static FAILURES: Mutex<Failures> = Mutex::new(Failures::new());
+
+/// The identity of a user's `Photos` folder, from a cheap `lstat` (never the helper):
+/// device, inode, owner and mode, or why there is none.
+pub fn source_id(root: &Path, u: &NasUser) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(home) = real_home(root, u) else { return "unreachable".into() };
+    match std::fs::symlink_metadata(home.join(FOLDER)) {
+        Ok(m) => format!("{}:{}:{}:{:o}", m.dev(), m.ino(), m.uid(), m.mode()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "absent".into(),
+        Err(e) => format!("error {}", e.kind()),
+    }
 }
 
 /// The users of a stack to mount (at start, after a change of the mount table, at boot):
@@ -662,7 +707,11 @@ pub fn to_restore(store: &Store, mounted: &BTreeSet<String>) -> Vec<String> {
 /// The mounts of every installed photo app as chosen, made where missing (no call to the
 /// apps: a block found by the last sync stays). A stack busy with another task is skipped:
 /// its task ends with a sync or leaves the mounts as they were.
-async fn restore(a: &Arc<AppsSvc>) {
+async fn restore(a: &Arc<AppsSvc>, event: bool) {
+    if !event {
+        // a start tries every folder again
+        FAILURES.lock().unwrap().clear();
+    }
     let (cat, _) = a.catalog().await;
     let Ok(users) = users_checked(&passwd(a)) else { return };
     let gid = a.apps_ids().map(|i| i.1);
@@ -677,9 +726,19 @@ async fn restore(a: &Arc<AppsSvc>) {
         let root = staging_root(&a.docker, &d.stack);
         for name in to_restore(&store, &mounted_users(&mountinfo(), &root)) {
             let Some(u) = users.iter().find(|u| u.name == name) else { continue };
+            let id = source_id(&a.docker.root, u);
+            if event && FAILURES.lock().unwrap().skip(&d.stack, &name, &id) {
+                continue;
+            }
             match mount_user(&a.docker, &root, u, gid).await {
-                Ok(out) => tracing::info!("photos: {}: {name}: {out}", d.stack),
-                Err(e) => tracing::debug!("photos: {}: {name}: {e}", d.stack),
+                Ok(out) => {
+                    FAILURES.lock().unwrap().ok(&d.stack, &name);
+                    tracing::info!("photos: {}: {name}: {out}", d.stack);
+                }
+                Err(e) => {
+                    FAILURES.lock().unwrap().failed(&d.stack, &name, id);
+                    tracing::debug!("photos: {}: {name}: {e}", d.stack);
+                }
             }
         }
     }
@@ -982,13 +1041,22 @@ pub(crate) async fn sync_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, stack: &str) -> R
         match step {
             Step::Mount => {
                 let Some(u) = users.iter().find(|u| u.name == name) else { continue };
+                // a sync always tries; a failure is remembered for the mount table's changes
+                let id = source_id(&a.docker.root, u);
                 match mount_user(&a.docker, &root, u, gid).await {
                     Ok(out) => {
+                        FAILURES.lock().unwrap().ok(stack, &name);
                         ctx.log(&format!("{name}: {out}"));
                         ready.push(name);
                     }
-                    Err(e) if mounted.contains(&name) => ctx.log(&format!("warning: {name}: {e}: the folder mounted before stays")),
-                    Err(e) => ctx.log(&format!("warning: {name}: {e}: not mounted")),
+                    Err(e) => {
+                        FAILURES.lock().unwrap().failed(stack, &name, id);
+                        if mounted.contains(&name) {
+                            ctx.log(&format!("warning: {name}: {e}: the folder mounted before stays"));
+                        } else {
+                            ctx.log(&format!("warning: {name}: {e}: not mounted"));
+                        }
+                    }
                 }
             }
             Step::Unmount(why) => {
@@ -1235,12 +1303,40 @@ mod tests {
         // a stack that is not installed (no compose file where it was): nothing for it
         let log = boot_restore(&t.path().join("state/docker"), t.path());
         assert_eq!(log, ["pigallery2: not installed: nothing mounted"]);
-        assert!(!missing_anywhere(&t.path().join("state/docker/photos"), t.path()));
+        let users = users_checked("ann:x:1000:100::/home/ann:/bin/sh\n").unwrap();
+        let none = Failures::new();
+        assert!(!missing_anywhere(&t.path().join("state/docker/photos"), t.path(), &users, &none));
         std::fs::create_dir_all(t.path().join("vol1/docker/stacks/pigallery2")).unwrap();
         std::fs::write(t.path().join("vol1/docker/stacks/pigallery2/compose.yaml"), "services: {}\n").unwrap();
         s.stack_dir = Some("/vol1/docker/stacks/pigallery2".into());
         save_store(&choices, &s).unwrap();
-        assert!(missing_anywhere(&t.path().join("state/docker/photos"), t.path()), "ann is chosen and not mounted");
+        let photos = t.path().join("state/docker/photos");
+        assert!(missing_anywhere(&photos, t.path(), &users, &none), "ann is chosen and not mounted");
+        // a failed mount is not tried again on mount table changes while the source is the same
+        let mut failures = Failures::new();
+        failures.failed("pigallery2", "ann", source_id(t.path(), &users[0]));
+        assert_eq!(source_id(t.path(), &users[0]), "absent");
+        assert!(!missing_anywhere(&photos, t.path(), &users, &failures), "nothing changed: no helper");
+        // the user's phone made the folder: worth a try again
+        std::fs::create_dir_all(t.path().join("home/ann/Photos")).unwrap();
+        assert_ne!(source_id(t.path(), &users[0]), "absent");
+        assert!(missing_anywhere(&photos, t.path(), &users, &failures));
+        // replaced by another folder: another identity
+        let id = source_id(t.path(), &users[0]);
+        failures.failed("pigallery2", "ann", id.clone());
+        assert!(!missing_anywhere(&photos, t.path(), &users, &failures));
+        std::fs::rename(t.path().join("home/ann/Photos"), t.path().join("home/ann/Old")).unwrap();
+        std::fs::create_dir_all(t.path().join("home/ann/Photos")).unwrap();
+        assert_ne!(source_id(t.path(), &users[0]), id);
+        assert!(missing_anywhere(&photos, t.path(), &users, &failures));
+        // a success or a start forgets it
+        failures.ok("pigallery2", "ann");
+        assert!(!failures.skip("pigallery2", "ann", &id));
+        failures.failed("pigallery2", "ann", id.clone());
+        failures.clear();
+        assert!(!failures.skip("pigallery2", "ann", &id));
+        std::fs::remove_dir(t.path().join("home/ann/Photos")).unwrap();
+        std::fs::remove_dir(t.path().join("home/ann/Old")).unwrap();
         let log = boot_restore(&t.path().join("state/docker"), t.path());
         assert_eq!(log.len(), 1, "{log:?}");
         assert!(log[0].starts_with("pigallery2: ann: ") && !log[0].ends_with("mounted"), "{log:?}");

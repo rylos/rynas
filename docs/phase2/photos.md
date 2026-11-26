@@ -113,7 +113,10 @@ now:
   home on a volume mounted later): a thread sleeps in `poll(2)` on `/proc/self/mountinfo`
   (`POLLPRI`, no wakeup otherwise), changes are gathered for 3 s, and only if a chosen folder
   of an installed stack is not mounted does rynasd mount it, stack by stack, reading the
-  choices and the mount table under the stack's busy mark. No timer runs for this; the apps'
+  choices and the mount table under the stack's busy mark. A folder that failed is not tried
+  again on these changes (no helper spawned) until its source changes (a cheap `lstat` of
+  `Photos`: device, inode, owner, mode, or absent); a start of rynasd or a sync tries it again.
+  No timer runs for this; the apps'
   `rslave` binds pick the mounts up. Uninstall removes the choices with the staging folder. The user list is checked first: an unreadable or empty passwd changes
   nothing (every chosen user would look gone).
 - Users leave the mounts only when they leave passwd (logged: the app may move the photos to
