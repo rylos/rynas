@@ -146,3 +146,5 @@ App icons come from [Dashboard Icons](https://github.com/homarr-labs/dashboard-i
 <sub>rynas is an independent project, not affiliated with, endorsed by or supported by
 Synology Inc. or QNAP Systems, Inc. Synology, DSM, QNAP and related names are trademarks of
 their owners, used here only to describe hardware compatibility.</sub>
+
+<p align="center"><sub>Made in Italy 🇮🇹</sub></p>
