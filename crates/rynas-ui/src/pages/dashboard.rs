@@ -612,20 +612,20 @@ fn NetworkWidget() -> impl IntoView {
             <Show when=move || s.with(Option::is_some) fallback=|| view! { <Skeleton lines=4 /> }>
                 <div class="duo">
                     <div class="duo-item">
-                        <span class="duo-label"><span class="dot c1"></span><Icon icon=icons::ARROW_DOWN size=14 />{tr("n.rx")}</span>
-                        <span class="duo-num">{move || i18n::bitrate(tot().0)}</span>
+                        <span class="duo-label"><span class="dot net-down"></span><Icon icon=icons::ARROW_DOWN size=14 />{tr("n.rx")}</span>
+                        <span class="duo-num net-down">{move || i18n::bitrate(tot().0)}</span>
                     </div>
                     <div class="duo-item">
-                        <span class="duo-label"><span class="dot c2"></span><Icon icon=icons::ARROW_UP size=14 />{tr("n.tx")}</span>
-                        <span class="duo-num">{move || i18n::bitrate(tot().1)}</span>
+                        <span class="duo-label"><span class="dot net-up"></span><Icon icon=icons::ARROW_UP size=14 />{tr("n.tx")}</span>
+                        <span class="duo-num net-up">{move || i18n::bitrate(tot().1)}</span>
                     </div>
                 </div>
                 <div class="chart-wrap">
                     <LiveChart
                         series=vec![
                             // in bit/s, so the 1-2-5 scale rounds in the unit shown
-                            Series::new("--c1", true, |m: &MetricsSample| net_total(m).0 as f32 * 8.0),
-                            Series::new("--c2", false, |m: &MetricsSample| net_total(m).1 as f32 * 8.0),
+                            Series::new("--net-down", true, |m: &MetricsSample| net_total(m).0 as f32 * 8.0),
+                            Series::new("--net-up", false, |m: &MetricsSample| net_total(m).1 as f32 * 8.0),
                         ]
                         label=|v| i18n::bitrate(v as u64 / 8)
                         aria=Signal::derive(move || format!("{} {} / {}", t("w.network"), i18n::bitrate(tot().0), i18n::bitrate(tot().1)))
