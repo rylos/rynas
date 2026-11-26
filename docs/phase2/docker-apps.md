@@ -414,7 +414,7 @@ Paths are relative to `/api/v1`.
 | GET | `/apps/installed` | — | `Vec<InstalledApp>`, sorted by stack |
 | GET | `/apps/installed/{stack}` | — | `InstalledAppDetail` {app `InstalledApp`, snapshots [`StackSnapshot`]} |
 | GET | `/apps/installed/{stack}/update` | — | `AppUpdatePlan`. 404 when the entry left the catalogue |
-| POST | `/apps/update-many` | `AppUpdateManyRequest` {stacks: 1–100} | 202 `TaskStarted` (`apps.update-many`, 0.9.12): "Update selected" as one server task, the apps one after the other with the default snapshot settings. An app whose new version needs answers (or that is up to date by then) is skipped and the task ends partial; a failed app fails the task at the end, the others are still updated. 409 `busy` while one runs |
+| POST | `/apps/update-many` | `AppUpdateManyRequest` {stacks: 1–100} | 202 `TaskStarted` (`apps.update-many`, 0.9.13): "Update selected" as one server task, the apps one after the other with the default snapshot settings. An app whose new version needs answers (or that is up to date by then) is skipped and the task ends partial; a failed app fails the task at the end, the others are still updated. 409 `busy` while one runs |
 | POST | `/apps/installed/{stack}/update` | optional `AppUpdateRequest` {answers, snapshot?, stop_first?} | 202 `TaskStarted` (`apps.update`). 409 `conflict` when up to date or for a downgrade. 400 `invalid_value` for a `missing_values` field that `answers` lacks |
 | POST | `/apps/installed/{stack}/rollback` | `AppRollbackRequest` {snapshot} | 202 (`apps.rollback`). 404 for an unknown snapshot |
 | POST | `/apps/installed/{stack}/convert` | — | 204. Removes `x-rynas` (and adds a header comment), nothing else. The stack stays as a custom stack and leaves this list |

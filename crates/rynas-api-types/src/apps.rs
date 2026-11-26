@@ -1079,7 +1079,7 @@ pub struct AppUpdateRequest {
 
 /// `POST /api/v1/apps/update-many`: "Update selected", one server task `apps.update-many`
 /// (the apps one after the other with the default snapshot settings; an app whose new
-/// version needs answers is skipped and the task ends partial). Added in 0.9.12.
+/// version needs answers is skipped and the task ends partial). Added in 0.9.13.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AppUpdateManyRequest {
