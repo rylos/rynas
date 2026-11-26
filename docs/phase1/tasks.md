@@ -188,6 +188,14 @@ disk, `/var/lib/rynas`, `/run`, `/proc`, `/sys`):
 | `updates.check`, `apps.catalog-refresh`, `kernel-update` | daily | system disk, network | unchanged |
 | rynas-web metrics, notifications, TLS, devices; rynasd network, clock, UPS, removable drives, Docker event sweep (`statvfs` of Docker's root), web access, DDNS | seconds to minutes | `/proc`, `/sys`, state files, memory, network | unchanged: no data-disk I/O |
 
+Evidence (DS920+ with 0.9.13, one HDD, 2026-11-26 17:09–18:06, `/proc/diskstats` every 30 s,
+read-only): the task log shows `pcbackup.retention` hourly (0.01–0.15 s), `updates.check` and
+`docker.update-check` daily, `space.scan` at 03:43 for 2703 s ("not measured: stopped", ended
+ok). On the data disk: 4 reads / 18 sectors every 5 minutes from rynasd (the same as one
+`mdadm --detail` plus one `--detail --export`, measured by hand: 2 reads / 9 sectors each), the
+18:03 retention pass with no disk read (its metadata was cached), writes every few minutes from
+the Syncthing containers. The disk never went to standby in that hour.
+
 Outside rynas: containers and their own scans (Syncthing rescans, media servers) and the
 hardware daemon's temperature reads keep disks awake by their own choice.
 
