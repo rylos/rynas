@@ -456,10 +456,61 @@ pub(crate) async fn inventory(st: &DaemonState) -> Res<Arc<Inventory>> {
     blocking_storage(st, |s| s.refresh_inventory()).await
 }
 
+/// The inventory for a view: the last one at once when nothing changed it since (no storage
+/// event, no change by rynas), read again in the background when it is older than the cache
+/// age (power states, fill levels); a new one first only after a change. Plans and checks use
+/// the strict [`inventory`].
+pub(crate) async fn inventory_view(st: &DaemonState) -> Res<Arc<Inventory>> {
+    if let Some(inv) = st.storage.cached_inventory() {
+        return Ok(inv);
+    }
+    if let Some(inv) = st.storage.last_inventory() {
+        refresh_in_background(st);
+        return Ok(inv);
+    }
+    inventory(st).await
+}
+
+/// A new inventory in the background, unless one is being read already.
+fn refresh_in_background(st: &DaemonState) {
+    let Ok(guard) = st.storage_lock.clone().try_lock_owned() else {
+        return;
+    };
+    let storage = st.storage.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        if let Err(e) = storage.refresh_inventory() {
+            tracing::debug!("storage inventory: {e}");
+        }
+    });
+}
+
+/// The storage events of the kernel (`sysevents::storage_changes`: a disk came or went, an
+/// array or a block-device mount changed) forget the inventory and read it again at once in
+/// the background, so the next view finds it current; nothing runs while nothing happens.
+pub fn spawn_inventory_refresher(st: DaemonState) {
+    tokio::spawn(async move {
+        let mut rx = crate::sysevents::storage_changes();
+        loop {
+            match rx.recv().await {
+                Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+            st.storage.forget_inventory();
+            let _guard = st.storage_lock.lock().await;
+            let storage = st.storage.clone();
+            let r = tokio::task::spawn_blocking(move || storage.refresh_inventory()).await;
+            if let Ok(Err(e)) = r {
+                tracing::debug!("storage inventory after a storage event: {e}");
+            }
+        }
+    });
+}
+
 async fn storage_disks(
     State(st): State<DaemonState>,
 ) -> Res<Json<Vec<rynas_api_types::storage::DiskSummary>>> {
-    Ok(Json(inventory(&st).await?.disks.clone()))
+    Ok(Json(inventory_view(&st).await?.disks.clone()))
 }
 
 use rynas_api_types::validate::disk_name as valid_disk_name;
@@ -487,13 +538,13 @@ async fn storage_disk(
 async fn storage_arrays(
     State(st): State<DaemonState>,
 ) -> Res<Json<Vec<rynas_api_types::storage::MdArray>>> {
-    Ok(Json(inventory(&st).await?.arrays.clone()))
+    Ok(Json(inventory_view(&st).await?.arrays.clone()))
 }
 
 async fn storage_filesystems(
     State(st): State<DaemonState>,
 ) -> Res<Json<Vec<rynas_api_types::storage::BtrfsFilesystem>>> {
-    let mut fss = inventory(&st).await?.filesystems.clone();
+    let mut fss = inventory_view(&st).await?.filesystems.clone();
     // a filesystem whole again after a degraded mount, not scrubbed yet (scrub needed)
     if let Some(path) = st.storage_ops.as_ref().and_then(|o| o.btrfs_guard.get())
         && let Ok(g) = rynas_storage::btrfs_repair::Guard::load(path)
@@ -506,7 +557,7 @@ async fn storage_filesystems(
 async fn storage_tree(
     State(st): State<DaemonState>,
 ) -> Res<Json<rynas_api_types::storage::StorageTree>> {
-    let mut inv = inventory(&st).await?;
+    let mut inv = inventory_view(&st).await?;
     // a filesystem whole again after a degraded mount, not scrubbed yet, reads as a warning
     if let Some(path) = st.storage_ops.as_ref().and_then(|o| o.btrfs_guard.get())
         && let Ok(g) = rynas_storage::btrfs_repair::Guard::load(path)

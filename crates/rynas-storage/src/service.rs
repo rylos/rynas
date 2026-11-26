@@ -397,30 +397,37 @@ impl Storage {
             return Vec::new();
         };
         let cached: HashSet<String> = self.cache.lock().unwrap().smart.keys().cloned().collect();
-        let mut read = Vec::new();
-        for d in g.disks() {
-            if !cached.contains(&d.kname)
-                || disk_kind(d) == DiskKind::Nvme
-                || asleep(self.power_of(d))
-            {
-                continue;
-            }
-            let mut args = smart::SETTINGS_ARGS.to_vec();
-            args.push(&d.path);
-            let Some(out) = self.run("smartctl", &args, T_SMART) else {
-                continue;
-            };
-            if let smart::SettingsRead::Data { apm, write_cache } =
-                smart::parse_settings(&out.stdout)
-            {
-                let mut c = self.cache.lock().unwrap();
-                if let Some(e) = c.smart.get_mut(&d.kname) {
-                    e.data.apm = apm;
-                    e.data.write_cache = write_cache;
-                    read.push(d.kname.clone());
-                }
-            }
-        }
+        let disks: Vec<&BlockDev> = g
+            .disks()
+            .into_iter()
+            .filter(|d| cached.contains(&d.kname) && disk_kind(d) != DiskKind::Nvme)
+            .collect();
+        // every disk at once (each smartctl waits on its own drive)
+        let mut read: Vec<String> = std::thread::scope(|s| {
+            let handles: Vec<_> = disks
+                .iter()
+                .map(|d| {
+                    s.spawn(move || {
+                        if asleep(self.power_of(d)) {
+                            return None;
+                        }
+                        let mut args = smart::SETTINGS_ARGS.to_vec();
+                        args.push(&d.path);
+                        let out = self.run("smartctl", &args, T_SMART)?;
+                        let smart::SettingsRead::Data { apm, write_cache } = smart::parse_settings(&out.stdout) else {
+                            return None;
+                        };
+                        let mut c = self.cache.lock().unwrap();
+                        let e = c.smart.get_mut(&d.kname)?;
+                        e.data.apm = apm;
+                        e.data.write_cache = write_cache;
+                        Some(d.kname.clone())
+                    })
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
+        });
+        read.sort();
         // the list views come from the inventory: build it again with the new values
         self.cache.lock().unwrap().inventory = None;
         read
@@ -1113,6 +1120,19 @@ impl Storage {
             .as_ref()
             .filter(|(at, _)| now.saturating_sub(*at) < max)
             .map(|(_, inv)| inv.clone())
+    }
+
+    /// The last inventory whatever its age; `None` after [`Storage::invalidate`] or
+    /// [`Storage::forget_inventory`] (then it must be read again before it is shown).
+    pub fn last_inventory(&self) -> Option<Arc<Inventory>> {
+        self.cache.lock().unwrap().inventory.as_ref().map(|(_, inv)| inv.clone())
+    }
+
+    /// Forgets the inventory only (a storage event from the kernel: a disk came or went, a
+    /// mount changed); the md, btrfs and LVM details keep their own rules (read again when
+    /// the kernel's view of them changes), so nothing reads a sleeping disk's superblock.
+    pub fn forget_inventory(&self) {
+        self.cache.lock().unwrap().inventory = None;
     }
 
     /// Takes a new inventory and caches it. The caller makes sure only one refresh runs at a

@@ -1634,6 +1634,8 @@ fn main() -> std::io::Result<()> {
             state.space = Some(space);
         }
         state.ops = Some(ops);
+        // the storage inventory follows the kernel's storage events
+        rynasd::server::spawn_inventory_refresher(state.clone());
         // arrays of rynas volumes left inactive after boot by a missing drive
         if !args.dry_system {
             rynasd::notifications::spawn_degraded_start(state.clone(), notifier.clone());
