@@ -113,6 +113,19 @@ fn valid(a: &str) -> Option<String> {
     ip.parse::<IpAddr>().ok().map(|_| a.to_string())
 }
 
+/// Resolver options of the file rynas writes (`docs/research/network.md` §4.1).
+///
+/// - `single-request-reopen`: glibc sends the A and AAAA queries of `getaddrinfo` from one
+///   socket at the same time; a NAT or conntrack table on the path that drops one of the two
+///   replies costs a 5 s timeout per lookup (measured on a QNAP with Debian 13: 5040 ms for
+///   `getent ahosts`, 42 ms with this option). With it glibc opens a new socket for the second
+///   query after such a loss. Other resolvers (musl) ignore the option.
+/// - `timeout:2`: a server that does not answer (a router's IPv6 address learned from an
+///   advertisement, a server down) costs 2 s instead of 5 before the next one is tried; a
+///   slow recursive lookup is retried on the next server and, in the second round, with a
+///   longer wait, so it still gets an answer.
+pub const OPTIONS: &str = "options single-request-reopen timeout:2";
+
 /// The file rynas writes.
 pub fn render(servers: &[String], search: &[String]) -> String {
     let mut s = format!(
@@ -121,6 +134,8 @@ pub fn render(servers: &[String], search: &[String]) -> String {
     if !search.is_empty() {
         s.push_str(&format!("search {}\n", search.join(" ")));
     }
+    s.push_str(OPTIONS);
+    s.push('\n');
     for n in servers.iter().take(MAXNS) {
         s.push_str(&format!("nameserver {n}\n"));
     }
@@ -263,7 +278,10 @@ mod tests {
         );
         assert!(f.starts_with(HEADER));
         assert!(f.contains("search lan.example\n"));
+        assert!(f.contains("\noptions single-request-reopen timeout:2\n"), "{f}");
         assert_eq!(f.matches("nameserver").count(), MAXNS);
+        // still recognised as rynas's own file, so it stays replaceable
+        assert_eq!(classify(Some(&f), None), Owner::Rynas);
     }
 
     #[test]

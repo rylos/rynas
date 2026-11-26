@@ -17,6 +17,10 @@ pub enum RepoKind {
     /// A file rynas writes (Debian backports, Docker, Tailscale): changed on the page that
     /// manages it ([`RepoEntry::manage_url`]).
     Rynas,
+    /// A source on the machine itself: the installation disc (`cdrom:`) or a local folder
+    /// (`file:`, `copy:`). Never counted as unsupported; an enabled disc entry is warned
+    /// about (apt asks for the disc).
+    LocalMedia,
     /// A file of the hardware support's system layer (read-only here).
     SystemLayer,
     /// Anything else.
@@ -395,11 +399,50 @@ pub struct MirrorTestRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MirrorResult {
     pub uri: String,
-    /// Time to the answer of the Release file.
+    /// Time to the answer of the Release file (name lookup included).
     #[serde(default)]
     pub ms: Option<u64>,
     #[serde(default)]
-    pub error: Option<String>,
+    pub error: Option<MirrorError>,
+}
+
+/// Why a mirror failed the test: the UI text is `repo.me.<code>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorErrorCode {
+    /// No answer within the time limit.
+    Timeout,
+    /// The host name did not resolve (or the resolver did not answer in time).
+    Dns,
+    /// The connection was refused or the host is unreachable.
+    Connect,
+    /// The TLS handshake failed (certificate, protocol).
+    Tls,
+    /// The server answered with an HTTP error ([`MirrorError::status`]).
+    Http,
+    #[default]
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MirrorError {
+    pub code: MirrorErrorCode,
+    /// The HTTP status of [`MirrorErrorCode::Http`].
+    #[serde(default)]
+    pub status: Option<u16>,
+    /// The underlying error in English, for logs and a tooltip.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+impl MirrorError {
+    pub fn new(code: MirrorErrorCode, detail: impl Into<String>) -> Self {
+        MirrorError { code, status: None, detail: Some(detail.into()) }
+    }
+
+    pub fn http(status: u16) -> Self {
+        MirrorError { code: MirrorErrorCode::Http, status: Some(status), detail: None }
+    }
 }
 
 /// Answer of the mirror test (fastest first).

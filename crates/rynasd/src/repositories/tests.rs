@@ -399,7 +399,31 @@ fn cdrom_lines_are_one_disabled_entry() {
     assert!(!e.enabled);
     assert!(e.uris[0].starts_with("cdrom:[Debian GNU/Linux 13.1.0"));
     assert_eq!(e.suites, ["trixie"]);
+    assert_eq!(e.kind, RepoKind::LocalMedia);
     assert_eq!(s.status, RepoStatus::Good, "{:?}", s.infos);
+    assert!(s.unsupported.is_empty(), "{:?}", s.unsupported);
+}
+
+/// An enabled installation disc is warned about, never "unsupported"; a local folder is
+/// local media too.
+#[test]
+fn enabled_cdrom_is_a_warning_not_third_party() {
+    let cd = "deb cdrom:[Debian GNU/Linux 13.7.0 _Trixie_ - Official amd64 NETINST with firmware 20260101-10:00]/ trixie contrib main non-free-firmware\n";
+    let d = root(&[
+        ("/etc/apt/sources.list", &format!("{cd}\n{MAIN_LIST}")),
+        ("/etc/apt/sources.list.d/local.list", "deb [trusted=no] file:/srv/repo ./\n"),
+    ]);
+    let s = st(&d, false);
+    let e = &s.files.iter().find(|f| f.path.ends_with("sources.list")).unwrap().entries[0];
+    assert!(e.enabled);
+    assert_eq!(e.kind, RepoKind::LocalMedia);
+    let local = &s.files.iter().find(|f| f.path.ends_with("local.list")).unwrap().entries[0];
+    assert_eq!(local.kind, RepoKind::LocalMedia);
+    assert!(s.unsupported.is_empty(), "{:?}", s.unsupported);
+    let c = codes(&s);
+    assert_eq!(c.iter().filter(|x| **x == "cdrom_enabled").count(), 1, "{c:?}");
+    assert!(!c.contains(&"no_signed_by"), "{c:?}");
+    assert_eq!(s.status, RepoStatus::Warning, "{:?}", s.infos);
 }
 
 /// The UPS flow and the old switch keep working through `/v1/updates/backports`.
@@ -419,4 +443,83 @@ fn backports_wrapper_unchanged() {
     assert_eq!(f.entries[0].manage_url.as_deref(), Some("/system/repositories#debian"));
     assert!(s.official.backports && !s.official.backports_by_system);
     assert!(crate::backports::state(d.path(), false).by_rynas);
+}
+
+// ------------------------------------------------------------------ mirror test
+
+/// A local HTTP server: `/ok/…` answers 200, anything else 404; `silent` accepts and never
+/// answers. Returns its base URL.
+async fn mirror_server(silent: bool) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((mut s, _)) = l.accept().await {
+            if silent {
+                held.push(s);
+                continue;
+            }
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let status = if req.starts_with("GET /ok/") { "200 OK" } else { "404 Not Found" };
+                let _ = s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").as_bytes()).await;
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+fn quick(total_ms: u64) -> MirrorLimits {
+    MirrorLimits { dns: Duration::from_secs(2), http: Duration::from_millis(400), total: Duration::from_millis(total_ms) }
+}
+
+fn code_of(r: &[MirrorResult], uri: &str) -> Option<MirrorErrorCode> {
+    r.iter().find(|x| x.uri == uri).unwrap().error.as_ref().map(|e| e.code)
+}
+
+#[tokio::test]
+async fn mirror_errors_are_codes() {
+    let base = mirror_server(false).await;
+    let ok = format!("{base}/ok");
+    let missing = format!("{base}/missing");
+    let tls = base.replace("http://", "https://");
+    let refused = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let p = l.local_addr().unwrap().port();
+        drop(l);
+        format!("http://127.0.0.1:{p}")
+    };
+    let silent = mirror_server(true).await;
+    let r = test_mirrors_with(vec![missing.clone(), ok.clone(), tls.clone(), refused.clone(), silent.clone()], "trixie", quick(3000)).await;
+    assert_eq!(r[0].uri, ok, "the answering mirror first: {r:?}");
+    assert!(r[0].ms.is_some() && r[0].error.is_none());
+    let m = r.iter().find(|x| x.uri == missing).unwrap().error.clone().unwrap();
+    assert_eq!((m.code, m.status), (MirrorErrorCode::Http, Some(404)));
+    assert_eq!(code_of(&r, &tls), Some(MirrorErrorCode::Tls), "{r:?}");
+    assert_eq!(code_of(&r, &refused), Some(MirrorErrorCode::Connect), "{r:?}");
+    assert_eq!(code_of(&r, &silent), Some(MirrorErrorCode::Timeout), "{r:?}");
+    // the whole-test limit applies per mirror: a silent one does not erase the others
+    let r = test_mirrors_with(vec![silent.clone(), ok.clone()], "trixie", MirrorLimits { http: Duration::from_secs(10), ..quick(600) }).await;
+    assert_eq!(code_of(&r, &silent), Some(MirrorErrorCode::Timeout), "{r:?}");
+    assert!(code_of(&r, &ok).is_none(), "{r:?}");
+    // a name that does not resolve (`.invalid` never does, RFC 6761): `dns`, whether the
+    // resolver says so or does not answer at all
+    let r = test_mirrors_with(vec!["http://mirror.rynas-test.invalid/debian".into()], "trixie", quick(5000)).await;
+    assert_eq!(r[0].error.as_ref().map(|e| e.code), Some(MirrorErrorCode::Dns), "{r:?}");
+}
+
+#[test]
+fn mirror_error_codes_and_wire_format() {
+    assert_eq!(mirror_error_code(true, true, "x"), MirrorErrorCode::Timeout);
+    assert_eq!(mirror_error_code(false, true, "client error (Connect): tcp connect error: Connection refused (os error 111)"), MirrorErrorCode::Connect);
+    assert_eq!(mirror_error_code(false, true, "error:0A000086:SSL routines:tls_post_process_server_certificate:certificate verify failed"), MirrorErrorCode::Tls);
+    assert_eq!(mirror_error_code(false, true, "dns error: failed to lookup address information"), MirrorErrorCode::Dns);
+    assert_eq!(mirror_error_code(false, false, "body"), MirrorErrorCode::Other);
+    let j = serde_json::to_value(MirrorError::http(503)).unwrap();
+    assert_eq!(j, serde_json::json!({"code": "http", "status": 503, "detail": null}));
+    let j = serde_json::to_value(MirrorError::new(MirrorErrorCode::Dns, "x")).unwrap();
+    assert_eq!(j["code"], "dns");
 }

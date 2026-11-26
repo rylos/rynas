@@ -6206,6 +6206,12 @@ repo.mirror	Зеркало
 repo.mirror_help	deb.debian.org сам выбирает ближайший сервер; зеркало страны можно ввести или выбрать.
 repo.test_mirrors	Проверить зеркала
 repo.ms	{n} мс
+repo.me.timeout	Нет ответа вовремя
+repo.me.dns	Имя не разрешается (или DNS-сервер не отвечает)
+repo.me.connect	Не удаётся подключиться
+repo.me.tls	Не удалось установить защищённое соединение (сертификат или TLS)
+repo.me.http	Сервер ответил ошибкой {status}
+repo.me.other	Проверка не удалась
 repo.use	Использовать
 repo.deb_save	Сохранить…
 repo.no_change	Нечего изменять.
@@ -6222,6 +6228,8 @@ repo.k_debian	Debian
 repo.k_rynas	rynas
 repo.k_system	Поддержка оборудования
 repo.k_third	Сторонний
+repo.k_disc	Установочный диск
+repo.k_local	Локальная папка
 repo.ro_rynas	Управляется rynas на другой странице.
 repo.ro_system	Управляется поддержкой оборудования.
 repo.ro_debian_system	Источниками Debian управляет поддержка оборудования.
@@ -6297,6 +6305,7 @@ repo.i.next_release	{suite} — следующий выпуск Debian: толь
 repo.i.security_suite	{suite}: начиная с Debian 11 набор безопасности называется {codename}-security.
 repo.i.security_uri	{suite} раздаётся из …/debian-security, а не из основного архива.
 repo.i.non_free_firmware	non-free используется без non-free-firmware: с Debian 12 прошивки перенесены туда.
+repo.i.cdrom_enabled	Установочный диск включён: apt просит диск при каждом обновлении. Отключите эту запись.
 repo.i.no_debian	Нет включённого источника Debian для {codename}: система не получает обновлений.
 repo.i.no_security	{codename}-security не настроен: нет обновлений безопасности.
 repo.i.no_updates	{codename}-updates не настроен: срочные исправления приходят только с промежуточными выпусками.

@@ -100,6 +100,17 @@ pub fn debian_host(h: &str) -> bool {
         || h.strip_prefix("ftp.").and_then(|r| r.strip_suffix(".debian.org")).is_some_and(|cc| cc.len() == 2 && cc.bytes().all(|b| b.is_ascii_lowercase()))
 }
 
+/// A URI on the machine itself: the installation disc or a local folder.
+pub fn local_uri(uri: &str) -> bool {
+    let u = uri.trim_start().to_ascii_lowercase();
+    u.starts_with("cdrom:") || u.starts_with("file:") || u.starts_with("copy:")
+}
+
+/// Every URI of `e` is local ([`local_uri`]).
+pub fn local_media(e: &Entry) -> bool {
+    !e.uris.is_empty() && e.uris.iter().all(|u| local_uri(u))
+}
+
 /// Another distribution's archive (incompatible with Debian).
 pub fn other_distro(uri: &str, origin: Option<&str>) -> bool {
     let h = host(uri);
@@ -222,6 +233,9 @@ pub fn classify(f: &SourceFile, e: &Entry, cx: &Context, lists: &mut Lists) -> C
     } else if system_layer_file(f, cx) {
         c.kind = RepoKind::SystemLayer;
         c.read_only = Some(ReadOnly::SystemLayer);
+    } else if local_media(e) {
+        // before Debian: a disc's cached Release file says `Origin: Debian`
+        c.kind = RepoKind::LocalMedia;
     } else if debian {
         c.kind = RepoKind::Debian;
         if cx.system_layer {
@@ -362,6 +376,15 @@ pub fn check(root: &Path, scan: &Scan, classes: &[Vec<Class>], codename: Option<
             if e.uris.iter().any(|u| other_distro(u, c.origin.as_deref())) {
                 infos.push(info(RepoLevel::Critical, "other_distro", &[("uri", &e.uris.join(" "))], format!("{}: packages of another distribution, incompatible with Debian", e.uris.join(" ")), at));
                 unsupported.insert(label_of(e, c));
+            }
+            if c.kind == RepoKind::LocalMedia && e.uris.iter().any(|u| u.trim_start().to_ascii_lowercase().starts_with("cdrom:")) {
+                infos.push(info(
+                    RepoLevel::Warning,
+                    "cdrom_enabled",
+                    &[],
+                    "the installation disc is enabled: apt asks for the disc at every update; disable this entry".into(),
+                    at,
+                ));
             }
             if c.kind == RepoKind::ThirdParty {
                 unsupported.insert(label_of(e, c));
