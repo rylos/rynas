@@ -545,7 +545,7 @@ pub fn tree(inv: &Inventory) -> StorageTree {
             .collect();
         t.volumes.push(v);
     }
-    // other filesystems (ext4/xfs volumes, unmounted btrfs)
+    // other filesystems (ext4/xfs volumes, a btrfs not mounted on an array or LUKS)
     for d in inv.graph.devs.values() {
         let Some(fs) = d.fstype.as_deref() else {
             continue;
@@ -557,6 +557,19 @@ pub fn tree(inv: &Inventory) -> StorageTree {
             .filesystems
             .iter()
             .any(|f| d.uuid.as_deref() == Some(f.uuid.as_str()))
+        {
+            continue;
+        }
+        // not mounted, right on a disk or a partition (no array, LVM or LUKS assembled under
+        // it): not a volume but what a free drive still holds. The drive lists it ("Holds btrfs
+        // “data”") and Create volume offers the drive; its usage is unknown, so it is never
+        // shown as a volume with 0 bytes used. A filesystem rynas recorded stays a volume.
+        let recorded = inv.records.as_ref().is_some_and(|r| {
+            r.iter().any(|r| d.uuid.as_deref().is_some_and(|u| u.eq_ignore_ascii_case(&r.fs_uuid)))
+        });
+        if mountpoints_of(&inv.graph, d).is_empty()
+            && matches!(node_kind(d), NodeKind::Disk | NodeKind::Partition)
+            && !recorded
         {
             continue;
         }
@@ -809,6 +822,51 @@ mod tests {
         assert_eq!(t.locked.len(), 1);
         assert_eq!(t.locked[0].children[0].name, "sde1");
         assert_eq!(t.unused_disks, ["sdd"]);
+    }
+
+    /// A disk carrying a btrfs with data that nothing mounts (issue #66, a 1 TB disk on a
+    /// DS2415+): no volume with "0 B of 932 GiB", whether the btrfs is on the whole disk or
+    /// on a partition. The drive stays free, with what it holds; an unmounted btrfs on an md
+    /// array, a mounted ext4 on a partition and a recorded filesystem stay volumes.
+    #[test]
+    fn unmounted_filesystem_on_a_drive_is_no_volume() {
+        let dev = |name: &str, kind: &str, fstype: &str, uuid: &str, mps: &str, children: &str| {
+            format!(
+                r#"{{"name":"{name}","kname":"{name}","path":"/dev/{name}","type":"{kind}","fstype":{fstype},"fsver":null,"label":null,"uuid":{uuid},"partlabel":null,"size":1000204886016,"rota":true,"tran":"sata","model":null,"serial":null,"wwn":null,"rev":null,"mountpoints":[{mps}],"rm":false,"hotplug":false,"maj:min":"8:0"{children}}}"#
+            )
+        };
+        let q = |s: &str| format!("\"{s}\"");
+        let md = dev("md5", "raid1", &q("btrfs"), &q("uuid-md"), "null", "");
+        let json = format!(
+            r#"{{"blockdevices":[{},{},{},{},{}]}}"#,
+            // btrfs on the whole disk, not mounted
+            dev("sdd", "disk", &q("btrfs"), &q("uuid-whole"), "null", ""),
+            // btrfs on a partition, not mounted
+            dev("sde", "disk", "null", "null", "null", &format!(r#","children":[{}]"#, dev("sde1", "part", &q("btrfs"), &q("uuid-part"), "null", ""))),
+            // ext4 on a partition, mounted
+            dev("sdf", "disk", "null", "null", "null", &format!(r#","children":[{}]"#, dev("sdf1", "part", &q("ext4"), &q("uuid-ext4"), &q("/srv/data"), ""))),
+            // btrfs on an md array (one member), not mounted
+            dev("sdg", "disk", "null", "null", "null", &format!(r#","children":[{}]"#, dev("sdg1", "part", &q("linux_raid_member"), &q("uuid-member"), "null", &format!(r#","children":[{md}]"#)))),
+            // a recorded volume's btrfs, not mounted
+            dev("sdh", "disk", &q("btrfs"), &q("UUID-REC"), "null", ""),
+        );
+        let graph = BlockGraph::parse(&json).unwrap();
+        let disks = graph.disks().into_iter().map(|d| summary(d, &graph, None, None, PowerState::Active, 0, false)).collect();
+        let records = vec![rynas_api_types::storage::VolumeRecord { label: "vol9".into(), fs_uuid: "uuid-rec".into(), ..Default::default() }];
+        let inv = Inventory { graph, disks, records: Some(records), ..Default::default() };
+        let t = tree(&inv);
+        let mut ids: Vec<(&str, Option<&str>)> = t.volumes.iter().map(|v| (v.id.as_str(), v.mountpoint.as_deref())).collect();
+        ids.sort();
+        assert_eq!(ids, [("UUID-REC", None), ("uuid-ext4", Some("/srv/data")), ("uuid-md", None)]);
+        // the drives still say what they hold, and are not in use
+        for (name, holds) in [("sdd", "btrfs"), ("sde", "btrfs")] {
+            let s = inv.disks.iter().find(|d| d.name == name).unwrap();
+            assert!(!s.in_use && !s.system, "{name}");
+            assert_eq!(s.used_by, [holds], "{name}");
+        }
+        // without records (the caller did not say) the drive is no volume either
+        let inv = Inventory { records: None, ..inv };
+        assert!(tree(&inv).volumes.iter().all(|v| v.id != "uuid-whole" && v.id != "uuid-part" && v.id != "UUID-REC"));
     }
 
     /// btrfs → LVM node (the flexible RAID) → one md node per tier → partitions → disks;
