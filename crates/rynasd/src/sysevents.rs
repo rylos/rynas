@@ -42,6 +42,11 @@ pub enum SysEvent {
     Block(Option<BlockEvent>),
     /// An md array changed state.
     Md,
+    /// The watcher thread stopped (an error): no events until [`SysEvent::Restarted`].
+    /// Subscribers that need to know fall back to their slow safety net ([`alive`]).
+    Lost,
+    /// The watcher thread runs again after a stop: everything may have changed meanwhile.
+    Restarted,
 }
 
 /// A uevent of the `block` subsystem.
@@ -65,17 +70,33 @@ const STORAGE_SETTLE: Duration = Duration::from_secs(2);
 
 static BUS: OnceLock<broadcast::Sender<SysEvent>> = OnceLock::new();
 static STORAGE: OnceLock<broadcast::Sender<()>> = OnceLock::new();
+/// The watcher thread is running and watching.
+static ALIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Longest pause between two restarts of a watcher that keeps failing.
+const RESTART_MAX: Duration = Duration::from_secs(60);
 
-/// The events from now on; the watcher thread starts with the first subscriber.
+/// Whether events flow now: `false` before the first start, while the watcher thread is
+/// down between restarts, or when it could not be started at all. A subscriber that relies
+/// on events keeps a faster safety net of its own while this is `false`.
+pub fn alive() -> bool {
+    ALIVE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The events from now on; the watcher thread starts with the first subscriber and is
+/// restarted (with a growing pause, at most [`RESTART_MAX`]) whenever it stops; each stop is
+/// [`SysEvent::Lost`], each restart [`SysEvent::Restarted`].
 pub fn subscribe() -> broadcast::Receiver<SysEvent> {
     BUS.get_or_init(|| {
         let (tx, _) = broadcast::channel(CAPACITY);
         let t = tx.clone();
+        // the thread is marked alive before it runs: a first subscriber must not fall back
+        ALIVE.store(true, std::sync::atomic::Ordering::Release);
         if let Err(e) = std::thread::Builder::new()
             .name("sysevents".into())
             .stack_size(128 << 10)
-            .spawn(move || watch(&t))
+            .spawn(move || supervise(&t))
         {
+            ALIVE.store(false, std::sync::atomic::Ordering::Release);
             tracing::warn!("system events: no watcher thread: {e}");
         }
         tx
@@ -83,11 +104,62 @@ pub fn subscribe() -> broadcast::Receiver<SysEvent> {
     .subscribe()
 }
 
-/// Waits for the next event `wanted` accepts (a lag counts as one), then until no further
-/// event came for `quiet`: a burst is one wake-up. `false` once the watcher is gone.
+/// Runs [`watch`] again whenever it returns, with a pause that doubles up to
+/// [`RESTART_MAX`] (back to one second after an hour of service).
+fn supervise(tx: &broadcast::Sender<SysEvent>) {
+    let mut pause = Duration::from_secs(1);
+    let mut first = true;
+    loop {
+        let started = std::time::Instant::now();
+        if !first {
+            ALIVE.store(true, std::sync::atomic::Ordering::Release);
+            let _ = tx.send(SysEvent::Restarted);
+        }
+        first = false;
+        let why = watch(tx);
+        ALIVE.store(false, std::sync::atomic::Ordering::Release);
+        let _ = tx.send(SysEvent::Lost);
+        if started.elapsed() > Duration::from_secs(3600) {
+            pause = Duration::from_secs(1);
+        }
+        tracing::warn!("system events: watcher stopped ({why}), restarting in {} s", pause.as_secs());
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(RESTART_MAX);
+    }
+}
+
+/// Remembers the block-device mounts and says when they changed: a mount table change that
+/// only adds a container's overlay is no storage change.
+#[derive(Debug, Default)]
+pub struct MountFilter(Vec<(String, String, String)>);
+
+impl MountFilter {
+    /// Starts from the mount table now.
+    pub fn now() -> Self {
+        Self(device_mounts(&read_mountinfo()))
+    }
+
+    /// Whether the block-device mounts of `mountinfo` differ from the last ones (kept).
+    pub fn changed_with(&mut self, mountinfo: &str) -> bool {
+        let now = device_mounts(mountinfo);
+        let changed = now != self.0;
+        self.0 = now;
+        changed
+    }
+
+    /// [`MountFilter::changed_with`] the mount table now.
+    pub fn changed(&mut self) -> bool {
+        self.changed_with(&read_mountinfo())
+    }
+}
+
+/// Waits for the next event `wanted` accepts (a lag or a restart of the watcher counts as
+/// one), then until no further event came for `quiet`: a burst is one wake-up. `false` once
+/// the channel is gone (never while the watcher only restarts).
 pub async fn next_burst(rx: &mut broadcast::Receiver<SysEvent>, quiet: Duration, mut wanted: impl FnMut(&SysEvent) -> bool) -> bool {
     loop {
         match rx.recv().await {
+            Ok(SysEvent::Restarted) => break,
             Ok(e) if wanted(&e) => break,
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(_)) => break,
@@ -112,15 +184,11 @@ pub fn storage_changes() -> broadcast::Receiver<()> {
             let t = tx.clone();
             let mut rx = subscribe();
             tokio::spawn(async move {
-                let mut mounts = device_mounts(&read_mountinfo());
+                let mut mounts = MountFilter::now();
                 loop {
                     let alive = next_burst(&mut rx, STORAGE_SETTLE, |e| match e {
-                        SysEvent::Mounts => {
-                            let now = device_mounts(&read_mountinfo());
-                            let changed = now != mounts;
-                            mounts = now;
-                            changed
-                        }
+                        SysEvent::Mounts => mounts.changed(),
+                        SysEvent::Lost => false,
                         _ => true,
                     })
                     .await;
@@ -216,6 +284,18 @@ fn open_uevent(group: u32) -> std::io::Result<OwnedFd> {
     if r < 0 {
         return Err(std::io::Error::last_os_error());
     }
+    // the sender's credentials with every message ([`sender_ok`])
+    let on: libc::c_int = 1;
+    // SAFETY: setsockopt(2) with an int option
+    unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PASSCRED,
+            (&on as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
     // a bigger receive buffer for bursts (best effort)
     let size: libc::c_int = 1 << 20;
     // SAFETY: setsockopt(2) with an int option
@@ -249,10 +329,22 @@ impl PriFile {
     }
 }
 
-fn watch(tx: &broadcast::Sender<SysEvent>) {
+/// Whether a netlink message comes from who may send it: in the kernel's group only the
+/// kernel (port id 0); in udevd's group only root (udevd), by the credentials the kernel
+/// attaches (`SO_PASSCRED`). A message without credentials is refused in udevd's group.
+pub fn sender_ok(group: u32, nl_pid: u32, uid: Option<u32>) -> bool {
+    match group {
+        GROUP_KERNEL => nl_pid == 0 && uid.is_none_or(|u| u == 0),
+        _ => uid == Some(0),
+    }
+}
+
+/// Watches until something fails; returns why.
+fn watch(tx: &broadcast::Sender<SysEvent>) -> String {
     let mut mounts = PriFile::open("/proc/self/mountinfo");
     let mut mdstat = PriFile::open("/proc/mdstat");
-    let group = if std::path::Path::new("/run/udev/control").exists() { GROUP_UDEV } else { GROUP_KERNEL };
+    let udevd = || std::path::Path::new("/run/udev/control").exists();
+    let group = if udevd() { GROUP_UDEV } else { GROUP_KERNEL };
     let uevent = open_uevent(group).map_err(|e| tracing::warn!("system events: no uevent socket: {e}")).ok();
     let mut buf = vec![0u8; 16 << 10];
     loop {
@@ -271,8 +363,7 @@ fn watch(tx: &broadcast::Sender<SysEvent>) {
             kinds.push(2);
         }
         if pfds.is_empty() {
-            tracing::warn!("system events: nothing to watch");
-            return;
+            return "nothing to watch".into();
         }
         // SAFETY: poll(2) on descriptors that live as long as this call, no timeout
         let r = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, -1) };
@@ -280,8 +371,7 @@ fn watch(tx: &broadcast::Sender<SysEvent>) {
             if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
-            tracing::warn!("system events: poll: {}", std::io::Error::last_os_error());
-            return;
+            return format!("poll: {}", std::io::Error::last_os_error());
         }
         for (p, kind) in pfds.iter().zip(&kinds) {
             if p.revents == 0 {
@@ -300,22 +390,38 @@ fn watch(tx: &broadcast::Sender<SysEvent>) {
                     }
                     vec![SysEvent::Md]
                 }
-                _ => uevent.as_ref().map(|u| drain_uevents(u, &mut buf)).unwrap_or_default(),
+                _ => uevent.as_ref().map(|u| drain_uevents(u, group, &mut buf)).unwrap_or_default(),
             };
             for e in ev {
                 // no subscriber is fine
                 let _ = tx.send(e);
             }
+            // udevd started after us: its group from now on (the events after its rules)
+            if *kind == 2 && group == GROUP_KERNEL && udevd() {
+                return "udevd started: switching to its events".into();
+            }
         }
     }
 }
 
-/// Every message waiting on the uevent socket, as block events.
-fn drain_uevents(fd: &OwnedFd, buf: &mut [u8]) -> Vec<SysEvent> {
+/// Every message waiting on the uevent socket from an allowed sender ([`sender_ok`]), as
+/// block events.
+fn drain_uevents(fd: &OwnedFd, group: u32, buf: &mut [u8]) -> Vec<SysEvent> {
     let mut out = Vec::new();
     loop {
-        // SAFETY: recv(2) into a buffer of the given length
-        let n = unsafe { libc::recv(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), libc::MSG_DONTWAIT) };
+        // SAFETY: zeroed sockaddr_nl, iovec, msghdr and control buffer are valid values
+        let mut sa: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        let mut iov = libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() };
+        let mut ctrl = [0u64; 8];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_name = (&mut sa as *mut libc::sockaddr_nl).cast();
+        msg.msg_namelen = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = ctrl.as_mut_ptr().cast();
+        msg.msg_controllen = std::mem::size_of_val(&ctrl) as _;
+        // SAFETY: recvmsg(2) into the buffers set up above
+        let n = unsafe { libc::recvmsg(fd.as_raw_fd(), &mut msg, libc::MSG_DONTWAIT) };
         if n < 0 {
             match std::io::Error::last_os_error().raw_os_error() {
                 Some(libc::EINTR) => continue,
@@ -329,6 +435,21 @@ fn drain_uevents(fd: &OwnedFd, buf: &mut [u8]) -> Vec<SysEvent> {
         }
         if n == 0 {
             break;
+        }
+        let mut uid = None;
+        // SAFETY: walking the control messages the kernel wrote into `ctrl`
+        unsafe {
+            let mut c = libc::CMSG_FIRSTHDR(&msg);
+            while !c.is_null() {
+                if (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_CREDENTIALS {
+                    let cred: libc::ucred = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast());
+                    uid = Some(cred.uid);
+                }
+                c = libc::CMSG_NXTHDR(&msg, c);
+            }
+        }
+        if !sender_ok(group, sa.nl_pid, uid) {
+            continue;
         }
         if let Some(e) = parse_uevent(&buf[..n as usize]) {
             out.push(SysEvent::Block(Some(e)));
@@ -374,6 +495,49 @@ mod tests {
         assert_eq!(device_mounts(a), vec![("/srv/vol1".into(), "/dev/md2".into(), "btrfs".into())]);
         let c = format!("{a}43 25 8:33 / /media/usb rw - exfat /dev/sdc1 rw\n");
         assert_ne!(device_mounts(a), device_mounts(&c));
+    }
+
+    #[test]
+    fn only_the_kernel_or_root_may_send() {
+        // kernel group: port id 0 only
+        assert!(sender_ok(GROUP_KERNEL, 0, Some(0)));
+        assert!(sender_ok(GROUP_KERNEL, 0, None));
+        assert!(!sender_ok(GROUP_KERNEL, 4242, Some(0)));
+        assert!(!sender_ok(GROUP_KERNEL, 0, Some(1000)));
+        // udevd's group: root's credentials only
+        assert!(sender_ok(GROUP_UDEV, 311, Some(0)));
+        assert!(!sender_ok(GROUP_UDEV, 311, Some(1000)));
+        assert!(!sender_ok(GROUP_UDEV, 311, None));
+    }
+
+    #[test]
+    fn a_container_start_is_no_mount_change() {
+        let base = "36 25 0:32 / /srv/vol1 rw - btrfs /dev/md2 rw\n";
+        let mut f = MountFilter::default();
+        assert!(f.changed_with(base), "first look: the mounts are new");
+        let overlay = format!("{base}40 25 0:40 / /var/lib/docker/overlay2/x/merged rw - overlay overlay rw\n");
+        assert!(!f.changed_with(&overlay));
+        let usb = format!("{overlay}43 25 8:33 / /media/usb rw - exfat /dev/sdc1 rw\n");
+        assert!(f.changed_with(&usb));
+        assert!(!f.changed_with(&usb));
+        assert!(f.changed_with(&overlay), "unplugged");
+    }
+
+    #[tokio::test]
+    async fn a_restart_is_a_burst_and_lost_goes_to_the_filter() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let _ = tx.send(SysEvent::Lost);
+        let _ = tx.send(SysEvent::Restarted);
+        // a filter that wants nothing still wakes on the restart (everything may have changed)
+        let mut seen = Vec::new();
+        assert!(next_burst(&mut rx, Duration::from_millis(50), |e| {
+            seen.push(e.clone());
+            false
+        })
+        .await);
+        assert_eq!(seen, vec![SysEvent::Lost]);
+        drop(tx);
+        assert!(!next_burst(&mut rx, Duration::from_millis(50), |_| true).await);
     }
 
     #[tokio::test]

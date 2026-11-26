@@ -25,8 +25,13 @@ use crate::model::{self, Chip, Line, Model};
 /// while something moves ([`Controller::tick`])...
 const POLL: Duration = Duration::from_millis(125);
 /// ...and the button poll on a quiet box (no blink, no press): 4 wake-ups a second instead
-/// of 8 (a Bay Trail box with a freeze history). A press shorter than this may be missed.
+/// of 8 (a Bay Trail box with a freeze history). A level change is confirmed by a second read
+/// [`CONFIRM`] later, so a tap counts when one poll falls inside it: a 150 ms tap is caught
+/// 60 % of the time (100 % from 250 ms on); at 8 Hz with two polls needed it was 20 %.
+/// gpio-f7188x has no interrupts: no edge events to wait on.
 const IDLE_POLL: Duration = Duration::from_millis(250);
+/// Second read of a button level that just changed (debounce without waiting a whole poll).
+const CONFIRM: Duration = Duration::from_millis(30);
 /// Ticks per slow toggle (the vendor's alternate green/red: every 500 ms).
 const SLOW_TICKS: u64 = 4;
 /// Ticks between attempts at writes that failed.
@@ -221,7 +226,16 @@ struct Button {
 /// The button is held, or its level changed and is not stable yet: polled fast until it
 /// settles (a press is caught at the idle pace, measured at the fast one).
 fn button_moving(b: &Button) -> bool {
-    b.pressed == Some(true) || b.seen != b.pressed
+    b.pressed == Some(true) || button_moving_level(b)
+}
+
+/// The level read last differs from the stable one (a change not confirmed yet).
+fn button_moving_level(b: &Button) -> bool {
+    b.seen.is_some() && b.seen != b.pressed
+}
+
+fn button(g: &mut Inner, reset: bool) -> &mut Button {
+    if reset { &mut g.reset } else { &mut g.usb_copy }
 }
 
 /// A press has been released: how long it was held. The state of the button decides: a button
@@ -658,16 +672,25 @@ impl Controller {
         if g.wrong_direction.contains(&line) {
             return None;
         }
-        let high = match g.gpio.read(&chip_label(line), line.offset) {
-            Ok(v) => v,
+        let read = |g: &mut Inner| match g.gpio.read(&chip_label(line), line.offset) {
+            Ok(high) => Some(high != line.active_low),
             Err(e) => {
                 tracing::debug!("qnap: button read: {e}");
-                return None;
+                None
             }
         };
-        let pressed = high != line.active_low;
-        let b = if reset { &mut g.reset } else { &mut g.usb_copy };
-        let held_ms = poll_button(b, pressed, now)?;
+        let pressed = read(g)?;
+        let mut held = poll_button(button(g, reset), pressed, now);
+        // a level that just changed is confirmed by a second read a moment later (the chip
+        // has no interrupts): a short tap seen once at the idle pace still counts
+        if held.is_none() && button_moving_level(button(g, reset)) {
+            std::thread::sleep(CONFIRM);
+            if let Some(p) = read(g) {
+                held = poll_button(button(g, reset), p, now + CONFIRM);
+            }
+        }
+        let held_ms = held?;
+        let b = button(g, reset);
         if action == ButtonAction::Ignore {
             return None;
         }
@@ -1227,6 +1250,36 @@ pub mod tests {
         assert!(button_moving(&Button { pressed: Some(true), seen: Some(true), ..Default::default() }));
         // a line that cannot be read never keeps the worker fast
         assert!(!button_moving(&Button::default()));
+    }
+
+    #[test]
+    fn a_tap_seen_by_one_poll_counts() {
+        let gpio = fake_gpio();
+        let m = &MODELS[0];
+        let label = chip_label(m.reset_button);
+        gpio.set_direction(&label, m.reset_button.offset, Direction::Input);
+        gpio.set_direction(&chip_label(m.usb_copy_button), m.usb_copy_button.offset, Direction::Input);
+        gpio.set_level(&chip_label(m.usb_copy_button), m.usb_copy_button.offset, true);
+        let (c, _, _) = ctl(&gpio);
+        c.apply(QnapSettings::default());
+        let t = Instant::now();
+        // released (active low: high), known after one poll and its confirming read
+        gpio.set_level(&label, m.reset_button.offset, true);
+        c.tick(t);
+        // pressed during one poll only, released by the next one (250 ms later)
+        gpio.set_level(&label, m.reset_button.offset, false);
+        c.tick(t + IDLE_POLL);
+        gpio.set_level(&label, m.reset_button.offset, true);
+        c.tick(t + IDLE_POLL * 2);
+        let ev = c.status().events;
+        assert_eq!(ev.len(), 1, "{ev:?}");
+        assert_eq!(ev[0].button, "reset");
+        // a read that bounces back before the confirming read is no press
+        let mut b = Button { pressed: Some(false), seen: Some(false), ..Default::default() };
+        assert_eq!(poll_button(&mut b, true, t), None);
+        assert!(button_moving_level(&b));
+        assert_eq!(poll_button(&mut b, false, t + CONFIRM), None);
+        assert_eq!(b.pressed, Some(false));
     }
 
     #[test]

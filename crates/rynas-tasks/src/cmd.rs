@@ -503,7 +503,10 @@ impl Cmd {
                 None => {
                     std::thread::sleep(nap.min(deadline.saturating_duration_since(Instant::now())));
                     // a long command is looked at twice a second (cancel, stall), not 20 times
-                    let cap = if started.elapsed() < Duration::from_secs(2) { 50 } else { 500 };
+                    // (other blocking runs keep their 50 ms: callers wait for their output)
+                    // (only work that is long by nature: heavy, watched for stalls, cancellable)
+                    let long = self.low || self.stall.is_some() || cancel.is_some();
+                    let cap = if long && started.elapsed() >= Duration::from_secs(2) { 500 } else { 50 };
                     nap = (nap * 2).min(Duration::from_millis(cap));
                 }
             }

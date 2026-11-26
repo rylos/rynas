@@ -183,6 +183,9 @@ pub struct ImportMem {
     watcher: bool,
     /// Rung when an import was saved or deleted: the watcher may have to start.
     kick: Arc<tokio::sync::Notify>,
+    /// The running watcher thread's eventfd: written on a kick, so that a thread asleep in
+    /// `poll(2)` watches the folders of a new import at once.
+    wake: Option<Arc<std::os::fd::OwnedFd>>,
 }
 
 /// What reading a watched folder led to.
@@ -877,7 +880,9 @@ impl WebAccessSvc {
             let mut mem = self.lock_imports();
             mem.watch.retain(|k, _| ids.contains(k));
             for id in &ids {
+                // a folder that is gone: nothing due until inotify says it is back
                 let Some(sig) = self.drop_sig(id) else {
+                    mem.watch.remove(id);
                     continue;
                 };
                 let w = mem.watch.entry(id.clone()).or_default();
@@ -1208,7 +1213,14 @@ impl WebAccessSvc {
     /// An import was saved or deleted: the folder watcher starts if a folder needs it (and
     /// ends by itself when none does).
     fn kick_drop_watch(&self) {
-        self.lock_imports().kick.notify_one();
+        let mem = self.lock_imports();
+        mem.kick.notify_one();
+        if let Some(fd) = &mem.wake {
+            use std::os::fd::AsRawFd;
+            let one: u64 = 1;
+            // SAFETY: write(2) of 8 bytes to an eventfd (non-blocking; a full counter is fine)
+            unsafe { libc::write(fd.as_raw_fd(), (&one as *const u64).cast(), 8) };
+        }
     }
 
     /// When the next look at the watched folders is due: a folder whose files changed and
@@ -1367,6 +1379,10 @@ fn watch_drops(svc: &Arc<WebAccessSvc>) {
     if ino.is_none() {
         tracing::warn!("web access: no inotify ({}), watched folders are looked at every {} s", io::Error::last_os_error(), POLL.as_secs());
     }
+    // SAFETY: eventfd(2); the descriptor is owned right after
+    let efd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    let efd = (efd >= 0).then(|| Arc::new(unsafe { OwnedFd::from_raw_fd(efd) }));
+    svc.lock_imports().wake = efd.clone();
     let mut buf = vec![0u8; 8 << 10];
     loop {
         let ids = svc.folder_ids();
@@ -1375,11 +1391,12 @@ fn watch_drops(svc: &Arc<WebAccessSvc>) {
             // saved meanwhile: go on (the kick of that save found the thread running)
             if svc.folder_ids().is_empty() {
                 mem.watcher = false;
+                mem.wake = None;
                 return;
             }
             continue;
         }
-        let mut watched = 0;
+        let mut watched = true;
         if let Some(fd) = &ino {
             let add = |p: &Path, mask: u32| {
                 let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else { return false };
@@ -1388,15 +1405,18 @@ fn watch_drops(svc: &Arc<WebAccessSvc>) {
                 unsafe { libc::inotify_add_watch(fd.as_raw_fd(), c.as_ptr(), mask) >= 0 }
             };
             let base = svc.drop_base();
-            watched += usize::from(add(&base, libc::IN_CREATE | libc::IN_DELETE | libc::IN_MOVED_TO | libc::IN_MOVED_FROM | libc::IN_ONLYDIR));
+            let dirs = libc::IN_CREATE | libc::IN_DELETE | libc::IN_MOVED_TO | libc::IN_MOVED_FROM | libc::IN_ATTRIB | libc::IN_ONLYDIR;
+            // a missing base: its parent says when it comes (no timer)
+            watched = add(&base, dirs) || base.parent().is_some_and(|p| add(p, libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_ONLYDIR));
             for id in &ids {
-                let mask = libc::IN_CLOSE_WRITE | libc::IN_MODIFY | libc::IN_ATTRIB | libc::IN_CREATE | libc::IN_DELETE | libc::IN_MOVED_TO | libc::IN_MOVED_FROM | libc::IN_ONLYDIR;
-                watched += usize::from(add(&base.join(id), mask));
+                // a missing folder: the base's IN_CREATE says when it comes
+                let mask = libc::IN_CLOSE_WRITE | libc::IN_MODIFY | dirs;
+                add(&base.join(id), mask);
             }
         }
         svc.scan_drops_at(Instant::now());
-        // a folder that cannot be watched (missing base) is looked at now and then
-        let fallback = if watched > ids.len() { None } else { Some(POLL.max(Duration::from_secs(60))) };
+        // nothing could be watched: looked at now and then
+        let fallback = if watched { None } else { Some(POLL.max(Duration::from_secs(60))) };
         let wait = [svc.next_drop_due(Instant::now()).map(|d| d + Duration::from_millis(50)), fallback]
             .into_iter()
             .flatten()
@@ -1406,11 +1426,19 @@ fn watch_drops(svc: &Arc<WebAccessSvc>) {
             std::thread::sleep(POLL);
             continue;
         };
-        let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let mut pfds = vec![libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        if let Some(e) = &efd {
+            pfds.push(libc::pollfd { fd: e.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+        }
         let ms = wait.map_or(-1, |d| d.as_millis().min(i32::MAX as u128) as i32);
-        // SAFETY: poll(2) on one valid descriptor
-        let r = unsafe { libc::poll(&mut pfd, 1, ms) };
+        // SAFETY: poll(2) on valid descriptors
+        let r = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, ms) };
         if r > 0 {
+            if let Some(e) = &efd {
+                let mut n = [0u8; 8];
+                // SAFETY: read(2) of the eventfd counter (non-blocking)
+                unsafe { libc::read(e.as_raw_fd(), n.as_mut_ptr().cast(), 8) };
+            }
             // a writer rewrites both files: gather its events into one look
             std::thread::sleep(Duration::from_millis(200));
             // SAFETY: read(2) into a buffer of the given length (non-blocking descriptor)

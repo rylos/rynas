@@ -21,8 +21,9 @@ page.
 
 **Subject.** A task about one thing (a stack, a PC, a volume) is started with
 `TaskManager::spawn_on(kind, Some(subject), user, job)`. `TaskInfo::subject` lets any view find
-it, and `TaskManager::running(kind, subject)` lets a second request answer the running task
-instead of starting another.
+it, and `TaskManager::spawn_once(kind, subject, user, job)` checks for a running task and
+starts one in a single step under the task list's lock (`Spawned::New` or
+`Spawned::Running`): two requests at once never start two tasks.
 
 **Partial outcome.** A job that stops at its time budget, or skips items, calls
 `TaskCtx::partial(why)` and returns `Ok`. The task ends with `status: ok` and
@@ -63,9 +64,16 @@ kept current by the `task.*` events of `/api/v1/events`. Nothing is polled.
 says so: a short "<task>: done", or the error (or the partial reason) with a "Log" button. A
 view reports a task when it follows it (`follow`, `run_and_report`, `TaskRun`), mounts a
 `use_task` for its type, or calls `tasks::reports(kind)` (a page that follows its tasks another
-way, e.g. the PC list that names the running measure). The decision waits 1.5 s, so a page that
-starts a task and follows it has registered by then. `config.*` tasks are left to the pending
-bar; cancellations say nothing.
+way, e.g. the PC list that names the running measure). A view registers the type and, for
+`use_task` with a subject, that subject only. The decision waits 1.5 s (plus up to 0.4 s, a
+different delay per tab), so a page that starts a task and follows it has registered by then;
+the first tab of the browser to toast notes the task in local storage and the other tabs stay
+quiet (a tab whose page reports the task does not tell the others). `config.*` tasks are left
+to the pending bar; cancellations say nothing.
+
+**Without a live stream** (a reconnect that takes long, or a proxy that holds the stream back:
+"live" but no metrics sample for 20 s) the task store and the pending changes are read every
+15 s while the tab is visible, so `use_task` views and the pending bar still move.
 
 ## Events, not loops
 
@@ -80,7 +88,13 @@ No loop wakes the NAS to look for a change that the kernel or another component 
 
 Subscribers call `sysevents::subscribe()` and wait with `next_burst(rx, quiet, filter)`: a burst
 (a disk with its partitions, a container start) is one wake-up. A lagged subscriber treats the
-lag as "everything may have changed". `sysevents::storage_changes()` is the debounced "the
+lag as "everything may have changed". The thread is restarted whenever it stops (pause doubling
+up to 60 s; also when udevd starts after rynasd, to switch to its group): each stop is
+`SysEvent::Lost`, each restart `SysEvent::Restarted` (a burst for everyone), and
+`sysevents::alive()` says whether events flow, so a subscriber can run its old pace while they
+do not (the removable drives go back to 2 s). Mount changes are filtered with `MountFilter`
+(block-device mounts only). Netlink messages are taken only from the kernel (port id 0) in the
+kernel's group, or from root (`SCM_CREDENTIALS`) in udevd's group. `sysevents::storage_changes()` is the debounced "the
 storage overview may have changed" (block and md events; mount changes only when the set of
 block-device mounts changed), sent on the task stream as `storage_changed` (`?storage=1`) and by
 rynas-web on `/api/v1/events` as `storage.changed`.
@@ -103,7 +117,7 @@ watches.
 | UI: `/config/pending` every 30 s | on `config.pending` events and when the tab becomes visible | 2/min → 0 per tab |
 | rynas-web: paired devices swept every 10 s, rynasd asked each time | every 60 s, rynasd asked only while a device has a session | 6/min → 1/min (no rynasd call) |
 | rynas-web: metrics sampled every second | every second while a client listens, every 10 s otherwise (history by time; a first client wakes the collector at once) | 60/min → 6/min |
-| QNAP worker 8 Hz (buttons, blink) | 4 Hz when nothing blinks and no button moves, 8 Hz otherwise | 480/min → 240/min |
+| QNAP worker 8 Hz (buttons, blink) | 4 Hz when nothing blinks and no button moves, 8 Hz otherwise; a level change is confirmed by a second read 30 ms later (gpio-f7188x has no interrupts), so a 150 ms tap is caught 60 % of the time instead of 20 % | 480/min → 240/min |
 
 ## Not converted yet
 

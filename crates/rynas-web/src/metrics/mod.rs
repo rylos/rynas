@@ -169,10 +169,11 @@ impl Store {
     /// ring.
     pub fn history(&self, window: Duration, max_points: usize) -> Vec<MetricsSample> {
         let ring = self.ring.read().unwrap_or_else(|e| e.into_inner());
-        let newest = ring.back().map_or(0, ring::Packed::ts_ms);
-        // (from, newest]: ten minutes at one per second are 600 samples
-        let from = newest.checked_sub(window.as_millis() as u64);
-        let start = from.map_or(0, |from| ring.partition_point(|p| p.ts_ms() <= from));
+        // by the monotonic time each sample was taken (the wall clock may jump), the newest
+        // as the reference; ts_ms stays in the answer. (from, newest]: ten minutes at one
+        // per second are 600 samples
+        let from = ring.back().and_then(|p| p.at().checked_sub(window));
+        let start = from.map_or(0, |from| ring.partition_point(|p| p.at() <= from));
         let len = ring.len() - start;
         let mut out: Vec<MetricsSample> = history::buckets(len, max_points)
             .into_iter()

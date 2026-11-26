@@ -2377,8 +2377,6 @@ async fn update_post(
 
 /// Most apps one "Update selected" may name.
 const UPDATE_MANY_MAX: usize = 100;
-/// Tasks looked at for an `apps.update-many` already running (the newest first).
-const UPDATE_MANY_SCAN: usize = 100;
 
 /// `POST /v1/apps/update-many` (body [`AppUpdateManyRequest`]): one task `apps.update-many`
 /// updates the named apps one after the other, each like `apps.update` with the default
@@ -2400,23 +2398,10 @@ async fn update_many_post(
     if stacks.is_empty() || stacks.len() > UPDATE_MANY_MAX {
         return Err(Error::invalid("stacks", format!("1 to {UPDATE_MANY_MAX} apps")));
     }
-    if let Some(running) = a
-        .docker
-        .ops
-        .tasks
-        .list(UPDATE_MANY_SCAN)
-        .into_iter()
-        .find(|t| t.kind == "apps.update-many" && !t.status.is_finished())
-    {
-        return Err(Error::new(
-            StatusCode::CONFLICT,
-            error_codes::BUSY,
-            format!("an update of several apps is running ({})", running.id),
-        ));
-    }
-    audit(&who, "update-many", &stacks.join(" "));
+    let stack_list = stacks.join(" ");
     let a2 = a.clone();
-    let id = a.docker.ops.tasks.spawn("apps.update-many", &who, move |ctx| async move {
+    // one at a time: the check and the start are one step (two clicks never start two)
+    let spawned = a.docker.ops.tasks.spawn_once("apps.update-many", UPDATE_MANY_SUBJECT, &who, move |ctx| async move {
         let (mut done, mut skipped, mut failed) = (Vec::new(), Vec::new(), Vec::new());
         let n = stacks.len();
         for (i, stack) in stacks.iter().enumerate() {
@@ -2425,21 +2410,18 @@ async fn update_many_post(
             }
             ctx.progress((i * 100 / n) as u8);
             ctx.log(&format!("== {stack} ({} of {n})", i + 1));
-            match a2.update_plan(stack).await {
-                Ok((.., p)) if p.up_to_date || p.downgrade => {
-                    ctx.log(&format!("{stack}: nothing to update"));
+            match a2.update_plan(stack).await.map(|(.., p)| update_many_skip(&p)) {
+                // updated meanwhile (its own dialog, the automatic update): nothing left to do
+                Ok(Some(ManySkip::UpToDate)) => {
+                    ctx.log(&format!("{stack}: already up to date"));
+                    continue;
+                }
+                Ok(Some(why)) => {
+                    ctx.log(&format!("{stack}: {}", why.text()));
                     skipped.push(stack.clone());
                     continue;
                 }
-                Ok((.., p)) if !p.missing_values.is_empty() => {
-                    ctx.log(&format!(
-                        "{stack}: the new version needs answers ({}): update it on its own",
-                        p.missing_values.join(", ")
-                    ));
-                    skipped.push(stack.clone());
-                    continue;
-                }
-                Ok(_) => {}
+                Ok(None) => {}
                 Err(e) => {
                     ctx.log(&format!("{stack}: {}", e.2));
                     failed.push(stack.clone());
@@ -2476,15 +2458,67 @@ async fn update_many_post(
             list_or_none(&skipped),
             list_or_none(&failed)
         ));
-        if !failed.is_empty() {
-            return Err(format!("not updated: {}", failed.join(", ")));
-        }
-        if !skipped.is_empty() {
-            ctx.partial(format!("skipped: {}", skipped.join(", ")));
+        if let Some(why) = update_many_outcome(&skipped, &failed)? {
+            ctx.partial(why);
         }
         Ok(())
     })?;
-    Ok(accepted(id))
+    match spawned {
+        rynas_tasks::Spawned::New(id) => {
+            audit(&who, "update-many", &stack_list);
+            Ok(accepted(id))
+        }
+        rynas_tasks::Spawned::Running(id) => Err(Error::new(
+            StatusCode::CONFLICT,
+            error_codes::BUSY,
+            format!("an update of several apps is running ({id})"),
+        )),
+    }
+}
+
+/// The subject of every `apps.update-many`: one at a time on the NAS.
+const UPDATE_MANY_SUBJECT: &str = "installed";
+
+/// Why "Update selected" leaves an app alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManySkip {
+    /// Nothing to do (updated meanwhile): not a skip, the task stays a full success.
+    UpToDate,
+    /// The catalogue has an older version.
+    Downgrade,
+    /// The new version asks for values: its own dialog.
+    NeedsAnswers,
+}
+
+impl ManySkip {
+    fn text(self) -> &'static str {
+        match self {
+            ManySkip::UpToDate => "already up to date",
+            ManySkip::Downgrade => "the catalog has an older version: not updated",
+            ManySkip::NeedsAnswers => "the new version needs answers: update it on its own",
+        }
+    }
+}
+
+fn update_many_skip(p: &AppUpdatePlan) -> Option<ManySkip> {
+    if p.up_to_date {
+        Some(ManySkip::UpToDate)
+    } else if p.downgrade {
+        Some(ManySkip::Downgrade)
+    } else if !p.missing_values.is_empty() {
+        Some(ManySkip::NeedsAnswers)
+    } else {
+        None
+    }
+}
+
+/// The end of an `apps.update-many`: failed apps fail it, skipped ones make it partial
+/// (`Ok(Some(why))`); apps that were already up to date count as done.
+fn update_many_outcome(skipped: &[String], failed: &[String]) -> Result<Option<String>, String> {
+    if !failed.is_empty() {
+        return Err(format!("not updated: {}", failed.join(", ")));
+    }
+    Ok((!skipped.is_empty()).then(|| format!("skipped: {}", skipped.join(", "))))
 }
 
 fn list_or_none(v: &[String]) -> String {
@@ -3084,6 +3118,25 @@ pub fn router(st: AppsState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_many_skips_and_outcome() {
+        let plan = |up_to_date: bool, downgrade: bool, missing: &[&str]| AppUpdatePlan {
+            up_to_date,
+            downgrade,
+            missing_values: missing.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        assert_eq!(update_many_skip(&plan(false, false, &[])), None);
+        assert_eq!(update_many_skip(&plan(true, false, &[])), Some(ManySkip::UpToDate));
+        assert_eq!(update_many_skip(&plan(false, true, &[])), Some(ManySkip::Downgrade));
+        assert_eq!(update_many_skip(&plan(false, false, &["TZ"])), Some(ManySkip::NeedsAnswers));
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // up to date apps are neither skipped nor failed: a full success
+        assert_eq!(update_many_outcome(&[], &[]), Ok(None));
+        assert_eq!(update_many_outcome(&v(&["immich"]), &[]), Ok(Some("skipped: immich".into())));
+        assert_eq!(update_many_outcome(&v(&["immich"]), &v(&["jellyfin"])), Err("not updated: jellyfin".into()));
+    }
 
     #[test]
     fn proc_net_listeners() {

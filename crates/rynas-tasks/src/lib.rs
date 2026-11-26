@@ -220,6 +220,35 @@ impl TaskManager {
         F: FnOnce(TaskCtx) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
+        match self.spawn_inner(kind, subject, user, false, job)? {
+            Spawned::New(id) | Spawned::Running(id) => Ok(id),
+        }
+    }
+
+    /// [`TaskManager::spawn_on`] unless a task of type `kind` about `subject` has not ended:
+    /// then that one is answered ([`Spawned::Running`]) and `job` is dropped. The check and
+    /// the start are one step under the task list's lock: two requests at once never start
+    /// two tasks.
+    pub fn spawn_once<F, Fut>(&self, kind: &str, subject: &str, user: &str, job: F) -> Result<Spawned, TaskError>
+    where
+        F: FnOnce(TaskCtx) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), String>> + Send + 'static,
+    {
+        self.spawn_inner(kind, Some(subject), user, true, job)
+    }
+
+    fn spawn_inner<F, Fut>(
+        &self,
+        kind: &str,
+        subject: Option<&str>,
+        user: &str,
+        once: bool,
+        job: F,
+    ) -> Result<Spawned, TaskError>
+    where
+        F: FnOnce(TaskCtx) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), String>> + Send + 'static,
+    {
         let start = now_ms();
         let seq = self.inner.seq.fetch_add(1, Ordering::Relaxed);
         let (kind, user) = (sanitize(kind), sanitize(user));
@@ -249,6 +278,16 @@ impl TaskManager {
         };
         {
             let mut t = self.inner.tasks.lock().unwrap();
+            if once
+                && let Some(e) = t.iter().rev().find(|e| {
+                    !e.info.status.is_finished() && e.info.kind == info.kind && e.info.subject == info.subject
+                })
+            {
+                let running = e.info.id.clone();
+                drop(t);
+                let _ = std::fs::remove_file(&log);
+                return Ok(Spawned::Running(running));
+            }
             let queued = t
                 .iter()
                 .filter(|e| e.info.status == TaskStatus::Queued)
@@ -299,7 +338,7 @@ impl TaskManager {
             };
             m.finish(&ctx, result);
         });
-        Ok(id)
+        Ok(Spawned::New(id))
     }
 
     /// Tasks, newest first.
@@ -611,6 +650,15 @@ impl TaskCtx {
     }
 }
 
+/// What [`TaskManager::spawn_once`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Spawned {
+    /// Started this task.
+    New(String),
+    /// One was running already: this one.
+    Running(String),
+}
+
 /// Longest [`TaskInfo::subject`] kept (characters).
 pub const SUBJECT_MAX: usize = 200;
 
@@ -879,6 +927,46 @@ mod tests {
         let info = m.wait(&id).await.unwrap();
         assert_eq!(info.status, TaskStatus::Error);
         assert!(info.partial.is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_once_answers_the_running_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(dir.path(), TaskConfig::default());
+        let gate = CancellationToken::new();
+        let g = gate.clone();
+        let Spawned::New(first) = m
+            .spawn_once("apps.update-many", "installed", "u", move |_| async move {
+                g.cancelled().await;
+                Ok(())
+            })
+            .unwrap()
+        else {
+            panic!("a first one starts")
+        };
+        // a second request at once: the same task, its job never runs
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let r2 = ran.clone();
+        let second = m
+            .spawn_once("apps.update-many", "installed", "v", move |_| async move {
+                r2.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(second, Spawned::Running(first.clone()));
+        assert_eq!(m.list(10).len(), 1, "no second task");
+        let logs = std::fs::read_dir(dir.path().join("tasks")).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "log")).count();
+        assert_eq!(logs, 1, "no stray log");
+        // another subject is another task
+        let other = m.spawn_once("apps.update-many", "elsewhere", "u", |_| async { Ok(()) }).unwrap();
+        assert!(matches!(other, Spawned::New(_)));
+        gate.cancel();
+        m.wait(&first).await;
+        let Spawned::New(again) = m.spawn_once("apps.update-many", "installed", "u", |_| async { Ok(()) }).unwrap() else {
+            panic!("the next one starts once the first ended")
+        };
+        m.wait(&again).await;
+        assert!(!ran.load(Ordering::Relaxed));
     }
 
     #[test]

@@ -620,10 +620,16 @@ fn ntfs_event(
 pub fn spawn_watch(s: Arc<RemovableSvc>) {
     tokio::spawn(async move {
         let mut settings = s.settings.clone();
-        let mut events = crate::sysevents::subscribe();
+        use crate::sysevents::{self, MountFilter, SysEvent};
+        let mut events = sysevents::subscribe();
         let mut watching = true;
-        let mut tick = tokio::time::interval(TICK);
+        // the pace of the safety net: slow while events flow, the old one while they do not
+        let pace = || if sysevents::alive() { TICK } else { LOST_TICK };
+        let mut every = pace();
+        let mut tick = tokio::time::interval(every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // only block-device mounts: a container start is no reason to read the drives
+        let mut mounts = MountFilter::now();
         loop {
             tokio::select! {
                 _ = tick.tick() => {
@@ -631,12 +637,21 @@ pub fn spawn_watch(s: Arc<RemovableSvc>) {
                         tracing::debug!("removable drives: {}", e.2);
                     }
                 }
-                alive = crate::sysevents::next_burst(&mut events, SETTLE, |e| !matches!(e, crate::sysevents::SysEvent::Md)), if watching => {
-                    if !alive {
-                        // no watcher: the safety net alone, at the old pace
-                        tracing::warn!("removable drives: no system events, looking every {} s", LOST_TICK.as_secs());
+                open = sysevents::next_burst(&mut events, SETTLE, |e| match e {
+                    SysEvent::Md => false,
+                    SysEvent::Mounts => mounts.changed(),
+                    _ => true,
+                }), if watching => {
+                    if !open {
                         watching = false;
-                        tick = tokio::time::interval(LOST_TICK);
+                    }
+                    if pace() != every {
+                        every = pace();
+                        tracing::info!("removable drives: looking every {} s", every.as_secs());
+                        tick = tokio::time::interval(every);
+                        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    }
+                    if !open || !sysevents::alive() {
                         continue;
                     }
                     if let Err(e) = s.refresh(false).await {

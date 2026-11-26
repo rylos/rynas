@@ -38,8 +38,27 @@ pub struct Tasks {
     pub stream_live: Signal<bool>,
     /// Tasks a page reports itself ([`follow`], [`Tasks::claim`]): no global toast at their end.
     followed: StoredValue<std::collections::HashSet<String>>,
-    /// Task types a mounted view shows in place ([`use_task`]), with how many views.
-    watched: StoredValue<std::collections::HashMap<String, u32>>,
+    /// Task types (and subjects; `None`: any) a mounted view shows in place ([`use_task`]),
+    /// with how many views.
+    watched: StoredValue<std::collections::HashMap<(String, Option<String>), u32>>,
+}
+
+/// Where the tabs of this browser note the task ends one of them already toasted.
+const TOLD_KEY: &str = "rynas.tasks.told";
+
+/// No other tab of this browser toasted the end of task `id` yet: this one does (and says
+/// so). Without local storage every tab toasts.
+fn first_tab_to_tell(id: &str) -> bool {
+    let told = crate::prefs::storage_get(TOLD_KEY).unwrap_or_default();
+    if told.split('\n').any(|x| x == id) {
+        return false;
+    }
+    let mut keep: Vec<&str> = told.split('\n').filter(|x| !x.is_empty()).collect();
+    let start = keep.len().saturating_sub(19);
+    keep.drain(..start);
+    keep.push(id);
+    crate::prefs::storage_set(TOLD_KEY, &keep.join("\n"));
+    true
 }
 
 thread_local! {
@@ -116,11 +135,14 @@ impl Tasks {
         if me.as_deref() != Some(task.user.as_str()) || task.kind.starts_with("config.") || task.status == TaskStatus::Cancelled {
             return;
         }
+        // a little later in each tab, so that the first one marks it for the others
+        let jitter = (js_sys::Math::random() * 400.0) as u64;
         set_timeout(
             move || {
                 let followed = self.followed.try_with_value(|f| f.contains(&task.id)).unwrap_or(true);
-                let watched = self.watched.try_with_value(|w| w.get(&task.kind).is_some_and(|n| *n > 0)).unwrap_or(true);
-                if followed || watched {
+                let count = |w: &std::collections::HashMap<(String, Option<String>), u32>, s: Option<String>| w.get(&(task.kind.clone(), s)).is_some_and(|n| *n > 0);
+                let watched = self.watched.try_with_value(|w| count(w, None) || (task.subject.is_some() && count(w, task.subject.clone()))).unwrap_or(true);
+                if followed || watched || !first_tab_to_tell(&task.id) {
                     return;
                 }
                 let name = task_label(&task.kind);
@@ -131,7 +153,7 @@ impl Tasks {
                     crate::toast::toast_task(task_tone(&task), text, task.id.clone());
                 }
             },
-            Duration::from_millis(1500),
+            Duration::from_millis(1500 + jitter),
         );
     }
 
@@ -315,30 +337,43 @@ impl UseTask {
 
 /// [`UseTask`] for type `kind` about `subject` ([`TaskInfo::subject`]; `None`: whatever it
 /// is about). While the view is mounted it reports the task's end itself, so the global
-/// toast stays quiet for that type.
+/// toast stays quiet for that type and subject (the subject as the view mounted).
 pub fn use_task(kind: &'static str, subject: Signal<Option<String>>) -> UseTask {
-    use_task_by(kind, move |t| subject.with(|s| s.is_none() || t.subject == *s))
+    reports_on(kind, subject.get_untracked());
+    find_task(kind, move |t| subject.with(|s| s.is_none() || t.subject == *s))
 }
 
 /// The calling view (while it is mounted) says itself how tasks of type `kind` end: the
 /// global toast stays quiet for them. [`use_task`] does it; a page that follows its tasks
 /// another way (the list names the running task) calls it alone.
 pub fn reports(kind: &'static str) {
+    reports_on(kind, None);
+}
+
+/// [`reports`] for the tasks about `subject` only (`None`: any).
+fn reports_on(kind: &'static str, subject: Option<String>) {
     let s = tasks();
-    s.watched.update_value(|w| *w.entry(kind.to_string()).or_default() += 1);
+    let key = (kind.to_string(), subject);
+    let k2 = key.clone();
+    s.watched.update_value(|w| *w.entry(key).or_default() += 1);
     on_cleanup(move || {
         let _ = s.watched.try_update_value(|w| {
-            if let Some(n) = w.get_mut(kind) {
+            if let Some(n) = w.get_mut(&k2) {
                 *n = n.saturating_sub(1);
             }
         });
     });
 }
 
-/// [`use_task`] with a filter of its own (`keep`: the user who started it, ...).
+/// [`use_task`] with a filter of its own (`keep`: the user who started it, ...); it reports
+/// every task of the type.
 pub fn use_task_by(kind: &'static str, keep: impl Fn(&TaskInfo) -> bool + Send + Sync + 'static) -> UseTask {
-    let s = tasks();
     reports(kind);
+    find_task(kind, keep)
+}
+
+fn find_task(kind: &'static str, keep: impl Fn(&TaskInfo) -> bool + Send + Sync + 'static) -> UseTask {
+    let s = tasks();
     let mounted = js_sys::Date::now() as u64;
     let task = Memo::new(move |_| {
         s.list.with(|l| {

@@ -66,6 +66,7 @@ fn net_meta(n: &NetRate) -> u64 {
 #[derive(Debug)]
 pub struct Packed {
     ts_ms: u64,
+    at: std::time::Instant,
     cpu_pct: f32,
     load: [f32; 3],
     mem: MemUsage,
@@ -98,6 +99,7 @@ impl Packed {
             .collect();
         Self {
             ts_ms: s.ts_ms,
+            at: std::time::Instant::now(),
             cpu_pct: s.cpu_pct,
             load: s.load,
             mem: s.mem,
@@ -109,6 +111,12 @@ impl Packed {
 
     pub fn ts_ms(&self) -> u64 {
         self.ts_ms
+    }
+
+    /// When it was packed (monotonic: a clock set back or forward never shifts the
+    /// history window).
+    pub fn at(&self) -> std::time::Instant {
+        self.at
     }
 
     pub fn series(&self) -> &Arc<Series> {

@@ -24,6 +24,8 @@ pub const HISTORY_CAP: usize = 600;
 /// The storage overview read again for its fill levels (everything else arrives as
 /// `storage.changed`).
 const STORAGE_LEVELS: Duration = Duration::from_secs(300);
+/// Tasks and pending changes read again while the event stream is not live.
+const NO_STREAM_POLL: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Conn {
@@ -95,6 +97,8 @@ thread_local! {
     static STREAM: RefCell<Option<Stream>> = const { RefCell::new(None) };
     /// Polling timers are created once and skip their work while signed out.
     static POLLING: Cell<bool> = const { Cell::new(false) };
+    /// When the last sample arrived (browser clock, ms).
+    static LAST_SAMPLE: Cell<f64> = const { Cell::new(0.0) };
 }
 
 fn close_stream() {
@@ -243,6 +247,7 @@ impl Live {
             h.push_back(s.clone());
         });
         if newer {
+            LAST_SAMPLE.with(|c| c.set(js_sys::Date::now()));
             crate::chart::note_sample(s.ts_ms);
             self.sample.set(Some(s));
             self.tick.update(|t| *t += 1);
@@ -356,6 +361,22 @@ impl Live {
                 }
             },
             STORAGE_LEVELS,
+        );
+        // no live stream (a proxy that holds it back, a reconnect that takes long): the task
+        // store (every `use_task` view reads it) and the pending changes are read now and
+        // then instead, nothing while the stream works
+        set_interval(
+            move || {
+                let conn = self.conn.get_untracked();
+                // "live" but silent: the server sends a sample every second while a stream
+                // listens, so a quiet live stream is one a proxy holds back
+                let held = conn == Conn::Live && js_sys::Date::now() - LAST_SAMPLE.with(Cell::get) > 20_000.0;
+                if should_poll() && conn != Conn::Demo && (conn != Conn::Live || held) {
+                    crate::tasks::tasks().reload();
+                    crate::config::config().refresh();
+                }
+            },
+            NO_STREAM_POLL,
         );
     }
 
