@@ -2,8 +2,9 @@
 //!
 //! Charts redraw only their `<canvas>`: no DOM re-render. Points are placed by their server
 //! timestamp and the right edge follows the (estimated) server clock one sample behind, so the
-//! series scrolls continuously instead of jumping once per sample; lines are smooth curves.
-//! Colors come from CSS custom properties read with `getComputedStyle`, so they follow the
+//! series scrolls continuously instead of jumping once per sample; lines are monotone cubics
+//! over a gradient, with a head (dot and halo) riding the curve at the right edge of the plot
+//! and a mini scale (top and half lines with their values) right of it. Colors come from CSS custom properties read with `getComputedStyle`, so they follow the
 //! theme. HiDPI aware (devicePixelRatio). Static when the user prefers reduced motion.
 
 use std::sync::Arc;
@@ -191,16 +192,37 @@ pub fn controls(pts: &[(f64, f64)], m: &[f64], k: usize) -> [(f64, f64); 2] {
     [(x0 + h, y0 + m[k] * h), (x1 - h, y1 - m[k + 1] * h)]
 }
 
-/// Smooth path through the points: monotone cubic ([`tangents`]).
-fn trace(ctx: &CanvasRenderingContext2d, pts: &[(f64, f64)]) {
+/// Smooth path through the points: monotone cubic with the tangents `m` ([`tangents`]).
+fn trace(ctx: &CanvasRenderingContext2d, pts: &[(f64, f64)], m: &[f64]) {
     let Some(&(x0, y0)) = pts.first() else { return };
     ctx.move_to(x0, y0);
-    let m = tangents(pts);
     for k in 0..pts.len() - 1 {
-        let [(ax, ay), (bx, by)] = controls(pts, &m, k);
+        let [(ax, ay), (bx, by)] = controls(pts, m, k);
         let (x, y) = pts[k + 1];
         ctx.bezier_curve_to(ax, ay, bx, by, x, y);
     }
+}
+
+/// Height at `x` of the curve [`trace`] draws through `pts` with tangents `m` (clamped to the
+/// points). The control points sit at a third and two thirds of each piece's width, so x is
+/// linear in the Bézier parameter and y follows directly.
+pub fn curve_y(pts: &[(f64, f64)], m: &[f64], x: f64) -> f64 {
+    let n = pts.len();
+    if n < 2 {
+        return pts.first().map_or(0.0, |p| p.1);
+    }
+    let mut k = n - 2;
+    while k > 0 && pts[k].0 > x {
+        k -= 1;
+    }
+    let ((x0, y0), (x1, y1)) = (pts[k], pts[k + 1]);
+    if x1 <= x0 {
+        return y1;
+    }
+    let u = ((x - x0) / (x1 - x0)).clamp(0.0, 1.0);
+    let [(_, c0), (_, c1)] = controls(pts, m, k);
+    let v = 1.0 - u;
+    v * v * v * y0 + 3.0 * v * v * u * c0 + 3.0 * v * u * u * c1 + u * u * u * y1
 }
 
 /// Peak of the samples drawn (NaN and negative values count as 0).
@@ -250,17 +272,21 @@ impl Scale {
     }
 }
 
-/// Draw the snapshot with the right edge of the chart at server time `t` (ms) and the scale
-/// top at `top` (eased); the label shows `label_top`, where the scale is going: a round value.
+/// Room for the head (radius 3.5 and a 6 px halo ring around it) at the top and right edges.
+const HALO: f64 = 7.0;
+
+/// Draw the snapshot with the head of the curve at server time `t` (ms) and the scale top at
+/// `top` (eased). The mini scale on the right shows the values of the top and half lines for
+/// `label_top`, where the scale is going: a round value.
 fn draw(canvas: &HtmlCanvasElement, series: &[Series], snap: &Snap, o: Opts, t: f64, top: f32, label_top: f32) {
     let (cw, ch, dpr) = (snap.w, snap.h, snap.dpr);
     if cw <= 0.0 || ch <= 0.0 {
         return;
     }
-    let (pw, ph) = ((cw * dpr).round() as u32, (ch * dpr).round() as u32);
-    if canvas.width() != pw || canvas.height() != ph {
-        canvas.set_width(pw);
-        canvas.set_height(ph);
+    let (bw, bh) = ((cw * dpr).round() as u32, (ch * dpr).round() as u32);
+    if canvas.width() != bw || canvas.height() != bh {
+        canvas.set_width(bw);
+        canvas.set_height(bh);
     }
     let Some(ctx) = canvas
         .get_context("2d")
@@ -274,27 +300,45 @@ fn draw(canvas: &HtmlCanvasElement, series: &[Series], snap: &Snap, o: Opts, t: 
     ctx.clear_rect(0.0, 0.0, cw, ch);
 
     let top = top.max(f32::MIN_POSITIVE);
-    let pad_top = if o.label.is_some() { 14.0 } else { 2.0 };
-    let h = ch - pad_top - 1.0;
+    let labels = o.label.map(|f| [f(label_top), f(label_top * 0.5)]);
+    ctx.set_font("500 10.5px Inter, system-ui, sans-serif");
+    // the plot ends where the head is; the labels sit right of it, in 8 px steps so the plot
+    // does not change width with every new label
+    let right = match &labels {
+        Some(l) => {
+            let w = l.iter().filter_map(|s| ctx.measure_text(s).ok()).fold(0.0, |a: f64, m| a.max(m.width()));
+            ((w + 10.0) / 8.0).ceil() * 8.0
+        }
+        None => HALO,
+    };
+    let pw = (cw - right).max(1.0);
+    let base = ch - 2.0;
+    let h = (base - HALO).max(1.0);
+    let line_y = |f: f64| (base - h * f).round() + 0.5;
 
     if o.grid {
         ctx.set_stroke_style_str(&snap.grid);
         ctx.set_line_width(1.0);
-        let _ = ctx.set_line_dash(&js_sys::Array::of2(&3.into(), &3.into()));
-        for i in 0..4 {
-            let y = (pad_top + h * i as f64 / 4.0).round() + 0.5;
-            ctx.begin_path();
-            ctx.move_to(0.0, y);
-            ctx.line_to(cw, y);
-            ctx.stroke();
+        ctx.begin_path();
+        ctx.move_to(0.0, line_y(0.0));
+        ctx.line_to(pw, line_y(0.0));
+        ctx.stroke();
+        let _ = ctx.set_line_dash(&js_sys::Array::of2(&2.into(), &4.into()));
+        ctx.begin_path();
+        for f in [1.0, 0.5] {
+            ctx.move_to(0.0, line_y(f));
+            ctx.line_to(pw, line_y(f));
         }
+        ctx.stroke();
         let _ = ctx.set_line_dash(&js_sys::Array::new());
     }
 
     let span = (window_len(o.points) - 1) as f64 * snap.step_ms();
+    let mut heads = Vec::with_capacity(series.len());
     ctx.save();
     ctx.begin_path();
-    ctx.rect(0.0, 0.0, cw, ch);
+    // past the head is the stretch to the next sample: it shows as the head gets there
+    ctx.rect(0.0, 0.0, pw, ch);
     ctx.clip();
     for ((s, vals), color) in series.iter().zip(&snap.data).zip(&snap.colors) {
         let n = vals.len().min(snap.ts.len());
@@ -306,26 +350,27 @@ fn draw(canvas: &HtmlCanvasElement, series: &[Series], snap: &Snap, o: Opts, t: 
             .iter()
             .zip(&vals[vals.len() - n..])
             // clamped to the plot: never below the baseline, never above the top
-            .map(|(&x, &v)| (cw - (t - x) / span * cw, pad_top + h - (clamp_value(v, top) / top) as f64 * h))
+            .map(|(&x, &v)| (pw - (t - x) / span * pw, base - (clamp_value(v, top) / top) as f64 * h))
             .collect();
+        let m = tangents(&pts);
         let (x0, y0) = pts[0];
         let xn = pts[n - 1].0;
         if s.fill {
-            let grad = ctx.create_linear_gradient(0.0, pad_top, 0.0, ch);
-            let _ = grad.add_color_stop(0.0, &hex_rgba(color, 0.32));
-            let _ = grad.add_color_stop(1.0, &hex_rgba(color, 0.0));
+            let grad = ctx.create_linear_gradient(0.0, HALO, 0.0, base);
+            let _ = grad.add_color_stop(0.0, &hex_rgba(color, 0.38));
+            let _ = grad.add_color_stop(1.0, &hex_rgba(color, 0.03));
             ctx.begin_path();
-            trace(&ctx, &pts);
-            ctx.line_to(xn, ch);
-            ctx.line_to(x0, ch);
+            trace(&ctx, &pts, &m);
+            ctx.line_to(xn, base);
+            ctx.line_to(x0, base);
             ctx.close_path();
             ctx.set_fill_style_canvas_gradient(&grad);
             ctx.fill();
         }
         ctx.begin_path();
-        trace(&ctx, &pts);
+        trace(&ctx, &pts, &m);
         ctx.set_stroke_style_str(color);
-        ctx.set_line_width(if o.grid { 1.75 } else { 1.5 });
+        ctx.set_line_width(2.0);
         ctx.set_line_join("round");
         ctx.set_line_cap("round");
         ctx.stroke();
@@ -336,13 +381,29 @@ fn draw(canvas: &HtmlCanvasElement, series: &[Series], snap: &Snap, o: Opts, t: 
             ctx.set_fill_style_str(color);
             ctx.fill();
         }
+        let hx = xn.min(pw);
+        heads.push((hx, curve_y(&pts, &m, hx), color));
     }
     ctx.restore();
 
-    if let Some(fmt) = o.label {
+    // the heads, on the curve at the right edge of the plot: a dot in a soft halo
+    for (x, y, color) in heads {
+        ctx.begin_path();
+        let _ = ctx.arc(x, y, 3.5, 0.0, std::f64::consts::TAU);
+        ctx.set_fill_style_str(color);
+        ctx.fill();
+        ctx.set_stroke_style_str(&hex_rgba(color, 0.35));
+        ctx.set_line_width(6.0);
+        ctx.stroke();
+    }
+
+    if let Some(l) = labels {
         ctx.set_fill_style_str(&snap.label);
-        ctx.set_font("500 11px Inter, system-ui, sans-serif");
-        let _ = ctx.fill_text(&fmt(label_top), 2.0, 10.0);
+        ctx.set_text_baseline("middle");
+        for (s, f) in l.iter().zip([1.0, 0.5]) {
+            let _ = ctx.fill_text(s, pw + 8.0, line_y(f));
+        }
+        ctx.set_text_baseline("alphabetic");
     }
 }
 
@@ -369,8 +430,89 @@ fn edge_time(snap: &Snap) -> f64 {
 /// requests and layouts, canvases drawn 60 times a second are what the main thread can least afford.
 const LOOP_START_MS: u64 = 1200;
 
-/// A live chart bound to the metrics history. It scrolls continuously (requestAnimationFrame at
-/// 30-60 fps, paused in hidden tabs); static with reduced motion.
+/// What the animation loop of a [`LiveChart`] reads: handles, so it is `Copy`.
+#[derive(Clone, Copy)]
+struct Loop {
+    series: StoredValue<Vec<Series>>,
+    snap: StoredValue<Snap>,
+    scale: StoredValue<Scale>,
+    running: StoredValue<bool>,
+    /// The canvas is in the viewport (IntersectionObserver).
+    visible: StoredValue<bool>,
+    /// The loop ran before: a restart (back in view, tab shown again) begins at once.
+    started: StoredValue<bool>,
+    opts: Opts,
+}
+
+impl Loop {
+    /// Draw the current snapshot once.
+    fn draw_now(self, canvas: &HtmlCanvasElement) {
+        let Some(sc) = self.scale.try_get_value() else { return };
+        let now = js_sys::Date::now();
+        self.series.with_value(|ss| self.snap.with_value(|sn| draw(canvas, ss, sn, self.opts, edge_time(sn), sc.at(now), sc.to)));
+    }
+
+    /// Start the animation loop unless it runs already, the chart is out of view, the tab is
+    /// hidden or the user prefers reduced motion. It stops by itself on any of these.
+    fn kick(self, canvas: HtmlCanvasElement) {
+        let still = self.snap.try_with_value(|s| s.still).unwrap_or(true);
+        if still || self.running.try_get_value().unwrap_or(true) || !self.visible.get_value() || document().hidden() {
+            return;
+        }
+        self.running.set_value(true);
+        if self.started.get_value() {
+            request_animation_frame(move || frame(canvas, self, 0.0));
+        } else {
+            self.started.set_value(true);
+            // the page is still arriving (requests, layouts): the loop starts once that is done;
+            // until then each new sample draws through the chart's effect
+            set_timeout(move || frame(canvas, self, 0.0), std::time::Duration::from_millis(LOOP_START_MS));
+        }
+    }
+}
+
+fn frame(canvas: HtmlCanvasElement, l: Loop, last: f64) {
+    // the component is gone (stored values disposed), the canvas left the page or the viewport,
+    // the tab is hidden or the user asked for reduced motion: stop (a new sample, or the chart
+    // coming back into view, starts the loop again)
+    if !canvas.is_connected()
+        || l.snap.try_with_value(|sn| sn.still).unwrap_or(true)
+        || !l.visible.try_get_value().unwrap_or(false)
+        || document().hidden()
+    {
+        l.running.try_set_value(false);
+        return;
+    }
+    // not laid out yet when the sample arrived (just mounted): measure until it is
+    if l.snap.with_value(|sn| sn.w <= 0.0) {
+        let (w, h) = (canvas.client_width() as f64, canvas.client_height() as f64);
+        l.snap.update_value(|sn| {
+            sn.w = w;
+            sn.h = h;
+            sn.dpr = window().device_pixel_ratio().max(1.0);
+        });
+    }
+    let now = js_sys::Date::now();
+    let mut drawn = last;
+    let due = l.snap.with_value(|sn| {
+        let span = (window_len(l.opts.points) - 1) as f64 * sn.step_ms();
+        let px_per_ms = sn.w * sn.dpr / span;
+        // at least 30 fps: steep pieces move vertically much more than the scroll itself, so a
+        // slower rate shows steps; 60 fps only when the scroll is fast
+        (0.25 / px_per_ms.max(1e-9)).clamp(16.0, 33.0)
+    });
+    // a rescale runs at the display frame rate
+    let due = if l.scale.get_value().moving(now) { 0.0 } else { due };
+    if now - last >= due {
+        l.draw_now(&canvas);
+        drawn = now;
+    }
+    request_animation_frame(move || frame(canvas, l, drawn));
+}
+
+/// A live chart bound to the metrics history. It scrolls continuously and its head rides the
+/// curve into each new sample (requestAnimationFrame at 30-60 fps, only while the chart is in
+/// view and the tab visible); static with reduced motion.
 #[component]
 pub fn LiveChart(
     series: Vec<Series>,
@@ -384,17 +526,31 @@ pub fn LiveChart(
     /// Accessible description of the chart.
     aria: Signal<String>,
 ) -> impl IntoView {
+    use wasm_bindgen::closure::Closure;
+
     let live = use_live();
     let ui = use_ui();
     let node = NodeRef::<Canvas>::new();
-    let opts = Opts { max, points, grid, label, binary };
-    let series = StoredValue::new(series);
-    let snap = StoredValue::new(Snap::default());
-    let running = StoredValue::new(false);
-    let scale = StoredValue::new(Scale::default());
+    let l = Loop {
+        series: StoredValue::new(series),
+        snap: StoredValue::new(Snap::default()),
+        scale: StoredValue::new(Scale::default()),
+        running: StoredValue::new(false),
+        visible: StoredValue::new(true),
+        started: StoredValue::new(false),
+        opts: Opts { max, points, grid, label, binary },
+    };
+    let (series, snap, scale, opts) = (l.series, l.snap, l.scale, l.opts);
     // the theme's colours (for `dark`): reading them forces a style recalculation of the page,
     // so once per theme and not once per sample
     let theme = StoredValue::new(None::<(bool, Vec<String>, String, String)>);
+    type Watch = (web_sys::IntersectionObserver, Closure<dyn Fn(js_sys::Array)>);
+    let watch = StoredValue::new_local(None::<Watch>);
+    on_cleanup(move || {
+        if let Some(Some((ob, _))) = watch.try_update_value(Option::take) {
+            ob.disconnect();
+        }
+    });
 
     // new sample, theme or layout change: refresh the snapshot and redraw once
     Effect::new(move || {
@@ -403,6 +559,23 @@ pub fn LiveChart(
         ui.layout_tick.track();
         ui.sidebar_collapsed.track();
         let Some(canvas) = node.get() else { return };
+        if watch.with_value(Option::is_none) {
+            // out of view (scrolled away, a collapsed card): no frames at all until it is back
+            let c = canvas.clone();
+            let cb = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
+                let Some(on) = entries.iter().last().and_then(|e| e.dyn_into::<web_sys::IntersectionObserverEntry>().ok()).map(|e| e.is_intersecting()) else {
+                    return;
+                };
+                if l.visible.try_update_value(|v| *v = on).is_some() && on {
+                    l.draw_now(&c);
+                    l.kick(c.clone());
+                }
+            });
+            if let Ok(ob) = web_sys::IntersectionObserver::new(cb.as_ref().unchecked_ref()) {
+                ob.observe(&canvas);
+                watch.set_value(Some((ob, cb)));
+            }
+        }
         if !theme.with_value(|t| t.as_ref().is_some_and(|t| t.0 == dark)) {
             let style = window().get_computed_style(&canvas).ok().flatten();
             let var = |name: &str| style.as_ref().and_then(|s| s.get_property_value(name).ok()).unwrap_or_default();
@@ -436,63 +609,12 @@ pub fn LiveChart(
         let (top, still) = (next_top(peak(&next), scale.get_value().to, opts.max, opts.binary), next.still);
         scale.update_value(|s| s.retarget(top, now, !still));
         snap.set_value(next);
-        let sc = scale.get_value();
-        series.with_value(|ss| snap.with_value(|sn| draw(&canvas, ss, sn, opts, edge_time(sn), sc.at(now), sc.to)));
-        if !running.get_value() && !still {
-            running.set_value(true);
-            // the page is still arriving (requests, layouts): the loop starts once that is done;
-            // until then each new sample draws through this effect
-            let start = move || frame(canvas, series, snap, scale, running, opts, 0.0);
-            set_timeout(start, std::time::Duration::from_millis(LOOP_START_MS));
+        // out of view: drawn when it comes back
+        if l.visible.get_value() {
+            l.draw_now(&canvas);
         }
+        l.kick(canvas);
     });
-
-    fn frame(
-        canvas: HtmlCanvasElement,
-        series: StoredValue<Vec<Series>>,
-        snap: StoredValue<Snap>,
-        scale: StoredValue<Scale>,
-        running: StoredValue<bool>,
-        o: Opts,
-        last: f64,
-    ) {
-        // the component is gone (stored values disposed), the canvas left the page or the user
-        // asked for reduced motion: stop (the next sample restarts the loop if needed)
-        if !canvas.is_connected() || snap.try_with_value(|sn| sn.still).unwrap_or(true) {
-            running.try_set_value(false);
-            return;
-        }
-        // not laid out yet when the sample arrived (just mounted): measure until it is
-        if snap.try_with_value(|sn| sn.w <= 0.0).unwrap_or(false) {
-            let (w, h) = (canvas.client_width() as f64, canvas.client_height() as f64);
-            snap.try_update_value(|sn| {
-                sn.w = w;
-                sn.h = h;
-                sn.dpr = window().device_pixel_ratio().max(1.0);
-            });
-        }
-        let now = js_sys::Date::now();
-        let mut drawn = last;
-        if !document().hidden() {
-            let due = snap
-                .try_with_value(|sn| {
-                    let span = (window_len(o.points) - 1) as f64 * sn.step_ms();
-                    let px_per_ms = sn.w * sn.dpr / span;
-                    // at least 30 fps: steep pieces move vertically much more than the scroll
-                    // itself, so a slower rate shows steps; 60 fps only when the scroll is fast
-                    (0.25 / px_per_ms.max(1e-9)).clamp(16.0, 33.0)
-                })
-                .unwrap_or(250.0);
-            let sc = scale.try_get_value().unwrap_or_default();
-            // a rescale runs at the display frame rate
-            let due = if sc.moving(now) { 0.0 } else { due };
-            if now - last >= due {
-                series.with_value(|ss| snap.with_value(|sn| draw(&canvas, ss, sn, o, edge_time(sn), sc.at(now), sc.to)));
-                drawn = now;
-            }
-        }
-        request_animation_frame(move || frame(canvas, series, snap, scale, running, o, drawn));
-    }
 
     view! { <canvas node_ref=node class=class role="img" aria-label=aria></canvas> }
 }
@@ -578,6 +700,23 @@ mod tests {
         for p in &pts {
             assert!(c.iter().any(|q| (q.0 - p.0).abs() < 1e-9 && (q.1 - p.1).abs() < 1e-9));
         }
+    }
+
+    #[test]
+    fn head_rides_the_drawn_curve() {
+        let pts: Vec<(f64, f64)> = [3.0, 7.0, 2.0, 9.0, 4.0].iter().enumerate().map(|(i, &y)| (i as f64 * 10.0, y)).collect();
+        let m = tangents(&pts);
+        // on every sample, and on the traced points in between
+        for p in &pts {
+            assert!((curve_y(&pts, &m, p.0) - p.1).abs() < 1e-9);
+        }
+        for q in curve(&pts) {
+            assert!((curve_y(&pts, &m, q.0) - q.1).abs() < 1e-9, "at x {}", q.0);
+        }
+        // outside the points: clamped to the ends
+        assert_eq!(curve_y(&pts, &m, 99.0), 4.0);
+        assert_eq!(curve_y(&pts, &m, -5.0), 3.0);
+        assert_eq!(curve_y(&pts[..1], &m, 5.0), 3.0);
     }
 
     #[test]
