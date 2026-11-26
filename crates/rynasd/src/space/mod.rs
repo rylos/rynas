@@ -449,6 +449,10 @@ pub struct Space {
     /// The scheduling gate (its leases are in the lock table the deletions ask).
     pub gate: Option<Arc<crate::gate::Gate>>,
     scanning: AtomicBool,
+    /// Automatic cleanup passes a person stopped: volume → the settings then (JSON). The next
+    /// pass waits for the next day ([`model::ThinDay::cooldown_until_ms`]) unless the settings
+    /// change.
+    thin_stopped: Mutex<HashMap<String, String>>,
     /// Previews by task id, with when they were asked (the oldest finished ones go first).
     previews: Mutex<HashMap<String, (u64, SpacePreview)>>,
     history: Mutex<History>,
@@ -537,6 +541,7 @@ impl Space {
             pins,
             gate: None,
             scanning: AtomicBool::new(false),
+            thin_stopped: Mutex::new(HashMap::new()),
             previews: Mutex::new(HashMap::new()),
             history: Mutex::new(history),
             stack_images: Mutex::new(None),
@@ -1827,6 +1832,19 @@ impl Space {
     /// Why an automatic cleanup pass of `label` would not start now (suspended, cooling down,
     /// the day's limit), without changing anything: the 5-minute watch starts no task then.
     pub fn thin_waits(&self, label: &str) -> Option<model::ThinStop> {
+        // a pass a person stopped: changed settings release the wait at once
+        let stopped = self.thin_stopped.lock().unwrap().get(label).cloned();
+        if let Some(then) = stopped
+            && serde_json::to_string(&self.settings()).unwrap_or_default() != then
+        {
+            self.thin_stopped.lock().unwrap().remove(label);
+            let mut h = self.history.lock().unwrap();
+            if let Some(d) = h.thin.get_mut(label) {
+                d.cooldown_until_ms = 0;
+            }
+            drop(h);
+            self.save_history();
+        }
         let h = self.history.lock().unwrap();
         if h.thin_suspended.contains(label) {
             return Some(model::ThinStop::Suspended);
@@ -1840,7 +1858,9 @@ impl Space {
     /// runs already or the task could not start.
     pub fn spawn_thin(self: &Arc<Self>, label: String, mount: PathBuf) -> Option<String> {
         let s = self.clone();
+        let s2 = self.clone();
         let subject = label.clone();
+        let subject2 = label.clone();
         let r = self.ops.tasks.spawn_once("space.auto-free", &subject, crate::scheduler::SCHEDULER_USER, move |ctx| async move {
             let (c, rt) = (ctx.clone(), tokio::runtime::Handle::current());
             let (_, stop) = in_thread(move || {
@@ -1862,6 +1882,9 @@ impl Space {
             })
             .await?;
             if ctx.is_cancelled() {
+                // stopped by a person: no new pass at the next turn of the watch, only the
+                // next day or after a change of the settings
+                s2.thin_stopped_by_user(&subject2);
                 return Err("cancelled".into());
             }
             if stop == Some(model::ThinStop::TimeCap) {
@@ -1880,6 +1903,22 @@ impl Space {
                 None
             }
         }
+    }
+
+    /// A person stopped the pass of `label`: the next one waits for the next day (UTC) unless
+    /// the settings change ([`Space::thin_waits`]).
+    fn thin_stopped_by_user(&self, label: &str) {
+        let now = now_ms();
+        let next_day = (u64::from(model::day_of(now)) + 1) * 86_400_000;
+        {
+            let mut h = self.history.lock().unwrap();
+            let d = h.thin.entry(label.to_string()).or_default();
+            d.cooldown_until_ms = d.cooldown_until_ms.max(next_day);
+        }
+        self.save_history();
+        let then = serde_json::to_string(&self.settings()).unwrap_or_default();
+        self.thin_stopped.lock().unwrap().insert(label.to_string(), then);
+        tracing::info!("space: {label}: automatic cleanup stopped by a person: the next pass waits for tomorrow or a change of the settings");
     }
 
     fn thin_within(&self, label: &str, mount: &Path, settings: &SpaceSettings, claim: &dyn Fn() -> Result<Claim, String>, log: &dyn Fn(&str), time_cap: Duration) -> (Vec<String>, Option<model::ThinStop>) {

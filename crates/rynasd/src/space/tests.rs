@@ -426,6 +426,11 @@ async fn automatic_cleanup_one_deletion_at_a_time() {
     // the reason the task turns into "partial"
     assert_eq!(stop, Some(super::model::ThinStop::TimeCap));
     assert_eq!(w.space.thin_waits("vol1"), None);
+    // a pass a person stopped: none at the next turn, until tomorrow or new settings
+    w.space.thin_stopped_by_user("vol1");
+    assert_eq!(w.space.thin_waits("vol1"), Some(super::model::ThinStop::Cooldown));
+    db.execute("INSERT OR REPLACE INTO config (key, value, rev) VALUES ('space', ?1, 1)", [json!({"low_free_pct": 7}).to_string()]).unwrap();
+    assert_eq!(w.space.thin_waits("vol1"), None, "changed settings release the wait");
     w.space.history.lock().unwrap().thin_suspended.insert("vol1".into());
     assert!(w.space.thin("vol1", &w.env.vol, &settings, &claim, &|_| {}).is_empty());
     assert_eq!(claims.load(Ordering::SeqCst), before);
