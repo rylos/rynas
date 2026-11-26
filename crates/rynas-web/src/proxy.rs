@@ -22,7 +22,7 @@ use crate::app::AppState;
 use crate::auth::CurrentSession;
 use crate::conn::{Client, LocalAddr};
 use crate::error::Error;
-use rynas_auth::ipc::{CLIENT_ADDR_HEADER, HOST_HEADER, LOCAL_ADDR_HEADER, REALM_HEADER};
+use rynas_auth::ipc::{AUTH_FRESH_HEADER, CLIENT_ADDR_HEADER, HOST_HEADER, LOCAL_ADDR_HEADER, REALM_HEADER};
 use rynas_auth::session::SessionData;
 
 /// Largest request body forwarded (guidelines M3).
@@ -150,7 +150,7 @@ pub fn routes() -> Router<AppState> {
         .route("/crypt", get(forward))
         .route("/crypt/install", post(forward))
         .route("/crypt/folders", post(forward))
-        .route("/crypt/folders/{volume}/{name}/reveal-recovery-key", post(forward))
+        .route("/crypt/folders/{volume}/{name}/reveal-recovery-key", post(forward_fresh))
         .route("/crypt/folders/{volume}/{name}/recovery-key", post(forward))
         .route("/crypt/folders/{volume}/{name}/recovery-key-saved", post(forward))
         .route("/crypt/recovery-pending", get(forward))
@@ -542,6 +542,19 @@ async fn forward(
     req: Request,
 ) -> Response {
     forward_with(st, session, req, Vec::new()).await
+}
+
+/// A route that shows a secret again: rynasd also learns whether the session signed in within
+/// the re-authentication window ([`AUTH_FRESH_HEADER`]).
+async fn forward_fresh(
+    State(st): State<AppState>,
+    Extension(CurrentSession(session)): Extension<CurrentSession>,
+    req: Request,
+) -> Response {
+    let now = st.auth.pairings().now_ms();
+    let fresh = now.saturating_sub(session.auth_ms) <= rynas_api_types::devices::REAUTH_WINDOW_S * 1000;
+    let extra = if fresh { vec![(AUTH_FRESH_HEADER, "1".to_string())] } else { Vec::new() };
+    forward_with(st, session, req, extra).await
 }
 
 /// A certificate change: forwarded, then the published pair is loaded at once instead of at

@@ -56,6 +56,12 @@ pub const CLIENT_ADDR_HEADER: &str = "x-rynas-client-addr";
 /// confirmation: rynasd checks that it arrived through the proxy on one of the new names.
 pub const HOST_HEADER: &str = "x-rynas-host";
 
+/// Header `1` added by `rynas-web` when the session signed in (or re-authenticated with
+/// `POST /api/v1/auth/reauth`) within the re-authentication window, on the routes that show a
+/// secret again (a kept recovery key). Never taken from a client: rynas-web builds the
+/// request to rynasd itself.
+pub const AUTH_FRESH_HEADER: &str = "x-rynas-auth-fresh";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticateRequest {
     pub username: String,

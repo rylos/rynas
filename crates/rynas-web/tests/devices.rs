@@ -306,6 +306,15 @@ async fn pairing_tokens_rotation_reuse() {
     assert_eq!(r.status, StatusCode::OK);
     let r = bearer(app, Method::GET, "/api/v1/events", &ok.access_token, None).await;
     assert_eq!(r.status, StatusCode::OK, "the event stream accepts the bearer");
+    // a phone never shows an encrypted folder's recovery key...
+    for p in ["/api/v1/crypt/folders/vol1/secret/reveal-recovery-key", "/api/v1/crypt/folders/vol1/secret/recovery-key"] {
+        let r = bearer(app, Method::POST, p, &ok.access_token, Some(json!({"password": "x"}))).await;
+        assert_eq!((r.status, r.code()), (StatusCode::FORBIDDEN, error_codes::NOT_FOR_DEVICES.to_string()), "{p}");
+    }
+    // ...but keeps everything a bare-metal PC restore needs (past the device check: whatever
+    // rynasd answers, it is not the device refusal)
+    let r = bearer(app, Method::POST, "/api/v1/pcbackup/devices/laptop/restore-code", &ok.access_token, Some(json!({}))).await;
+    assert!(r.status != StatusCode::FORBIDDEN || r.code() != error_codes::NOT_FOR_DEVICES, "{}", String::from_utf8_lossy(&r.body));
     let r = bearer(app, Method::PATCH, "/api/v1/devices/self", &ok.access_token, Some(json!({"name": "Pixel"}))).await;
     assert_eq!(r.json::<Device>().name, "Pixel");
     let list: Vec<Device> = app.get("/api/v1/devices", &creds).await.json();

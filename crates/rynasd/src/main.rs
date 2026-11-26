@@ -984,7 +984,9 @@ fn main() -> std::io::Result<()> {
         // containers a lock stopped while rynasd ended are started again
         rynasd::services::crypt::start_left_stopped(&args.state_dir);
         // recovery keys of new encrypted folders not confirmed saved yet
-        rynasd::services::crypt::load_recovery_keys(&args.state_dir);
+        // (tmpfs: never in a system restore point or a backup; an older file is moved there)
+        let run_dir = if args.dry_system { args.state_dir.join("run") } else { PathBuf::from("/run/rynas") };
+        rynasd::services::crypt::load_recovery_keys(&run_dir, &args.state_dir);
         if let Some(s) = &state.services {
             rynasd::services::crypt::auto_unlock_at_start(s);
         }

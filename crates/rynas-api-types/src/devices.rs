@@ -76,9 +76,13 @@ pub mod revoke_reason {
 }
 
 /// Routes a device may not call (403 `not_for_devices`): `(method, path prefix)` relative to
-/// `/api/v1`, `"*"` for any method. A device acts as its user in v1, so the list is empty; it
-/// stays the one place per-device scopes will extend.
-pub const NOT_FOR_DEVICES: &[(&str, &str)] = &[];
+/// `/api/v1`, `"*"` for any method, a `*` path segment for any one segment. A device acts as
+/// its user in v1 (everything a bare-metal PC restore needs stays allowed, the restore code
+/// included), except showing an encrypted folder's recovery key: only in the web interface.
+pub const NOT_FOR_DEVICES: &[(&str, &str)] = &[
+    ("*", "/crypt/folders/*/*/reveal-recovery-key"),
+    ("*", "/crypt/folders/*/*/recovery-key"),
+];
 
 /// `GET /api/v1/ping` (no session): who answers on this address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

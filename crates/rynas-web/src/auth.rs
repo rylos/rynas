@@ -138,10 +138,13 @@ fn api_path(path: &str) -> &str {
 /// to a paired device. The production list is [`rynas_api_types::devices::NOT_FOR_DEVICES`].
 pub fn refused_to_devices(list: &[(&str, &str)], method: &Method, path: &str) -> bool {
     let p = api_path(path);
-    list.iter().any(|(m, prefix)| {
-        (*m == "*" || m.eq_ignore_ascii_case(method.as_str()))
-            && (p == *prefix || p.starts_with(&format!("{}/", prefix.trim_end_matches('/'))))
-    })
+    // a `*` segment of the prefix stands for any one segment of the path
+    let under = |prefix: &str| {
+        let want: Vec<&str> = prefix.trim_end_matches('/').split('/').collect();
+        let have: Vec<&str> = p.split('/').collect();
+        have.len() >= want.len() && want.iter().zip(&have).all(|(w, h)| *w == "*" || w == h)
+    };
+    list.iter().any(|(m, prefix)| (*m == "*" || m.eq_ignore_ascii_case(method.as_str())) && under(prefix))
 }
 
 /// A restart, shutdown or cancellation asked by a request: `restart`, `shutdown`, `cancel`.
@@ -631,8 +634,16 @@ mod tests {
 
     #[test]
     fn the_device_refusal_list_matches_method_and_prefix() {
-        // empty in v1: a device acts as its user
-        assert!(rynas_api_types::devices::NOT_FOR_DEVICES.is_empty());
+        // a device acts as its user, but never shows an encrypted folder's recovery key; all a
+        // bare-metal PC restore needs stays allowed
+        let prod = |m: Method, p: &str| refused_to_devices(rynas_api_types::devices::NOT_FOR_DEVICES, &m, p);
+        assert!(prod(Method::POST, "/api/v1/crypt/folders/vol1/secret/reveal-recovery-key"));
+        assert!(prod(Method::POST, "/crypt/folders/vol1/secret/recovery-key"));
+        assert!(!prod(Method::POST, "/crypt/folders/vol1/secret/recovery-key-saved"));
+        assert!(!prod(Method::POST, "/crypt/folders"));
+        assert!(!prod(Method::POST, "/api/v1/pcbackup/devices/laptop/restore-code"));
+        assert!(!prod(Method::GET, "/pcbackup/devices/laptop/browse"));
+        assert!(!prod(Method::POST, "/storage/volumes/vol1/reveal-recovery-key"));
         let list = [("*", "/updates"), ("POST", "/system/power")];
         let r = |m: Method, p: &str| refused_to_devices(&list, &m, p);
         assert!(r(Method::GET, "/updates"));

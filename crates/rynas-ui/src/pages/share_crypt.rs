@@ -220,13 +220,19 @@ pub fn PendingKeys() -> impl IntoView {
     crate::tasks::watch_task_by("crypt.create", |_| true).on_end(move |_| list.reload());
     let open = RwSignal::new(None::<(rynas_api_types::CryptPendingKey, String)>);
     let error = RwSignal::new(None::<String>);
+    // shown once already: the server wants a fresh sign-in before showing it again
+    let reauth = RwSignal::new(None::<rynas_api_types::CryptPendingKey>);
     let show = move |p: rynas_api_types::CryptPendingKey| {
         error.set(None);
         spawn_local(async move {
             let url = format!("/api/v1/crypt/folders/{}/{}/reveal-recovery-key", api::encode(&p.volume), api::encode(&p.name));
             match api::post::<(), RecoveryKey>(&url, None).await {
                 Ok(k) => {
+                    let _ = reauth.try_set(None);
                     let _ = open.try_set(Some((p, k.key)));
+                }
+                Err(e) if e.code() == error_codes::REAUTH_REQUIRED => {
+                    let _ = reauth.try_set(Some(p));
                 }
                 Err(e) => {
                     let _ = error.try_set(Some(e.text()));
@@ -252,6 +258,60 @@ pub fn PendingKeys() -> impl IntoView {
                 list.reload();
             }) />
         })}
+        {move || reauth.get().map(|p| view! {
+            <ReauthDialog on_close=Callback::new(move |_| reauth.set(None)) on_done=Callback::new(move |_| show(p.clone())) />
+        })}
+    }
+}
+
+/// Password (and TOTP code when enabled) again (`POST /api/v1/auth/reauth`), then `on_done`.
+#[component]
+fn ReauthDialog(on_close: Callback<()>, on_done: Callback<()>) -> impl IntoView {
+    let password = RwSignal::new(String::new());
+    let totp = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let totp_on = crate::auth::auth().session.with_untracked(|s| s.as_ref().is_some_and(|s| s.totp_enabled));
+    on_cleanup(move || {
+        let _ = password.try_set(String::new());
+    });
+    const FORM: &str = "crypt-reauth";
+    let submit = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        if busy.get_untracked() || password.with_untracked(String::is_empty) {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        let body = rynas_api_types::ReauthRequest {
+            password: password.get_untracked(),
+            totp: Some(totp.get_untracked()).filter(|c| !c.trim().is_empty()),
+        };
+        spawn_local(async move {
+            let r = api::post_empty("/api/v1/auth/reauth", Some(&body)).await;
+            let _ = busy.try_set(false);
+            match r {
+                Ok(()) => {
+                    let _ = password.try_set(String::new());
+                    on_close.run(());
+                    on_done.run(());
+                }
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
+                }
+            }
+        });
+    };
+    let foot = move || save_bar_with(SaveBar { can_save: Signal::derive(move || !password.with(String::is_empty)), form: Some(FORM), ..SaveBar::new(busy, "sto.rk_reveal", on_close, Callback::new(|_| {})) });
+    view! {
+        <Modal title=t("sto.rk_reveal").to_string() on_close=on_close foot=foot>
+            <form id=FORM class="form" on:submit=submit>
+                <p class="muted small">{tr("crypt.rk_reauth")}</p>
+                {text_field("login.password", password.into(), Callback::new(move |v| password.set(v)), Signal::derive(|| None), In { kind: "password", autocomplete: "current-password", maxlength: INPUT_MAX, ..In::default() })}
+                {totp_on.then(|| text_field("login.totp_code", totp.into(), Callback::new(move |v| totp.set(v)), Signal::derive(|| None), In { autocomplete: "one-time-code", maxlength: 32, ..In::default() }))}
+                {form_error(error)}
+            </form>
+        </Modal>
     }
 }
 
