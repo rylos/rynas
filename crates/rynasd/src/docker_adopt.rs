@@ -655,7 +655,7 @@ pub(crate) async fn move_route(
     let s2 = s.clone();
     let id = s.ops.tasks.spawn("docker.stack.move", &who, move |ctx| async move {
         let _guard = guard;
-        move_task(&s2, &ctx, &name, a, l, running).await
+        move_task(&s2, &ctx, &name, a, l, running, req.unmeasured_ok).await
     })?;
     Ok(accepted(id))
 }
@@ -728,6 +728,7 @@ async fn space_for_copy(
     ctx: &TaskCtx,
     dir: &str,
     l: &Layout,
+    unmeasured_ok: bool,
 ) -> Result<(), String> {
     let from = under(&s.root, dir);
     let vol = under(&s.root, &l.volume);
@@ -741,29 +742,22 @@ async fn space_for_copy(
         .args(["-s", "--block-size=1"])
         .arg(&from)
         .timeout(std::time::Duration::from_secs(30 * 60));
-    let need = s
-        .run(ctx, &du)
-        .await
-        .ok()
-        .filter(|o| o.success())
-        .as_ref()
-        .and_then(crate::docker::du_bytes);
-    let avail = rynas_storage::overview::statvfs(&vol.to_string_lossy()).map(|v| v.avail);
+    let need = crate::docker::measure_du(s, ctx, &du).await;
+    let avail = rynas_storage::overview::statvfs(&vol.to_string_lossy())
+        .map(|v| v.avail)
+        .ok_or_else(|| format!("the free space of {} could not be read", l.volume));
     match (need, avail) {
-        (Some(n), Some(a)) if n.saturating_add(n / 10) > a => Err(format!(
+        (Ok(n), Ok(a)) if n.saturating_add(n / 10) > a => Err(format!(
             "not enough space on {}: the stack folder holds {} MiB, {} MiB are free (10 % margin): nothing was moved",
             l.volume,
             n >> 20,
             a >> 20
         )),
-        (Some(n), Some(a)) => {
+        (Ok(n), Ok(a)) => {
             ctx.log(&format!("space: {} MiB to copy, {} MiB free", n >> 20, a >> 20));
             Ok(())
         }
-        _ => {
-            ctx.log("space: could not be measured, copying anyway");
-            Ok(())
-        }
+        (Err(e), _) | (_, Err(e)) => crate::docker::space_unmeasured(ctx, &e, unmeasured_ok, "moved"),
     }
 }
 
@@ -778,6 +772,7 @@ async fn move_task(
     a: Adopted,
     l: Layout,
     running: bool,
+    unmeasured_ok: bool,
 ) -> Result<(), String> {
     let target = l.stack(name);
     let new = adopt::moved(&a, &target);
@@ -791,7 +786,7 @@ async fn move_task(
     plain_folder(s, &a.dir)?;
     let old_cmd = cmd_of(&s.root, name, &a);
     let old_binds = binds_of(s, ctx, old_cmd(ComposeAction::Config)).await?;
-    space_for_copy(s, ctx, &a.dir, &l).await?;
+    space_for_copy(s, ctx, &a.dir, &l, unmeasured_ok).await?;
     if running {
         let out = s.run(ctx, &old_cmd(ComposeAction::Down)).await?;
         if !out.success() {

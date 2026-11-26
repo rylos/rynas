@@ -4737,6 +4737,7 @@ dk.mig.volume	目标量
 dk.mig.running	{n}集装箱运行：先停放，移动需要 Docker已停放。
 dk.mig.go	移动数据
 dk.mig.confirm	Docker在复制期间停下来，然后在{vol}再次开始。
+dk.copy_unmeasured	不检查空间直接复制（仅在上次尝试无法测量所需空间之后使用）
 dk.vol_free	{free}免费
 place.system	系统
 place.system_note	系统存储卷是系统磁盘上的文件夹 {path},它分享了该磁盘的空间：如果它填满了，系统可以停止工作，而该磁盘的失败会带去这个数据。

@@ -191,6 +191,10 @@ pub struct InstallRequest {
 pub struct MigrateRequest {
     /// Target volume label.
     pub volume: String,
+    /// Copy even when the space the folders need cannot be measured (`du` failed): without
+    /// it such a task stops before anything changes and says why.
+    #[serde(default)]
+    pub unmeasured_ok: bool,
 }
 
 // ------------------------------------------------------------------ settings (key `docker`)
@@ -687,6 +691,10 @@ pub struct StackAdopted {
 pub struct MoveStackRequest {
     /// The stack name again (the stack is stopped while its folder is copied).
     pub confirm: String,
+    /// Copy even when the space the folder needs cannot be measured (`du` failed): without
+    /// it such a task stops before anything changes and says why.
+    #[serde(default)]
+    pub unmeasured_ok: bool,
 }
 
 /// One file of a stack folder.

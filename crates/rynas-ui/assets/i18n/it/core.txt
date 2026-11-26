@@ -4202,6 +4202,7 @@ dk.mig.text	Copia immagini, container e dati di containerd in <volume>/docker e 
 dk.mig.volume	Volume di destinazione
 dk.mig.running	{n} container sono in esecuzione: fermali prima, lo spostamento richiede Docker fermo.
 dk.mig.go	Sposta i dati
+dk.copy_unmeasured	Copia senza il controllo dello spazio (solo dopo un tentativo che non ha potuto misurare lo spazio necessario)
 dk.mig.confirm	Docker si ferma durante la copia e riparte su {vol}.
 dk.vol_free	{free} liberi
 place.system	Sistema

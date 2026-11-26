@@ -525,7 +525,7 @@ async fn run_migration(e: &Env) -> (TaskInfo, String) {
         .ops
         .tasks
         .spawn("docker.migrate", "admin", move |ctx| async move {
-            rynasd::docker::migrate_task(&s, &ctx, "admin", "vol1").await
+            rynasd::docker::migrate_task(&s, &ctx, "admin", "vol1", false).await
         })
         .unwrap();
     let t = wait_task(e, &id).await;
@@ -868,6 +868,8 @@ impl Runner for Adopting {
                 );
                 String::new()
             }
+            // the folder's size before a move (a failed measure stops it)
+            "du" => format!("4096\t{}\n", words.last().copied().unwrap_or("")),
             _ => String::new(),
         };
         Ok(CmdOutput {
@@ -1122,6 +1124,9 @@ impl Runner for Outside {
             format!(
                 r#"{{"services":{{"web":{{"image":"x","volumes":[{{"type":"bind","source":"{parent}/shared","target":"/s"}}]}}}}}}"#
             )
+        } else if line.starts_with("du ") {
+            // the folder's size before a move (a failed measure stops it)
+            format!("4096\t{}\n", words.last().copied().unwrap_or(""))
         } else {
             String::new()
         };

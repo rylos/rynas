@@ -1521,7 +1521,7 @@ async fn migrate_route(
         .ops
         .tasks
         .spawn("docker.migrate", &who, move |ctx| async move {
-            let r = migrate_task(&s2, &ctx, &who2, &req.volume).await;
+            let r = migrate_task(&s2, &ctx, &who2, &req.volume, req.unmeasured_ok).await;
             drop(reserved);
             s2.drop_engine().await;
             s2.changed();
@@ -1556,6 +1556,34 @@ fn systemctl(verb: &str, units: &[&str]) -> Cmd {
 }
 
 /// Bytes `du -sx` counts in the folders (`None`: unknown, e.g. a dry run).
+/// The bytes `du` measured, or why it could not (the caller logs it: [`space_unmeasured`]).
+pub(crate) async fn measure_du(s: &DockerSvc, ctx: &TaskCtx, du: &Cmd) -> Result<u64, String> {
+    let o = s.run(ctx, du).await?;
+    if !o.success() {
+        let last = o.stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+        return Err(match o.code {
+            Some(c) => format!("du exited with {c}: {last}"),
+            None => format!("du was stopped: {last}"),
+        });
+    }
+    du_bytes(&o).ok_or_else(|| "du printed no size".to_string())
+}
+
+/// A space check that could not measure: logged (task log and journal), and the copy goes on
+/// only when the request said so (`unmeasured_ok`, asked after such a stop); else the task
+/// stops before anything changed (`nothing`: "changed", "moved").
+pub(crate) fn space_unmeasured(ctx: &TaskCtx, why: &str, ok: bool, nothing: &str) -> Result<(), String> {
+    ctx.log(&format!("space: could not be measured: {why}"));
+    tracing::warn!("docker: the space a copy needs could not be measured: {why}");
+    if ok {
+        ctx.log("space: copying without the space check, as confirmed");
+        return Ok(());
+    }
+    Err(format!(
+        "the space the copy needs could not be measured ({why}): nothing was {nothing}; start it again with \"Copy without the space check\" to go on"
+    ))
+}
+
 pub(crate) fn du_bytes(out: &CmdOutput) -> Option<u64> {
     let mut sum = 0u64;
     let mut any = false;
@@ -1577,6 +1605,7 @@ pub async fn migrate_task(
     ctx: &TaskCtx,
     who: &str,
     volume: &str,
+    unmeasured_ok: bool,
 ) -> Result<(), String> {
     let l = Layout::of_label(volume);
     let (old_data, old_ctd) = eng::effective_roots(&s.root);
@@ -1615,25 +1644,26 @@ pub async fn migrate_task(
             .args(["-sx", "--block-size=1"])
             .args(copies.iter().map(|(f, _)| rynas_docker::under(&s.root, f)))
             .timeout(Duration::from_secs(30 * 60));
-        let need = s.run(ctx, &du).await.ok().filter(|o| o.success()).as_ref().and_then(du_bytes);
+        let need = measure_du(s, ctx, &du).await;
         let avail = rynas_storage::overview::statvfs(
             &rynas_docker::under(&s.root, &l.volume).to_string_lossy(),
         )
-        .map(|v| v.avail);
+        .map(|v| v.avail)
+        .ok_or_else(|| format!("the free space of {volume} could not be read"));
         match (need, avail) {
-            (Some(n), Some(a)) if n.saturating_add(n / 10) > a => {
+            (Ok(n), Ok(a)) if n.saturating_add(n / 10) > a => {
                 return Err(format!(
                     "not enough space on {volume}: the engine's folders hold {} MiB, {} MiB are free (10 % margin): nothing was changed",
                     n >> 20,
                     a >> 20
                 ));
             }
-            (Some(n), Some(a)) => ctx.log(&format!(
+            (Ok(n), Ok(a)) => ctx.log(&format!(
                 "space: {} MiB to copy, {} MiB free on {volume}",
                 n >> 20,
                 a >> 20
             )),
-            _ => ctx.log("space: could not be measured, copying anyway"),
+            (Err(e), _) | (_, Err(e)) => space_unmeasured(ctx, &e, unmeasured_ok, "changed")?,
         }
     }
     s.drop_engine().await;

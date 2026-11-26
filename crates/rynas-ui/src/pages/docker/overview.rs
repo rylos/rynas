@@ -538,10 +538,12 @@ fn migrate_card(settings: Remote<DockerSettingsState>) -> AnyView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let task = RwSignal::new(None::<String>);
+    // after a task that stopped because the space could not be measured
+    let unmeasured = RwSignal::new(false);
     let go = Callback::new(move |_| {
         busy.set(true);
         error.set(None);
-        let body = MigrateRequest { volume: vol.get_untracked() };
+        let body = MigrateRequest { volume: vol.get_untracked(), unmeasured_ok: unmeasured.get_untracked() };
         spawn_local(async move {
             let r = api::start_task("/api/v1/docker/engine/migrate", serde_json::to_string(&body).ok()).await;
             busy.set(false);
@@ -563,6 +565,7 @@ fn migrate_card(settings: Remote<DockerSettingsState>) -> AnyView {
                 None => view! {
                     {volume_select("dk.mig.volume", None, settings, vol.into(), Callback::new(move |v| vol.set(v)), None)}
                     {move || (running.get() > 0).then(|| ui::note(Tone::Info, icons::INFO, ui::text(tf("dk.mig.running", &[("n", &running.get().to_string())]))))}
+                    <label class="check"><input type="checkbox" prop:checked=move || unmeasured.get() on:change=move |ev| unmeasured.set(event_target_checked(&ev)) />{tr("dk.copy_unmeasured")}</label>
                     <div class="sec-actions">
                         <button class="btn ghost" disabled=move || { running.get() > 0 || vol.with(String::is_empty) } on:click=move |_| { error.set(None); ask.set(true); }>
                             <Icon icon=icons::FOLDER_SYNC size=16 />{tr("dk.mig.go")}

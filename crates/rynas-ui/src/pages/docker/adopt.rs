@@ -288,8 +288,10 @@ pub(super) fn move_dialog(name: String, dir: String, target: Option<String>, can
     let error = RwSignal::new(None::<String>);
     let u = url(&name, "/move");
     let n2 = name.clone();
+    // after a task that stopped because the space could not be measured
+    let unmeasured = RwSignal::new(false);
     let go = Callback::new(move |_| {
-        let body = MoveStackRequest { confirm: n2.clone() };
+        let body = MoveStackRequest { confirm: n2.clone(), unmeasured_ok: unmeasured.get_untracked() };
         launch(u.clone(), serde_json::to_string(&body).ok(), busy, error, cancel);
     });
     let target = target.unwrap_or_else(|| ui::DASH.into());
@@ -316,6 +318,10 @@ pub(super) fn move_dialog(name: String, dir: String, target: Option<String>, can
             }
         })
     };
-    let extra = view! { {summary} }.into_any();
+    let extra = view! {
+        {summary}
+        <label class="check"><input type="checkbox" prop:checked=move || unmeasured.get() on:change=move |ev| unmeasured.set(event_target_checked(&ev)) />{tr("dk.copy_unmeasured")}</label>
+    }
+    .into_any();
     ui::confirm(Confirm { extra: Some(extra), typed: Signal::stored(Some(typed)), busy, error, ..Confirm::new(tf("dk.ad.move_title", &[("name", &name)]), text, "dk.ad.move", false, go, cancel) })
 }

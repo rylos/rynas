@@ -5385,6 +5385,7 @@ dict! { BLOB, LENS;
     "dk.mig.running" => "{n} containers are running: stop them first, the move needs Docker stopped.";
     "dk.mig.go" => "Move data";
     "dk.mig.confirm" => "Docker stops during the copy and starts again on {vol}.";
+    "dk.copy_unmeasured" => "Copy without the space check (only after a try that could not measure the space needed)";
     "dk.vol_free" => "{free} free";
     // the volumes something can be put on, the system volume included (D-ROOTVOL)
     "place.system" => "System";
