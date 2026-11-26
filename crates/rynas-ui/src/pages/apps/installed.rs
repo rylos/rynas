@@ -5,7 +5,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::TaskStatus;
-use rynas_api_types::apps::{AppRollbackRequest, AppUninstallRequest, AppUpdatePlan, AppUpdateRequest, ImageChangeKind, InstalledApp, InstalledAppDetail};
+use rynas_api_types::apps::{AppRollbackRequest, AppUninstallRequest, AppUpdatePlan, AppUpdateRequest, ImageChangeKind, InstalledApp, InstalledAppDetail, PhotosKeyRequest, PhotosLibrary, PhotosState, PhotosUserRequest};
 use rynas_api_types::docker::{DockerSettingsState, StackSnapshot};
 
 use super::{AppDetail, app_icon, apps, open_href};
@@ -426,6 +426,7 @@ pub fn drawer(stack: String) -> AnyView {
                 <a class="btn ghost sm" href=docker_href><Icon icon=icons::CONTAINER size=14 />{tr("apps.in_docker")}</a>
                 <button class="btn ghost sm" on:click=move |_| ask.set(Some(Ask::Convert))><Icon icon=icons::LAYERS size=14 />{tr("apps.convert")}</button>
             </div>
+            {x.user_photos.then(|| photos_section(x.stack.clone()))}
             <div class="mini-title">{tr("dk.snap.title")}</div>
             {if !x.snapshots {
                 ui::note(Tone::Info, icons::INFO, ui::text(t("dk.snap.not_subvolume").to_string()))
@@ -444,6 +445,106 @@ pub fn drawer(stack: String) -> AnyView {
         ..ui::Danger::new("apps.uninstall", Callback::new(move |_| ask.set(Some(Ask::Uninstall))))
     };
     ui::detail_drawer(Signal::stored(tf("apps.inst.title", &[("name", &stack)])), close, false, body, Some(uninstall), None)
+}
+
+/// Photos from the RyNAS app (D-PHOTOS): which users' Photos folders the app reads, its
+/// libraries (apps with an API key), "Sync" and the key.
+fn photos_section(stack: String) -> AnyView {
+    let p = Remote::<PhotosState>::new(inst_url(&stack, "/photos"));
+    let (busy, error, key) = (RwSignal::new(false), RwSignal::new(None::<String>), RwSignal::new(String::new()));
+    let s = StoredValue::new(stack);
+    let sync = move |_| {
+        let url = inst_url(&s.get_value(), "/photos/sync");
+        crate::tasks::run_and_report(async move { api::start_task(&url, None).await }, t("apps.ph.synced").to_string(), busy, error, Callback::new(move |_| p.reload()));
+    };
+    let save = move |_| {
+        let url = inst_url(&s.get_value(), "/photos/key");
+        let body = PhotosKeyRequest { key: key.get_untracked() };
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let r = api::post_empty(&url, Some(&body)).await;
+            let _ = busy.try_set(false);
+            match r {
+                Ok(()) => {
+                    key.set(String::new());
+                    p.reload();
+                }
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
+                }
+            }
+        });
+    };
+    // choose a user (with an API: confirm `account`) or leave them out; a sync follows
+    let choose = move |user: String, include: bool, account: Option<String>| {
+        let url = inst_url(&s.get_value(), &format!("/photos/users/{}", api::encode(&user)));
+        let body = serde_json::to_string(&PhotosUserRequest { include, account }).ok();
+        crate::tasks::run_and_report(async move { api::start_task(&url, body).await }, t("apps.ph.synced").to_string(), busy, error, Callback::new(move |_| p.reload()));
+    };
+    let content = move || {
+        let Some(st) = p.data.get() else { return ().into_any() };
+        let api_app = st.api.is_some();
+        let wired = st.users.iter().filter(|u| u.mounted).count();
+        let rows = st
+            .users
+            .iter()
+            .map(|u| {
+                let state = match (u.included, u.mounted, u.library) {
+                    (false, _, _) => "apps.ph.left_out",
+                    (true, _, Some(PhotosLibrary::OtherOwner)) => "apps.ph.lib.other-owner",
+                    (true, false, _) => "apps.ph.not_mounted",
+                    (true, true, Some(PhotosLibrary::Linked)) => "apps.ph.lib.linked",
+                    (true, true, Some(PhotosLibrary::Missing)) => "apps.ph.lib.missing",
+                    (true, true, Some(PhotosLibrary::NoAccount)) => "apps.ph.lib.no-account",
+                    (true, true, _) => "apps.ph.mounted",
+                };
+                let who = u.account.as_ref().or(u.proposed.as_ref()).map(|a| if a.email.is_empty() { a.name.clone() } else { a.email.clone() });
+                let (user, prop) = (u.user.clone(), u.proposed.as_ref().map(|a| a.id.clone()));
+                let action = match (u.included, api_app, prop) {
+                    (true, _, _) => Some(("apps.ph.leave_out", false, None)),
+                    (false, false, _) => Some(("apps.ph.include", true, None)),
+                    (false, true, Some(id)) => Some(("apps.ph.confirm", true, Some(id))),
+                    (false, true, None) => None,
+                };
+                view! {
+                    <li>
+                        <strong>{u.user.clone()}</strong>" · "{tr(state)}{who.map(|w| format!(" · {w}"))}
+                        {u.problem.clone().map(|e| view! { <br /><span class="muted">{e}</span> })}
+                        <br /><span class="mono muted">{u.folder.clone()}</span>
+                        {action.map(|(k, inc, acc)| view! { " " <button class="btn ghost sm" disabled=move || busy.get() on:click=move |_| choose(user.clone(), inc, acc.clone())>{tr(k)}</button> })}
+                    </li>
+                }
+            })
+            .collect_view();
+        view! {
+            <p class="small">{tf("apps.ph.wired", &[("n", &wired.to_string()), ("total", &st.users.len().to_string())])}</p>
+            <ul class="small app-list">{rows}</ul>
+            {st.allow_list.map(|v| {
+                let v = v.replace("{user}", st.users.first().map_or("ann", |u| u.user.as_str()));
+                ui::note(Tone::Info, icons::INFO, ui::text(tf("apps.ph.allow", &[("value", &v)])))
+            })}
+            {st.api.map(|a| view! {
+                {a.error.map(|e| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(e)))}
+                <p class="small muted">{tr(if a.key { "apps.ph.key_set" } else { "apps.ph.key_hint" })}</p>
+                <div class="sec-actions">
+                    <input class="input" type="password" autocomplete="off" placeholder=t("dns.f.api_key") prop:value=move || key.get() on:input=move |ev| key.set(event_target_value(&ev)) />
+                    <button class="btn ghost sm" disabled=move || busy.get() || key.get().trim().is_empty() on:click=save>{tr("apps.ph.key_save")}</button>
+                </div>
+            })}
+        }
+        .into_any()
+    };
+    view! {
+        <div class="mini-title">{tr("apps.ph.title")}</div>
+        <p class="small muted">{tr("apps.ph.text")}</p>
+        {move || p.view(3, content)}
+        {move || error.get().map(|e| ui::note(Tone::Err, icons::TRIANGLE_ALERT, ui::text(e)))}
+        <div class="sec-actions">
+            <button class="btn ghost sm" disabled=move || busy.get() on:click=sync><Icon icon=icons::ROTATE_CCW size=14 />{tr("apps.ph.sync")}</button>
+        </div>
+    }
+    .into_any()
 }
 
 fn ask_dialog(q: Ask, stack: String, ask: RwSignal<Option<Ask>>, close_drawer: Callback<()>, d: Remote<InstalledAppDetail>) -> AnyView {

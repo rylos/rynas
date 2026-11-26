@@ -1,3 +1,5 @@
+user_photos = "/var/lib/rynas/docker/photos/immich"
+
 [form]
 ML_DISABLED = true
 HW_TRANSCODING = true

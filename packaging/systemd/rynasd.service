@@ -16,6 +16,9 @@ After=rynasd.socket local-fs.target nss-user-lookup.target
 # without internet. The certificates do not rely on it: a local CA is never replaced because
 # of the clock (crates/rynasd/src/tls.rs).
 After=time-set.target
+# The boot mounts of the users' Photos folders first (D-PHOTOS): rynasd then only mounts
+# what that unit could not (ordering only: it never fails, and rynasd starts without it).
+After=rynas-photos-mounts.service
 
 [Service]
 Type=simple

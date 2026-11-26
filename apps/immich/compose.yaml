@@ -1,6 +1,8 @@
 # Upstream: https://github.com/immich-app/immich/releases/download/v3.3.6/docker-compose.yml
 # Differences: images pinned by tag and digest, no container_name, explicit environment
-# instead of env_file, external library share, proxied port bound to ${RYNAS_BIND}.
+# instead of env_file, external library share, proxied port bound to ${RYNAS_BIND}. rynas adds
+# a read-only bind of its staging folder at /mnt/photos, where it mounts each chosen user's
+# Photos folder as /mnt/photos/<user> ([user_photos]).
 services:
   immich-server:
     image: ghcr.io/immich-app/immich-server:v3.4.2@sha256:fc880c1bf665b4aab1e74c15e56ab871225989cd546536e6b77e771869af06bd

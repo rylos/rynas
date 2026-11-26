@@ -93,7 +93,7 @@ pub struct AppsSvc {
 
 pub type AppsState = Option<Arc<AppsSvc>>;
 
-fn asvc(st: &AppsState) -> Res<Arc<AppsSvc>> {
+pub(crate) fn asvc(st: &AppsState) -> Res<Arc<AppsSvc>> {
     st.clone().ok_or_else(|| {
         Error::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -104,7 +104,7 @@ fn asvc(st: &AppsState) -> Res<Arc<AppsSvc>> {
 }
 
 /// The user, who must be an administrator (reads included).
-fn admin(s: &AppsSvc, hd: &HeaderMap) -> Res<String> {
+pub(crate) fn admin(s: &AppsSvc, hd: &HeaderMap) -> Res<String> {
     let who = user(hd)?;
     s.docker
         .ops
@@ -495,7 +495,7 @@ fn field_error(e: &RenderError) -> FieldError {
 }
 
 /// A render failure as an API error (`invalid_value` with the field when there is one).
-fn render_err(e: RenderError) -> Error {
+pub(crate) fn render_err(e: RenderError) -> Error {
     let f = field_error(&e);
     match e {
         RenderError::NotInstalledApp(m) => conflict(m),
@@ -523,7 +523,7 @@ fn masked_env(text: &str, secrets: &BTreeSet<String>) -> String {
     out
 }
 
-fn file_text(r: &RenderedStack, path: &str) -> String {
+pub(crate) fn file_text(r: &RenderedStack, path: &str) -> String {
     r.file(path)
         .map(|f| String::from_utf8_lossy(&f.contents).into_owned())
         .unwrap_or_default()
@@ -665,7 +665,7 @@ impl AppsSvc {
             .collect()
     }
 
-    fn one_on_disk(&self, stack: &str) -> Res<(Layout, OnDisk)> {
+    pub(crate) fn one_on_disk(&self, stack: &str) -> Res<(Layout, OnDisk)> {
         rynas_docker::stacks::check_name(stack)?;
         let l = self
             .docker
@@ -791,7 +791,7 @@ impl AppsSvc {
     }
 
     /// The values rynas provides to a render, read from the host.
-    fn provided(
+    pub(crate) fn provided(
         &self,
         l: &Layout,
         stack: &str,
@@ -1111,6 +1111,8 @@ impl AppsSvc {
             secrets: BTreeMap::new(),
             share_set,
             run_as: req.run_as.clone().filter(|u| !u.is_empty()),
+            user_photos: None,
+            user_photos_key: None,
         };
         // the NAS user the app runs as (entries with run_as)
         let mut run_as_ids = None;
@@ -1166,7 +1168,7 @@ impl AppsSvc {
                         .map(|f| self.planned_folder(app, f, &stack, ssd.as_deref(), &request))
                         .collect();
                     let secrets: BTreeSet<String> =
-                        m.secrets.iter().map(|s| s.env.clone()).collect();
+                        m.secrets.iter().map(|s| s.env.clone()).chain(m.user_photos.iter().filter_map(|u| u.key_env.clone())).collect();
                     plan.compose = file_text(&r, COMPOSE_FILE);
                     plan.env = masked_env(&file_text(&r, ".env"), &secrets);
                     plan.images = r.images.iter().map(|(_, i)| i.to_string()).collect();
@@ -1316,6 +1318,7 @@ impl AppsSvc {
                 })
                 .collect(),
             added_grants: read_made(&self.docker, &d.stack).grants,
+            user_photos: entry.is_some_and(|a| a.manifest.user_photos.is_some()),
         }
     }
 
@@ -1389,7 +1392,7 @@ fn route_spec(
 }
 
 /// `.env` text with `key` set to `value` (the line replaced, or added at the end).
-fn set_env_line(text: &str, key: &str, value: &str) -> String {
+pub(crate) fn set_env_line(text: &str, key: &str, value: &str) -> String {
     let mut found = false;
     let mut out: Vec<String> = text
         .lines()
@@ -1591,7 +1594,14 @@ pub(crate) async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob)
         .get(&j.app)
         .ok_or_else(|| format!("{} left the catalog", j.app))?;
     let provided = a.provided(&j.layout, &j.stack, &j.bind, ids);
-    let r = rynas_apps::render::render(app, &cat.source, &provided, &j.request)
+    let mut request = j.request.clone();
+    if app.manifest.user_photos.is_some() {
+        // the staging folder where rynasd mounts the chosen users' Photos folders (none yet:
+        // an administrator chooses them on the app's page)
+        request.user_photos = Some(crate::photos::prepare_staging(s, app, &j.stack)?);
+        ctx.log("Photos folders: none yet (choose the users on the app's page)");
+    }
+    let r = rynas_apps::render::render(app, &cat.source, &provided, &request)
         .map_err(|e| e.to_string())?;
     ctx.progress(10);
     let (compose, env) = (file_text(&r, COMPOSE_FILE), file_text(&r, ".env"));
@@ -1897,7 +1907,7 @@ async fn grant_shares(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, stack: &str, a
             use rynas_services::idremap::{self, DryRemap, GroupGrant, HostRemap, RemapFs};
             let fs: &dyn RemapFs = if dry { &DryRemap } else { &HostRemap };
             let real = rynas_docker::under(&root, &path);
-            let c = idremap::grant(fs, &[real], GroupGrant { gid: id, user, write }, &|| cancel.is_cancelled());
+            let c = idremap::grant(fs, &[real], GroupGrant { gid: id, user, write, owner: None }, &|| cancel.is_cancelled());
             log.log(&format!(
                 "{path}: {} access for {sname} on {} of {} entries",
                 if write { "read and write" } else { "read" },
@@ -2574,6 +2584,8 @@ async fn uninstall_post(
         let s = &s2;
         ctx.log(&format!("stopping and removing the containers of {n2}"));
         compose_run(s, &ctx, &n2, &l, ComposeAction::Down).await?;
+        // the users' Photos folders mounted for the app (never into a folder being deleted)
+        crate::photos::release(s, &ctx, &n2).await;
         if let Some(w) = web {
             let (n3, log) = (n2.clone(), ctx.clone());
             match blocking(move || w.remove_stack_routes(&who2, &n3, &|m| log.log(m))).await {

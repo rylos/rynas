@@ -104,6 +104,20 @@ pub struct InstallRequest {
     /// keeps the name in `.env` ([`crate::manifest::RUN_AS_ENV`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_as: Option<String>,
+    /// The staging folder of an entry with `[user_photos]` (filled by rynasd, never by the
+    /// caller): a root-owned folder where rynasd mounts each chosen user's `Photos` folder
+    /// read-only; the app sees it at `[user_photos].target`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_photos: Option<String>,
+    /// The API key kept under `[user_photos].key_env` (`None`: empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_photos_key: Option<String>,
+}
+
+/// An API key rynas keeps in `.env` for an app: 1-256 characters of `[A-Za-z0-9._~+/=-]`
+/// (what the apps' keys are made of), so it is written unquoted and never interpolated.
+pub fn valid_api_key(k: &str) -> bool {
+    !k.is_empty() && k.len() <= 256 && k.bytes().all(|c| c.is_ascii_alphanumeric() || b"._~+/=-".contains(&c))
 }
 
 /// One share of a `[share_set]`: mounted at `<target>/<name>` of the set's service.
@@ -246,6 +260,32 @@ fn add_share_set_volumes(doc: &mut Value, service: &str, target: &str, ro: bool,
         }
         seq.push(Value::Mapping(m));
     }
+    Ok(())
+}
+
+/// The bind of `[user_photos]`: the staging folder, read-only, following the mounts rynasd
+/// makes in it later (`rslave`: a user's folder appears or goes without a restart of the app).
+fn add_user_photos_volume(doc: &mut Value, service: &str, target: &str, root: &str) -> Result<(), RenderError> {
+    let svc = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut(service))
+        .and_then(Value::as_mapping_mut)
+        .ok_or_else(|| RenderError::Compose(format!("user_photos service `{service}` is not in the compose file")))?;
+    if !svc.contains_key("volumes") {
+        svc.insert("volumes".into(), Value::Sequence(Vec::new()));
+    }
+    let Some(Value::Sequence(seq)) = svc.get_mut("volumes") else {
+        return Err(RenderError::Compose(format!("service `{service}`: volumes is not a list")));
+    };
+    let mut m = Mapping::new();
+    m.insert("type".into(), "bind".into());
+    m.insert("source".into(), Value::String(compose_literal(root)));
+    m.insert("target".into(), Value::String(target.trim_end_matches('/').to_string()));
+    m.insert("read_only".into(), Value::Bool(true));
+    let mut b = Mapping::new();
+    b.insert("propagation".into(), "rslave".into());
+    m.insert("bind".into(), Value::Mapping(b));
+    seq.push(Value::Mapping(m));
     Ok(())
 }
 
@@ -420,6 +460,9 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
     if m.share_set.is_none() && !req.share_set.is_empty() {
         return Err(RenderError::UnknownValue("share_set".into()));
     }
+    if m.user_photos.is_none() && (req.user_photos.is_some() || req.user_photos_key.is_some()) {
+        return Err(RenderError::UnknownValue("user_photos".into()));
+    }
     match (&req.run_as, m.run_as) {
         (Some(_), None) => return Err(RenderError::UnknownValue("run_as".into())),
         (Some(u), Some(_)) if !crate::manifest::is_user_name(u) => {
@@ -490,6 +533,20 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
             });
         }
     }
+    if let Some(up) = &m.user_photos {
+        let root = req.user_photos.clone().unwrap_or_default();
+        if !root.is_empty() && !(share_set_path_ok(&root) && !root.starts_with("./")) {
+            return Err(RenderError::InvalidValue { field: up.env.clone(), reason: "must be an absolute path".into() });
+        }
+        env.push((up.env.clone(), root));
+        if let Some(k) = &up.key_env {
+            let key = req.user_photos_key.clone().unwrap_or_default();
+            if !key.is_empty() && !valid_api_key(&key) {
+                return Err(RenderError::InvalidValue { field: k.clone(), reason: "not an API key".into() });
+            }
+            env.push((k.clone(), key));
+        }
+    }
     for s in &m.secrets {
         let v = match req.secrets.get(&s.env) {
             Some(v) if !v.is_empty() => v.clone(),
@@ -503,6 +560,11 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
     let (mut doc, applied) = merged_compose(app, &env_map);
     if let Some(ss) = &m.share_set {
         add_share_set_volumes(&mut doc, &ss.service, &ss.target, ss.access == crate::manifest::Access::Ro, &req.share_set)?;
+    }
+    if let Some(up) = &m.user_photos
+        && let Some(root) = req.user_photos.as_deref().filter(|r| !r.is_empty())
+    {
+        add_user_photos_volume(&mut doc, &up.service, &up.target, root)?;
     }
     for r in compose::refs(&doc).map_err(RenderError::Compose)? {
         if !env_map.contains_key(&r.name) {
@@ -610,6 +672,10 @@ pub fn request_from_env(app: &CatalogApp, stack: &str, env: &BTreeMap<String, St
         // a broken line is kept as read: the render then names the bad item instead of
         // silently unmounting the shares
         req.share_set = split_share_set(v).unwrap_or_else(|_| vec![ShareSetItem { name: String::new(), path: v.clone(), follow: false }]);
+    }
+    if let Some(up) = &m.user_photos {
+        req.user_photos = env.get(&up.env).filter(|v| v.starts_with('/')).cloned();
+        req.user_photos_key = up.key_env.as_ref().and_then(|k| env.get(k)).filter(|k| !k.is_empty()).cloned();
     }
     for (name, field) in &app.form.properties {
         let Some(v) = env.get(name) else { continue };

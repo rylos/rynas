@@ -240,6 +240,30 @@ pub struct GroupGrant {
     pub user: bool,
     /// Read and write; otherwise read (folders also get `x`, to be entered).
     pub write: bool,
+    /// Only what this user owns, and never a regular file with several hard links (a link
+    /// made into the tree to a file kept elsewhere): a tree that belongs to a person (the
+    /// Photos folder of a home), where the owner could plant other files.
+    pub owner: Option<u32>,
+}
+
+/// The link count of an open file (0 when unknown).
+#[allow(clippy::unnecessary_cast)] // `st_nlink` is narrower on some targets
+fn nlink(fd: BorrowedFd) -> u64 {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fstat fills `st` for a valid descriptor; checked by its return value
+    if unsafe { libc::fstat(fd.as_raw_fd(), st.as_mut_ptr()) } != 0 {
+        return 0;
+    }
+    // SAFETY: fstat succeeded
+    unsafe { st.assume_init() }.st_nlink as u64
+}
+
+/// Whether a grant with an owner leaves this entry alone ([`GroupGrant::owner`]).
+fn grant_skips(g: &GroupGrant, uid: u32, kind: Kind, links: impl FnOnce() -> u64) -> bool {
+    match g.owner {
+        Some(o) => uid != o || (kind == Kind::File && links() > 1),
+        None => false,
+    }
 }
 
 const ACL_USER_OBJ: u16 = 0x01;
@@ -534,6 +558,44 @@ fn remap_with(
                 continue;
             }
         };
+        if !walk(fs, parent, name, root, opts, hook, &mounts, &mut c) {
+            return c;
+        }
+    }
+    c
+}
+
+/// [`grant`] of the tree below an open folder (`dir`, e.g. one opened with `O_NOFOLLOW` and
+/// checked by the caller); `label` names it in reports.
+pub fn grant_fd(fs: &dyn RemapFs, dir: BorrowedFd, label: &Path, grant: GroupGrant, cancelled: &dyn Fn() -> bool) -> RemapCounts {
+    let opts = RemapOpts {
+        map: IdMap::default(),
+        acls: false,
+        keep_setid: false,
+        dry_run: false,
+        deadline: None,
+        cancelled,
+        tick: &|_| {},
+        grant: Some(grant),
+    };
+    let mut c = RemapCounts::default();
+    // SAFETY: a duplicate descriptor, owned below
+    let dup = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        push_err(&mut c, label, &io::Error::last_os_error());
+        return c;
+    }
+    // SAFETY: `dup` is ours
+    let parent = unsafe { OwnedFd::from_raw_fd(dup) };
+    let mounts = fs.mount_points();
+    walk(fs, parent, c".".to_owned(), label.to_path_buf(), &opts, &|_| {}, &mounts, &mut c);
+    c
+}
+
+/// Walks one root (`name` in the open `parent`); `false` when cancelled or out of time.
+#[allow(clippy::too_many_arguments)]
+fn walk(fs: &dyn RemapFs, parent: OwnedFd, name: CString, root: PathBuf, opts: &RemapOpts, hook: &dyn Fn(&Path), mounts: &BTreeSet<PathBuf>, c: &mut RemapCounts) -> bool {
+    {
         let mut root_mount: Option<MountKey> = None;
         let mut stack = vec![Pending {
             parent: Arc::new(parent),
@@ -543,16 +605,16 @@ fn remap_with(
         while let Some(p) = stack.pop() {
             if (opts.cancelled)() {
                 c.cancelled = true;
-                return c;
+                return false;
             }
             if opts.deadline.is_some_and(|d| Instant::now() >= d) {
                 c.partial = true;
-                return c;
+                return false;
             }
             let pre = match statx_at(p.parent.as_raw_fd(), &p.name, 0) {
                 Ok(m) => m,
                 Err(e) => {
-                    push_err(&mut c, &p.path, &e);
+                    push_err(c, &p.path, &e);
                     continue;
                 }
             };
@@ -564,13 +626,13 @@ fn remap_with(
             let is_root = root_mount.is_none();
             if kind == Kind::Symlink && is_root {
                 push_err(
-                    &mut c,
+                    c,
                     &p.path,
                     &io::Error::other("a symbolic link, not followed"),
                 );
                 continue;
             }
-            let mount = fs.mount_of(&p.path, pre.mnt_id, &mounts);
+            let mount = fs.mount_of(&p.path, pre.mnt_id, mounts);
             match &root_mount {
                 None => root_mount = Some(mount),
                 Some(r) if *r != mount => {
@@ -583,7 +645,7 @@ fn remap_with(
             let (fd, st) = match open_checked(p.parent.as_fd(), &p.name, &pre) {
                 Ok(x) => x,
                 Err(e) => {
-                    push_err(&mut c, &p.path, &e);
+                    push_err(c, &p.path, &e);
                     continue;
                 }
             };
@@ -601,13 +663,13 @@ fn remap_with(
                     push_path(&mut c.readonly, &p.path);
                     continue;
                 }
-                match visit(fs, &e, opts, &mut c) {
+                match visit(fs, &e, opts, c) {
                     Ok(()) => {}
                     Err(err) if err.raw_os_error() == Some(libc::EROFS) => {
                         push_path(&mut c.readonly, &p.path);
                         continue;
                     }
-                    Err(err) => push_err(&mut c, &p.path, &err),
+                    Err(err) => push_err(c, &p.path, &err),
                 }
             }
             if kind == Kind::Dir {
@@ -625,12 +687,12 @@ fn remap_with(
                             });
                         }
                     }
-                    Err(e) => push_err(&mut c, &p.path, &e),
+                    Err(e) => push_err(c, &p.path, &e),
                 }
             }
         }
     }
-    c
+    true
 }
 
 /// One entry: owner, group, set-id bits, ACLs.
@@ -655,6 +717,7 @@ fn visit(fs: &dyn RemapFs, e: &Entry, opts: &RemapOpts, c: &mut RemapCounts) -> 
     }
     if let Some(g) = opts.grant
         && matches!(e.kind, Kind::Dir | Kind::File)
+        && !grant_skips(&g, e.uid, e.kind, || nlink(e.fd))
     {
         let access = fs.get_acl(e, false)?;
         if let Some(new) = grant_acl(access.as_deref(), None, e.mode, e.kind == Kind::Dir, g) {
@@ -1007,7 +1070,7 @@ mod tests {
 
     #[test]
     fn a_group_grant_only_adds_and_starts_from_the_mode() {
-        let g = GroupGrant { gid: 986, user: false, write: false };
+        let g = GroupGrant { gid: 986, user: false, write: false, owner: None };
         let u = ACL_UNDEFINED_ID;
         // a 0600 file without ACL: base entries from the mode, the group, a mask that lets it read
         assert_eq!(grant_acl(None, None, 0o600, false, g), Some(acl(&[(ACL_USER_OBJ, 6, u), (ACL_GROUP_OBJ, 0, u), (ACL_GROUP, 4, 986), (ACL_MASK, 4, u), (ACL_OTHER, 0, u)])));
@@ -1019,9 +1082,9 @@ mod tests {
         assert_eq!(grant_acl(Some(&has), None, 0o770, true, g), None);
         // read and write on a folder: rwx; its missing default starts from the access ACL
         // a user subject gets an ACL_USER entry, the same way
-        let ug = GroupGrant { gid: 1026, user: true, write: true };
+        let ug = GroupGrant { gid: 1026, user: true, write: true, owner: None };
         assert_eq!(grant_acl(None, None, 0o640, false, ug), Some(acl(&[(ACL_USER_OBJ, 6, u), (ACL_USER, 6, 1026), (ACL_GROUP_OBJ, 4, u), (ACL_MASK, 6, u), (ACL_OTHER, 0, u)])));
-        let rw = GroupGrant { gid: 986, user: false, write: true };
+        let rw = GroupGrant { gid: 986, user: false, write: true, owner: None };
         let dir = acl(&[(ACL_USER_OBJ, 7, u), (ACL_USER, 5, 1000), (ACL_GROUP_OBJ, 0, u), (ACL_MASK, 5, u), (ACL_OTHER, 0, u)]);
         assert_eq!(grant_acl(None, Some(&dir), 0o750, true, rw), Some(acl(&[(ACL_USER_OBJ, 7, u), (ACL_USER, 5, 1000), (ACL_GROUP_OBJ, 0, u), (ACL_GROUP, 7, 986), (ACL_MASK, 7, u), (ACL_OTHER, 0, u)])));
         // an unknown format is left alone
@@ -1043,6 +1106,51 @@ mod tests {
     }
 
     /// root/{a, sub/{b}, snap/{c}, mnt/{d}, link -> /etc}
+    /// A grant for a person's tree: files of other owners and hard-linked files are left
+    /// alone (a link to a file kept elsewhere never gains an entry).
+    #[test]
+    fn an_owner_grant_skips_hard_links_and_other_owners() {
+        let t = tree();
+        let r = t.path().to_path_buf();
+        std::fs::hard_link(r.join("a"), r.join("sub/a-link")).unwrap();
+        let (uid, _) = me();
+        let fake = Fake::default();
+        grant(&fake, std::slice::from_ref(&r), GroupGrant { gid: 54400, user: false, write: false, owner: Some(uid) }, &|| false);
+        let touched: BTreeSet<PathBuf> = fake.acls.lock().unwrap().iter().map(|a| a.0.clone()).collect();
+        assert!(touched.contains(&r.join("sub/b")) && touched.contains(&r.join("sub")), "{touched:?}");
+        assert!(!touched.contains(&r.join("a")) && !touched.contains(&r.join("sub/a-link")), "{touched:?}");
+        // another owner: nothing at all
+        let fake = Fake::default();
+        grant(&fake, std::slice::from_ref(&r), GroupGrant { gid: 54400, user: false, write: false, owner: Some(uid + 1) }, &|| false);
+        assert!(fake.acls.lock().unwrap().is_empty());
+        let g = GroupGrant { gid: 1, user: false, write: false, owner: Some(7) };
+        assert!(!grant_skips(&g, 7, Kind::Dir, || 5), "folders have many links");
+        assert!(grant_skips(&g, 7, Kind::File, || 2));
+        assert!(!grant_skips(&GroupGrant { owner: None, ..g }, 8, Kind::File, || 2));
+    }
+
+    /// A grant from an open folder: the whole tree below it, by descriptor (a path through
+    /// `/proc/self/fd` would stop at the `self` link).
+    #[test]
+    fn a_grant_walks_from_a_descriptor() {
+        let t = tree();
+        let r = t.path().to_path_buf();
+        let dir = std::fs::File::open(&r).unwrap();
+        let (uid, _) = me();
+        let fake = Fake::default();
+        let c = grant_fd(&fake, dir.as_fd(), Path::new("/label"), GroupGrant { gid: 54400, user: false, write: false, owner: Some(uid) }, &|| false);
+        assert_eq!(c.errors, 0, "{c:?}");
+        let touched: BTreeSet<PathBuf> = fake.acls.lock().unwrap().iter().map(|a| a.0.clone()).collect();
+        for p in ["/label", "/label/a", "/label/sub/b"] {
+            assert!(touched.contains(Path::new(p)), "{p}: {touched:?}");
+        }
+        assert!(!touched.iter().any(|p| p.ends_with("link")), "links are never followed");
+        // the old way fails at the first link of the path
+        let via = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
+        let c = grant(&Fake::default(), &[via], GroupGrant { gid: 54400, user: false, write: false, owner: None }, &|| false);
+        assert_eq!(c.errors, 1);
+    }
+
     fn tree() -> tempfile::TempDir {
         let t = tempfile::tempdir().unwrap();
         let r = t.path();
@@ -1554,7 +1662,7 @@ mod tests {
         }
         let fake = Fake { real_acls: true, ..Default::default() };
         let root = t.path().to_path_buf();
-        let c = grant(&fake, std::slice::from_ref(&root), GroupGrant { gid: 54400, user: false, write: false }, &|| false);
+        let c = grant(&fake, std::slice::from_ref(&root), GroupGrant { gid: 54400, user: false, write: false, owner: None }, &|| false);
         assert!(c.acl_entries > 0 && c.errors == 0, "{c:?}");
         let out = std::process::Command::new("getfacl").args(["-R", "-n", "-p"]).arg(&root).output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
@@ -1562,7 +1670,7 @@ mod tests {
         // the earlier entry stays as it was
         assert!(text.contains("group:54321:r--"), "{text}");
         // a second pass writes nothing
-        assert_eq!(grant(&fake, std::slice::from_ref(&root), GroupGrant { gid: 54400, user: false, write: false }, &|| false).acl_entries, 0);
+        assert_eq!(grant(&fake, std::slice::from_ref(&root), GroupGrant { gid: 54400, user: false, write: false, owner: None }, &|| false).acl_entries, 0);
     }
 
     #[test]

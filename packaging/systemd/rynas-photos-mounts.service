@@ -1,0 +1,21 @@
+# rynas: the Photos folders of the users an administrator chose for photo apps (D-PHOTOS,
+# docs/phase2/photos.md §3), mounted read-only into each app's staging folder at boot.
+#
+# Ordered before the container engine so the apps start with their users' folders. Before=
+# without Requires= only orders, and the command never fails the unit: Docker starts anyway,
+# and rynasd mounts what is still missing when it starts and when the mount table changes.
+[Unit]
+Description=rynas: mount the chosen users' Photos folders for photo apps
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target remote-fs.target
+Before=docker.service containerd.service
+RequiresMountsFor=/var/lib/rynas
+ConditionDirectoryNotEmpty=/var/lib/rynas/docker/photos
+
+[Service]
+Type=oneshot
+ExecStart=-/usr/libexec/rynas/rynasd photos-restore
+TimeoutStartSec=120
+
+[Install]
+WantedBy=docker.service multi-user.target

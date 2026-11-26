@@ -1,2 +1,4 @@
+user_photos = "/var/lib/rynas/docker/photos/pigallery2"
+
 [shares]
 PHOTOS = "/volume1/photos"

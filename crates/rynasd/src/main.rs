@@ -174,6 +174,29 @@ enum Command {
     /// leaf for the current host name and addresses (after an imported certificate that
     /// clients refuse). rynas-web picks it up within seconds, without a restart.
     TlsReset,
+    /// Internal (run by rynasd in a transient unit): mount a user's Photos folder read-only
+    /// into a photo app's staging folder, from a descriptor opened without following links.
+    #[command(hide = true)]
+    PhotosMount {
+        /// The user's real home (its parents' links already resolved).
+        #[arg(long)]
+        home: PathBuf,
+        #[arg(long)]
+        uid: u32,
+        /// A root-owned folder of the staging folder.
+        #[arg(long)]
+        target: PathBuf,
+    },
+    /// Internal: detach a mount of a staging folder.
+    #[command(hide = true)]
+    PhotosUnmount {
+        #[arg(long)]
+        target: PathBuf,
+    },
+    /// Internal (the boot unit rynas-photos-mounts): mount the chosen users' Photos folders
+    /// of every photo app; never fails.
+    #[command(hide = true)]
+    PhotosRestore,
 }
 
 /// The certificate service: private store in the state folder, published files for
@@ -525,9 +548,30 @@ fn run_command(args: &Args, cmd: &Command) -> std::io::Result<()> {
     if let Command::TlsReset = cmd {
         return tls_reset(args);
     }
+    match cmd {
+        Command::PhotosMount { home, uid, target } => {
+            return match rynasd::photos_mount::mount(home, *uid, target) {
+                Ok(m) => {
+                    println!("{}", if m == rynasd::photos_mount::Mounted::Already { "already mounted" } else { "mounted" });
+                    Ok(())
+                }
+                Err(e) => Err(std::io::Error::other(e)),
+            };
+        }
+        Command::PhotosUnmount { target } => {
+            return rynasd::photos_mount::unmount(target).map(|_| ()).map_err(std::io::Error::other);
+        }
+        Command::PhotosRestore => {
+            for line in rynasd::photos::boot_restore(&args.state_dir.join("docker"), &config_root(args)) {
+                println!("{line}");
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
     let cfg = open_config(args, Arc::new(MemorySystem::new(&running_hostname())), None)?.config;
     match cmd {
-        Command::TlsReset => unreachable!("handled above"),
+        Command::TlsReset | Command::PhotosMount { .. } | Command::PhotosUnmount { .. } | Command::PhotosRestore => unreachable!("handled above"),
         Command::Export {
             out,
             passphrase_file,
@@ -1416,6 +1460,8 @@ fn main() -> std::io::Result<()> {
                 rynasd::syncthing::live::install(live.clone());
                 rynasd::syncthing::live::spawn(live, apps.clone());
             }
+            // photos from the RyNAS app: a scan of the user's library after an upload batch
+            rynasd::photos::spawn(apps.clone());
             state.apps = Some(apps);
             state.docker = Some(docker);
         }

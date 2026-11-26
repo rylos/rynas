@@ -96,6 +96,9 @@ pub struct TestValues {
     /// The `[share_set]` items (`[[share_set]]` tables with name, path, follow).
     #[serde(default)]
     pub share_set: Vec<crate::render::ShareSetItem>,
+    /// The `[user_photos]` staging folder (a top-level `user_photos = "/..."`).
+    #[serde(default)]
+    pub user_photos: Option<String>,
 }
 
 impl TestValues {
@@ -382,6 +385,7 @@ impl CatalogApp {
         let mut taken: Vec<&str> = PROVIDED_VARS.to_vec();
         taken.extend(manifest.declared_envs());
         taken.extend(manifest.share_set.iter().map(|s| s.env.as_str()));
+        taken.extend(manifest.user_photos.iter().flat_map(|u| std::iter::once(u.env.as_str()).chain(u.key_env.as_deref())));
         form.check(id, &taken, &mut issues);
 
         // overlays: declared ⇔ present, each parses, condition known and boolean
@@ -467,6 +471,8 @@ impl CatalogApp {
             secrets: BTreeMap::new(),
             share_set: self.tests.share_set.clone(),
             run_as: None,
+            user_photos: self.tests.user_photos.clone(),
+            user_photos_key: None,
         }
     }
 }

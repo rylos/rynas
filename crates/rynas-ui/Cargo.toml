@@ -29,7 +29,7 @@ features = [
   "Storage", "Navigator", "Location", "MediaQueryList",
   "EventSource", "MessageEvent", "Event", "KeyboardEvent",
   "Request", "RequestInit", "Response", "Headers", "AbortSignal",
-  "ResizeObserver", "ResizeObserverEntry",
+  "ResizeObserver", "ResizeObserverEntry", "IntersectionObserver", "IntersectionObserverEntry", "TextMetrics",
   "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "HtmlTextAreaElement", "HtmlDocument", "Clipboard",
   "NodeList", "History", "File", "FileList", "Performance",
   "ScrollIntoViewOptions", "ScrollLogicalPosition", "FocusOptions",

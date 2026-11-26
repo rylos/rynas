@@ -852,6 +852,78 @@ async fn move_behind_the_proxy() {
     assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, error_codes::CONFLICT));
 }
 
+/// Photos from the RyNAS app: an install binds the root-owned staging folder and mounts
+/// nobody; an administrator chooses users (with an API: confirms the account), the choice is
+/// kept, and the key is only for apps with an API.
+#[tokio::test]
+async fn user_photos_are_chosen_by_an_administrator() {
+    use std::os::unix::fs::MetadataExt;
+    let e = env();
+    let root = e.root();
+    for d in ["etc", "home/ann/Photos/2026/11", "home/bob"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+    }
+    let me = std::fs::metadata(root.join("home/ann")).unwrap().uid();
+    std::fs::write(root.join("etc/passwd"), format!("root:x:0:0::/root:/bin/sh\nann:x:{me}:100::/home/ann:/bin/sh\nbob:x:{me}:100::/home/bob:/bin/sh\n")).unwrap();
+    let (_, log) = install(&e, "pigallery2", json!({})).await;
+    assert!(log.contains("Photos folders: none yet"), "{log}");
+    let staging = e.dir.path().join("state/docker/photos/pigallery2");
+    assert!(staging.join("Shared").is_dir(), "the mount point of the shared folder");
+    let dir = e.stack("pigallery2");
+    let envf = std::fs::read_to_string(dir.join(".env")).unwrap();
+    assert!(envf.contains(&format!("USER_PHOTOS={}\n", staging.display())), "{envf}");
+    let compose = std::fs::read_to_string(dir.join("compose.yaml")).unwrap();
+    assert!(compose.contains("target: /app/data/images\n") && compose.contains("propagation: rslave") && !compose.contains("/home/"), "{compose}");
+    let (s, b) = call(&e, "GET", "/v1/apps/installed/pigallery2", None).await;
+    assert!(json_of::<InstalledAppDetail>(s, &b).app.user_photos);
+    let (s, b) = call(&e, "GET", "/v1/apps/installed/pigallery2/photos", None).await;
+    let st: PhotosState = json_of(s, &b);
+    let rows: Vec<(&str, bool, bool)> = st.users.iter().map(|u| (u.user.as_str(), u.included, u.mounted)).collect();
+    assert_eq!(rows, [("ann", false, false), ("bob", false, false)], "nobody at install");
+    assert_eq!((st.api, st.allow_list.as_deref()), (None, Some("/{user}/*")));
+    // choose ann: kept, then synced (a dry system mounts nothing)
+    let (s, b) = call(&e, "POST", "/v1/apps/installed/pigallery2/photos/users/ann", Some(json!({"include": true}))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t: TaskStarted = serde_json::from_slice(&b).unwrap();
+    let (info, log) = wait_task(&e, &t.task_id).await;
+    assert_eq!(info.status, TaskStatus::Ok, "{log}");
+    assert!(log.contains("ann: dry system: not mounted") && !log.contains("bob"), "{log}");
+    let kept = std::fs::read_to_string(e.dir.path().join("state/docker/photos/pigallery2.json")).unwrap();
+    assert!(kept.contains("\"ann\"") && !kept.contains("bob"), "{kept}");
+    let (_, b) = call(&e, "GET", "/v1/apps/installed/pigallery2/photos", None).await;
+    let st: PhotosState = json_of(StatusCode::OK, &b);
+    assert!(st.users[0].included && !st.users[1].included);
+    // not a NAS user; leave ann out again
+    let (s, b) = call(&e, "POST", "/v1/apps/installed/pigallery2/photos/users/zed", Some(json!({"include": true}))).await;
+    assert_eq!((s, err(&b).field.as_deref()), (StatusCode::BAD_REQUEST, Some("user")));
+    let (_, b) = call(&e, "POST", "/v1/apps/installed/pigallery2/photos/users/ann", Some(json!({"include": false}))).await;
+    let t: TaskStarted = serde_json::from_slice(&b).unwrap();
+    assert_eq!(wait_task(&e, &t.task_id).await.0.status, TaskStatus::Ok);
+    assert!(!std::fs::read_to_string(e.dir.path().join("state/docker/photos/pigallery2.json")).unwrap().contains("ann"));
+    // no key for an app without an API
+    let (s, _) = call(&e, "POST", "/v1/apps/installed/pigallery2/photos/key", Some(json!({"key": "abc"}))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    // Immich: a user needs a confirmed account, which needs the app's API
+    install(&e, "immich", json!({})).await;
+    let (s, b) = call(&e, "POST", "/v1/apps/installed/immich/photos/users/ann", Some(json!({"include": true}))).await;
+    assert_eq!((s, err(&b).field.as_deref()), (StatusCode::BAD_REQUEST, Some("account")));
+    let (s, _) = call(&e, "POST", "/v1/apps/installed/immich/photos/users/ann", Some(json!({"include": true, "account": "u-ann"}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "no key yet");
+    let (s, b) = call(&e, "GET", "/v1/apps/installed/immich/photos", None).await;
+    let st: PhotosState = json_of(s, &b);
+    assert_eq!(st.api, Some(PhotosApi { key: false, error: None }));
+    // uninstall with the data: the staging folder and the choices go
+    let (s, b) = call(&e, "POST", "/v1/apps/installed/pigallery2/uninstall", Some(json!({"delete_data": true, "confirm": "pigallery2"}))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t: TaskStarted = serde_json::from_slice(&b).unwrap();
+    let (info, log) = wait_task(&e, &t.task_id).await;
+    assert_eq!(info.status, TaskStatus::Ok, "{log}");
+    assert!(!staging.exists() && !e.dir.path().join("state/docker/photos/pigallery2.json").exists());
+    // an app that does not read the folders
+    let (s, _) = call(&e, "GET", "/v1/apps/installed/nope/photos", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
 /// An entry with `run_as`: plans offer the NAS users, refuse root, system accounts and the
 /// apps' account, and an install writes the user's ids and name.
 #[tokio::test]
@@ -1076,6 +1148,8 @@ async fn non_admins_get_403_on_every_route() {
         include_str!("../src/tls.rs"),
         include_str!("../src/web_access/mod.rs"),
         include_str!("../src/syncthing/mod.rs"),
+        // the router only: its tests serve a fake app's API
+        include_str!("../src/photos.rs").split("#[cfg(test)]").next().unwrap_or_default(),
     ] {
         let routes = routes_of(src);
         assert!(routes.len() >= 2, "routes not found");

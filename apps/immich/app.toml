@@ -1,7 +1,7 @@
 schema = 1
 id = "immich"
 name = "Immich"
-version = "1.0.4"
+version = "1.1.0"
 app_version = "v3.4.2"
 update_policy = "patch"
 description = "Photo and video library with mobile backup, faces, maps and smart search."
@@ -68,6 +68,13 @@ access = "ro"
 required = false
 fallback = "external"
 
+[user_photos]
+env = "USER_PHOTOS"
+service = "immich-server"
+target = "/mnt/photos"
+key_env = "PHOTOS_API_KEY"
+description = "The Photos folder of each NAS user whose Immich account an administrator confirmed, where the RyNAS app backs up the phone's photos, read-only at /mnt/photos/<user>. With an API key, rynas adds each folder to Immich as an external library of that account and scans it after each backup"
+
 [[secrets]]
 env = "DB_PASSWORD"
 length = 32
@@ -100,3 +107,7 @@ text = "Immich wants 6 GB of RAM with machine learning (8 GB recommended). On 4 
 [[notes]]
 level = "info"
 text = "The first visitor creates the admin account: open Immich right after install."
+
+[[notes]]
+level = "info"
+text = "Phones back up with the RyNAS app into each user's Photos folder. Immich reads those folders read-only: give rynas an Immich API key on the app's page and confirm each user's Immich account there: that account gets the user's folder as an external library, scanned after each backup. Immich's own mobile upload keeps working as well."

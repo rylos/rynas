@@ -67,6 +67,10 @@
   --c3: #0f6e9e;
   --c4: #3a8f7f;
   --c5: #df8e1d;
+  /* network chart and its legend: download blue, upload orange (apart in hue and lightness,
+     text ≥ 4.5:1 on the surface in both themes) */
+  --net-down: #0b63c4;
+  --net-up: #c25400;
   /* text on a tier colour (c1-c4 dark in light mode); c5 is light in both themes */
   --on-tier: #ffffff;
   --on-tier-5: #1f2328;
@@ -152,6 +156,8 @@
   --c3: #56c2e6;
   --c4: #3cc47c;
   --c5: #e7a93a;
+  --net-down: #6cb8ff;
+  --net-up: #ffa64d;
   --on-tier: #14171c;
   --on-tier-5: #14171c;
   --chart-grid: rgba(228, 231, 236, .08);
@@ -860,6 +866,8 @@ kbd {
 .duo-item { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
 .duo-label { display: flex; align-items: center; gap: var(--s-1); font-size: var(--fs-12); color: var(--text-subtle); }
 .duo-num { font-size: var(--fs-20); font-weight: 600; letter-spacing: -.01em; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dot.net-down { background: var(--net-down); } .dot.net-up { background: var(--net-up); }
+.duo-num.net-down { color: var(--net-down); } .duo-num.net-up { color: var(--net-up); }
 
 .rows { display: flex; flex-direction: column; }
 .row { display: flex; align-items: center; gap: var(--s-2); min-height: 30px; border-top: 1px solid var(--border); font-size: var(--fs-13); }

@@ -2,6 +2,8 @@
 # Differences: image pinned, no nginx (web access does that), runs as PUID:PGID (the image starts
 # as root but works unprivileged, port 80 included), no 3G memory limit. The image has its own
 # HEALTHCHECK on /heartbeat. Thumbnail threads stay on upstream's default, CPUs minus one.
+# The images folder is rynas's staging folder ([user_photos], read-only): the shared folder is
+# bound at Shared, and rynas mounts each chosen user's Photos folder as /app/data/images/<user>.
 services:
   pigallery2:
     image: bpatrik/pigallery2:3.8.0@sha256:290de6eb5216218b0be7561ec04d719260e551a213257300abeaba7d72c4a5f5
@@ -16,4 +18,4 @@ services:
       - ${CONFIG_FOLDER}:/app/data/config
       - ${DB_FOLDER}:/app/data/db
       - ${TMP_FOLDER}:/app/data/tmp
-      - ${PHOTOS}:/app/data/images:ro
+      - ${PHOTOS}:/app/data/images/Shared:ro
