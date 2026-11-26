@@ -558,6 +558,44 @@ fn remap_with(
                 continue;
             }
         };
+        if !walk(fs, parent, name, root, opts, hook, &mounts, &mut c) {
+            return c;
+        }
+    }
+    c
+}
+
+/// [`grant`] of the tree below an open folder (`dir`, e.g. one opened with `O_NOFOLLOW` and
+/// checked by the caller); `label` names it in reports.
+pub fn grant_fd(fs: &dyn RemapFs, dir: BorrowedFd, label: &Path, grant: GroupGrant, cancelled: &dyn Fn() -> bool) -> RemapCounts {
+    let opts = RemapOpts {
+        map: IdMap::default(),
+        acls: false,
+        keep_setid: false,
+        dry_run: false,
+        deadline: None,
+        cancelled,
+        tick: &|_| {},
+        grant: Some(grant),
+    };
+    let mut c = RemapCounts::default();
+    // SAFETY: a duplicate descriptor, owned below
+    let dup = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        push_err(&mut c, label, &io::Error::last_os_error());
+        return c;
+    }
+    // SAFETY: `dup` is ours
+    let parent = unsafe { OwnedFd::from_raw_fd(dup) };
+    let mounts = fs.mount_points();
+    walk(fs, parent, c".".to_owned(), label.to_path_buf(), &opts, &|_| {}, &mounts, &mut c);
+    c
+}
+
+/// Walks one root (`name` in the open `parent`); `false` when cancelled or out of time.
+#[allow(clippy::too_many_arguments)]
+fn walk(fs: &dyn RemapFs, parent: OwnedFd, name: CString, root: PathBuf, opts: &RemapOpts, hook: &dyn Fn(&Path), mounts: &BTreeSet<PathBuf>, c: &mut RemapCounts) -> bool {
+    {
         let mut root_mount: Option<MountKey> = None;
         let mut stack = vec![Pending {
             parent: Arc::new(parent),
@@ -567,16 +605,16 @@ fn remap_with(
         while let Some(p) = stack.pop() {
             if (opts.cancelled)() {
                 c.cancelled = true;
-                return c;
+                return false;
             }
             if opts.deadline.is_some_and(|d| Instant::now() >= d) {
                 c.partial = true;
-                return c;
+                return false;
             }
             let pre = match statx_at(p.parent.as_raw_fd(), &p.name, 0) {
                 Ok(m) => m,
                 Err(e) => {
-                    push_err(&mut c, &p.path, &e);
+                    push_err(c, &p.path, &e);
                     continue;
                 }
             };
@@ -588,13 +626,13 @@ fn remap_with(
             let is_root = root_mount.is_none();
             if kind == Kind::Symlink && is_root {
                 push_err(
-                    &mut c,
+                    c,
                     &p.path,
                     &io::Error::other("a symbolic link, not followed"),
                 );
                 continue;
             }
-            let mount = fs.mount_of(&p.path, pre.mnt_id, &mounts);
+            let mount = fs.mount_of(&p.path, pre.mnt_id, mounts);
             match &root_mount {
                 None => root_mount = Some(mount),
                 Some(r) if *r != mount => {
@@ -607,7 +645,7 @@ fn remap_with(
             let (fd, st) = match open_checked(p.parent.as_fd(), &p.name, &pre) {
                 Ok(x) => x,
                 Err(e) => {
-                    push_err(&mut c, &p.path, &e);
+                    push_err(c, &p.path, &e);
                     continue;
                 }
             };
@@ -625,13 +663,13 @@ fn remap_with(
                     push_path(&mut c.readonly, &p.path);
                     continue;
                 }
-                match visit(fs, &e, opts, &mut c) {
+                match visit(fs, &e, opts, c) {
                     Ok(()) => {}
                     Err(err) if err.raw_os_error() == Some(libc::EROFS) => {
                         push_path(&mut c.readonly, &p.path);
                         continue;
                     }
-                    Err(err) => push_err(&mut c, &p.path, &err),
+                    Err(err) => push_err(c, &p.path, &err),
                 }
             }
             if kind == Kind::Dir {
@@ -649,12 +687,12 @@ fn remap_with(
                             });
                         }
                     }
-                    Err(e) => push_err(&mut c, &p.path, &e),
+                    Err(e) => push_err(c, &p.path, &e),
                 }
             }
         }
     }
-    c
+    true
 }
 
 /// One entry: owner, group, set-id bits, ACLs.
@@ -1089,6 +1127,28 @@ mod tests {
         assert!(!grant_skips(&g, 7, Kind::Dir, || 5), "folders have many links");
         assert!(grant_skips(&g, 7, Kind::File, || 2));
         assert!(!grant_skips(&GroupGrant { owner: None, ..g }, 8, Kind::File, || 2));
+    }
+
+    /// A grant from an open folder: the whole tree below it, by descriptor (a path through
+    /// `/proc/self/fd` would stop at the `self` link).
+    #[test]
+    fn a_grant_walks_from_a_descriptor() {
+        let t = tree();
+        let r = t.path().to_path_buf();
+        let dir = std::fs::File::open(&r).unwrap();
+        let (uid, _) = me();
+        let fake = Fake::default();
+        let c = grant_fd(&fake, dir.as_fd(), Path::new("/label"), GroupGrant { gid: 54400, user: false, write: false, owner: Some(uid) }, &|| false);
+        assert_eq!(c.errors, 0, "{c:?}");
+        let touched: BTreeSet<PathBuf> = fake.acls.lock().unwrap().iter().map(|a| a.0.clone()).collect();
+        for p in ["/label", "/label/a", "/label/sub/b"] {
+            assert!(touched.contains(Path::new(p)), "{p}: {touched:?}");
+        }
+        assert!(!touched.iter().any(|p| p.ends_with("link")), "links are never followed");
+        // the old way fails at the first link of the path
+        let via = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
+        let c = grant(&Fake::default(), &[via], GroupGrant { gid: 54400, user: false, write: false, owner: None }, &|| false);
+        assert_eq!(c.errors, 1);
     }
 
     fn tree() -> tempfile::TempDir {

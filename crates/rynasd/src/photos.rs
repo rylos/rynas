@@ -30,7 +30,6 @@
 //!   allow lists are set in the gallery by hand (the page shows the values, [`ALLOW_LIST`]).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -124,6 +123,10 @@ pub struct Member {
 pub struct Store {
     #[serde(default)]
     pub users: BTreeMap<String, Member>,
+    /// The app needs a confirmed account per user (it has an API): the boot unit mounts
+    /// only confirmed users then.
+    #[serde(default)]
+    pub api: bool,
 }
 
 fn photos_dir(d: &DockerSvc) -> PathBuf {
@@ -244,9 +247,13 @@ pub fn propose<'a>(user: &str, email: &str, accounts: &'a [Account]) -> Option<&
 pub fn library_state(user: &str, account: Option<&str>, accounts: &[Account], libraries: &[Library], target: &str) -> PhotosLibrary {
     let Some(account) = account else { return PhotosLibrary::Unconfirmed };
     let path = import_path(target, user);
-    match libraries.iter().find(|l| reads(l, &path)) {
-        Some(l) if l.owner_id == account => PhotosLibrary::Linked,
-        Some(_) => PhotosLibrary::OtherOwner,
+    let on_path: Vec<&Library> = libraries.iter().filter(|l| reads(l, &path)).collect();
+    if on_path.iter().any(|l| l.owner_id != account) {
+        // any other account on the path, even next to the user's own library
+        return PhotosLibrary::OtherOwner;
+    }
+    match on_path.first() {
+        Some(_) => PhotosLibrary::Linked,
         None if !accounts.iter().any(|a| a.id == account && a.deleted_at.is_none()) => PhotosLibrary::NoAccount,
         None => PhotosLibrary::Missing,
     }
@@ -369,7 +376,7 @@ pub enum Step {
 /// libraries when it has an API and answered (`None`: no API, or it did not answer: then the
 /// blocks found before stay as they are).
 pub fn plan(store: &Store, users: &[NasUser], mounted: &BTreeSet<String>, api: bool, immich: Option<(&[Account], &[Library])>, target: &str) -> (Vec<(String, Step)>, Store) {
-    let mut kept = Store::default();
+    let mut kept = Store { api, ..Default::default() };
     let mut steps = Vec::new();
     for (name, m) in &store.users {
         if !users.iter().any(|u| &u.name == name) {
@@ -432,19 +439,23 @@ async fn mount_user(d: &Arc<DockerSvc>, root: &Path, u: &NasUser, gid: Option<u3
     // files, never a hard-linked one, from the descriptor checked like the mount's
     if let Some(gid) = gid {
         let uid = u.uid;
-        let _ = blocking(move || {
-            use rynas_services::idremap::{self, GroupGrant, HostRemap};
-            let fd = crate::photos_mount::open_photos(&home, uid)?;
-            let via = PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()));
-            let c = idremap::grant(&HostRemap, &[via], GroupGrant { gid, user: false, write: false, owner: Some(uid) }, &|| false);
-            if c.errors > 0 {
-                tracing::warn!("photos: {}: {} entries not opened to the apps' account", home.display(), c.errors);
-            }
-            Ok::<(), String>(())
-        })
-        .await;
+        let r = blocking(move || open_to_apps(&rynas_services::idremap::HostRemap, &home, uid, gid)).await;
+        match r {
+            Ok(c) if c.errors > 0 => tracing::warn!("photos: {}: {} entries not opened to the apps' account: {}", u.name, c.errors, c.error_samples.join("; ")),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("photos: {}: not opened to the apps' account: {e}", u.name),
+        }
     }
     Ok(out)
+}
+
+/// Lets the apps' group read the user's `Photos` folder: only the user's files and folders,
+/// never a hard-linked file, walked from the descriptor checked like the mount's.
+pub fn open_to_apps(fs: &dyn rynas_services::idremap::RemapFs, home: &Path, uid: u32, gid: u32) -> Result<rynas_services::idremap::RemapCounts, String> {
+    use rynas_services::idremap::{GroupGrant, grant_fd};
+    let fd = crate::photos_mount::open_photos(home, uid)?;
+    let label = home.join(FOLDER);
+    Ok(grant_fd(fs, std::os::fd::AsFd::as_fd(&fd), &label, GroupGrant { gid, user: false, write: false, owner: Some(uid) }, &|| false))
 }
 
 async fn unmount_user(d: &Arc<DockerSvc>, root: &Path, user: &str) -> Result<(), String> {
@@ -535,38 +546,96 @@ pub fn spawn(apps: Arc<AppsSvc>) {
     tokio::spawn(async move {
         restore(&p.apps).await;
         let mut t = tokio::time::interval(TICK);
+        let mut n: u64 = 0;
         loop {
             t.tick().await;
+            n += 1;
             let due = p.queue.lock().unwrap().due(Instant::now());
             for user in due {
                 rescan(&p.apps, &user).await;
+            }
+            // chosen folders still missing (a volume mounted later, a failed helper)
+            if n.is_multiple_of(RECHECK_TICKS) {
+                restore(&p.apps).await;
             }
         }
     });
 }
 
-/// After a start: the mounts of every photo app as chosen (no call to the apps: a block
-/// found by the last sync stays).
+/// The chosen users' folders checked again every minute (in ticks of [`TICK`]).
+const RECHECK_TICKS: u64 = 6;
+
+/// The users of a stack to mount at start or in the minute check: chosen, confirmed when the
+/// app has an API, not blocked, and not mounted yet.
+pub fn to_restore(store: &Store, mounted: &BTreeSet<String>) -> Vec<String> {
+    store
+        .users
+        .iter()
+        .filter(|(n, m)| !mounted.contains(*n) && m.blocked.is_none() && (!store.api || m.account.is_some()))
+        .map(|(n, _)| n.clone())
+        .collect()
+}
+
+/// The mounts of every photo app as chosen, made where missing (no call to the apps: a block
+/// found by the last sync stays). A stack busy with another task is left to the next check.
 async fn restore(a: &Arc<AppsSvc>) {
     let (cat, _) = a.catalog().await;
-    let users = nas_users(&passwd(a));
+    let Ok(users) = users_checked(&passwd(a)) else { return };
     let gid = a.apps_ids().map(|i| i.1);
     for d in a.on_disk() {
         let Some(app) = cat.get(&d.meta.app) else { continue };
-        let Some(up) = &app.manifest.user_photos else { continue };
+        if app.manifest.user_photos.is_none() {
+            continue;
+        }
         let store = load_store(&store_path(&a.docker, &d.stack));
         let root = staging_root(&a.docker, &d.stack);
-        let api = up.key_env.is_some();
-        for (name, m) in &store.users {
-            let Some(u) = users.iter().find(|u| &u.name == name) else { continue };
-            if (api && m.account.is_none()) || m.blocked.is_some() {
-                continue;
-            }
-            if let Err(e) = mount_user(&a.docker, &root, u, gid).await {
-                tracing::warn!("photos: {}: {name}: {e}", d.stack);
+        let missing = to_restore(&store, &mounted_users(&mountinfo(), &root));
+        if missing.is_empty() {
+            continue;
+        }
+        let Ok(_guard) = mark_busy(&a.docker, &d.stack) else { continue };
+        for name in missing {
+            let Some(u) = users.iter().find(|u| u.name == name) else { continue };
+            match mount_user(&a.docker, &root, u, gid).await {
+                Ok(out) => tracing::info!("photos: {}: {name}: {out}", d.stack),
+                Err(e) => tracing::debug!("photos: {}: {name}: {e}", d.stack),
             }
         }
     }
+}
+
+/// `rynasd photos-restore` (the boot unit, before the container engine): the chosen users'
+/// folders of every photo stack under `<state>/docker/photos`, mounted with the same checks.
+/// Never fails: what it cannot mount, rynasd retries every minute.
+pub fn boot_restore(docker_state: &Path, root: &Path) -> Vec<String> {
+    let mut log = Vec::new();
+    let users = match users_checked(&std::fs::read_to_string(rynas_docker::under(root, "/etc/passwd")).unwrap_or_default()) {
+        Ok(u) => u,
+        Err(e) => return vec![e],
+    };
+    let dir = docker_state.join("photos");
+    let mi = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        let Some(stack) = p.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".json")).map(str::to_string) else { continue };
+        if rynas_docker::stacks::check_name(&stack).is_err() {
+            continue;
+        }
+        let staging = dir.join(&stack);
+        let store = load_store(&p);
+        for name in to_restore(&store, &mounted_users(&mi, &staging)) {
+            let Some(u) = users.iter().find(|u| u.name == name) else { continue };
+            let r = real_home(root, u).and_then(|home| {
+                ensure_staging(&staging, [name.as_str()])?;
+                crate::photos_mount::mount(&home, u.uid, &staging.join(&name))
+            });
+            log.push(match r {
+                Ok(_) => format!("{stack}: {name}: mounted"),
+                Err(e) => format!("{stack}: {name}: {e}"),
+            });
+        }
+    }
+    log
 }
 
 /// The files gateway saw `user` upload into `dir` (files API path): an upload into the
@@ -641,6 +710,16 @@ fn passwd(a: &AppsSvc) -> String {
     std::fs::read_to_string(rynas_docker::under(&a.docker.root, "/etc/passwd")).unwrap_or_default()
 }
 
+/// The NAS users, or why nothing may be changed: an unreadable or empty user list would
+/// make every chosen user look gone (and lose their folder in the apps).
+pub fn users_checked(passwd: &str) -> Result<Vec<NasUser>, String> {
+    let users = nas_users(passwd);
+    if users.is_empty() {
+        return Err("the user list (/etc/passwd) cannot be read or has no NAS user: the mounts stay as they are".into());
+    }
+    Ok(users)
+}
+
 /// `GET /v1/apps/installed/{stack}/photos`.
 async fn state_get(State(st): State<AppsState>, hd: HeaderMap, UrlPath(stack): UrlPath<String>) -> Res<Json<PhotosState>> {
     let a = asvc(&st)?;
@@ -689,8 +768,7 @@ async fn state_get(State(st): State<AppsState>, hd: HeaderMap, UrlPath(stack): U
     Ok(Json(out))
 }
 
-fn start_sync(a: &Arc<AppsSvc>, who: &str, stack: String) -> Res<Response> {
-    let guard = mark_busy(&a.docker, &stack)?;
+fn start_sync<G: Send + 'static>(a: &Arc<AppsSvc>, who: &str, stack: String, guard: G) -> Res<Response> {
     let a2 = a.clone();
     let id = a.docker.ops.tasks.spawn("apps.photos-sync", who, move |ctx| async move {
         let _guard = guard;
@@ -704,8 +782,9 @@ async fn sync_post(State(st): State<AppsState>, hd: HeaderMap, UrlPath(stack): U
     let a = asvc(&st)?;
     let who = admin(&a, &hd)?;
     photo_app(&a, &stack).await?;
+    let guard = mark_busy(&a.docker, &stack)?;
     audit(&who, "photos-sync", &stack);
-    start_sync(&a, &who, stack)
+    start_sync(&a, &who, stack, guard)
 }
 
 /// `POST /v1/apps/installed/{stack}/photos/users/{user}`: an administrator chooses a user (with
@@ -719,6 +798,8 @@ async fn user_post(
     let a = asvc(&st)?;
     let who = admin(&a, &hd)?;
     let Json(req) = body?;
+    // busy first: the choices are read and written under it, and the sync runs under it
+    let guard = mark_busy(&a.docker, &stack)?;
     let (cat, _, d) = photo_app(&a, &stack).await?;
     let app = cat.get(&d.meta.app).ok_or_else(|| Error::not_found("no such app"))?;
     let api = app.manifest.user_photos.as_ref().is_some_and(|u| u.key_env.is_some());
@@ -745,9 +826,10 @@ async fn user_post(
             store.users.insert(user.clone(), Member { account: Some(acc.to_string()), blocked: None });
         }
     }
+    store.api = api;
     save_store(&path, &store).map_err(Error::internal)?;
     audit(&who, if req.include { "photos-user-chosen" } else { "photos-user-left-out" }, &format!("{stack} {user}"));
-    start_sync(&a, &who, stack)
+    start_sync(&a, &who, stack, guard)
 }
 
 /// Brings the stack and the mounts in line with the choices, then, with an API key, creates
@@ -800,7 +882,7 @@ pub(crate) async fn sync_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, stack: &str) -> R
     };
     let path = store_path(&a.docker, stack);
     let store = load_store(&path);
-    let users = nas_users(&passwd(a));
+    let users = users_checked(&passwd(a))?;
     let mounted = mounted_users(&mountinfo(), &root);
     let api = up.key_env.is_some();
     let (steps, kept) = plan(&store, &users, &mounted, api, view.as_ref().map(|(x, y)| (x.as_slice(), y.as_slice())), &up.target);
@@ -914,7 +996,7 @@ mod tests {
     }
 
     fn store(v: &[(&str, Option<&str>)]) -> Store {
-        Store { users: v.iter().map(|(n, a)| (n.to_string(), Member { account: a.map(str::to_string), blocked: None })).collect() }
+        Store { users: v.iter().map(|(n, a)| (n.to_string(), Member { account: a.map(str::to_string), blocked: None })).collect(), api: false }
     }
 
     #[test]
@@ -1008,6 +1090,60 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let far = NasUser { home: "/vol9/homes/ann".into(), ..user("ann") };
         assert!(real_home(t.path(), &far).is_err());
+    }
+
+    /// Review 2 H1: the apps' account is let in through the real call path (open the folder,
+    /// walk from its descriptor): every entry of the user, no error, never a hard link.
+    #[test]
+    fn photos_are_opened_to_the_apps_account_from_the_checked_folder() {
+        use std::os::unix::fs::MetadataExt;
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("ann");
+        std::fs::create_dir_all(home.join("Photos/2026/11")).unwrap();
+        std::fs::write(home.join("Photos/2026/11/a.jpg"), "jpg").unwrap();
+        std::fs::write(t.path().join("elsewhere"), "secret").unwrap();
+        std::fs::hard_link(t.path().join("elsewhere"), home.join("Photos/linked.jpg")).unwrap();
+        let uid = std::fs::metadata(&home).unwrap().uid();
+        let c = open_to_apps(&rynas_services::idremap::DryRemap, &home, uid, 54400).unwrap();
+        assert_eq!(c.errors, 0, "{c:?}");
+        // Photos, 2026, 11 (access + default each) and a.jpg; never linked.jpg
+        assert_eq!(c.acl_entries, 7, "{c:?}");
+        // a link instead of the folder: refused before any walk
+        std::fs::rename(home.join("Photos"), home.join("Old")).unwrap();
+        std::os::unix::fs::symlink("/", home.join("Photos")).unwrap();
+        assert!(open_to_apps(&rynas_services::idremap::DryRemap, &home, uid, 54400).unwrap_err().contains("link"));
+    }
+
+    /// Review 2 M4/M5 and the boot gap: another account next to the user's own library still
+    /// blocks; an empty or unreadable user list changes nothing; the minute check and the
+    /// boot unit mount only what is chosen, confirmed, not blocked and still missing.
+    #[test]
+    fn guards_of_the_review() {
+        let accounts = [acc("a1", "ann@example.com", "ann"), acc("m1", "m@example.com", "mallory")];
+        let both = [lib("L1", "a1", "/mnt/photos/ann"), lib("L2", "m1", "/mnt/photos/ann")];
+        assert_eq!(library_state("ann", Some("a1"), &accounts, &both, "/mnt/photos"), PhotosLibrary::OtherOwner);
+        assert!(users_checked("").is_err());
+        assert!(users_checked("root:x:0:0::/root:/bin/sh\n").is_err());
+        assert_eq!(users_checked("ann:x:1000:100::/home/ann:/bin/sh\n").unwrap().len(), 1);
+        let mut s = store(&[("ann", Some("a1")), ("bob", None), ("cid", Some("c1")), ("dan", Some("d1"))]);
+        s.api = true;
+        s.users.get_mut("dan").unwrap().blocked = Some("other library".into());
+        let mounted: BTreeSet<String> = ["cid".to_string()].into();
+        assert_eq!(to_restore(&s, &mounted), ["ann"]);
+        s.api = false;
+        assert_eq!(to_restore(&s, &mounted), ["ann", "bob"]);
+        // the boot unit with nobody in passwd: nothing touched, said why
+        let t = tempfile::tempdir().unwrap();
+        let log = boot_restore(&t.path().join("state/docker"), t.path());
+        assert!(log.len() == 1 && log[0].contains("no NAS user"), "{log:?}");
+        // with a user whose folder is not there: logged, nothing mounted, never an error
+        std::fs::create_dir_all(t.path().join("etc")).unwrap();
+        std::fs::create_dir_all(t.path().join("home/ann")).unwrap();
+        std::fs::write(t.path().join("etc/passwd"), "ann:x:1000:100::/home/ann:/bin/sh\n").unwrap();
+        save_store(&t.path().join("state/docker/photos/pigallery2.json"), &store(&[("ann", None)])).unwrap();
+        let log = boot_restore(&t.path().join("state/docker"), t.path());
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(log[0].starts_with("pigallery2: ann: ") && !log[0].ends_with("mounted"), "{log:?}");
     }
 
     #[test]

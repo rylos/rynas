@@ -85,22 +85,35 @@ now:
   without following its last component, checks it is a folder of the user, opens `Photos`
   below it with `O_NOFOLLOW` and checks it is a folder of the user, checks the target is a
   root folder nobody else may change, and mounts **from that descriptor**: `open_tree` +
-  `mount_setattr` (read-only, nosuid, nodev, noexec, private) + `move_mount`, so the mount is
-  read-only before it is attached; kernels without these calls get a bind of
-  `/proc/self/fd/N` and a read-only remount. A link swapped in after the check changes
-  nothing: the mount holds the folder, not its name.
+  `mount_setattr` (read-only, nosuid, nodev, noexec, **nosymfollow**, private) +
+  `move_mount`, so the mount has its attributes before it is attached. Kernels without these
+  calls get a bind of `/proc/self/fd/N` on a private scratch mount point
+  (`/run/rynas-photos-<pid>`), remounted there read-only, nosuid, nodev, noexec,
+  `MS_NOSYMFOLLOW`, then moved onto the target with `MS_MOVE`: no app ever sees it writable.
+  A link swapped in after the check changes nothing: the mount holds the folder, not its name.
+- Review 2026-11-26 (2nd, H2): links are never followed inside a mount. Every user sits below
+  the same container folder, so `ln -s /mnt/photos/alice ~/Photos/x` would otherwise show
+  Alice's photos under Bob's account (Immich's scanner and PiGallery2 follow links). A kernel
+  that does not know the flag (before Linux 5.10) refuses the mount: nothing is mounted rather
+  than a mount without it.
 - A failed check (no `Photos` yet, a link, a file, a home on a volume not mounted yet) changes
   nothing at the target: a user mounted before **stays mounted** (an app that loses a folder
   trashes its photos after a while) and the task log says why; a user not mounted yet stays an
   empty root folder, and the app starts as usual. The same folder mounted already is left as
   it is; a new `Photos` (same user, another folder) replaces the old mount.
-- Mounts are made again when rynasd starts (`photos::spawn`, after the catalogue): the apps'
-  containers may already run; their `rslave` binds pick the mounts up.
+- At boot, the unit `rynas-photos-mounts.service` (`rynasd photos-restore`, oneshot,
+  `Before=docker.service`, wanted by it, never failing) mounts the chosen users' folders from
+  `<state>/docker/photos/<stack>.json` with the same checks before the apps start. rynasd also
+  mounts what is missing when it starts and **every minute** (a home on a volume mounted
+  later, a failed helper), stack by stack under the stack's busy mark; the apps' `rslave` binds
+  pick the mounts up. The user list is checked first: an unreadable or empty passwd changes
+  nothing (every chosen user would look gone).
 - Users leave the mounts only when they leave passwd (logged: the app may move the photos to
   its trash) or when an administrator leaves them out.
 - The apps' account (`docker-apps`) gets read access through ACLs (`idremap::grant` with an
   `owner`: only files and folders of the user, never a regular file with several hard links,
-  only bits added, default ACLs on folders), walked from the checked descriptor, so apps
+  only bits added, default ACLs on folders), walked from the checked descriptor
+  (`idremap::grant_fd`; a path through `/proc/self/fd` would stop at its `self` link), so apps
   that run as that account (PiGallery2) read the folders; Immich's server runs as root.
 - Uninstall: the mounts are taken away after the containers stop; with the data, the
   staging folder (only empty folders are removed) and the choices go too.
@@ -160,7 +173,9 @@ owned by the confirmed account, named "Photos from the RyNAS app", whose only im
 Review 2026-11-26 (M3): a library of **another** account on the user's path (a user name used
 again, a library made by hand) blocks the user: the folder is unmounted, the block kept in the
 choices (and honoured at start and while Immich does not answer) and shown on the page until
-an administrator resolves it in Immich. A library of the confirmed account is left as it is.
+an administrator resolves it in Immich; one other account's library on the path is enough, even
+next to the user's own. A library of the confirmed account is left as it is. Choosing a user
+marks the stack busy before the choices are read and written, and the sync runs under it.
 Immich's own mobile upload keeps working; OIDC accounts (phase 3) are confirmed the same way.
 
 The client talks to `http://127.0.0.1:<web port>` (the port is published on loopback or on
@@ -198,10 +213,9 @@ Sync).
 
 ## 9. Open points
 
-- At boot, the apps' containers may start before rynasd mounts the folders: for that moment
-  the users' folders are empty in the app. Immich only trashes photos it finds missing during
-  a scan (its daily scan runs at midnight by default) and takes them back when they return; a
-  unit ordered before Docker would close the gap.
+- A home on a volume mounted after Docker starts is empty in the app until the minute check
+  mounts it. Immich only trashes photos it finds missing during a scan (its daily scan runs at
+  midnight by default) and takes them back when they return.
 - After updating PiGallery2 from 1.x the staging folder is bound at the first Sync.
 - Per-user allow lists in PiGallery2 stay manual (no API key there).
 - The mount itself is not exercised by the tests (it needs root and a mount namespace); the

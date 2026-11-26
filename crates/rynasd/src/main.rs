@@ -193,6 +193,10 @@ enum Command {
         #[arg(long)]
         target: PathBuf,
     },
+    /// Internal (the boot unit rynas-photos-mounts): mount the chosen users' Photos folders
+    /// of every photo app; never fails.
+    #[command(hide = true)]
+    PhotosRestore,
 }
 
 /// The certificate service: private store in the state folder, published files for
@@ -557,11 +561,17 @@ fn run_command(args: &Args, cmd: &Command) -> std::io::Result<()> {
         Command::PhotosUnmount { target } => {
             return rynasd::photos_mount::unmount(target).map(|_| ()).map_err(std::io::Error::other);
         }
+        Command::PhotosRestore => {
+            for line in rynasd::photos::boot_restore(&args.state_dir.join("docker"), &config_root(args)) {
+                println!("{line}");
+            }
+            return Ok(());
+        }
         _ => {}
     }
     let cfg = open_config(args, Arc::new(MemorySystem::new(&running_hostname())), None)?.config;
     match cmd {
-        Command::TlsReset | Command::PhotosMount { .. } | Command::PhotosUnmount { .. } => unreachable!("handled above"),
+        Command::TlsReset | Command::PhotosMount { .. } | Command::PhotosUnmount { .. } | Command::PhotosRestore => unreachable!("handled above"),
         Command::Export {
             out,
             passphrase_file,

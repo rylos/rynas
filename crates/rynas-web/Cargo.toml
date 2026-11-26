@@ -131,4 +131,6 @@ systemd-units = [
     { unit-scripts = "../../packaging/systemd", unit-name = "rynas-net-watchdog", enable = true, start = false },
     # encrypted folders (D-CRYPT E1): automatic unlock at boot, before the container engines
     { unit-scripts = "../../packaging/systemd", unit-name = "rynas-crypt-unlock", enable = true, start = false },
+    # photos (D-PHOTOS): the chosen users' Photos folders mounted for photo apps, before Docker
+    { unit-scripts = "../../packaging/systemd", unit-name = "rynas-photos-mounts", enable = true, start = false },
 ]

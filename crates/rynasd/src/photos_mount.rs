@@ -16,6 +16,7 @@
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 
 /// The folder of a home the RyNAS app backs up into.
@@ -123,17 +124,21 @@ fn mounted(path: &Path) -> bool {
     is_mount_point(&std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(), path)
 }
 
-/// Detaches the mount at `target` (nothing when it is not a mount point).
+/// Detaches every mount stacked at `target` (nothing when it is not a mount point).
 pub fn unmount(target: &Path) -> Result<bool, String> {
-    if !mounted(target) {
-        return Ok(false);
-    }
     let t = cstr(target)?;
-    // SAFETY: umount2 with a NUL-terminated path
-    if unsafe { libc::umount2(t.as_ptr(), libc::MNT_DETACH | libc::UMOUNT_NOFOLLOW) } != 0 {
-        return Err(format!("{}: {}", target.display(), errno()));
+    let mut any = false;
+    for _ in 0..16 {
+        if !mounted(target) {
+            return Ok(any);
+        }
+        // SAFETY: umount2 with a NUL-terminated path
+        if unsafe { libc::umount2(t.as_ptr(), libc::MNT_DETACH | libc::UMOUNT_NOFOLLOW) } != 0 {
+            return Err(format!("{}: {}", target.display(), errno()));
+        }
+        any = true;
     }
-    Ok(true)
+    Err(format!("{}: still a mount point after 16 unmounts", target.display()))
 }
 
 const OPEN_TREE_CLONE: libc::c_uint = 1;
@@ -142,8 +147,23 @@ const MOUNT_ATTR_RDONLY: u64 = 0x1;
 const MOUNT_ATTR_NOSUID: u64 = 0x2;
 const MOUNT_ATTR_NODEV: u64 = 0x4;
 const MOUNT_ATTR_NOEXEC: u64 = 0x8;
+/// Links are never followed inside the mount (Linux 5.10): without it a user's
+/// `Photos/x -> /mnt/photos/<other user>` would show another user's photos in the app.
+const MOUNT_ATTR_NOSYMFOLLOW: u64 = 0x0020_0000;
 /// `MS_PRIVATE` as `mount_setattr` wants it (`linux/mount.h`).
 const MS_PRIVATE: u64 = 1 << 18;
+/// `MS_NOSYMFOLLOW` (`linux/mount.h`, Linux 5.10).
+const MS_NOSYMFOLLOW: libc::c_ulong = 256;
+
+/// The attributes the new mount gets before it is attached.
+pub const fn mount_attrs() -> u64 {
+    MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSYMFOLLOW
+}
+
+/// The flags of the read-only remount of the older kernels' path.
+pub const fn remount_flags() -> libc::c_ulong {
+    libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | MS_NOSYMFOLLOW
+}
 
 #[repr(C)]
 struct MountAttr {
@@ -153,8 +173,9 @@ struct MountAttr {
     userns_fd: u64,
 }
 
-/// `open_tree` + `mount_setattr` + `move_mount`: the mount is read-only before it is
-/// attached. `Err(None)`: the kernel lacks the calls.
+/// `open_tree` + `mount_setattr` + `move_mount`: the mount is read-only, without set-id,
+/// devices, programs or links before it is attached. `Err(None)`: the kernel lacks the calls
+/// (an attribute it does not know is an error: never a mount without it).
 fn mount_new_api(src: &OwnedFd, target: &CString) -> Result<(), Option<String>> {
     let empty = c"";
     // SAFETY: open_tree on a valid descriptor with an empty path; the result is owned below
@@ -165,12 +186,12 @@ fn mount_new_api(src: &OwnedFd, target: &CString) -> Result<(), Option<String>> 
     }
     // SAFETY: a fresh descriptor nobody else owns
     let tree = unsafe { OwnedFd::from_raw_fd(tree as RawFd) };
-    let attr = MountAttr { attr_set: MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC, attr_clr: 0, propagation: MS_PRIVATE, userns_fd: 0 };
+    let attr = MountAttr { attr_set: mount_attrs(), attr_clr: 0, propagation: MS_PRIVATE, userns_fd: 0 };
     // SAFETY: mount_setattr on the detached tree with a correctly sized attribute struct
     let r = unsafe { libc::syscall(libc::SYS_mount_setattr, tree.as_raw_fd(), empty.as_ptr(), libc::AT_EMPTY_PATH as libc::c_uint, &attr as *const MountAttr, std::mem::size_of::<MountAttr>()) };
     if r < 0 {
         let e = errno();
-        return Err((e.raw_os_error() != Some(libc::ENOSYS)).then(|| format!("mount_setattr: {e}")));
+        return Err((e.raw_os_error() != Some(libc::ENOSYS)).then(|| format!("mount_setattr (read-only, no links followed): {e}")));
     }
     // SAFETY: move_mount of the detached tree onto a NUL-terminated target path
     let r = unsafe { libc::syscall(libc::SYS_move_mount, tree.as_raw_fd(), empty.as_ptr(), libc::AT_FDCWD, target.as_ptr(), MOVE_MOUNT_F_EMPTY_PATH) };
@@ -180,22 +201,41 @@ fn mount_new_api(src: &OwnedFd, target: &CString) -> Result<(), Option<String>> 
     Ok(())
 }
 
-/// Older kernels: a bind of the descriptor, then the read-only remount.
+fn sys_mount(src: Option<&CString>, target: &CString, flags: libc::c_ulong) -> Result<(), std::io::Error> {
+    // SAFETY: mount with NUL-terminated paths (or none) and no data
+    let r = unsafe { libc::mount(src.map_or(std::ptr::null(), |s| s.as_ptr()), target.as_ptr(), std::ptr::null(), flags, std::ptr::null()) };
+    if r != 0 { Err(errno()) } else { Ok(()) }
+}
+
+/// Older kernels: the bind is made and made read-only on a private scratch mount point
+/// (nothing propagates from there), then moved onto the target: an app never sees it
+/// writable. A kernel without `MS_NOSYMFOLLOW` refuses the remount: nothing is mounted.
 fn mount_old_api(src: &OwnedFd, target: &CString) -> Result<(), String> {
-    let from = CString::new(format!("/proc/self/fd/{}", src.as_raw_fd())).unwrap_or_default();
-    // SAFETY: mount with NUL-terminated paths and no data
-    if unsafe { libc::mount(from.as_ptr(), target.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null()) } != 0 {
-        return Err(format!("bind: {}", errno()));
+    let scratch = std::path::PathBuf::from(format!("/run/rynas-photos-{}", std::process::id()));
+    std::fs::DirBuilder::new().mode(0o700).create(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+    let inner = scratch.join("m");
+    let r = (|| {
+        let s = cstr(&scratch)?;
+        sys_mount(Some(&s), &s, libc::MS_BIND).map_err(|e| format!("scratch bind: {e}"))?;
+        sys_mount(None, &s, libc::MS_PRIVATE).map_err(|e| format!("scratch private: {e}"))?;
+        std::fs::DirBuilder::new().mode(0o700).create(&inner).map_err(|e| format!("{}: {e}", inner.display()))?;
+        let i = cstr(&inner)?;
+        let from = CString::new(format!("/proc/self/fd/{}", src.as_raw_fd())).unwrap_or_default();
+        sys_mount(Some(&from), &i, libc::MS_BIND).map_err(|e| format!("bind: {e}"))?;
+        sys_mount(None, &i, remount_flags()).map_err(|e| match e.raw_os_error() {
+            Some(libc::EINVAL) => "this kernel cannot keep links from being followed in a mount (Linux 5.10 or later is needed): not mounted".to_string(),
+            _ => format!("read-only remount: {e}"),
+        })?;
+        sys_mount(Some(&i), target, libc::MS_MOVE).map_err(|e| format!("move: {e}"))
+    })();
+    // whatever happened: the scratch mounts go (a bind left there is detached with them)
+    if let Ok(s) = cstr(&scratch) {
+        // SAFETY: umount2 with a NUL-terminated path
+        unsafe { libc::umount2(s.as_ptr(), libc::MNT_DETACH) };
     }
-    let flags = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
-    // SAFETY: as above
-    if unsafe { libc::mount(std::ptr::null(), target.as_ptr(), std::ptr::null(), flags, std::ptr::null()) } != 0 {
-        let e = errno();
-        // SAFETY: undo the writable bind
-        unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) };
-        return Err(format!("read-only remount: {e}"));
-    }
-    Ok(())
+    let _ = std::fs::remove_dir(&inner);
+    let _ = std::fs::remove_dir(&scratch);
+    r
 }
 
 /// What [`mount`] did.
@@ -294,6 +334,19 @@ mod tests {
             assert!(check_target(t.path()).unwrap_err().contains("only root"));
         }
         assert!(check_target(&t.path().join("none")).is_err());
+    }
+
+    /// Review 2 H2: links are never followed inside a mount, on both paths, with the rest.
+    #[test]
+    fn mounts_never_follow_links_and_are_read_only() {
+        assert_eq!(mount_attrs() & 0x0020_0000, 0x0020_0000, "MOUNT_ATTR_NOSYMFOLLOW");
+        for a in [MOUNT_ATTR_RDONLY, MOUNT_ATTR_NOSUID, MOUNT_ATTR_NODEV, MOUNT_ATTR_NOEXEC] {
+            assert_eq!(mount_attrs() & a, a);
+        }
+        assert_eq!(remount_flags() & 256, 256, "MS_NOSYMFOLLOW");
+        for f in [libc::MS_REMOUNT, libc::MS_BIND, libc::MS_RDONLY, libc::MS_NOSUID, libc::MS_NODEV, libc::MS_NOEXEC] {
+            assert_eq!(remount_flags() & f, f);
+        }
     }
 
     #[test]
