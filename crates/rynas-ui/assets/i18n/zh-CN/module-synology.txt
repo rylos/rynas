@@ -1,0 +1,207 @@
+# rynas: Simplified Chinese, module-synology. A UTF-8 key<TAB>text table (docs/i18n.md).
+nt.src.synodeb	基础系统
+nev.synodeb.unit_failed.title	服务故障（{unit}）
+nev.synodeb.smart_error.title	{device} 的 SMART 状态异常（{failtype}）
+nev.synodeb.smart_error.title_2	{device} 的 SMART 警告
+nev.synodeb.smart_error.failtype.health	健康状态检查未通过
+nev.synodeb.smart_error.failtype.failedhealthcheck	无法运行健康检查
+nev.synodeb.smart_error.failtype.currentpendingsector	等待重新分配的扇区
+nev.synodeb.smart_error.failtype.offlineuncorrectablesector	不可校正的扇区
+nev.synodeb.smart_error.failtype.failedreadsmartdata	SMART 数据无法读取
+nev.synodeb.smart_error.failtype.emailtest	测试消息
+nev.synodeb.smart_error.failtype.errorcount	错误日志中的新错误
+nev.synodeb.smart_error.failtype.selftest	自检失败
+nev.synodeb.smart_error.failtype.failedopendevice	无法打开设备
+nev.synodeb.smart_error.failtype.usage	用量属性异常
+nev.synodeb.raid_event.title	RAID {array} · {event}（{device}）
+nev.synodeb.raid_event.title_2	RAID {array} · {event}
+nev.synodeb.raid_event.event.fail	设备故障
+nev.synodeb.raid_event.event.failspare	备用设备故障
+nev.synodeb.raid_event.event.degradedarray	阵列已降级
+nev.synodeb.raid_event.event.devicedisappeared	阵列已不可见
+nev.synodeb.raid_event.event.sparesmissing	缺少备用设备
+nev.synodeb.raid_event.event.movespare	备用设备已移到其他阵列
+nev.synodeb.raid_event.event.spareactive	备用设备已激活
+nev.synodeb.raid_event.event.rebuildfinished	重建完成
+nev.synodeb.raid_event.event.rebuildstarted	开始重建
+nev.synodeb.raid_event.event.testmessage	测试消息
+nev.synodeb.raid_event.event.newarray	检测到新阵列
+nev.synodeb.boot_completed.title	本次启动已完成，上一次运行异常终止（{previous_boot}）
+nev.synodeb.boot_completed.title_2	已完成启动
+nev.synodeb.boot_completed.body	内核 {kernel}，网络地址 {addresses}，系统卷状态为 {root}。看门狗重置信息为 {watchdog}。
+nev.synodeb.boot_completed.body_2	内核 {kernel}，网络地址 {addresses}，系统卷状态为 {root}。
+nev.synodeb.boot_completed.body_3	内核 {kernel}，系统卷状态为 {root}。
+nev.synodeb.boot_completed.root.ok	正常
+nev.synodeb.boot_completed.root.degraded	降级
+nev.synodeb.boot_completed.root.resync_started	已开始重新同步
+nev.synodeb.boot_completed.root.resync_failed	重同步失败
+nev.synodeb.emergency_mode.title	紧急模式
+nev.synodeb.emergency_mode.body	启动过程已停在紧急模式（{failed}）。可通过 SSH 登录 {addresses}，运行 journalctl -xb 查看日志。修复后运行 sudo systemctl default 或重启。root 账号被锁定时，systemd 每隔几分钟重试启动。其他情况下，若 10 分钟内没有 SSH 登录，NAS 将自动重启。
+nev.synodeb.emergency_mode.body_2	启动过程已停在紧急模式，原因未知。可通过 SSH 登录 {addresses}，运行 journalctl -xb 查看日志。修复后运行 sudo systemctl default 或重启。root 账号被锁定时，systemd 每隔几分钟重试启动。其他情况下，若 10 分钟内没有 SSH 登录，NAS 将自动重启。
+nev.synodeb.emergency_mode.body_3	启动过程已停在紧急模式，尚无可用的网络地址。请在本地控制台运行 journalctl -xb 查看原因，修复后运行 sudo systemctl default 或重启。
+nev.synodeb.fan_failure.title	风扇故障
+nev.synodeb.fan_failure.body	以下风扇已停止或无法读取状态（{fans}）。
+nev.synodeb.fan_failure.body_2	硬件控制器报告 {fan} 故障。
+nev.synodeb.fan_failure.fan.fan	系统风扇
+nev.synodeb.fan_failure.fan.cpu_fan	CPU 风扇
+nev.synodeb.fans_ok.title	风扇已恢复正常
+nev.synodeb.thermal_shutdown.title	过热关机
+nev.synodeb.thermal_shutdown.body	NAS 正在关机以保护硬件，原因为 {reason}。
+nev.synodeb.shutdown.title	正在关机（{button}）
+nev.synodeb.shutdown.title_2	正在关机
+nev.synodeb.shutdown.body	关机命令为 {command}
+nev.synodeb.shutdown.button.power_button	电源按钮
+nev.synodeb.dom_update_failed.title	启动模块更新失败
+nev.synodeb.dom_default_debian.title	已恢复 DEBIAN 为默认启动项
+nev.synodeb.dom_default_debian.body	备用启动项 DEBIAN_OLD 已无内核。将使用 DEBIAN 启动项（内核 {kernel}）启动，目前没有备用内核。
+nev.synodeb.kernel_not_tried.title	新内核尚未试启动
+nev.synodeb.kernel_not_tried.body	DEBIAN 已更新到内核 {kernel}。当前默认启动项仍为备用项 DEBIAN_OLD，尚未使用新内核。可运行 synodeb-dom default debian && reboot 试启动新内核。
+nev.synodeb.kernel_boot_failed.title	新内核启动失败
+nev.synodeb.kernel_boot_failed.body	启动模块已回退到 DEBIAN_OLD（{running}），并保留为默认启动项。较新内核会安装到 DEBIAN，运行 synodeb-dom default debian 后才会用其启动。
+nev.synodeb.ups_safe_mode.title	UPS 已触发安全模式
+nev.synodeb.ups_safe_mode.body	触发原因为 {reason}，电池电量 {battery}%，剩余续航 {runtime} 秒。服务已停止，存储卷已卸载。恢复供电后 NAS 将重启。
+nev.synodeb.ups_safe_mode.body_2	触发原因为 {reason}。服务已停止，存储卷已卸载。恢复供电后 NAS 将重启。
+nev.synodeb.ups_safe_mode.body_3	服务已停止，存储卷已卸载。恢复供电后 NAS 将重启。
+nev.synodeb.ups_safe_mode.reason.lowbatt	电池电量低
+nev.synodeb.ups_safe_mode.reason.nocomm	无法与 UPS 通信
+nev.synodeb.ups_safe_mode.reason.waittimeup	电池供电达到设定时限
+nev.synodeb.ups_safe_mode.reason.fsd	UPS 请求强制关机
+nev.synodeb.ups_power_restored_reboot.title	UPS 已恢复市电供电
+nev.synodeb.ups_power_restored_reboot.body	NAS 将重启并退出安全模式。
+nev.synodeb.ups_power_restored.title	UPS 已恢复市电供电
+nev.synodeb.ups_power_restored.body	电池电量 {battery}%。
+nev.synodeb.ups_on_battery.title	UPS 已切换到电池供电
+nev.synodeb.ups_on_battery.body	电池电量 {battery}%，剩余续航 {runtime} 秒。
+nev.synodeb.ups_on_battery.body_2	电池电量 {battery}%。
+nev.synodeb.ups_battery_low.title	UPS 电池电量低
+nev.synodeb.ups_battery_low.body	电池电量 {battery}%，剩余续航 {runtime} 秒。NAS 正在进入安全模式。
+nev.synodeb.ups_battery_low.body_2	进入安全模式。
+nev.synodeb.ups_unreachable.title	无法连接 UPS
+nev.synodeb.ups_unreachable.body	已至少 {minutes} 分钟无法与 {ups} 通信。
+nev.synodeb.boot_stalled.title	系统启动停滞
+nev.synodeb.boot_stalled.body	开机 10 分钟后，系统仍在等待 {jobs} 完成。可以登录，地址为 {addresses}。
+nev.synodeb.boot_stalled.body_2	开机 10 分钟后，系统仍未完成启动。当前允许登录。
+cfg.key.synology.hw	硬件设置
+syn.tab	Synology
+syn.not_running	synohwd 当前未运行。硬件状态暂停更新，暂时无法鸣响蜂鸣器或定位盘位。可保存设置，应用时会重新启动 synohwd。
+syn.foreign	/etc/synohwd.toml 含有在 rynas 之外设置的按钮命令（{cmds}）。应用后将覆盖这些命令。
+syn.platform	{bays} 个盘位 · {fans} 个风扇
+syn.settings	设置
+syn.daemon	synohwd
+syn.running	运行中
+syn.stopped	未运行
+syn.fan_mode	风扇转速模式
+syn.fan_low	静音
+syn.fan_high	散热
+syn.fan_full	全速
+syn.fan_low_help	默认模式，风扇按温度曲线调速以降低噪声。
+syn.fan_high_help	采用较低的升速阈值，风扇会更早提速以降低硬盘温度。
+syn.fan_full_help	风扇始终以 99% 的占空比运行。
+syn.full_note	全速模式下，风扇固定以 99% 的占空比运行，过热关机阈值沿用静音模式。
+syn.fan_ok	正常
+syn.fan_stopped	已停止
+syn.fan_unknown	未测量
+syn.curve	风扇调速曲线
+syn.curve_duty	当前速度
+syn.curve_preview	所选模式预览（尚未应用）
+syn.cls_disk	磁盘
+syn.cls_nvme	NVMe
+syn.cls_cpu	CPU
+syn.cls_nic	网卡
+syn.fan_period	调速间隔（秒）
+syn.fan_period_help	两次风扇调速的间隔，可设为 5 至 300 秒。
+syn.fan_min_duty	最低占空比（%）
+syn.fan_min_duty_help	风扇调速曲线的下限，可设为 0 至 99。
+syn.hysteresis	温度滞回（°C）
+syn.hysteresis_help	传感器读数需降至当前档位阈值以下的温差，达到后风扇才会减速。可设为 0 至 20。
+syn.thermal	过热保护
+syn.thermal_on	过热时自动关机
+syn.thermal_help	同一传感器连续两次达到或超过关机温度时，synohwd 会关闭 NAS。
+syn.thermal_off	过热关机已关闭。风扇故障时，硬盘、NVMe 设备和 CPU 可能过热损坏。
+syn.sensor	传感器
+syn.now_limit	当前温度 / 关机阈值
+syn.leds_beeper	指示灯和蜂鸣器
+syn.disk_leds	硬盘指示灯
+syn.disk_leds_help	插入硬盘时显示绿灯，读写时闪烁。
+syn.brightness	指示灯亮度
+syn.brightness_help	此亮度适用于所有硬盘指示灯，会与其他设置一同应用。
+syn.ledsch	前面板指示灯亮度计划
+syn.ledsch_on	按小时调整亮度
+syn.ledsch_on_help	关闭计划后，前面板指示灯始终使用正常亮度。
+syn.ledsch_normal	正常
+syn.ledsch_reduced	调暗
+syn.ledsch_off	熄灭
+syn.ledsch_grid	按小时设置前面板指示灯亮度
+syn.ledsch_level	调暗后的亮度
+syn.ledsch_level_help	{lo} 为最低亮度，{normal} 为正常亮度。在时间表中选择「熄灭」会关闭所有前面板指示灯。
+syn.ledsch_now	前面板指示灯当前状态
+syn.ledsch_now_value	{mode}，亮度 {level}
+syn.ledsch_scope	此芯片控制所有前面板指示灯。上方的硬盘指示灯亮度也会叠加影响。两处都调低时，硬盘指示灯会更暗。
+syn.ledsch_import	从 DSM 导入
+syn.ledsch_import_text	计划表或 synoinfo.conf 中的相关配置行
+syn.ledsch_import_help	可粘贴 168 字符的计划，或粘贴从 DSM 导出的 synoinfo.conf 配置行 led_brightness_schedule，以及存在时的 led_brightness_adjusted_level。
+syn.ledsch_found_schedule	读取到计划（{summary}）
+syn.ledsch_found_level	读取到调暗亮度 {level}
+syn.ledsch_level_outside	调暗亮度 {level} 超出此型号支持的范围（{lo} 至 {hi}），该值未应用。
+syn.ledsch_err_len	计划必须有 168 个字符，当前为 {n} 个。
+syn.ledsch_err_char	第 {pos} 个字符「{ch}」无效，只允许使用 0、1 和 2。
+syn.ledsch_level_unreadable	调暗亮度「{value}」不是数字，该值未应用。
+syn.ledsch_err_none	未识别到亮度计划。请粘贴 168 字符的计划，或粘贴 led_brightness_schedule 配置行。
+syn.ledsch_apply	填入表单
+syn.beep_start	NAS 启动后鸣响
+syn.beep_error	硬件故障时鸣响
+syn.beep_error_help	风扇故障或过热关机时鸣响。
+syn.beep_sent	已触发蜂鸣器
+syn.mute	将警报静音
+syn.mute_help	synohwd 的蜂鸣器每次只响一次。静音会将当前硬件通知标为已确认，停止重复提醒。
+syn.muted	警报已静音，已确认 {n} 条通知
+syn.buttons	按钮
+syn.power_button	电源按钮
+syn.power_button_help	正常关机会按顺序停止任务和服务。
+syn.pb_poweroff	正常关机
+syn.btn_log	仅记录事件
+syn.btn_ignore	忽略
+syn.rb_rescue	网络应急恢复（按两次）
+syn.rescue_help	在 10 秒内按两次重置按钮，网络将恢复使用 DHCP 并启用应急防火墙，便于在网络配置出错后重新连接。按一次不会执行操作。
+syn.rescue_off	关闭网络应急恢复后，若网络设置出错，需通过显示器或串口控制台访问 NAS。
+syn.power	电源与硬盘
+syn.standby	硬盘待机延迟（分钟）
+syn.standby_help	盘位中的硬盘空闲达到此时间后停止转动。可设为 0 至 330，0 表示不自动待机。
+syn.ac_recovery	来电后自动开机
+syn.ac_recovery_help	断电后恢复供电时，NAS 会自动开机。
+syn.wol	网络唤醒（Wake-on-LAN）
+syn.wol_help	向任意局域网端口发送唤醒包即可启动 NAS。
+syn.macs	用于网络唤醒的 MAC 地址
+syn.no_macs	未找到以太网端口。
+syn.unsaved	未保存的硬件设置
+syn.ups_none	UPS 服务正在运行，但尚未检测到设备。请通过 USB 连接 UPS，再在下方设置，配置将由 synodeb 应用。
+syn.ups_down	此 NAS 的本地 NUT 端口（127.0.0.1:3493）无响应。请在下方配置 UPS，配置将由 synodeb 应用。
+syn.ups_lb_always	UPS 首次报告低电量（LB）或电池供电下的低电量状态时，NAS 会进入安全模式。下方的计时器可设置更早的触发条件。
+syn.ups_timer	电池供电达到设定时间后进入安全模式
+syn.ups_timer_help	进入安全模式时，系统会停止服务、卸载存储卷并让硬盘停止转动。恢复供电后，NAS 会重新启动。
+syn.ups_pre_timeout_help	进入安全模式前，rynas 等程序会在设定时间内停止各自的任务。可设为 10 至 900 秒。
+syn.ups_test_lb	电池测试期间达到低电量时，NAS 仍会进入安全模式。
+syn.ups_deep_text	UPS 将使用电池供电，直到电量接近耗尽，过程可能长达一小时。达到低电量（LB）时，NAS 会进入安全模式。请在有人现场值守并能停止测试时启动。
+syn.upsw_too_old	此版本的 synodeb 无法配置其他 UPS 驱动程序。更新 synodeb 后可使用设置向导。
+syn.upsw_find_text	请先连接 UPS。检测会列出 USB UPS，并依次测试匹配的 NUT 驱动程序，直到能读取状态。synodeb 随后会用选中的驱动程序配置 NUT。串口或网络 UPS 的驱动程序需手动填写。
+syn.upsw_commands	synodeb 将执行的 NUT 配置命令
+syn.upsn_too_old	此版本尚未提供网络 UPS 服务器。请将 synodeb 更新到 4.6 或更高版本后再配置。
+syn.upsn_listen	NAS 的所有地址（由 synodeb 设置）
+syn.upsn_allow_help	每行填写一个 IP 地址或子网，例如 192.168.1.20、192.168.1.0/24 或 fd00::/64。至少填写一项。synodeb 使用独立的 nftables 表，只允许这些主机访问端口 3493。
+syn.upsn_filter	synodeb 防火墙
+syn.upsn_filter_inactive	synodeb 的端口 3493 防火墙规则未生效，当前未限制允许连接的主机。请重新保存设置，或查看 synodeb-ups 日志。
+syn.upsn_unreadable	无法读取 synodeb 的网络 UPS 服务器状态。synodeb-ups netserver status 命令失败，或返回了无法识别的格式。请更新 rynas 或查看日志。
+syn.upsn_primary	synodeb 还提供账号「{name}」（upsmon primary），供其他 Synology NAS 作为 UPS 客户端使用。请在此 NAS 上运行 synodeb-ups passwd 来设置密码。
+syn.upsn_manual	当前从 /etc/synodeb/ups.conf 的 NETWORK_CLIENTS 读取手动配置的允许主机。保存后将创建 /etc/synodeb/ups-network.conf，并优先使用该文件。
+syn.upsn_outside	synodeb 中存在通过其他方式配置的账号（{names}）。在此页面保存时，这些账号将被移除。
+syn.upsn_role_monitor_help	适用于家庭自动化和仪表板。允许的主机可直接读取 UPS 状态，无需密码。此角色无法登录或执行命令。
+syn.upsn_user_help	最多 32 个字符，首字符须为 a-z，后续可用 a-z、0-9 和 _。monuser 和 admin 为保留名称。
+syn.upsn_user_bad	请输入 1 至 32 个字符，首字符须为 a-z，后续可用 a-z、0-9 和 _。monuser 和 admin 由 synodeb 保留。
+syn.upsn_commands	synodeb 将执行的配置命令
+syn.reset_on	可恢复网络
+syn.reset_off	网络恢复已关闭
+syn.reset_pending_on	应用后启用网络恢复
+syn.reset_pending_off	应用后关闭网络恢复
+syn.reset_text	在 10 秒内连按两次，所有接口将恢复使用 DHCP 和链路本地地址。原网络设置会保存为配置版本。
+syn.reset_owner	在「硬件 → Synology」中设置。
+syn.reset_owner_link	打开硬件

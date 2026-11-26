@@ -1,0 +1,86 @@
+# rynas: Simplified Chinese, module-qnap. A UTF-8 key<TAB>text table (docs/i18n.md).
+nt.src.qnap	硬件按钮
+nev.qnap.button_reset.title	已按下重置按钮
+nev.qnap.button_usb_copy.title	已按下 USB 复制按钮
+qnap.tab	前面板
+qnap.not_verified	此型号的指示灯、按钮和蜂鸣器映射来自厂商配置，尚未在此硬件上验证。请先完成首次启动检查。
+qnap.leds	指示灯
+qnap.led_control	允许 rynas 控制指示灯
+qnap.led_control_help	关闭后，rynas 停止写入并释放指示灯控制线。
+qnap.need_confirm	请先在此设备上确认型号。
+qnap.mapping	首次启动检查
+qnap.mapping_text	固件提供的信息不足以自动区分所有型号。请在此设备完成首次启动检查，再输入机身标注的型号，以允许 rynas 控制指示灯和写入来电恢复设置。
+qnap.mapping_type	输入 {model}
+qnap.mapping_confirm	确认此型号
+qnap.mapping_done	此设备的型号已确认
+qnap.mapping_revoke	取消型号确认
+qnap.brightness	前面板指示灯亮度
+qnap.bright_100	100 %
+qnap.bright_50	50 %
+qnap.bright_0	0%（关闭指示灯）
+qnap.power	来电恢复
+qnap.pr_choice	恢复供电时
+qnap.pr_last	恢复断电前的状态
+qnap.pr_on	自动开机
+qnap.pr_off	保持关机
+qnap.pr_now	硬件当前设置为 {mode}
+qnap.pr_unknown	无法识别硬件中的当前设置
+qnap.pr_help	打开页面时会读取硬件设置。点击「写入硬件」后才会应用。
+qnap.pr_apply	写入硬件
+qnap.pr_done	已写入并读取确认
+qnap.pr_eup	BIOS 中启用了 EuP。关闭 EuP 后，此设置才会生效。
+qnap.gpio_inactive	此芯片的 GPIO 设备尚未启用，指示灯操作可能没有效果。
+qnap.gpio_activate	激活 GPIO 设备
+qnap.bay_failed	硬盘故障
+qnap.bay_warning	磁盘警告
+qnap.bay_ok	未报告故障
+qnap.feat_led_brightness	指示灯亮度控制
+qnap.why_mapping_unconfirmed	此设备尚未确认型号
+qnap.why_write_failed	写入控制线失败，正在重试
+qnap.led_auto	随硬盘状态变化
+qnap.led_green	绿色
+qnap.led_green_blink	绿灯闪烁
+qnap.led_red	红色
+qnap.led_red_blink	红灯闪烁
+qnap.led_alternate	红绿交替
+qnap.led_off	关闭
+qnap.disk_leds	盘位故障灯随硬盘状态变化
+qnap.usb_led	USB 指示灯
+qnap.usb_on	常亮
+qnap.usb_blink	闪烁
+qnap.shown	当前状态
+qnap.shown_none	由其他方式控制
+qnap.bays	盘位
+qnap.bay_n	盘位 {n}
+qnap.bay_empty	空
+qnap.bay_on	硬盘故障（已指示故障灯亮起）
+qnap.bay_blink	硬盘警告（已指示故障灯闪烁）
+qnap.bay_off	未报告故障（已指示故障灯熄灭）
+qnap.buttons	按钮
+qnap.usb_copy	USB 复制按钮
+qnap.btn_log	仅记录到下方列表
+qnap.btn_ignore	忽略
+qnap.buttons_help	按钮仅用于记录事件或发送通知。设置、密码和磁盘数据会保留。
+qnap.buzzer	蜂鸣器
+qnap.beep_failure	硬盘故障时鸣响
+qnap.beep_failure_help	每 5 分钟鸣响一次，直到警报静音或故障硬盘被更换。
+qnap.beep_sent	已触发蜂鸣器
+qnap.mute	将警报静音
+qnap.alarm_on	正在鸣响
+qnap.events	按钮事件
+qnap.events_none	rynas 启动后暂无按键记录
+qnap.held	按住 {s} 秒
+qnap.features	此设备支持的功能
+qnap.feat_status_led	状态灯控制
+qnap.feat_disk_leds	盘位故障灯控制
+qnap.feat_usb_led	USB 指示灯控制
+qnap.feat_reset_button	检测重置按钮
+qnap.feat_usb_copy_button	检测 USB 复制按钮
+qnap.feat_buzzer	蜂鸣器鸣响
+qnap.why_driver_missing	内核驱动程序尚未加载
+qnap.why_wrong_direction	控制线方向与预期不符，已停用控制
+qnap.why_led_control_off	指示灯控制已关闭
+qnap.why_no_speaker	未检测到 PC 扬声器设备
+qnap.why_not_fitted	此型号未配备该部件
+qnap.available	可用
+qnap.unsaved	未保存的更改
