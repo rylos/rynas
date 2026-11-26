@@ -1600,10 +1600,9 @@ pub async fn migrate_task(
     .collect();
     // the space check runs before anything stops
     if !copies.is_empty() {
-        let du = Cmd::new("du")
+        let du = crate::heavy::heavy_cmd("du")
             .args(["-sx", "--block-size=1"])
             .args(copies.iter().map(|(f, _)| rynas_docker::under(&s.root, f)))
-            .env_clear()
             .timeout(Duration::from_secs(30 * 60));
         let need = s.run(ctx, &du).await.ok().filter(|o| o.success()).as_ref().and_then(du_bytes);
         let avail = rynas_storage::overview::statvfs(

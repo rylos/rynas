@@ -22,6 +22,10 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const KILL_GRACE: Duration = Duration::from_secs(3);
 /// Captured stdout/stderr are cut at this size each.
 const CAPTURE_CAP: usize = 1 << 20;
+/// `ioprio_set(2)`: the calling process...
+const IOPRIO_WHO_PROCESS: libc::c_int = 1;
+/// ...in the idle class (`IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT`).
+const IOPRIO_IDLE: libc::c_int = 3 << 13;
 /// `PATH` of a child started with [`Cmd::env_clear`].
 const CHILD_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
@@ -38,6 +42,61 @@ pub struct Cmd {
     runtime_max: Option<Duration>,
     /// Over the capture cap, the end of each stream is kept instead of its start.
     tail: bool,
+    /// Lowest CPU and I/O priority ([`Cmd::heavy`]).
+    low: bool,
+    /// Stopped when nothing happened for this long ([`Cmd::stall_timeout`]).
+    stall: Option<(Duration, Activity)>,
+}
+
+/// Last sign of life of a long command, for its stall watchdog ([`Cmd::stall_watch`]): every
+/// output line counts, and the caller bumps it when it sees progress another way (a status
+/// file read now and then, bytes written). Cheap to clone; the clones share the time.
+#[derive(Clone, Debug)]
+pub struct Activity(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+fn mono_ms() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+impl Default for Activity {
+    fn default() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(mono_ms())))
+    }
+}
+
+impl Activity {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Something happened now.
+    pub fn bump(&self) {
+        self.0.store(mono_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Time since the last sign of life.
+    pub fn idle(&self) -> Duration {
+        Duration::from_millis(mono_ms().saturating_sub(self.0.load(std::sync::atomic::Ordering::Relaxed)))
+    }
+}
+
+/// A reader that bumps an [`Activity`] at every chunk (pipe readers of the blocking runner).
+struct Bumping<R> {
+    r: R,
+    act: Option<Activity>,
+}
+
+impl<R: Read> Read for Bumping<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.r.read(buf)?;
+        if n > 0
+            && let Some(a) = &self.act
+        {
+            a.bump();
+        }
+        Ok(n)
+    }
 }
 
 /// Bytes for a child's standard input (passwords, keys): overwritten with zeros when dropped,
@@ -104,6 +163,8 @@ pub enum CmdError {
     Cancelled,
     /// It ran but exited with an error ([`Cmd::run_checked`] only).
     Failed(CmdOutput),
+    /// No output and no progress for this long ([`Cmd::stall_timeout`]): stopped.
+    Stalled(Duration),
 }
 
 impl std::fmt::Display for CmdError {
@@ -112,6 +173,7 @@ impl std::fmt::Display for CmdError {
             CmdError::Spawn(e) => write!(f, "cannot start: {e}"),
             CmdError::Timeout(d) => write!(f, "timed out after {} s", d.as_secs_f32()),
             CmdError::Cancelled => write!(f, "cancelled"),
+            CmdError::Stalled(d) => write!(f, "stopped: no progress for {} s", d.as_secs()),
             CmdError::Failed(o) => {
                 let last = o.stderr.lines().rev().find(|l| !l.trim().is_empty());
                 match (o.code, last) {
@@ -136,7 +198,33 @@ impl Cmd {
             timeout: DEFAULT_TIMEOUT,
             runtime_max: None,
             tail: false,
+            low: false,
+            stall: None,
         }
+    }
+
+    /// Heavy work (a tree walk, a checksum, a copy, a measure): the child runs at the lowest
+    /// priorities, `nice 19` and the idle I/O class (it gets the disk only when nobody else
+    /// wants it), set in the child before it starts, so it never slows the NAS's
+    /// interactive work. Most heavy commands also want [`Cmd::stall_timeout`] instead of a
+    /// fixed timeout; rynasd's `heavy::heavy_cmd` sets both.
+    pub fn heavy(mut self) -> Self {
+        self.low = true;
+        self
+    }
+
+    /// Stopped ([`CmdError::Stalled`]) once neither output nor progress was seen for `d`:
+    /// work of unknown length is never cut at a fixed time while it still moves. The fixed
+    /// [`Cmd::timeout`] still applies (make it long). Output lines count as progress.
+    pub fn stall_timeout(self, d: Duration) -> Self {
+        self.stall_watch(d, Activity::new())
+    }
+
+    /// [`Cmd::stall_timeout`] with an [`Activity`] the caller bumps when it sees progress
+    /// another way (the command is quiet, its progress is read elsewhere).
+    pub fn stall_watch(mut self, d: Duration, activity: Activity) -> Self {
+        self.stall = Some((d, activity));
+        self
     }
 
     /// Keeps the end of the captured output when it is over the cap, not its start (a log
@@ -240,6 +328,17 @@ impl Cmd {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
+        if self.low {
+            // SAFETY: only async-signal-safe system calls between fork and exec; a failure
+            // leaves the default priorities (never worse than without `heavy`)
+            unsafe {
+                c.pre_exec(|| {
+                    libc::setpriority(libc::PRIO_PROCESS as _, 0, 19);
+                    libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, IOPRIO_IDLE);
+                    Ok(())
+                });
+            }
+        }
         c
     }
 
@@ -266,14 +365,34 @@ impl Cmd {
         let never = CancellationToken::new();
         let cancel = cancel.unwrap_or(&never);
 
-        let readers =
-            async { tokio::join!(read_lines(out, "", line, self.tail), read_lines(err, "stderr: ", line, self.tail)) };
+        let act = self.stall.as_ref().map(|s| s.1.clone());
+        if let Some(a) = &act {
+            a.bump();
+        }
+        let readers = async {
+            tokio::join!(
+                read_lines(out, "", line, self.tail, act.as_ref()),
+                read_lines(err, "stderr: ", line, self.tail, act.as_ref())
+            )
+        };
+        let stall = self.stall.clone();
+        let stalled = async move {
+            let Some((d, a)) = stall else { return std::future::pending().await };
+            loop {
+                let idle = a.idle();
+                if idle >= d {
+                    return CmdError::Stalled(d);
+                }
+                tokio::time::sleep(d - idle).await;
+            }
+        };
         let (status, (stdout, stderr)) = tokio::join!(
             async {
                 let waited = tokio::select! {
                     s = child.wait() => Ok(s),
                     _ = tokio::time::sleep(self.timeout) => Err(CmdError::Timeout(self.timeout)),
                     _ = cancel.cancelled() => Err(CmdError::Cancelled),
+                    e = stalled => Err(e),
                 };
                 match waited {
                     Ok(s) => Ok(s),
@@ -326,7 +445,13 @@ impl Cmd {
     /// Synchronous variant for code that is not async (e.g. a configuration apply running on
     /// a blocking thread). A non-zero exit is an error.
     pub fn run_blocking(&self) -> Result<CmdOutput, CmdError> {
-        let o = self.output_blocking()?;
+        self.run_blocking_in(None)
+    }
+
+    /// [`Cmd::run_blocking`] that stops the command when `cancel` fires (a task's token, on
+    /// the task's blocking thread: [`crate::TaskCtx::run_blocking`]).
+    pub fn run_blocking_in(&self, cancel: Option<&CancellationToken>) -> Result<CmdOutput, CmdError> {
+        let o = self.output_blocking_in(cancel)?;
         if o.success() {
             Ok(o)
         } else {
@@ -338,6 +463,11 @@ impl Cmd {
     /// smartctl report findings in it). Same guarantees as [`Cmd::run`]: own process group,
     /// `SIGTERM` then `SIGKILL` to the group on timeout, output capped at 1 MiB per stream.
     pub fn output_blocking(&self) -> Result<CmdOutput, CmdError> {
+        self.output_blocking_in(None)
+    }
+
+    /// [`Cmd::output_blocking`] that stops the command when `cancel` fires.
+    pub fn output_blocking_in(&self, cancel: Option<&CancellationToken>) -> Result<CmdOutput, CmdError> {
         use std::io::Write;
         let started = Instant::now();
         let mut child = self.std_command().spawn().map_err(CmdError::Spawn)?;
@@ -352,8 +482,13 @@ impl Cmd {
         // both pipes are drained on small helper threads (reading one here would block the
         // timeout check); this thread waits for the exit
         let tail = self.tail;
-        let t_out = small_thread(move || capture(&mut out, tail));
-        let t_err = small_thread(move || capture(&mut err, tail));
+        let act = self.stall.as_ref().map(|s| s.1.clone());
+        if let Some(a) = &act {
+            a.bump();
+        }
+        let (a_out, a_err) = (act.clone(), act);
+        let t_out = small_thread(move || capture(&mut Bumping { r: &mut out, act: a_out }, tail));
+        let t_err = small_thread(move || capture(&mut Bumping { r: &mut err, act: a_err }, tail));
         let deadline = Instant::now() + self.timeout;
         // short commands end in a few ms: poll often at first, then back off
         let mut nap = Duration::from_millis(1);
@@ -361,9 +496,15 @@ impl Cmd {
             match child.try_wait().map_err(CmdError::Spawn)? {
                 Some(s) => break Ok(s),
                 None if Instant::now() >= deadline => break Err(CmdError::Timeout(self.timeout)),
+                None if cancel.is_some_and(CancellationToken::is_cancelled) => break Err(CmdError::Cancelled),
+                None if self.stall.as_ref().is_some_and(|(d, a)| a.idle() >= *d) => {
+                    break Err(CmdError::Stalled(self.stall.as_ref().map(|s| s.0).unwrap_or_default()));
+                }
                 None => {
                     std::thread::sleep(nap.min(deadline.saturating_duration_since(Instant::now())));
-                    nap = (nap * 2).min(Duration::from_millis(50));
+                    // a long command is looked at twice a second (cancel, stall), not 20 times
+                    let cap = if started.elapsed() < Duration::from_secs(2) { 50 } else { 500 };
+                    nap = (nap * 2).min(Duration::from_millis(cap));
                 }
             }
         };
@@ -627,6 +768,7 @@ async fn read_lines(
     prefix: &str,
     sink: Option<&(dyn Fn(&str) + Sync)>,
     tail: bool,
+    act: Option<&Activity>,
 ) -> String {
     let mut reader = BufReader::new(r);
     let mut captured = String::new();
@@ -656,6 +798,9 @@ async fn read_lines(
             Ok(b) if !b.is_empty() => b,
             _ => break,
         };
+        if let Some(a) = act {
+            a.bump();
+        }
         let (take, newline) = match buf.iter().position(|&b| b == b'\n') {
             Some(i) => (i, true),
             None => (buf.len(), false),
@@ -980,5 +1125,64 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(5));
         std::thread::sleep(Duration::from_millis(2500));
         assert!(!marker.exists(), "grandchild survived the timeout");
+    }
+
+    #[test]
+    fn heavy_runs_at_the_lowest_priorities() {
+        let o = Cmd::new("sh").args(["-c", "cut -d' ' -f19 /proc/self/stat"]).heavy().run_blocking().unwrap();
+        assert_eq!(o.stdout.trim(), "19", "nice of the child");
+        let o = Cmd::new("sh").args(["-c", "cut -d' ' -f19 /proc/self/stat"]).run_blocking().unwrap();
+        assert_ne!(o.stdout.trim(), "19");
+    }
+
+    #[test]
+    fn a_quiet_command_stalls_and_a_talkative_one_does_not() {
+        let t = Instant::now();
+        let e = Cmd::new("sleep").arg("30").timeout(Duration::from_secs(60)).stall_timeout(Duration::from_millis(400)).output_blocking().unwrap_err();
+        assert!(matches!(e, CmdError::Stalled(_)), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(5));
+        // a line every 200 ms for 1.2 s: never 400 ms without output
+        let o = Cmd::new("sh")
+            .args(["-c", "for i in 1 2 3 4 5 6; do echo $i; sleep 0.2; done"])
+            .stall_timeout(Duration::from_millis(600))
+            .run_blocking()
+            .unwrap();
+        assert_eq!(o.stdout.lines().count(), 6);
+        // progress bumped by the caller keeps a quiet command alive
+        let a = Activity::new();
+        let a2 = a.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s2 = stop.clone();
+        let bumper = std::thread::spawn(move || {
+            while !s2.load(std::sync::atomic::Ordering::Relaxed) {
+                a2.bump();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        Cmd::new("sleep").arg("1").stall_watch(Duration::from_millis(500), a).run_blocking().unwrap();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        bumper.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn async_stall_stops_the_command() {
+        let t = Instant::now();
+        let e = Cmd::new("sleep").arg("30").stall_timeout(Duration::from_millis(300)).run(None, None).await.unwrap_err();
+        assert!(matches!(e, CmdError::Stalled(_)), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn blocking_run_stops_on_cancel() {
+        let token = CancellationToken::new();
+        let t2 = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            t2.cancel();
+        });
+        let t = Instant::now();
+        let e = Cmd::new("sleep").arg("30").run_blocking_in(Some(&token)).unwrap_err();
+        assert!(matches!(e, CmdError::Cancelled), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(5));
     }
 }

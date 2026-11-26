@@ -32,6 +32,7 @@ pub mod fslock;
 pub mod gate;
 pub mod groups;
 pub mod hardware;
+pub mod heavy;
 pub mod jobs;
 pub mod kernel_updates;
 pub mod modules;

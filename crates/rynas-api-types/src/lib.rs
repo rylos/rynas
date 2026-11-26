@@ -1034,6 +1034,29 @@ pub struct TaskInfo {
     /// Error message of a failed task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What the task works on, when it is about one thing (a stack, a PC, a volume): with
+    /// `type` it lets any view find the task running for what it shows, also after a reload.
+    /// Added in 0.9.12 (absent before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// Set on a task that ended with `status: ok` but did not do all of its work (it stopped at
+    /// its time budget, some items were skipped): why. Views show it as "partial" (a warning),
+    /// never as a plain success. A flag rather than a new status so that clients written
+    /// before it keep parsing `status` (they see `ok`). Added in 0.9.12.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<String>,
+}
+
+impl TaskInfo {
+    /// Ended with all of its work done (`ok` and not partial).
+    pub fn is_full_success(&self) -> bool {
+        self.status == TaskStatus::Ok && self.partial.is_none()
+    }
+
+    /// Ended `ok` but only partly ([`TaskInfo::partial`]).
+    pub fn is_partial(&self) -> bool {
+        self.status == TaskStatus::Ok && self.partial.is_some()
+    }
 }
 
 /// `event:` name of the SSE stream `GET /api/v1/tasks/stream`.

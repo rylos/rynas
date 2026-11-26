@@ -809,6 +809,13 @@ pub fn task_event(t: &TaskInfo) -> Option<NewEvent> {
                 },
             )
         }
+        // stopped at its time budget or skipped items: a warning that stays until the next
+        // full success of the same type
+        TaskStatus::Ok if t.partial.is_some() => {
+            let mut e = firing(cat, Sev::Warning, source, &key, format!("{what} finished only in part"));
+            e.body = t.partial.clone().unwrap_or_default();
+            code(e, "task.partial")
+        }
         TaskStatus::Ok => code(
             resolved(cat, source, &key, format!("{what} succeeded")),
             if apply {
@@ -1336,6 +1343,12 @@ mod tests {
         assert_eq!(e.body, "testparm failed");
         t.status = TaskStatus::Ok;
         assert_eq!(task_event(&t).unwrap().state, EventState::Resolved);
+        // partial: a warning on the same key, never a success
+        t.partial = Some("time budget reached".into());
+        let e = task_event(&t).unwrap();
+        assert_eq!((e.state, e.severity, e.code.as_str()), (EventState::Firing, Sev::Warning, "task.partial"));
+        assert_eq!(e.body, "time budget reached");
+        t.partial = None;
         t.status = TaskStatus::Cancelled;
         assert!(task_event(&t).is_none());
         t.kind = "smb.recycle-cleanup".into();

@@ -24,7 +24,7 @@ pub use rynas_api_types::{TaskEvent, TaskEventKind, TaskInfo, TaskStatus};
 use tokio::sync::{Semaphore, broadcast};
 pub use tokio_util::sync::CancellationToken;
 
-pub use cmd::{CRYPT_UNIT, Cmd, CmdError, CmdOutput, Outside, crypt_cmd, kdf_heavy, transient_unit};
+pub use cmd::{Activity, CRYPT_UNIT, Cmd, CmdError, CmdOutput, Outside, crypt_cmd, kdf_heavy, transient_unit};
 
 /// Limits and retention.
 #[derive(Debug, Clone)]
@@ -203,6 +203,23 @@ impl TaskManager {
         F: FnOnce(TaskCtx) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
+        self.spawn_on(kind, None, user, job)
+    }
+
+    /// [`TaskManager::spawn`] for a task about one thing (`subject`: a stack, a PC, a
+    /// volume id): [`TaskInfo::subject`] lets every view find the task running for what it
+    /// shows ([`TaskManager::running`]), also after the page was closed or reloaded.
+    pub fn spawn_on<F, Fut>(
+        &self,
+        kind: &str,
+        subject: Option<&str>,
+        user: &str,
+        job: F,
+    ) -> Result<String, TaskError>
+    where
+        F: FnOnce(TaskCtx) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), String>> + Send + 'static,
+    {
         let start = now_ms();
         let seq = self.inner.seq.fetch_add(1, Ordering::Relaxed);
         let (kind, user) = (sanitize(kind), sanitize(user));
@@ -227,6 +244,7 @@ impl TaskManager {
             user,
             start_ms: start,
             status: TaskStatus::Queued,
+            subject: subject.map(|s| s.chars().take(SUBJECT_MAX).collect()),
             ..Default::default()
         };
         {
@@ -252,6 +270,7 @@ impl TaskManager {
         let ctx = TaskCtx {
             id: id.clone(),
             manager: self.clone(),
+            partial: Arc::new(Mutex::new(None)),
             cancel: token.clone(),
             log: Arc::new(Mutex::new(LogWriter {
                 file,
@@ -292,6 +311,20 @@ impl TaskManager {
     pub fn get(&self, id: &str) -> Option<TaskInfo> {
         let t = self.inner.tasks.lock().unwrap();
         t.iter().find(|e| e.info.id == id).map(|e| e.info.clone())
+    }
+
+    /// The newest task of type `kind` about `subject` that has not ended (queued or
+    /// running): one task per thing, a second request answers it instead of starting another.
+    pub fn running(&self, kind: &str, subject: &str) -> Option<TaskInfo> {
+        let t = self.inner.tasks.lock().unwrap();
+        t.iter()
+            .rev()
+            .find(|e| {
+                !e.info.status.is_finished()
+                    && e.info.kind == kind
+                    && e.info.subject.as_deref() == Some(subject)
+            })
+            .map(|e| e.info.clone())
     }
 
     /// Requests cancellation. The task ends when its job notices (commands are killed).
@@ -407,8 +440,13 @@ impl TaskManager {
     }
 
     fn finish(&self, ctx: &TaskCtx, result: Result<(), String>) {
+        let partial = ctx.partial.lock().unwrap().take();
+        let ok_partial = result.is_ok().then_some(partial).flatten();
         let (status, error, marker) = match result {
-            Ok(()) => (TaskStatus::Ok, None, "TASK OK".to_string()),
+            Ok(()) => match &ok_partial {
+                Some(why) => (TaskStatus::Ok, None, format!("TASK PARTIAL: {why}")),
+                None => (TaskStatus::Ok, None, "TASK OK".to_string()),
+            },
             Err(_) if ctx.cancel.is_cancelled() => (
                 TaskStatus::Cancelled,
                 Some("cancelled".to_string()),
@@ -427,6 +465,7 @@ impl TaskManager {
             };
             e.info.status = status;
             e.info.error = error;
+            e.info.partial = ok_partial;
             e.info.end_ms = Some(now_ms());
             e.cancel = None;
             let info = e.info.clone();
@@ -515,6 +554,8 @@ pub struct TaskCtx {
     manager: TaskManager,
     cancel: CancellationToken,
     log: Arc<Mutex<LogWriter>>,
+    /// Set by [`TaskCtx::partial`]: an `Ok` end is reported as partial.
+    partial: Arc<Mutex<Option<String>>>,
 }
 
 impl TaskCtx {
@@ -550,7 +591,28 @@ impl TaskCtx {
         let sink = |l: &str| self.log(l);
         cmd.run_checked(Some(&self.cancel), Some(&sink)).await
     }
+
+    /// [`TaskCtx::run`] for a job's blocking thread (`spawn_blocking`): the command line is
+    /// logged, the command is killed when the task is cancelled, a non-zero exit is an error.
+    /// Its output is returned, not logged (callers parse it).
+    pub fn run_blocking(&self, cmd: &Cmd) -> Result<CmdOutput, CmdError> {
+        self.log(&format!("$ {}", cmd.display()));
+        cmd.run_blocking_in(Some(&self.cancel))
+    }
+
+    /// The task stops short of its whole work (its time budget ran out, items were skipped):
+    /// when the job then returns `Ok`, the task ends as *partial* ([`TaskInfo::partial`],
+    /// `TASK PARTIAL: <why>` in the log), a warning in the views and the notifications,
+    /// never a plain success. The last call wins; an error or a cancellation still wins.
+    pub fn partial(&self, why: impl Into<String>) {
+        let why = why.into();
+        self.log(&format!("partial: {why}"));
+        *self.partial.lock().unwrap() = Some(why);
+    }
 }
+
+/// Longest [`TaskInfo::subject`] kept (characters).
+pub const SUBJECT_MAX: usize = 200;
 
 #[cfg(test)]
 mod tests {
@@ -781,6 +843,42 @@ mod tests {
         assert!(list[0].error.as_deref().unwrap().contains("interrupted"));
         assert_eq!(m2.get(&ids[2]).unwrap().status, TaskStatus::Ok);
         gate.cancel();
+    }
+
+    #[tokio::test]
+    async fn subject_finds_the_running_task_and_partial_is_not_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(dir.path(), TaskConfig::default());
+        let gate = CancellationToken::new();
+        let g = gate.clone();
+        let id = m
+            .spawn_on("space.preview", Some("vol1"), "u", move |ctx| async move {
+                g.cancelled().await;
+                ctx.partial("time budget reached");
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(m.get(&id).unwrap().subject.as_deref(), Some("vol1"));
+        assert_eq!(m.running("space.preview", "vol1").unwrap().id, id);
+        assert!(m.running("space.preview", "vol2").is_none());
+        assert!(m.running("other", "vol1").is_none());
+        gate.cancel();
+        let info = m.wait(&id).await.unwrap();
+        assert_eq!(info.status, TaskStatus::Ok);
+        assert!(info.is_partial() && !info.is_full_success());
+        assert_eq!(info.partial.as_deref(), Some("time budget reached"));
+        assert!(full_log(&m, &id).ends_with("TASK PARTIAL: time budget reached\n"));
+        assert!(m.running("space.preview", "vol1").is_none());
+        // a failure after partial() is a failure
+        let id = m
+            .spawn("t", "u", |ctx| async move {
+                ctx.partial("x");
+                Err("boom".into())
+            })
+            .unwrap();
+        let info = m.wait(&id).await.unwrap();
+        assert_eq!(info.status, TaskStatus::Error);
+        assert!(info.partial.is_none());
     }
 
     #[test]

@@ -737,10 +737,9 @@ async fn space_for_copy(
         ctx.log("space: same btrfs file system, the copy shares its blocks (reflink)");
         return Ok(());
     }
-    let du = Cmd::new("du")
+    let du = crate::heavy::heavy_cmd("du")
         .args(["-s", "--block-size=1"])
         .arg(&from)
-        .env_clear()
         .timeout(std::time::Duration::from_secs(30 * 60));
     let need = s
         .run(ctx, &du)

@@ -3958,6 +3958,7 @@ dependencies = [
 name = "rynas-tasks"
 version = "0.9.11"
 dependencies = [
+ "libc",
  "nix",
  "rynas-api-types",
  "serde",
