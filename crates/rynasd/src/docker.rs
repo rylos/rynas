@@ -986,6 +986,34 @@ impl DockerSvc {
 }
 
 impl DockerSvc {
+    /// Docker is installed or its installation runs: what [`DockerSvc::status`] reports as
+    /// `installed || task_id`, without the engine's details (the interface's optional
+    /// sections, [`rynas_api_types::sections`]). Cheap after the first call: the install facts
+    /// come from their cache and the engine answers `version` on its socket. Runs in a task of
+    /// its own, so a caller that stops waiting (rynas-web's short deadline) still leaves the
+    /// facts cached for the next one.
+    pub async fn present(self: &Arc<Self>) -> bool {
+        if self.engine_task.lock().unwrap().as_ref().is_some_and(|t| !t.is_empty()) {
+            return true;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            if me.facts(false).await.installed {
+                return true;
+            }
+            // the engine answers although the host shows no installation (status says
+            // installed then too)
+            let Ok(e) = me.engine_opt().await else { return false };
+            let up = e.version().await.is_ok();
+            if !up {
+                me.drop_engine().await;
+            }
+            up
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     pub async fn status(&self) -> DockerStatus {
         let f = self.facts(false).await;
         let mut st = DockerStatus {

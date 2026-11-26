@@ -46,7 +46,7 @@ D-APPCAT, adopted after D-DOCKER, moves the catalogue into **phase 2**. That sup
   - A **Docker** page, shown only when Docker is present or the module is installed, with tabs Overview, Containers, Stacks and Images & volumes.
   - The **Apps & Plugins** page, with sections Featured, Apps, Plugins, Installed and Updates.
   - A dashboard widget.
-- **What is not built.** Nothing in navigation, the dashboard or the storage tabs when Docker is not installed. The Apps page then offers "Install Docker" as the first step.
+- **What is not built.** Nothing in navigation, the dashboard or the storage tabs when Docker is not installed. The Apps page then offers "Install Docker" as the first step. The session answer says whether Docker is present (`Session.sections`, `docs/phase1/plan.md` "Optional sections"), so the Docker and Syncthing entries and the widget are there, or not, from the first frame instead of appearing after the status read.
 
 ## 3. Rules (from the research, binding)
 

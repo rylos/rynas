@@ -162,6 +162,18 @@ Rules:
   timers, reconnects), so an unattended open tab is signed out after 30 min.
 - **CSRF**: every method other than GET/HEAD/OPTIONS needs the `X-CSRF-Token` header equal to
   `Session.csrf_token` (403 `csrf`). Login accepts JSON only.
+- **Optional sections** (`Session.sections`, names in `rynas_api_types::sections`): the login and
+  session answers say which optional navigation entries exist now (`docker` and `syncthing` while
+  Docker is installed or being installed; the UI shows Syncthing to administrators only), so the
+  shell draws the right sidebar on its first frame. rynas-web asks rynasd's internal
+  `GET /v1/ui/sections` (`UiSections`; Docker's cached install facts, else the engine's `version`,
+  in a task of its own so a caller that stops waiting still leaves the cache warm) within 300 ms
+  (`SECTIONS_DEADLINE`); without an answer in time it sends rynasd's last answer if younger than
+  60 s, else leaves the field out (unknown). The UI uses the session's sections, else the last ones
+  it remembers (localStorage `rynas.sections`), else Docker's status read; every status read
+  updates the remembered sections, so an install or uninstall still adds or removes the entry live.
+  A later optional section adds its name to `rynas_api_types::sections` and its presence to
+  `/v1/ui/sections`.
 - **SSE**: `/metrics/stream` requires the session (the cookie travels with `EventSource`), does not
   renew the idle timeout and closes when the session ends (the UI reconnects and gets 401).
 - **Errors** (`ApiError.code`, constants in `rynas_api_types::error_codes`): `invalid_credentials` 401

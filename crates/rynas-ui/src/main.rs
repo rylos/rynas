@@ -33,6 +33,7 @@ mod removable;
 mod reorder;
 mod schedule;
 mod schema_form;
+mod sections;
 mod shell;
 mod sidebar;
 mod sshfp;
@@ -51,6 +52,7 @@ fn main() {
     api::init();
     config::init();
     docker::init();
+    sections::init();
     toast::init();
     // in Italian the boot screen waits for the Italian texts (briefly, see `i18n::when_ready`)
     i18n::when_ready(mount);

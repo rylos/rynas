@@ -207,6 +207,7 @@ pub fn router(state: DaemonState) -> Router {
         .unwrap_or_default();
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/ui/sections", get(ui_sections))
         .route("/v1/authenticate", post(authenticate))
         .route("/v1/users/{user}/groups", get(groups))
         .route("/v1/totp/{user}", get(totp_status))
@@ -268,6 +269,20 @@ pub fn router(state: DaemonState) -> Router {
 async fn health() -> Json<Health> {
     Json(Health {
         version: env!("CARGO_PKG_VERSION").into(),
+    })
+}
+
+/// The optional sections of the web interface present now ([`rynas_api_types::sections`]):
+/// rynas-web's session answer carries them, so the shell draws the right navigation at once.
+/// Internal (rynas-web only, no user needed): it names what exists, nothing about it. Without
+/// the Docker service in this rynasd, Docker is absent (its routes answer 503 then).
+async fn ui_sections(State(st): State<DaemonState>) -> Json<rynas_api_types::UiSections> {
+    let docker = match &st.docker {
+        Some(d) => d.present().await,
+        None => false,
+    };
+    Json(rynas_api_types::UiSections {
+        sections: rynas_api_types::sections::with_docker(&[], docker),
     })
 }
 

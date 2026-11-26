@@ -616,6 +616,74 @@ pub struct Session {
     /// The session ends at this time unless there is activity before.
     pub idle_expires_ms: u64,
     pub idle_timeout_s: u64,
+    /// The optional sections of the interface present on this NAS now ([`sections`]), so
+    /// that the shell's first frame already shows the right navigation entries. `None` (left
+    /// out) when rynas-web could not learn them in time: the interface then uses the last ones
+    /// it remembers, else its own reads (Docker's status).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<Vec<String>>,
+}
+
+/// Optional sections of the interface: navigation entries that exist only on some systems,
+/// named in [`Session::sections`] and in rynasd's internal `GET /v1/ui/sections`
+/// ([`UiSections`]). A later section with a presence check adds its name here.
+pub mod sections {
+    /// Docker: while it is installed or being installed.
+    pub const DOCKER: &str = "docker";
+    /// Syncthing (a catalogue app on Docker): present with Docker; the interface shows it to
+    /// administrators only.
+    pub const SYNCTHING: &str = "syncthing";
+    /// The sections that come and go with Docker.
+    pub const WITH_DOCKER: &[&str] = &[DOCKER, SYNCTHING];
+
+    /// `current` with the sections that follow Docker set from `docker_present` (the others
+    /// kept, order kept, no duplicates).
+    pub fn with_docker(current: &[String], docker_present: bool) -> Vec<String> {
+        let mut out: Vec<String> = current
+            .iter()
+            .filter(|s| !WITH_DOCKER.contains(&s.as_str()))
+            .cloned()
+            .collect();
+        if docker_present {
+            out.extend(WITH_DOCKER.iter().map(|s| s.to_string()));
+        }
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn docker_sections_follow_presence() {
+            let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            assert_eq!(with_docker(&[], true), v(&["docker", "syncthing"]));
+            assert_eq!(with_docker(&v(&["docker", "syncthing"]), false), v(&[]));
+            // other sections stay, nothing doubles
+            assert_eq!(with_docker(&v(&["other", "docker"]), true), v(&["other", "docker", "syncthing"]));
+            assert_eq!(with_docker(&v(&["other", "syncthing"]), false), v(&["other"]));
+        }
+
+        #[test]
+        fn session_without_sections_reads_as_unknown() {
+            let s: crate::Session = serde_json::from_str(
+                r#"{"user":{"username":"a","realm":"pam","role":"admin"},"csrf_token":"t","totp_enabled":false,"created_ms":0,"expires_ms":0,"idle_expires_ms":0,"idle_timeout_s":0}"#,
+            )
+            .unwrap();
+            assert_eq!(s.sections, None);
+            // unknown is left out of the answer; known (even empty) is sent
+            assert!(!serde_json::to_string(&s).unwrap().contains("sections"));
+            let known = crate::Session { sections: Some(vec![]), ..s };
+            assert!(serde_json::to_string(&known).unwrap().contains(r#""sections":[]"#));
+        }
+    }
+}
+
+/// Answer of rynasd's internal `GET /v1/ui/sections` (rynas-web copies it into
+/// [`Session::sections`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UiSections {
+    pub sections: Vec<String>,
 }
 
 /// Answer of `POST /api/v1/auth/totp/enroll`: the pending secret, to be confirmed with a code.

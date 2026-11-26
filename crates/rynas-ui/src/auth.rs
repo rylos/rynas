@@ -140,6 +140,8 @@ impl Auth {
         self.note_skew();
         storage_set("rynas.user", &s.user.username);
         storage_set("rynas.sess", "1"); // the next load asks for the first screen's data at once (index.html)
+        // before the shell draws: its navigation shows the right entries from the first frame
+        crate::sections::from_session(&s);
         self.session.set(Some(s));
         self.reason.set(Reason::None);
         self.unreachable.set(false);
@@ -153,6 +155,7 @@ impl Auth {
         spawn_local(async move {
             if let Ok(s) = api::get::<Session>("/api/v1/auth/session").await {
                 self.note_skew();
+                crate::sections::from_session(&s);
                 self.session.set(Some(s));
             }
         });

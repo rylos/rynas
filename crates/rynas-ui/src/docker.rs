@@ -4,7 +4,8 @@
 //! - `GET /api/v1/docker/status` is read at sign-in, on a `resync` of the `docker` stream and
 //!   when a `docker.*` task ends; the navigation entry and the widget exist only while Docker
 //!   is installed or being installed ([`Docker::present`]). Without Docker nothing else asks
-//!   the Docker routes.
+//!   the Docker routes. Before the first answer they follow [`crate::sections`] (the session
+//!   answer, else the browser's memory), which every answer updates.
 //! - `docker.stats` events (every 5 s, the latest on connect) feed [`Docker::stats`]: the
 //!   widget and the CPU/memory cells of the containers table read it in place.
 //! - `docker.changed` events bump [`Docker::generation`]: the page's lists read again;
@@ -90,6 +91,11 @@ pub fn parse_stats(text: &str) -> Option<Stats> {
     crate::api::decode(text).ok()
 }
 
+/// Docker is installed, or its installation runs, in status `s`.
+fn present_in(s: &DockerStatus) -> bool {
+    s.installed || s.task_id.is_some()
+}
+
 /// Wait after a change before reading a list again (a compose up sends several hints).
 const RELOAD_DEBOUNCE_MS: u64 = 300;
 
@@ -122,7 +128,7 @@ pub fn follow(trigger: RwSignal<u64>, visible: Signal<bool>, reload: Callback<()
 impl Docker {
     /// Docker is installed, or its installation runs: the navigation entry and the widget.
     pub fn present(self) -> bool {
-        self.status.with(|s| s.as_ref().is_some_and(|s| s.installed || s.task_id.is_some()))
+        self.status.with(|s| s.as_ref().is_some_and(present_in))
     }
 
     /// The engine answers (lists and actions work).
@@ -143,6 +149,8 @@ impl Docker {
                     if self.status_err.with_untracked(Option::is_some) {
                         let _ = self.status_err.try_set(None);
                     }
+                    // the navigation's memory follows the live state (install, uninstall)
+                    crate::sections::docker_seen(present_in(&s));
                     if self.status.with_untracked(|cur| cur.as_ref().is_none_or(|c| !same(c, &s))) {
                         let _ = self.status.try_set(Some(s));
                     }

@@ -32,11 +32,14 @@ pub struct NavItem {
 
 /// Whether a navigation entry exists now: Docker only while it is installed or being
 /// installed (nothing of it on systems without Docker); Syncthing (a catalogue app) also
-/// only for administrators.
+/// only for administrators. Known from the first frame ([`crate::sections`]: the session
+/// answer, else the browser's memory); only when neither knows, from Docker's status read.
 pub fn nav_shown(path: &str) -> bool {
+    use rynas_api_types::sections::{DOCKER, SYNCTHING};
+    let section = |name| crate::sections::has(name).unwrap_or_else(|| crate::docker::docker().present());
     match path {
-        "/docker" => crate::docker::docker().present(),
-        "/syncthing" => crate::docker::docker().present() && is_admin(),
+        "/docker" => section(DOCKER),
+        "/syncthing" => section(SYNCTHING) && is_admin(),
         _ => true,
     }
 }
