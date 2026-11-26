@@ -651,6 +651,25 @@ struct TaskStreamQuery {
     /// block-device mounts changed ([`crate::sysevents::storage_changes`]); re-read the
     /// storage overview.
     storage: Option<String>,
+    /// `1` or `true`: also the restore requests waiting for an approval
+    /// (`pcbackup.restore_request`, `pcbackup.restore_resolved`, `pcbackup_resync`;
+    /// [`crate::pc_agent::approval`]); for administrators only.
+    pcbackup: Option<String>,
+}
+
+/// The restore requests half of the task stream: every new request and every end; a lag is
+/// `pcbackup_resync`.
+fn pcbackup_events(ops: &Ops) -> Option<impl Stream<Item = Result<Event, Infallible>> + use<>> {
+    let a = ops.pc_agent.get()?.upgrade()?;
+    let rx = a.approvals.subscribe();
+    Some(stream::unfold(rx, |mut rx| async move {
+        let ev = match rx.recv().await {
+            Ok((name, j)) => Event::default().event(name).data(&*j),
+            Err(RecvError::Lagged(_)) => Event::default().event(crate::pc_agent::approval::EV_RESYNC).data("{}"),
+            Err(RecvError::Closed) => return None,
+        };
+        Some((Ok(ev), rx))
+    }))
 }
 
 /// Event of the task stream (with `?storage=1`): the storage overview may have changed.
@@ -721,9 +740,15 @@ pub const REMOVABLE_RESYNC: &str = "removable_resync";
 /// after a `resync` the subscriber re-reads the pending changes too.
 async fn task_stream(
     State(st): State<OpsState>,
+    h: HeaderMap,
     Query(q): Query<TaskStreamQuery>,
 ) -> Res<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     let ops = ops(&st)?;
+    // restore requests carry addresses and codes: administrators only
+    let pcbackup = (matches!(q.pcbackup.as_deref(), Some("1" | "true"))
+        && user(&h).is_ok_and(|u| ops.admins.is_admin(&u)))
+    .then(|| pcbackup_events(&ops))
+    .flatten();
     let rx = ops.tasks.subscribe_json();
     let tasks = stream::unfold(rx, |mut rx| async move {
         let ev = match rx.recv().await {
@@ -759,7 +784,10 @@ async fn task_stream(
                 stream::iter(config).flatten(),
                 stream::iter(removable).flatten(),
             ),
-            stream::select(stream::iter(docker).flatten(), stream::iter(storage).flatten()),
+            stream::select(
+                stream::select(stream::iter(docker).flatten(), stream::iter(storage).flatten()),
+                stream::iter(pcbackup).flatten(),
+            ),
         ),
     );
     Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))

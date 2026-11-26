@@ -1114,6 +1114,61 @@ async fn device_targets_push_encrypted_messages() {
     assert_eq!(push.reqs.lock().unwrap().len(), 1, "no retry after a 410");
 }
 
+/// A restore request (rynasd's `pc_agent::approval`) goes straight to the phones of the
+/// accounts allowed, rules aside, with its action and category, in each target's language;
+/// a disabled target and other accounts' devices get nothing.
+#[tokio::test]
+async fn direct_pushes_carry_the_action_to_allowed_accounts_only() {
+    use rynas_api_types::devices::{PushAction, PushPayload, PushSubscription};
+    use rynas_notify::engine::webpush;
+    let push = fake_push().await;
+    let e = env_with(|o| o.push_loopback_http = true);
+    let dir = Arc::new(Directory::default());
+    for (id, user) in [("d_0a", "alice"), ("d_0b", "bob"), ("d_0c", "alice")] {
+        dir.owners.lock().unwrap().insert(id.into(), user.into());
+        dir.subs.lock().unwrap().insert(
+            id.into(),
+            PushSubscription { endpoint: format!("{}/up-{id}", push.url), p256dh: UA_PUBLIC.into(), auth: UA_AUTH.into() },
+        );
+    }
+    e.engine.set_push_directory(dir.clone());
+    e.engine.create_target(&device_target("d_0a")).unwrap();
+    e.engine.create_target(&TargetRequest { name: "Bob".into(), ..device_target("d_0b") }).unwrap();
+    e.engine.create_target(&TargetRequest { name: "Off".into(), enabled: false, ..device_target("d_0c") }).unwrap();
+    // no rule at all: a direct push does not need one
+    let mut ev = event::firing(NotifyCategory::Backup, NotifySeverity::Info, "pcbackup", "pcbackup:restore-request:00ff", "Restore of casa waits for approval");
+    ev.code = "pcbackup.restore_request".into();
+    let n = e.engine.ingest(ev, false).unwrap().unwrap();
+    let action = PushAction {
+        kind: "pc_restore".into(),
+        request: "00000000000000ff".into(),
+        pc: "casa".into(),
+        device: None,
+        code: "042913".into(),
+        from_ip: "192.0.2.10".into(),
+        expires_ms: 1,
+    };
+    let sent = e.engine.push_direct(&n, "pcbackup.restore_request", Some(action.clone()), &|owner| owner == "alice").await;
+    assert_eq!(sent, 1);
+    let reqs = std::mem::take(&mut *push.reqs.lock().unwrap());
+    assert_eq!(reqs.len(), 1);
+    let (line, headers, body) = &reqs[0];
+    assert!(line.starts_with("POST /up-d_0a "), "{line}");
+    assert_eq!(headers.iter().find(|(k, _)| k == "urgency").map(|(_, v)| v.as_str()), Some("high"));
+    let secret: [u8; 32] = b64u(UA_SECRET).try_into().unwrap();
+    let plain = webpush::decrypt(&secret, &b64u(UA_AUTH), body).unwrap();
+    let p: PushPayload = serde_json::from_slice(&plain).unwrap();
+    assert_eq!((p.id, p.category.as_str(), p.severity.as_str(), p.source.as_str()), (n.id, "pcbackup.restore_request", "info", "pcbackup"));
+    assert_eq!(p.title, "Restore of casa waits for approval");
+    assert_eq!(p.action, Some(action));
+    // the JSON shape the app reads: `action` with a null device
+    let j: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+    assert_eq!(j["action"]["kind"], "pc_restore");
+    assert!(j["action"]["device"].is_null());
+    // a plain notification has no action key at all
+    assert!(serde_json::to_value(PushPayload::default()).unwrap().get("action").is_none());
+}
+
 /// A file transfer's end as rynasd's file manager emits it.
 fn files_job(code: &str, sev: NotifySeverity, user: &str, job: u64, state: &str) -> NewEvent {
     let mut ev = event::oneshot(NotifyCategory::Files, sev, "files", format!("files:job:{job}"), "Copy finished");

@@ -375,6 +375,61 @@ impl Engine {
         self.0.push.get().map(|p| p.as_ref())
     }
 
+    /// Sends the stored notification `n` straight to every enabled `device` target whose
+    /// device belongs to an account `allow` accepts, each in its target's language, with
+    /// `category` and `action` in the payload, rules and silences aside: a request that
+    /// waits for an answer (a PC's restore, `docs/phase2/pc-restore-approval.md`) must reach
+    /// the administrators' phones whatever their rules say. Urgency high. A subscription the
+    /// push service no longer knows is dropped as for any push. Returns how many devices
+    /// accepted the message.
+    pub async fn push_direct(
+        &self,
+        n: &Notification,
+        category: &str,
+        action: Option<rynas_api_types::devices::PushAction>,
+        allow: &(dyn Fn(&str) -> bool + Sync),
+    ) -> usize {
+        let Some(dir) = self.0.push.get().cloned() else { return 0 };
+        let targets = match self.targets() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("direct push: the targets: {e}");
+                return 0;
+            }
+        };
+        let mut sent = 0;
+        for t in targets.into_iter().filter(|t| t.enabled) {
+            let TargetConfig::Device { device_id } = &t.config else { continue };
+            if !dir.owner(device_id).is_some_and(|o| allow(&o)) {
+                continue;
+            }
+            let Some(sub) = dir.subscription(device_id) else { continue };
+            let Ok(sub) = webpush::parse_subscription_with(&sub, self.0.o.push_loopback_http) else { continue };
+            let e = self.0.tpl.event_ctx(n, false, t.language, self.0.o.local);
+            let p = rynas_api_types::devices::PushPayload {
+                v: 1,
+                id: e.id,
+                title: format!("{}{}", e.prefix, e.title),
+                body: e.body,
+                severity: e.severity.into(),
+                category: category.into(),
+                source: e.source,
+                ts_ms: e.ts_ms,
+                action: action.clone(),
+                ..Default::default()
+            };
+            match webpush::post(&sub, &webpush::payload_json(p), "high").await {
+                Ok(webpush::Delivery::Accepted) => sent += 1,
+                Ok(webpush::Delivery::Gone) => {
+                    tracing::info!("push subscription of device {device_id} is gone: dropped");
+                    dir.gone(device_id);
+                }
+                Err(err) => tracing::warn!("direct push to device {device_id}: {err}"),
+            }
+        }
+        sent
+    }
+
     /// Whether a personal event (an opt-in category: a user's file transfers) may go to the
     /// target whose stored `config` this is: a `device` target only when its device belongs to
     /// the event's `user`; every other kind when a rule names the category (checked by the

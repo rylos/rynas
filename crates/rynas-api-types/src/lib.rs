@@ -469,6 +469,13 @@ pub mod error_codes {
     /// Software repositories: the key is not a usable OpenPGP public key, or its
     /// fingerprints differ from the confirmed ones (400).
     pub const KEY_INVALID: &str = "key_invalid";
+    /// A request that waited for a decision is over: its time ran out (410; a restore
+    /// request approved from a phone).
+    pub const REQUEST_EXPIRED: &str = "request_expired";
+    /// The certificate a client says it sees is not this NAS' own: something in between
+    /// answers for the NAS, or the client came through another proxy (409, `field`
+    /// `fingerprint`).
+    pub const CERTIFICATE_MISMATCH: &str = "certificate_mismatch";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -556,6 +563,8 @@ pub mod error_codes {
         CLOCK_SKEW,
         LAST_DEBIAN_ENTRY,
         KEY_INVALID,
+        REQUEST_EXPIRED,
+        CERTIFICATE_MISMATCH,
     ];
 }
 

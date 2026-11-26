@@ -26,6 +26,8 @@ use crate::error::Error;
 pub const MAX_REPO_BODY: usize = 1 << 30;
 /// Largest JSON body of the agent's calls (a report with its manifest).
 pub const MAX_AGENT_BODY: usize = 2 << 20;
+/// Largest body of a restore request (no session: a PC name and a fingerprint).
+pub const MAX_RESTORE_REQUEST_BODY: usize = 4 << 10;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -38,6 +40,10 @@ pub fn routes() -> Router<AppState> {
         .route("/pcbackup/agent/btrfs/snapshots", get(forward))
         .route("/pcbackup/agent/btrfs/receive", post(forward))
         .route("/pcbackup/agent/restore/login", post(forward))
+        // a restore approved from a phone: the request, then the TUI's long poll (and its
+        // withdrawal) with the poll token as bearer
+        .route("/pcbackup/agent/restore-requests", post(forward))
+        .route("/pcbackup/agent/restore-requests/{id}", get(forward).delete(forward))
         .route("/pcbackup/agent/restore/admin-login", post(restore_admin_login))
         .route("/pcbackup/agent/restore/report", post(forward))
         // a bare-metal restore from btrfs snapshots: listing, manifest, legacy files, and the
@@ -108,6 +114,8 @@ async fn forward(State(st): State<AppState>, client: Option<Extension<Client>>, 
     let stream = parts.uri.path().ends_with("/pcbackup/agent/btrfs/receive");
     let max = if stream {
         usize::MAX
+    } else if parts.uri.path().contains("/pcbackup/agent/restore-requests") {
+        MAX_RESTORE_REQUEST_BODY
     } else if repo {
         MAX_REPO_BODY
     } else {

@@ -61,6 +61,9 @@ pub struct Live {
     /// Bumped on every `storage.changed` (disks, arrays, block-device mounts): the storage
     /// pages read their inventory again when it changes, instead of polling.
     pub storage_gen: RwSignal<u64>,
+    /// Bumped on every `pcbackup.restore_request` / `pcbackup.restore_resolved` (a restore
+    /// waiting for an approval came or ended): the lists of requests read again.
+    pub pcbackup_gen: RwSignal<u64>,
 }
 
 /// A polled resource (for error states and Retry).
@@ -177,6 +180,7 @@ impl Live {
             ups: RwSignal::new(None),
             removable: RwSignal::new(None),
             storage_gen: RwSignal::new(0),
+            pcbackup_gen: RwSignal::new(0),
         }
     }
 
@@ -525,14 +529,17 @@ impl Live {
         }
         // pushed hints: the storage overview and the pending changes may have changed
         let on_hint = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
-            if ev.type_() == "storage.changed" {
+            let kind = ev.type_();
+            if kind == "storage.changed" {
                 self.refresh_storage();
                 self.storage_gen.update(|n| *n += 1);
+            } else if kind.starts_with("pcbackup.") {
+                self.pcbackup_gen.update(|n| *n += 1);
             } else {
                 crate::config::config().refresh();
             }
         });
-        for name in ["storage.changed", "config.pending"] {
+        for name in ["storage.changed", "config.pending", "pcbackup.restore_request", "pcbackup.restore_resolved"] {
             let _ = es.add_event_listener_with_callback(name, on_hint.as_ref().unchecked_ref());
         }
         // missed events: re-read that collection
@@ -558,6 +565,8 @@ impl Live {
             } else if data.contains("\"storage\"") {
                 self.refresh_storage();
                 self.storage_gen.update(|n| *n += 1);
+            } else if data.contains("\"pcbackup\"") {
+                self.pcbackup_gen.update(|n| *n += 1);
             }
         });
         let _ = es.add_event_listener_with_callback("resync", on_resync.as_ref().unchecked_ref());

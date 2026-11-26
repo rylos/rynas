@@ -1,5 +1,6 @@
-//! The restore TUI (ratatui): NAS → certificate → restore code, or administrator + TOTP
-//! and the PC from a list → method (when the PC has both) → version (file method) or run of
+//! The restore TUI (ratatui): NAS → certificate → an administrator's approval (the PC's
+//! name, then a compare code and a QR code while the phone or the web interface decides),
+//! a restore code, or administrator + TOTP and the PC from a list → method (when the PC has both) → version (file method) or run of
 //! btrfs snapshots → mode (whole / system / custom / add) and subvolumes with their
 //! snapshots → target disk (or, adding, the PC's btrfs filesystem) → passphrase (LUKS) →
 //! plan → the disk name typed → restore (plain log in the terminal) → reboot, offered only
@@ -11,7 +12,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
@@ -20,7 +21,7 @@ use std::sync::Arc;
 use rynas_api_types::pcagent::{Manifest, RestoreDevice};
 
 use super::source::{RestoreSource, Version};
-use super::{btrfs, exec, plan, restic};
+use super::{approval, btrfs, exec, plan, restic};
 use crate::http::{self, Client, Endpoint};
 
 /// A step found a state the earlier steps always set (a bug): the TUI ends with this.
@@ -122,6 +123,90 @@ fn choose(term: &mut DefaultTerminal, title: &str, intro: &[String], items: &[(S
                 {
                     return Answer::Ok(i);
                 }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Waits for the administrator's decision on `a`: the compare code, the QR code (when the
+/// terminal is large enough and takes UTF-8) and the time left. `Ok(Ok(approval))` when
+/// approved, `Ok(Err(why))` when it ended otherwise; Esc (and Ctrl-C) withdraw the request.
+fn wait_approval(term: &mut DefaultTerminal, ep: &Endpoint, fp: &str, a: &approval::Asked, pc: &str) -> Answer<Result<rynas_api_types::pcagent::RestoreApproval, String>> {
+    use approval::Heard;
+    use rynas_api_types::pcagent::RestoreRequestState;
+    let (tx, rx) = std::sync::mpsc::channel();
+    approval::spawn_poller(ep.clone(), fp.to_string(), a.created.id.clone(), a.created.poll_token.clone(), tx);
+    let rows = if approval::utf8_terminal() { approval::qr_rows(&a.link) } else { None };
+    let withdraw = || approval::withdraw(ep.clone(), fp, &a.created.id, &a.created.poll_token);
+    let mut trouble = String::new();
+    loop {
+        while let Ok(h) = rx.try_recv() {
+            match h {
+                Heard::Approved(x) => return Answer::Ok(Ok(x)),
+                Heard::Ended(s) => {
+                    return Answer::Ok(Err(match s {
+                        RestoreRequestState::Denied => "the administrator denied the request".into(),
+                        RestoreRequestState::Expired => "nobody approved it within 10 minutes: ask again".into(),
+                        _ => "the request was withdrawn".into(),
+                    }));
+                }
+                Heard::Unknown => return Answer::Ok(Err("the NAS no longer knows this request (did it restart?): ask again".into())),
+                Heard::Trouble(e) => trouble = e,
+            }
+        }
+        let left = a.created.expires_ms.saturating_sub(now_ms()) / 1000;
+        let code = rynas_api_types::pcagent::restore_code_text(&a.code);
+        let mut lines: Vec<Line> = vec![
+            Line::from("Waiting for an administrator's approval."),
+            Line::from(""),
+            Line::from(format!("Code: {code}")).bold(),
+            Line::from(""),
+            Line::from(format!("PC: {pc}")),
+            Line::from("On the phone: the rynas app's notification, or scan the QR code. In the web interface: Backup → PCs."),
+            Line::from("Approve only where the same code shows."),
+            Line::from(""),
+        ];
+        if !fp.is_empty() {
+            lines.push(Line::from("Certificate (SHA-256):"));
+            lines.push(Line::from(fp.to_string()));
+        }
+        lines.push(Line::from(format!("Time left: {}:{:02}", left / 60, left % 60)));
+        if !trouble.is_empty() {
+            lines.push(Line::from(format!("! NAS not reachable, trying again: {trouble}")));
+        }
+        let _ = term.draw(|f| {
+            let [main, keys] = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
+            let text = Paragraph::new(Text::from(lines.clone())).wrap(Wrap { trim: false });
+            match rows.as_ref().filter(|r| approval::qr_fits(r, f.area().width, f.area().height)) {
+                Some(r) => {
+                    let w = r[0].chars().count() as u16 + 2;
+                    let [left, right] = Layout::horizontal([Constraint::Length(w), Constraint::Min(approval::TEXT_MIN_COLS)]).areas(main);
+                    let [qr_area, _] = Layout::vertical([Constraint::Length(r.len() as u16 + 2), Constraint::Min(0)]).areas(left);
+                    // white on black whatever the terminal's colours: light modules are drawn
+                    let qr: Vec<Line> = r.iter().map(|s| Line::from(s.as_str())).collect();
+                    f.render_widget(
+                        Paragraph::new(Text::from(qr)).style(Style::default().fg(Color::White).bg(Color::Black)).block(Block::default().borders(Borders::ALL).title(" QR ")),
+                        qr_area,
+                    );
+                    f.render_widget(text.block(frame_title("Approval")), right);
+                }
+                None => f.render_widget(text.block(frame_title("Approval")), main),
+            }
+            f.render_widget(Paragraph::new(" Esc: withdraw the request and go back · Ctrl-C: leave").italic(), keys);
+        });
+        match key() {
+            Some((KeyCode::Char('c'), m)) if m.contains(KeyModifiers::CONTROL) => {
+                withdraw();
+                return Answer::Quit;
+            }
+            Some((KeyCode::Esc, _)) => {
+                withdraw();
+                return Answer::Back;
             }
             _ => {}
         }
@@ -306,6 +391,9 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
     let mut bsrc: Option<btrfs::BtrfsSource> = None;
     let mut use_btrfs = false;
     let mut admin_user = String::new();
+    // "Ask for approval": the PC as the person names it, and the request the NAS took
+    let mut pc_claim = super::opt(args, "--pc").unwrap_or_default();
+    let mut asked: Option<approval::Asked> = None;
     let mut choice: Vec<rynas_api_types::pcagent::RestoreChoiceDevice> = Vec::new();
     let mut versions: Vec<Version> = Vec::new();
     let mut version: Option<Version> = None;
@@ -380,13 +468,62 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
             }
             3 => {
                 let items = vec![
+                    ("Ask an administrator to approve it (rynas app on a phone, or the web interface)".to_string(), None),
                     (format!("Restore code, made on the NAS ({CODE_WHERE})"), None),
                     ("Administrator of the NAS with TOTP".to_string(), None),
                 ];
                 let intro = vec!["How do you log in to the NAS?".to_string()];
                 let i = step!(choose(term, "Access", &intro, &items), stage = 1);
                 error = None;
-                stage = if i == 0 { 30 } else { 31 };
+                stage = match i {
+                    0 => 33,
+                    1 => 30,
+                    _ => 31,
+                };
+            }
+            33 => {
+                let mut help = vec![
+                    "Which PC is this? Its host name, or its name on the NAS.".to_string(),
+                    "The administrator sees what you type and the address of this machine, and chooses the PC whose backups the restore may read.".into(),
+                    String::new(),
+                    "PC:".into(),
+                ];
+                help.extend(err_lines(&error));
+                pc_claim = step!(input(term, "Approval", &help, &pc_claim, false), stage = 3);
+                if pc_claim.trim().is_empty() {
+                    error = Some("type the PC's name".into());
+                    continue;
+                }
+                match approval::ask(&Client::new(ep.clone().ok_or(INTERNAL)?, &fp), &pc_claim, &fp) {
+                    Ok(a) => {
+                        asked = Some(a);
+                        error = None;
+                        stage = 34;
+                    }
+                    Err(e) => error = Some(e),
+                }
+            }
+            34 => {
+                let a = asked.clone().ok_or(INTERNAL)?;
+                let e = ep.clone().ok_or(INTERNAL)?;
+                let answer = step!(wait_approval(term, &e, &fp, &a, &pc_claim), stage = 33);
+                match answer {
+                    Ok(appr) => match super::login(Client::new(e, &fp), &appr.code, Some(&appr.device)) {
+                        Ok(s) => {
+                            session = Some(s);
+                            error = None;
+                            stage = 2;
+                        }
+                        Err(err) => {
+                            error = Some(format!("{err} (ask again)"));
+                            stage = 33;
+                        }
+                    },
+                    Err(why) => {
+                        error = Some(why);
+                        stage = 33;
+                    }
+                }
             }
             31 => {
                 let mut help = vec![

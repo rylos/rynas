@@ -304,6 +304,30 @@ pub struct PushPayload {
     pub state: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub user: String,
+    /// Something the app offers to do from the notification (approve a PC's bare-metal
+    /// restore); absent for plain notifications. Added after rynas 0.9.16: older apps ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<PushAction>,
+}
+
+/// [`PushPayload::action`]. `kind` `pc_restore` (the only one so far): a restore TUI waits for
+/// an administrator's approval (`docs/phase2/pc-restore-approval.md`); the app shows the
+/// claimed PC, the address and the code, checks the user locally (biometrics), then calls
+/// `POST /api/v1/pcbackup/restore-requests/{request}/approve` or `…/deny`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PushAction {
+    pub kind: String,
+    /// The request's id.
+    pub request: String,
+    /// The PC as the requester claimed it.
+    pub pc: String,
+    /// The backup PC the claim matches, `null` when none or several do.
+    pub device: Option<String>,
+    /// Six digits, the same as on the PC's screen.
+    pub code: String,
+    /// Where the request came from.
+    pub from_ip: String,
+    pub expires_ms: u64,
 }
 
 /// `PUT /api/v1/devices/self/push` (bearer): the subscription and, optionally, the language

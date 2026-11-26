@@ -1155,3 +1155,322 @@ async fn btrfs_restore_session_reads_only_its_own_pc() {
     let names: Vec<&str> = c.devices.iter().map(|d| d.device.as_str()).collect();
     assert_eq!(names, vec!["casa", "other"]);
 }
+
+// ------------------------------------------------------------------ restore approved from a phone
+
+/// A call of the restore TUI from `ip`: poll token (or none), JSON body.
+async fn tui_call(e: &Env, ip: &str, token: Option<&str>, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Vec<u8>) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(rynas_auth::ipc::CLIENT_ADDR_HEADER, ip);
+    if let Some(t) = token {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let r = e.app.clone().oneshot(req.body(body.map(|b| Body::from(b.to_string())).unwrap_or_default()).unwrap()).await.unwrap();
+    let s = r.status();
+    (s, to_bytes(r.into_body(), 1 << 20).await.unwrap().to_vec())
+}
+
+const REQS: &str = "/v1/pcbackup/agent/restore-requests";
+
+async fn ask(e: &Env, ip: &str, pc: &str) -> rynas_api_types::pcagent::RestoreRequestCreated {
+    let (s, b) = tui_call(e, ip, None, "POST", REQS, Some(json!({"pc": pc, "fingerprint": ""}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    // nothing but these five: no PC, no match, no code
+    let v: Value = serde_json::from_slice(&b).unwrap();
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["expires_ms", "id", "nonce", "poll_token", "sid"]);
+    serde_json::from_slice(&b).unwrap()
+}
+
+async fn poll(e: &Env, c: &rynas_api_types::pcagent::RestoreRequestCreated, wait: u64) -> (StatusCode, Option<rynas_api_types::pcagent::RestoreRequestPoll>) {
+    let (s, b) = tui_call(e, "192.0.2.10", Some(&c.poll_token), "GET", &format!("{REQS}/{}?wait={wait}", c.id), None).await;
+    (s, serde_json::from_slice(&b).ok())
+}
+
+async fn pending(e: &Env) -> Vec<rynas_api_types::pcagent::RestoreRequestView> {
+    let (s, b) = call(e, "GET", "/v1/pcbackup/restore-requests", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    serde_json::from_slice(&b).unwrap()
+}
+
+/// A btrfs folder "casa" (no PC record): a PC the NAS can restore.
+async fn casa(e: &Env) {
+    let path = "/volume1/backup/casa";
+    let t = task(e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "casa", "path": path, "public_key": KEY}))).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    folder(e, path, vec![snap_u("@", 1)]);
+}
+
+/// The whole life of a request: what the requester learns, the match, the compare code, the
+/// administrators' list and events, the push, the long poll woken by the approval, the code
+/// that works once for that PC only, the security notification, double decisions.
+#[tokio::test]
+async fn a_restore_request_approved_from_a_phone_opens_one_restore() {
+    use rynas_api_types::devices::PushAction;
+    use rynas_api_types::notify::{NewEvent, NotifyCategory};
+    use rynas_api_types::pcagent::*;
+    use rynasd::pc_agent::approval;
+    let (e, agent) = env_agent();
+    casa(&e).await;
+    let pushed: Arc<std::sync::Mutex<Vec<(NewEvent, PushAction)>>> = Arc::default();
+    let p2 = pushed.clone();
+    assert!(agent.restore_push.set(Arc::new(move |ev, a| p2.lock().unwrap().push((ev, a)))).is_ok());
+    let mut events = agent.approvals.subscribe();
+    e.notifier.take();
+
+    // a fingerprint that is not the NAS' own, a bad one, a bad name
+    let fp = "AB:".repeat(31) + "AB";
+    let (s, b) = tui_call(&e, "192.0.2.10", None, "POST", REQS, Some(json!({"pc": "casa", "fingerprint": fp}))).await;
+    assert_eq!((s, err(&b).code.as_str(), err(&b).field.as_deref()), (StatusCode::CONFLICT, "certificate_mismatch", Some("fingerprint")));
+    let (s, _) = tui_call(&e, "192.0.2.10", None, "POST", REQS, Some(json!({"pc": "casa", "fingerprint": "AB:CD"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    for bad in ["", "   ", "a\u{7}b"] {
+        let (s, _) = tui_call(&e, "192.0.2.10", None, "POST", REQS, Some(json!({"pc": bad}))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad:?}");
+    }
+    assert!(pending(&e).await.is_empty());
+
+    let c = ask(&e, "192.0.2.10", "CASA").await;
+    assert!(c.id.len() == 16 && c.id.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(c.poll_token.len(), 64);
+    assert_eq!(c.sid.len(), 22);
+    // the administrators see it: claim, match, the code the TUI makes too, the address
+    let list = pending(&e).await;
+    assert_eq!(list.len(), 1);
+    let v = &list[0];
+    assert_eq!((v.id.as_str(), v.pc.as_str(), v.device.as_deref(), v.from_ip.as_str()), (c.id.as_str(), "CASA", Some("casa"), "192.0.2.10"));
+    assert_eq!(v.code, approval::compare_code(&c.nonce, ""));
+    assert_eq!(v.expires_ms, c.expires_ms);
+    assert!(v.expires_ms - v.created_ms == RESTORE_REQUEST_TTL_MS);
+    // not for other users
+    let (s, _) = call_as(&e, "bob", "GET", "/v1/pcbackup/restore-requests", None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = call_as(&e, "bob", "POST", &format!("/v1/pcbackup/restore-requests/{}/approve", c.id), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // the event and the push with its action
+    let (name, data) = events.try_recv().unwrap();
+    assert_eq!(name, approval::EV_REQUEST);
+    assert_eq!(&serde_json::from_str::<RestoreRequestView>(&data).unwrap(), v);
+    let (ev, action) = pushed.lock().unwrap().remove(0);
+    assert_eq!(
+        action,
+        PushAction {
+            kind: "pc_restore".into(),
+            request: c.id.clone(),
+            pc: "CASA".into(),
+            device: Some("casa".into()),
+            code: v.code.clone(),
+            from_ip: "192.0.2.10".into(),
+            expires_ms: c.expires_ms,
+        }
+    );
+    assert_eq!((ev.code.as_str(), ev.category, ev.state), ("pcbackup.restore_request", NotifyCategory::Backup, EventState::Firing));
+    assert_eq!(ev.fields.get("request"), Some(&c.id));
+    assert_eq!(ev.fields.get("from_ip").map(String::as_str), Some("192.0.2.10"));
+    assert!(ev.actions[0].url.contains(&c.id));
+    let shape = serde_json::to_value(&action).unwrap();
+    assert_eq!(shape["kind"], "pc_restore");
+    assert!(shape.as_object().unwrap().contains_key("device"));
+
+    // the poll needs the token; a wrong one is "unknown" too
+    let (s, _) = tui_call(&e, "192.0.2.10", None, "GET", &format!("{REQS}/{}", c.id), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = tui_call(&e, "192.0.2.10", Some(&"0".repeat(64)), "GET", &format!("{REQS}/{}", c.id), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, p) = poll(&e, &c, 0).await;
+    assert_eq!((s, p.unwrap().state), (StatusCode::OK, RestoreRequestState::Pending));
+
+    // a long poll waits, and the approval wakes it with a restore code for that PC
+    let started = std::time::Instant::now();
+    let waiting = {
+        let (app, c) = (e.app.clone(), c.clone());
+        tokio::spawn(async move {
+            let req = Request::builder()
+                .uri(format!("{REQS}/{}?wait=20", c.id))
+                .header(header::AUTHORIZATION, format!("Bearer {}", c.poll_token))
+                .body(Body::empty())
+                .unwrap();
+            let r = app.oneshot(req).await.unwrap();
+            serde_json::from_slice::<RestoreRequestPoll>(&to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap()
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!waiting.is_finished(), "the poll waits while pending");
+    let (s, b) = call(&e, "POST", &format!("/v1/pcbackup/restore-requests/{}/approve", c.id), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{}", String::from_utf8_lossy(&b));
+    let p = waiting.await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(p.state, RestoreRequestState::Approved);
+    let a = p.approval.unwrap();
+    assert_eq!(a.device, "casa");
+    // a restore code like the web interface's: valid for an hour
+    assert!(a.expires_ms > rynas_tasks::now_ms() + RESTORE_REQUEST_TTL_MS);
+    let (name, data) = events.try_recv().unwrap();
+    assert_eq!(name, approval::EV_RESOLVED);
+    assert_eq!(serde_json::from_str::<RestoreRequestResolved>(&data).unwrap(), RestoreRequestResolved { id: c.id.clone(), outcome: RestoreRequestState::Approved });
+    assert!(pending(&e).await.is_empty());
+    // decided once: approve, deny again → 409; unknown → 404
+    for what in ["approve", "deny"] {
+        let (s, _) = call(&e, "POST", &format!("/v1/pcbackup/restore-requests/{}/{what}", c.id), Some(json!({}))).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{what}");
+    }
+    let (s, _) = call(&e, "POST", "/v1/pcbackup/restore-requests/00000000000000ff/approve", Some(json!({"device": "casa"}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    // the notifications: the request resolved quietly, the security one with who and where
+    let sent = e.notifier.take();
+    let resolved = sent.iter().find(|n| n.code == "pcbackup.restore_request").unwrap();
+    assert!(resolved.state == EventState::Resolved && resolved.quiet);
+    let sec = sent.iter().find(|n| n.code == "pcbackup.restore_approved").unwrap();
+    assert_eq!(sec.category, NotifyCategory::Security);
+    assert_eq!((sec.fields["device"].as_str(), sec.fields["user"].as_str(), sec.fields["from_ip"].as_str()), ("casa", "admin", "192.0.2.10"));
+
+    // the code opens one read-only session for that PC only, once
+    let (s, b) = agent_call(&e, None, "POST", "/v1/pcbackup/agent/restore/login", json!({"code": a.code}).to_string().into_bytes()).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let sess: RestoreSession = serde_json::from_slice(&b).unwrap();
+    assert_eq!(sess.devices.iter().map(|d| d.device.as_str()).collect::<Vec<_>>(), ["casa"]);
+    let now = rynas_tasks::now_ms();
+    assert!(sess.expires_ms <= now + 3600 * 1000 && sess.expires_ms > now + 3500 * 1000);
+    let (s, _) = agent_call(&e, Some(&sess.token), "GET", "/v1/pcbackup/agent/restore/btrfs/other/snapshots", Vec::new()).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = agent_call(&e, None, "POST", "/v1/pcbackup/agent/restore/login", json!({"code": a.code}).to_string().into_bytes()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "one-time");
+    // its request is done: the poll no longer knows it
+    assert_eq!(poll(&e, &c, 0).await.0, StatusCode::NOT_FOUND);
+
+    // the PC list for the approver's choice
+    let (s, b) = call(&e, "GET", "/v1/pcbackup/devices", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let pcs: Vec<RestorablePc> = serde_json::from_slice(&b).unwrap();
+    assert_eq!(pcs, vec![RestorablePc { device: "casa".into(), description: pcs[0].description.clone(), hostname: String::new(), files: false, btrfs: true }]);
+}
+
+/// Denied, withdrawn, no match (the approver must choose), a PC that does not exist, and an
+/// approval withdrawn before its code was used (the code is revoked).
+#[tokio::test]
+async fn denied_withdrawn_and_unmatched_requests() {
+    use rynas_api_types::pcagent::*;
+    use rynasd::pc_agent::approval;
+    let (e, agent) = env_agent();
+    casa(&e).await;
+    let mut events = agent.approvals.subscribe();
+
+    // denied
+    let d = ask(&e, "192.0.2.10", "casa").await;
+    let (s, _) = call(&e, "POST", &format!("/v1/pcbackup/restore-requests/{}/deny", d.id), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(poll(&e, &d, 5).await.1.unwrap().state, RestoreRequestState::Denied);
+    let (s, _) = call(&e, "POST", &format!("/v1/pcbackup/restore-requests/{}/approve", d.id), Some(json!({"device": "casa"}))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+
+    // a claim that matches nothing: same answer to the requester, the approver must choose
+    let u = ask(&e, "192.0.2.11", "some-laptop").await;
+    assert_eq!(pending(&e).await.iter().find(|v| v.id == u.id).unwrap().device, None);
+    let url = format!("/v1/pcbackup/restore-requests/{}/approve", u.id);
+    let (s, b) = call(&e, "POST", &url, None).await;
+    assert_eq!((s, err(&b).field.as_deref()), (StatusCode::BAD_REQUEST, Some("device")));
+    let (s, _) = call(&e, "POST", &url, Some(json!({"device": "nope"}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = call(&e, "POST", &url, Some(json!({"device": "../x"}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(poll(&e, &u, 0).await.1.unwrap().state, RestoreRequestState::Pending, "a refused approval decides nothing");
+    let (s, _) = call(&e, "POST", &url, Some(json!({"device": "casa"}))).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let a = poll(&e, &u, 0).await.1.unwrap().approval.unwrap();
+    // withdrawn after the approval: the code no longer works
+    let (s, _) = tui_call(&e, "192.0.2.11", Some(&u.poll_token), "DELETE", &format!("{REQS}/{}", u.id), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = agent_call(&e, None, "POST", "/v1/pcbackup/agent/restore/login", json!({"code": a.code}).to_string().into_bytes()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // withdrawn while pending (needs the token)
+    let w = ask(&e, "192.0.2.12", "casa").await;
+    let (s, _) = tui_call(&e, "192.0.2.12", None, "DELETE", &format!("{REQS}/{}", w.id), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = tui_call(&e, "192.0.2.12", Some(&w.poll_token), "DELETE", &format!("{REQS}/{}", w.id), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(poll(&e, &w, 0).await.1.unwrap().state, RestoreRequestState::Canceled);
+    let (s, _) = call(&e, "POST", &format!("/v1/pcbackup/restore-requests/{}/deny", w.id), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+
+    // the events: request, denied, request, request, approved, request, canceled
+    let mut outcomes = Vec::new();
+    while let Ok((name, data)) = events.try_recv() {
+        if name == approval::EV_RESOLVED {
+            outcomes.push(serde_json::from_str::<RestoreRequestResolved>(&data).unwrap().outcome);
+        }
+    }
+    assert_eq!(outcomes, [RestoreRequestState::Denied, RestoreRequestState::Approved, RestoreRequestState::Canceled]);
+}
+
+/// The one-shot timer expires a request nobody decided: the poll hears it, a late approval
+/// is 410, the event says expired.
+#[tokio::test(start_paused = true)]
+async fn an_undecided_restore_request_expires() {
+    use rynas_api_types::pcagent::*;
+    use rynasd::pc_agent::approval;
+    let (e, agent) = env_agent();
+    let mut events = agent.approvals.subscribe();
+    let c = ask(&e, "192.0.2.10", "casa").await;
+    let _ = events.recv().await.unwrap();
+    tokio::time::advance(Duration::from_millis(RESTORE_REQUEST_TTL_MS + 1000)).await;
+    let (name, data) = tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
+    assert_eq!(name, approval::EV_RESOLVED);
+    assert_eq!(serde_json::from_str::<RestoreRequestResolved>(&data).unwrap().outcome, RestoreRequestState::Expired);
+    assert_eq!(poll(&e, &c, 0).await.1.unwrap().state, RestoreRequestState::Expired);
+    let (s, b) = call(&e, "POST", &format!("/v1/pcbackup/restore-requests/{}/approve", c.id), Some(json!({"device": "casa"}))).await;
+    assert_eq!((s, err(&b).code.as_str()), (StatusCode::GONE, "request_expired"));
+    assert!(pending(&e).await.is_empty());
+}
+
+/// Flooding: two waiting per address, 16 in all, 6 new ones per address in ten minutes; wrong
+/// poll tokens lock the address out like wrong codes.
+#[tokio::test]
+async fn restore_requests_are_limited() {
+    use rynasd::pc_agent::approval::{MAX_CREATED_PER_SOURCE, MAX_PENDING, MAX_PENDING_PER_SOURCE};
+    let (e, _agent) = env_agent();
+    let a = ask(&e, "192.0.2.10", "pc").await;
+    for _ in 1..MAX_PENDING_PER_SOURCE {
+        ask(&e, "192.0.2.10", "pc").await;
+    }
+    let (s, b) = tui_call(&e, "192.0.2.10", None, "POST", REQS, Some(json!({"pc": "pc"}))).await;
+    assert_eq!((s, err(&b).code.as_str()), (StatusCode::TOO_MANY_REQUESTS, "rate_limited"));
+    // an IPv6 /64 is one client
+    ask(&e, "2001:db8::1", "pc").await;
+    ask(&e, "2001:db8::2", "pc").await;
+    let (s, _) = tui_call(&e, "2001:db8::3", None, "POST", REQS, Some(json!({"pc": "pc"}))).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+    // withdrawing one makes room, until the address made too many in the window
+    let (s, _) = tui_call(&e, "192.0.2.10", Some(&a.poll_token), "DELETE", &format!("{REQS}/{}", a.id), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let mut made = MAX_PENDING_PER_SOURCE;
+    while made < MAX_CREATED_PER_SOURCE {
+        let c = ask(&e, "192.0.2.10", "pc").await;
+        made += 1;
+        let (s, _) = tui_call(&e, "192.0.2.10", Some(&c.poll_token), "DELETE", &format!("{REQS}/{}", c.id), None).await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+    }
+    let (s, _) = tui_call(&e, "192.0.2.10", None, "POST", REQS, Some(json!({"pc": "pc"}))).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "six new ones in ten minutes");
+    // everybody together: at most 16 waiting
+    let mut waiting = 3; // 192.0.2.10 (1 left) and the /64 (2)
+    let mut i = 20;
+    while waiting < MAX_PENDING {
+        ask(&e, &format!("198.51.100.{i}"), "pc").await;
+        waiting += 1;
+        i += 1;
+    }
+    let (s, _) = tui_call(&e, "203.0.113.1", None, "POST", REQS, Some(json!({"pc": "pc"}))).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+    // guessing poll tokens locks the address out (of polls and of new requests)
+    for _ in 0..10 {
+        let (s, _) = tui_call(&e, "203.0.113.7", Some("guess"), "GET", &format!("{REQS}/{}", a.id), None).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+    }
+    let (s, _) = tui_call(&e, "203.0.113.7", Some("guess"), "GET", &format!("{REQS}/{}", a.id), None).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+}

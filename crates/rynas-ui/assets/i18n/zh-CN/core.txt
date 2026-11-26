@@ -6772,3 +6772,22 @@ dk.set.journal_help	日志不再写入 Docker 的文件夹，其硬盘可以休�
 dk.ssd_hint	建议：使用 SSD 上的存储卷，这样硬盘可以停转。
 dk.plan.logs_title	更改容器日志的去向？
 dk.plan.logs_text	应用后会修改此文件并重启 Docker。每个容器在重新创建后使用新设置。
+err.request_expired	请求在有人做出决定之前已过期。
+err.certificate_mismatch	NAS 并未使用客户端看到的证书：中间有其他设备在冒充 NAS 应答。
+rr.title	{pc} 的恢复正在等待您的批准
+rr.intro	一台从 Live 系统启动的电脑请求读取其备份以进行裸机恢复。仅当恢复由您本人发起且电脑屏幕显示此代码时才批准。
+rr.code	电脑上显示的代码
+rr.pc_claimed	请求方所称的电脑
+rr.pc_matched	可读取的备份
+rr.pc_none	选择电脑…
+rr.choose_pc	请选择恢复可读取其备份的电脑。
+rr.from	请求来源
+rr.until	等待至
+rr.approve	批准
+rr.deny	拒绝
+rr.approved	恢复已批准：电脑可以继续。
+rr.denied	恢复请求已拒绝。
+nev.pcbackup.restore_request.title	{pc} 的恢复正在等待批准
+nev.pcbackup.restore_request.body	来自 {from_ip} 的裸机恢复请求读取 {pc} 的备份（代码 {code}）。仅当恢复由您本人发起且电脑屏幕显示相同代码时才批准。
+nev.pcbackup.restore_approved.title	{device} 的恢复已由 {user} 批准
+nev.pcbackup.restore_approved.body	来自 {from_ip} 的裸机恢复（以 {pc} 名义请求）可在一小时内以只读方式读取 {device} 的备份。

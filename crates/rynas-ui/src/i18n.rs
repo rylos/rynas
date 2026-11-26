@@ -1026,6 +1026,25 @@ dict! { BLOB, LENS;
     "err.clock_skew" => "The device's clock differs from the NAS' by more than 2 minutes: set the right time and try again.";
     "err.last_debian_entry" => "This is the last enabled Debian source of the release: without it the system gets no updates.";
     "err.key_invalid" => "The key is not a usable OpenPGP public key, or its fingerprints are not the ones confirmed.";
+    "err.request_expired" => "The request expired before anyone decided.";
+    "err.certificate_mismatch" => "The NAS does not serve the certificate the client sees: something in between answers for it.";
+    "rr.title" => "A restore of {pc} waits for your approval";
+    "rr.intro" => "A PC started from a live system asks to read its backups for a bare-metal restore. Approve it only if you started it and the PC's screen shows this code.";
+    "rr.code" => "Code shown on the PC";
+    "rr.pc_claimed" => "PC, as the requester names it";
+    "rr.pc_matched" => "Backups it may read";
+    "rr.pc_none" => "Choose a PC…";
+    "rr.choose_pc" => "Choose the PC whose backups the restore may read.";
+    "rr.from" => "Requested from";
+    "rr.until" => "Waits until";
+    "rr.approve" => "Approve";
+    "rr.deny" => "Deny";
+    "rr.approved" => "Restore approved: the PC can go on.";
+    "rr.denied" => "Restore request denied.";
+    "nev.pcbackup.restore_request.title" => "Restore of {pc} waits for approval";
+    "nev.pcbackup.restore_request.body" => "A bare-metal restore from {from_ip} asks to read the backups of {pc} (code {code}). Approve it only if you started it and the PC's screen shows the same code.";
+    "nev.pcbackup.restore_approved.title" => "Restore of {device} approved by {user}";
+    "nev.pcbackup.restore_approved.body" => "A bare-metal restore from {from_ip} (asked as {pc}) may read the backups of {device}, read-only, for an hour.";
     "mem.title" => "Memory";
     "mem.subtitle" => "Compressed swap in RAM";
     "mem.open_text" => "zram: compressed swap in RAM, with values advised for this system.";
@@ -8230,7 +8249,7 @@ mod tests {
                 || s.ends_with(".log")
                 || s.starts_with("fuse.")
                 || s.contains("example")
-                || matches!(s, "a.b" | "metrics.sample" | "hardware.status" | "task.started" | "task.updated" | "task.finished" | "removable.state" | "docker.stats" | "docker.changed" | "storage.changed" | "config.pending")
+                || matches!(s, "a.b" | "metrics.sample" | "hardware.status" | "task.started" | "task.updated" | "task.finished" | "removable.state" | "docker.stats" | "docker.changed" | "storage.changed" | "config.pending" | "pcbackup.restore_request" | "pcbackup.restore_resolved")
                 // task types named to the task store (`tasks::use_task`, `tasks::reports`)
                 || matches!(s, "space.preview" | "space.scan" | "pcbackup.usage" | "crypt.create" | "replication.run" | "updates.status")
         };

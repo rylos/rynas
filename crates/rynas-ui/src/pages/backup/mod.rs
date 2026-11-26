@@ -5,6 +5,7 @@
 
 mod agent;
 pub mod pcs;
+pub mod restore_requests;
 mod restic;
 
 use leptos::prelude::*;
@@ -33,6 +34,8 @@ pub fn BackupPage() -> impl IntoView {
                 }}
                 {crate::shell::is_admin().then(|| view! { <a class="btn ghost" href="/storage/space"><Icon icon=icons::LAYERS size=16 /><span class="btn-label">{tr("sp.open")}</span></a> })}
             </PageHeader>
+            // restores waiting for an approval, whichever tab is open
+            {crate::shell::is_admin().then(|| restore_requests::restore_requests(None, "card widget w-12"))}
             <section class="card widget w-12">
                 {tabs("bkp", TABS, tab, "bk.title")}
                 <div role="tabpanel" id="bkp-p0" aria-labelledby="bkp-t0" hidden=move || tab.get() != 0>{restic::panel(edit)}</div>

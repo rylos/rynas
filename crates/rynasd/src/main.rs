@@ -1611,6 +1611,28 @@ fn main() -> std::io::Result<()> {
                     d.bind_engine(engine.clone());
                     rynasd::devices::spawn_watch(d.clone());
                     state.devices = Some(d);
+                    // a PC's restore waiting for an approval: stored as a notification and
+                    // pushed with its action to the administrators' phones, rules aside
+                    if let Some(a) = state.pc_agent.as_ref() {
+                        let (e, admins) = (engine.clone(), ops.admins.clone());
+                        let push: rynasd::pc_agent::approval::RestorePush = Arc::new(move |ev, action| {
+                            let (e, admins) = (e.clone(), admins.clone());
+                            tokio::spawn(async move {
+                                let stored = {
+                                    let e = e.clone();
+                                    tokio::task::spawn_blocking(move || e.ingest(ev, false)).await
+                                };
+                                let Ok(Ok(Some(n))) = stored else {
+                                    tracing::warn!("pc backup: the restore request's notification was not stored: no push");
+                                    return;
+                                };
+                                let code = rynasd::pc_agent::approval::CODE_REQUEST;
+                                let sent = e.push_direct(&n, code, Some(action), &|owner| admins.is_admin(owner)).await;
+                                tracing::info!("pc backup: restore request pushed to {sent} phones");
+                            });
+                        });
+                        let _ = a.restore_push.set(push);
+                    }
                 }
                 Err(e) => tracing::error!("mobile devices: {e}"),
             }

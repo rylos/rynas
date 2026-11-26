@@ -362,9 +362,15 @@ fn detail_drawer(n: Notification, close: Callback<()>, silence: RwSignal<Option<
             .into_any()
         })
         .collect();
+    // a restore waiting for an approval: Approve / Deny right here while it waits
+    let restore = (n.code == "pcbackup.restore_request" && n.resolved_ms.is_none())
+        .then(|| n.fields.get("request").cloned())
+        .flatten()
+        .map(|id| crate::pages::backup::restore_requests::restore_requests(Some(id), "status-card"));
     let body = view! {
         <div class="chips">{severity_pill(n.severity)}{state_pill(&n)}</div>
         {(!body_text.is_empty()).then(|| view! { <p class=if log { "pre-text log-text" } else { "pre-text" }>{body_text}</p> })}
+        {restore}
         {(!actions.is_empty()).then(|| view! { <div class="card-actions">{actions}</div> })}
         <dl class="kvs">{kvs}</dl>
         {has_fields.then(|| view! { <h3 class="mini-title">{tr("nt.fields")}</h3><dl class="kvs">{fields}</dl> })}

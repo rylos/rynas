@@ -643,6 +643,11 @@ mod tests {
         assert!(!prod(Method::POST, "/crypt/folders"));
         assert!(!prod(Method::POST, "/api/v1/pcbackup/devices/laptop/restore-code"));
         assert!(!prod(Method::GET, "/pcbackup/devices/laptop/browse"));
+        // the approval of a restore from a phone: the list, the PCs, the decision
+        assert!(!prod(Method::GET, "/api/v1/pcbackup/restore-requests"));
+        assert!(!prod(Method::GET, "/api/v1/pcbackup/devices"));
+        assert!(!prod(Method::POST, "/api/v1/pcbackup/restore-requests/0123456789abcdef/approve"));
+        assert!(!prod(Method::POST, "/api/v1/pcbackup/restore-requests/0123456789abcdef/deny"));
         assert!(!prod(Method::POST, "/storage/volumes/vol1/reveal-recovery-key"));
         let list = [("*", "/updates"), ("POST", "/system/power")];
         let r = |m: Method, p: &str| refused_to_devices(&list, &m, p);

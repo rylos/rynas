@@ -24,6 +24,7 @@
 //! creates plain folders instead of subvolumes; everything else is real (the worker runs as a
 //! child process).
 
+pub mod approval;
 pub mod maint;
 pub mod repo;
 
@@ -494,6 +495,12 @@ pub struct PcAgent {
     /// Per device: when its agent took a sleep or shut-down command (ms, memory only): the
     /// contacts until shortly after it do not prove the PC is still on.
     slept: Mutex<HashMap<String, u64>>,
+    /// Restores waiting for an administrator's approval from a phone ([`approval`]).
+    pub approvals: approval::Approvals,
+    /// Delivers a new restore request to the administrators' phones (set once by main when
+    /// the devices and the notification engine run); without it the request is only a
+    /// notification ([`approval::RestorePush`]).
+    pub restore_push: std::sync::OnceLock<approval::RestorePush>,
 }
 
 /// Contacts within this span after a taken sleep command do not count ([`PcAgent::last_contact`]):
@@ -577,6 +584,8 @@ impl PcAgent {
             scheduler: std::sync::OnceLock::new(),
             contacts: Mutex::new(HashMap::new()),
             slept: Mutex::new(HashMap::new()),
+            approvals: approval::Approvals::default(),
+            restore_push: std::sync::OnceLock::new(),
         })
     }
 
@@ -1355,6 +1364,10 @@ pub fn router(st: PaState) -> Router {
         .route("/v1/pcbackup/devices/{device}/zip", get(zip_get))
         .route("/v1/pcbackup/devices/{device}/restore-code", post(restore_code_post))
         .route("/v1/pcbackup/restore-choice", post(restore_choice_post))
+        .route("/v1/pcbackup/devices", get(restorable_get))
+        .route("/v1/pcbackup/restore-requests", get(approval::list_get))
+        .route("/v1/pcbackup/restore-requests/{id}/approve", post(approval::approve_post))
+        .route("/v1/pcbackup/restore-requests/{id}/deny", post(approval::deny_post))
         .with_state(st.clone())
         .route_layer(axum::middleware::from_fn_with_state(
             crate::roles::AdminGate {
@@ -1373,6 +1386,11 @@ pub fn router(st: PaState) -> Router {
         .route("/v1/pcbackup/agent/btrfs/snapshots", get(btrfs_snapshots_get))
         .route("/v1/pcbackup/agent/btrfs/receive", post(btrfs_receive_post))
         .route("/v1/pcbackup/agent/restore/login", post(restore_login))
+        .route("/v1/pcbackup/agent/restore-requests", post(approval::create_post))
+        .route(
+            "/v1/pcbackup/agent/restore-requests/{id}",
+            get(approval::poll_get).delete(approval::cancel_delete),
+        )
         .route("/v1/pcbackup/agent/restore/report", post(restore_report))
         .route("/v1/pcbackup/agent/restore/btrfs/{device}/snapshots", get(restore_btrfs_snapshots))
         .route("/v1/pcbackup/agent/restore/btrfs/{device}/manifest", get(restore_btrfs_manifest))
@@ -2065,6 +2083,24 @@ async fn restore_code_post(
     let svc = pa(&st)?;
     let who = user(&h)?;
     check_name(&device)?;
+    let (code, expires_ms) = issue_restore_code(&svc, &device)?;
+    audit(&who, "restore code", &device);
+    Ok((
+        StatusCode::CREATED,
+        Json(RestoreCodeCreated {
+            code,
+            expires_ms,
+            device,
+        }),
+    )
+        .into_response())
+}
+
+/// A restore code for `device` (one-time, read-only, [`RESTORE_CODE_TTL_MS`]): 404 for an
+/// unknown PC, 409 for one with nothing to restore from. It replaces the PC's earlier codes.
+/// The web interface's codes and the approvals from a phone ([`approval`]) both come here.
+pub fn issue_restore_code(svc: &PcAgent, device: &str) -> Res<(String, u64)> {
+    let device = device.to_string();
     let code = new_code()?;
     let expires_ms = now_ms() + RESTORE_CODE_TTL_MS;
     let btrfs = svc.has_btrfs_folder(&device);
@@ -2091,16 +2127,43 @@ async fn restore_code_post(
         });
         Ok(())
     })?;
-    audit(&who, "restore code", &device);
-    Ok((
-        StatusCode::CREATED,
-        Json(RestoreCodeCreated {
-            code,
-            expires_ms,
-            device,
-        }),
-    )
-        .into_response())
+    Ok((code, expires_ms))
+}
+
+/// Every PC this NAS can restore: file backups (a group), a folder of btrfs snapshots (an
+/// agent of the btrfs method or btrbk over SSH, maybe without a PC record), or both; by name.
+pub fn restorable(svc: &PcAgent) -> Vec<RestorablePc> {
+    let folders: BTreeMap<String, String> = svc.btrfs.get().map(|b| b.target_names().into_iter().collect()).unwrap_or_default();
+    let reg = svc.reg.lock().unwrap_or_else(|p| p.into_inner());
+    let mut out: BTreeMap<String, RestorablePc> = BTreeMap::new();
+    for (n, d) in &reg.devices {
+        let (files, btrfs) = (!d.group.is_empty(), folders.contains_key(n));
+        if files || btrfs {
+            out.insert(n.clone(), RestorablePc {
+                device: n.clone(),
+                description: d.settings.description.clone(),
+                hostname: d.hostname.clone(),
+                files,
+                btrfs,
+            });
+        }
+    }
+    for (n, desc) in folders {
+        out.entry(n.clone()).or_insert(RestorablePc {
+            device: n,
+            description: desc,
+            hostname: String::new(),
+            files: false,
+            btrfs: true,
+        });
+    }
+    out.into_values().collect()
+}
+
+/// `GET /v1/pcbackup/devices`: [`restorable`].
+async fn restorable_get(State(st): State<PaState>) -> Res<Json<Vec<RestorablePc>>> {
+    let svc = pa(&st)?;
+    Ok(Json(restorable(&svc)))
 }
 
 async fn restore_choice_post(State(st): State<PaState>, h: HeaderMap) -> Res<Json<RestoreChoice>> {
@@ -2627,6 +2690,8 @@ async fn restore_login(
         r.sessions.push(session);
         Ok(())
     })?;
+    // a code from an approval on a phone: its request has done its job
+    svc.approvals.code_used(&hash);
     tracing::info!(target: "rynas::audit", "pc backup: restore session for {}", code.device);
     Ok(Json(RestoreSession {
         token,

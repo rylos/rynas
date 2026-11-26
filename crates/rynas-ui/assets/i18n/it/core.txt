@@ -6816,3 +6816,22 @@ dk.set.journal_help	I log non scrivono più nella cartella di Docker, così i su
 dk.ssd_hint	Consigliato: un volume su SSD, così i dischi rigidi possono fermarsi.
 dk.plan.logs_title	Cambiare dove vanno i log dei container?
 dk.plan.logs_text	Applicando si modifica questo file e Docker riparte. Ogni container usa la nuova impostazione quando viene ricreato.
+err.request_expired	La richiesta è scaduta prima che qualcuno decidesse.
+err.certificate_mismatch	Il NAS non usa il certificato che vede il client: qualcosa in mezzo risponde al suo posto.
+rr.title	Un ripristino di {pc} attende la tua approvazione
+rr.intro	Un PC avviato da un sistema live chiede di leggere i suoi backup per un ripristino bare metal. Approva solo se l'hai avviato tu e lo schermo del PC mostra questo codice.
+rr.code	Codice mostrato sul PC
+rr.pc_claimed	PC, come lo chiama chi chiede
+rr.pc_matched	Backup che può leggere
+rr.pc_none	Scegli un PC…
+rr.choose_pc	Scegli il PC di cui il ripristino può leggere i backup.
+rr.from	Richiesto da
+rr.until	Attende fino a
+rr.approve	Approva
+rr.deny	Rifiuta
+rr.approved	Ripristino approvato: il PC può proseguire.
+rr.denied	Richiesta di ripristino rifiutata.
+nev.pcbackup.restore_request.title	Il ripristino di {pc} attende l'approvazione
+nev.pcbackup.restore_request.body	Un ripristino bare metal da {from_ip} chiede di leggere i backup di {pc} (codice {code}). Approva solo se l'hai avviato tu e lo schermo del PC mostra lo stesso codice.
+nev.pcbackup.restore_approved.title	Ripristino di {device} approvato da {user}
+nev.pcbackup.restore_approved.body	Un ripristino bare metal da {from_ip} (richiesto come {pc}) può leggere i backup di {device}, in sola lettura, per un'ora.

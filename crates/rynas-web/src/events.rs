@@ -15,8 +15,10 @@
 //!   `docker.stats` (data `DockerStats`, every 5 s while a stream listens, the latest on
 //!   connect), `docker.changed` (data `DockerChanged`: containers, stacks or images changed),
 //!   `storage.changed` (data `{}`: disks, partitions, arrays or block-device mounts changed,
-//!   from rynasd's system watcher; re-read `/storage`), and
-//!   `resync` with data `{"stream":"metrics"|"tasks"|"config"|"notifications"|"hardware"|"ups"|"removable"|"docker"|"storage"}` when the
+//!   from rynasd's system watcher; re-read `/storage`), `pcbackup.restore_request` (data
+//!   `RestoreRequestView`: a restore TUI asks for an approval) and `pcbackup.restore_resolved`
+//!   (data `RestoreRequestResolved`), and
+//!   `resync` with data `{"stream":"metrics"|"tasks"|"config"|"notifications"|"hardware"|"ups"|"removable"|"docker"|"storage"|"pcbackup"}` when the
 //!   client missed events and must re-read that collection. The task and notification halves follow rynasd's streams
 //!   (`/v1/tasks/stream`, `/v1/notifications/stream`) and reconnect every [`TASKS_RETRY`]
 //!   while rynasd is away; the metrics half never stops.
@@ -158,7 +160,7 @@ pub async fn events(
             follow(
                 st.clone(),
                 user.clone(),
-                "/v1/tasks/stream?config=1&removable=1&docker=1&storage=1",
+                "/v1/tasks/stream?config=1&removable=1&docker=1&storage=1&pcbackup=1",
                 task_event,
             ),
             follow(
@@ -221,6 +223,7 @@ fn task_event(f: Frame, out: &mut VecDeque<Event>) {
             out.push_back(resync("removable"));
             out.push_back(resync("docker"));
             out.push_back(resync("storage"));
+            out.push_back(resync("pcbackup"));
         }
         "storage_changed" => out.push_back(Event::default().event("storage.changed").data("{}")),
         "config_pending" => out.push_back(Event::default().event("config.pending").data(f.data)),
@@ -229,6 +232,11 @@ fn task_event(f: Frame, out: &mut VecDeque<Event>) {
         "docker_stats" => out.push_back(Event::default().event("docker.stats").data(f.data)),
         "docker_changed" => out.push_back(Event::default().event("docker.changed").data(f.data)),
         "docker_resync" => out.push_back(resync("docker")),
+        // restores waiting for an approval: under rynasd's own names
+        "pcbackup.restore_request" | "pcbackup.restore_resolved" => {
+            out.push_back(Event::default().event(f.event.clone()).data(f.data))
+        }
+        "pcbackup_resync" => out.push_back(resync("pcbackup")),
         kind => out.push_back(Event::default().event(format!("task.{kind}")).data(f.data)),
     }
 }
@@ -335,10 +343,28 @@ mod tests {
         task_event(f("removable"), &mut q);
         task_event(f("removable_resync"), &mut q);
         task_event(f("resync"), &mut q);
-        // five resyncs after rynasd's own: tasks, config, removable, docker, storage
-        assert_eq!(q.len(), 7);
-        task_event(f("storage_changed"), &mut q);
+        // six resyncs after rynasd's own: tasks, config, removable, docker, storage, pcbackup
         assert_eq!(q.len(), 8);
+        task_event(f("storage_changed"), &mut q);
+        assert_eq!(q.len(), 9);
+    }
+
+    #[test]
+    fn restore_request_events_keep_their_names() {
+        let mut q = VecDeque::new();
+        let f = |e: &str| Frame {
+            event: e.into(),
+            data: "{\"id\":\"x\"}".into(),
+        };
+        task_event(f("pcbackup.restore_request"), &mut q);
+        task_event(f("pcbackup.restore_resolved"), &mut q);
+        task_event(f("pcbackup_resync"), &mut q);
+        assert_eq!(q.len(), 3);
+        let text: Vec<String> = q.iter().map(|e| format!("{e:?}")).collect();
+        assert!(text[0].contains("pcbackup.restore_request"), "{}", text[0]);
+        assert!(text[1].contains("pcbackup.restore_resolved"), "{}", text[1]);
+        assert!(text[2].contains("pcbackup"), "{}", text[2]);
+        assert!(!text[0].contains("task."), "not renamed as a task event");
     }
 
     #[test]

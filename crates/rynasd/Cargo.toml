@@ -77,7 +77,8 @@ zstd.workspace = true
 # signs test catalogues with a key made in the test
 rynas-apps = { workspace = true, features = ["test-signing"] }
 tower = { version = "0.5.3", features = ["util"] }
-tokio = { workspace = true, features = ["io-util"] }
+# test-util: a paused clock for the one-shot timers (a restore request's expiry)
+tokio = { workspace = true, features = ["io-util", "test-util"] }
 tempfile.workspace = true
 rusqlite.workspace = true
 # a software P-256 key in the mobile device tests

@@ -74,7 +74,8 @@ const USAGE: &str = "usage:
                       [--disk /dev/X] [--confirm X] [--allow-http] [--dry-run]
                       [--method files|btrfs] [--mode whole|system|custom|add]
                       [--subvol NAME[=SNAPSHOT]]... [--add-to /dev/X] [--esp-mib N]
-                      [--passphrase-file F] [--no-nvram]
+                      [--passphrase-file F] [--no-nvram] [--pc NAME]
+                   (--pc: the PC's name offered when asking an administrator's approval)
   rynas-agent --version";
 
 fn flag(args: &[String], name: &str) -> bool {

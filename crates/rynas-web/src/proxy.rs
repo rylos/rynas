@@ -460,6 +460,12 @@ pub fn routes() -> Router<AppState> {
         .route("/pcbackup/devices/{device}/download", get(forward))
         .route("/pcbackup/devices/{device}/zip", get(forward))
         .route("/pcbackup/devices/{device}/restore-code", post(forward))
+        // the PCs a restore may read, and the restores waiting for an approval (web
+        // interface or a paired phone's device token)
+        .route("/pcbackup/devices", get(forward))
+        .route("/pcbackup/restore-requests", get(forward))
+        .route("/pcbackup/restore-requests/{id}/approve", post(forward))
+        .route("/pcbackup/restore-requests/{id}/deny", post(forward))
         // Wake-on-LAN, administrators' part (devices, discovery, enable on a PC); the part
         // every user may use on the devices that list them is in `wol_user_routes`
         .route("/wol/devices", post(forward))

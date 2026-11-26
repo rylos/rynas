@@ -1240,6 +1240,218 @@ pub struct RestoreSession {
     pub devices: Vec<RestoreDevice>,
 }
 
+// ------------------------------------------------------------------ restore approved from a phone
+
+/// `POST /api/v1/pcbackup/agent/restore-requests` (no session): the restore TUI asks an
+/// administrator to approve a bare-metal restore (`docs/phase2/pc-restore-approval.md`).
+pub const AGENT_RESTORE_REQUESTS: &str = "/api/v1/pcbackup/agent/restore-requests";
+/// A restore request waits this long for a decision.
+pub const RESTORE_REQUEST_TTL_MS: u64 = 10 * 60 * 1000;
+/// Longest wait of the TUI's poll (`?wait=` seconds).
+pub const RESTORE_REQUEST_POLL_WAIT_S: u64 = 25;
+/// Longest PC label a requester may claim (characters, after trimming).
+pub const RESTORE_REQUEST_MAX_PC: usize = 64;
+/// `kind` of the push action and of the QR scheme of a restore request.
+pub const PUSH_ACTION_PC_RESTORE: &str = "pc_restore";
+
+/// The body of a new restore request: only what the person at the dead PC says. Nothing the
+/// NAS knows comes back before an administrator approved (no PC list, no names).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreRequestCreate {
+    /// The PC as the person at it calls it (its host name, or the PC's name on the NAS);
+    /// shown to the approver, matched against the NAS' PCs only on the NAS.
+    pub pc: String,
+    /// SHA-256 of the certificate the TUI sees (`AA:BB:…`; empty over plain HTTP). It must
+    /// be the NAS' own (or empty), else 409 `certificate_mismatch`: the compare code is made
+    /// from it on both sides.
+    #[serde(default)]
+    pub fingerprint: String,
+}
+
+/// 201 of a new restore request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreRequestCreated {
+    /// 64 random bits (16 hex digits): names the request in the QR code and to the approver.
+    /// Not a secret (the poll token is); short so that the QR code fits a text console.
+    pub id: String,
+    /// The TUI's secret (256 bits, hex): needed to poll and to receive the approval. Never
+    /// in the QR code, never shown.
+    pub poll_token: String,
+    /// Random (hex): the TUI makes the compare code from it and the certificate it saw
+    /// ([`restore_compare_input`]); the NAS sends no code, so a party in the middle cannot
+    /// hand the TUI a matching one.
+    pub nonce: String,
+    /// This NAS' identity for the app (`GET /api/v1/ping` `sid`): the QR code names it.
+    pub sid: String,
+    pub expires_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreRequestState {
+    #[default]
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+    /// Withdrawn by the TUI (Esc).
+    Canceled,
+}
+
+impl RestoreRequestState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+            Self::Expired => "expired",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+/// What an approval gives the TUI: a restore code exactly like the one made in the web
+/// interface (one-time, read-only, this PC only, 1 hour), used with
+/// `POST /api/v1/pcbackup/agent/restore/login`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreApproval {
+    pub code: String,
+    pub device: String,
+    pub expires_ms: u64,
+}
+
+/// `GET /api/v1/pcbackup/agent/restore-requests/{id}?wait=<s>` with the poll token as bearer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreRequestPoll {
+    pub state: RestoreRequestState,
+    pub expires_ms: u64,
+    /// Only in `approved`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<RestoreApproval>,
+}
+
+/// A pending restore request as administrators see it (`GET /api/v1/pcbackup/restore-requests`,
+/// the event `pcbackup.restore_request`, the push action).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreRequestView {
+    pub id: String,
+    /// The PC as the requester claimed it (not checked: show it as a claim).
+    pub pc: String,
+    /// The backup PC the claim matches when exactly one does (device name or host name,
+    /// case-insensitive); `null`: the approver picks one.
+    pub device: Option<String>,
+    /// Six digits; the TUI shows the same ones (`482 913`).
+    pub code: String,
+    /// The address the request came from, as the NAS saw it.
+    pub from_ip: String,
+    /// SHA-256 of the NAS certificate the TUI saw (`AA:BB:…`; empty over plain HTTP).
+    #[serde(default)]
+    pub fingerprint: String,
+    pub created_ms: u64,
+    pub expires_ms: u64,
+}
+
+/// `POST /api/v1/pcbackup/restore-requests/{id}/approve`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreRequestApprove {
+    /// The PC whose backups the restore may read; may be left out only when the request
+    /// matched one ([`RestoreRequestView::device`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+}
+
+/// The event `pcbackup.restore_resolved`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreRequestResolved {
+    pub id: String,
+    /// `approved`, `denied`, `expired` or `canceled`.
+    pub outcome: RestoreRequestState,
+}
+
+/// `GET /api/v1/pcbackup/devices`: every PC the NAS can restore (file backups, a folder of
+/// btrfs snapshots, or both), for the approver's choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestorablePc {
+    pub device: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub hostname: String,
+    /// File backups (a backup group).
+    pub files: bool,
+    /// A folder of btrfs snapshots.
+    pub btrfs: bool,
+}
+
+/// The text whose SHA-256 gives a restore request's compare code: the NAS' nonce and the
+/// certificate the TUI saw, as upper-case hex without separators (empty over plain HTTP).
+/// The NAS uses the fingerprint the TUI claimed, which must be its own certificate; the TUI
+/// the one it really saw. A party in the middle (its own certificate) gets different digits.
+pub fn restore_compare_input(nonce: &str, fingerprint: &str) -> String {
+    let fp: String = fingerprint
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    format!("rynas-restore-v1\n{nonce}\n{fp}")
+}
+
+/// The six digits of a compare code from the SHA-256 of [`restore_compare_input`]: its first
+/// four bytes, big-endian, modulo 1 000 000, zero-padded.
+pub fn restore_compare_code(sha256: &[u8]) -> String {
+    let b = [sha256.first(), sha256.get(1), sha256.get(2), sha256.get(3)].map(|x| x.copied().unwrap_or(0));
+    format!("{:06}", u32::from_be_bytes(b) % 1_000_000)
+}
+
+/// `482 913`: a compare code as people read it.
+pub fn restore_code_text(code: &str) -> String {
+    if code.len() == 6 && code.is_ascii() {
+        format!("{} {}", &code[..3], &code[3..])
+    } else {
+        code.to_string()
+    }
+}
+
+/// What the restore TUI's QR code carries.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RestoreQr {
+    /// The NAS' `sid`.
+    pub nas: String,
+    /// The request's id.
+    pub req: String,
+    /// The compare code the TUI made (six digits).
+    pub code: String,
+}
+
+impl RestoreQr {
+    /// `rynas-restore:v1?nas=<sid>&req=<id>&code=<digits>` (every value is base64url, hex or
+    /// digits: nothing to escape).
+    pub fn link(&self) -> String {
+        format!("rynas-restore:v1?nas={}&req={}&code={}", self.nas, self.req, self.code)
+    }
+
+    /// The link read back; `None` for another scheme or version, a missing or malformed
+    /// value. Unknown parameters are ignored (later versions may add some).
+    pub fn parse(s: &str) -> Option<RestoreQr> {
+        let q = s.trim().strip_prefix("rynas-restore:v1?")?;
+        let mut out = RestoreQr::default();
+        for kv in q.split('&') {
+            let (k, v) = kv.split_once('=')?;
+            let slot = match k {
+                "nas" => &mut out.nas,
+                "req" => &mut out.req,
+                "code" => &mut out.code,
+                _ => continue,
+            };
+            *slot = v.to_string();
+        }
+        let b64u = |s: &str| !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        let hex = |s: &str| s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit());
+        let digits = out.code.len() == 6 && out.code.bytes().all(|b| b.is_ascii_digit());
+        (b64u(&out.nas) && hex(&out.req) && digits).then_some(out)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RestoreReport {
     pub device: String,
@@ -2159,6 +2371,45 @@ pub fn device_from_hostname(h: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_qr_links_go_both_ways() {
+        let q = RestoreQr {
+            nas: "AbCdEfGhIjKlMnOpQrSt_-".into(),
+            req: "0123456789abcdef".into(),
+            code: "042913".into(),
+        };
+        let link = q.link();
+        assert_eq!(link, "rynas-restore:v1?nas=AbCdEfGhIjKlMnOpQrSt_-&req=0123456789abcdef&code=042913");
+        assert_eq!(RestoreQr::parse(&link), Some(q.clone()));
+        // unknown parameters are ignored, the order does not matter
+        assert_eq!(
+            RestoreQr::parse("rynas-restore:v1?code=042913&x=1&req=0123456789abcdef&nas=AbCdEfGhIjKlMnOpQrSt_-"),
+            Some(q)
+        );
+        for bad in [
+            "rynas-restore:v2?nas=a&req=0123456789abcdef&code=042913",
+            "rynas://pair?nas=a&req=0123456789abcdef&code=042913",
+            "rynas-restore:v1?nas=a&req=0123456789abcdeg&code=042913",
+            "rynas-restore:v1?nas=a&req=0123456789abcdef&code=42913",
+            "rynas-restore:v1?nas=a%20b&req=0123456789abcdef&code=042913",
+            "rynas-restore:v1?req=0123456789abcdef&code=042913",
+        ] {
+            assert_eq!(RestoreQr::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn restore_compare_codes() {
+        // the input names the version, the nonce and the certificate as bare upper-case hex
+        assert_eq!(restore_compare_input("ab12", "aa:bb:0c"), "rynas-restore-v1\nab12\nAABB0C");
+        assert_eq!(restore_compare_input("ab12", ""), "rynas-restore-v1\nab12\n");
+        // first four bytes, big-endian, modulo a million, six digits
+        assert_eq!(restore_compare_code(&[0, 0, 0, 7, 9, 9]), "000007");
+        assert_eq!(restore_compare_code(&[0xff, 0xff, 0xff, 0xff]), "967295");
+        assert_eq!(restore_code_text("042913"), "042 913");
+        assert_eq!(restore_code_text("x"), "x");
+    }
 
     #[test]
     fn capture_note_from_a_newer_agent_is_kept_as_other() {

@@ -258,6 +258,7 @@ async fn device(
             job_id: field_of(e, "job_id"),
             state: field_of(e, "state"),
             user: field_of(e, "user"),
+            action: None,
         })
         .collect();
     if payloads.is_empty() {
