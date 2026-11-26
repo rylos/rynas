@@ -120,12 +120,15 @@ administrator account of the server. The PC backup agent ships in the same relea
 
 ## Synology and QNAP hardware
 
-rynas runs on any Debian box. On Synology hardware, use
-[**synodeb**](https://github.com/rylos/synodeb): it installs Debian 13 on
-[supported Synology models](https://github.com/rylos/synodeb#supported-models) with fans, LEDs, buttons, beeper, power schedule, UPS and every bay working. rynas
-detects it and adds the hardware screens (the real chassis, fan modes, LEDs, power schedule);
-on other machines they stay hidden. QNAP units have their own module, starting with the HS-251: bays, fans, LEDs and
+On Synology hardware, use [**synodeb**](https://github.com/rylos/synodeb): it installs Debian 13
+on [supported Synology models](https://github.com/rylos/synodeb#supported-models) with fans,
+LEDs, buttons, beeper, power schedule, UPS and every bay working. rynas detects it and adds the
+hardware screens (the real chassis, fan modes, LEDs, power schedule); on other machines they
+stay hidden. QNAP units have their own module, starting with the HS-251: bays, fans, LEDs and
 power recovery.
+
+And of course rynas runs on anything that runs Debian 13 amd64: a mini PC, an old desktop, a
+rack server or a virtual machine.
 
 ## More
 
