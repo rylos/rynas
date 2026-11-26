@@ -3806,6 +3806,7 @@ task.tailscale.logout	Uscita da Tailscale
 task.tailscale.options	Modifica delle impostazioni di Tailscale
 task.tailscale.revert	Ritorno alle impostazioni precedenti di Tailscale
 task.updates.check	Controllo aggiornamenti
+task.updates.status	Lettura degli aggiornamenti disponibili
 task.updates.backports	Modifica dell'impostazione dei backports di Debian
 task.updates.repositories	Modifica dei repository software
 task.updates.sources-check	Verifica dei repository software
@@ -3831,6 +3832,7 @@ upd.removals_note	Installare tutto rimuoverebbe: {p}.
 upd.held	Trattenuti
 upd.lists_updated	Ultimo controllo
 upd.read_at	Letto il
+upd.refreshing	{when} (lo stato di apt è cambiato: rilettura in corso…)
 upd.install_all	Installa tutto
 upd.install_security	Installa aggiornamenti di sicurezza
 upd.install_selected	Installa selezionati ({n})

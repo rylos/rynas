@@ -66,6 +66,9 @@ pub fn Updates() -> impl IntoView {
         channel.reload();
         kernel.reload();
     });
+    // the server answered with its last list while it reads apt's changed state again
+    // (`refreshing`): read the list when that ends
+    crate::tasks::use_task("updates.status", Signal::stored(None)).on_end(move |_| st.reload());
     let selected = RwSignal::new(Vec::<String>::new());
     let run = RwSignal::new(None::<(String, String)>);
     let ask = RwSignal::new(None::<Ask>);
@@ -179,7 +182,7 @@ fn summary_card(st: Remote<UpdatesStatus>, selected: RwSignal<Vec<String>>, ask:
             {removals}
             <dl class="kvs">
                 {ui::kv("upd.lists_updated", text(ms_text(s.lists_updated_ms)))}
-                {ui::kv("upd.read_at", text(i18n::datetime(s.read_at_ms)))}
+                {ui::kv("upd.read_at", if s.refreshing { text(tf("upd.refreshing", &[("when", &i18n::datetime(s.read_at_ms))])) } else { text(i18n::datetime(s.read_at_ms)) })}
                 {held}
                 {kernel_held}
             </dl>

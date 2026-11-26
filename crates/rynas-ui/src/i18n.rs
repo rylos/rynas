@@ -4767,6 +4767,7 @@ dict! { BLOB, LENS;
     // ---- System › Updates (upd.*) and its task names
     "task.updates.check" => "Check for updates";
     "task.updates.backports" => "Change the Debian backports setting";
+    "task.updates.status" => "Read the available updates";
     "task.updates.repositories" => "Change the software repositories";
     "task.updates.sources-check" => "Check the software repositories";
     "task.updates.install" => "Install updates";
@@ -4794,6 +4795,7 @@ dict! { BLOB, LENS;
     "upd.lists_updated" => "Last checked";
     "upd.read_at" => "Read on";
     "upd.install_all" => "Install all";
+    "upd.refreshing" => "{when} (apt's state changed: reading it again…)";
     "upd.install_security" => "Install security updates";
     "upd.install_selected" => "Install selected ({n})";
     "upd.autoremove_n" => "Clean up ({n})";

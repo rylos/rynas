@@ -56,6 +56,9 @@ const KERNEL_TTL: Duration = Duration::from_secs(6 * 3600);
 const KERNEL_MIN_REFRESH: Duration = Duration::from_secs(60);
 const LISTS_MAX_AGE: Duration = Duration::from_secs(36 * 3600);
 const NOTIFY_KEY: &str = "updates:available";
+/// The background recomputation of the status ([`Updates::status_now`]); it does not make
+/// the update actions wait.
+pub const STATUS_TASK: &str = "updates.status";
 
 /// What decides whether the cached simulation is still good.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -291,7 +294,7 @@ impl Updates {
             .into_iter()
             .find(|t| {
                 t.id != me
-                    && t.kind.starts_with("updates.")
+                    && t.kind.starts_with("updates.") && t.kind != STATUS_TASK
                     && matches!(t.status, TaskStatus::Running | TaskStatus::Queued)
             })
             .map(|t| t.id)
@@ -303,7 +306,7 @@ impl Updates {
             .list(100)
             .into_iter()
             .find(|t| {
-                t.kind.starts_with("updates.")
+                t.kind.starts_with("updates.") && t.kind != STATUS_TASK
                     && matches!(t.status, TaskStatus::Running | TaskStatus::Queued)
             })
             .map(|t| t.id)
@@ -335,6 +338,48 @@ impl Updates {
                 }
             }
         };
+        self.live(&mut s).await;
+        s
+    }
+
+    /// The answer of `GET /v1/updates`: the cached status when apt's state did not change;
+    /// when it did, the last status marked `refreshing` while task `updates.status` computes
+    /// the new one (apt's simulations never run inside the request). Only the very first
+    /// answer after rynasd's start, before anything was computed, waits for the simulations.
+    pub async fn status_now(self: &Arc<Self>) -> UpdatesStatus {
+        let stamp = self.stamp().await;
+        let last = self.cache.lock().expect("cache lock").clone();
+        match last {
+            Some((st, mut v)) => {
+                if st != stamp {
+                    v.refreshing = true;
+                    self.refresh_in_background();
+                }
+                self.live(&mut v).await;
+                v
+            }
+            None => self.status(false).await,
+        }
+    }
+
+    /// Task [`STATUS_TASK`]: recomputes the cached status and re-evaluates the notification;
+    /// one at a time.
+    pub fn refresh_in_background(self: &Arc<Self>) {
+        let me = self.clone();
+        let r = self.ops.tasks.spawn_once(STATUS_TASK, "apt", crate::scheduler::SCHEDULER_USER, move |ctx| async move {
+            ctx.log("apt's state changed: reading the available updates again");
+            let s = me.status(false).await;
+            me.notify(&s);
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::warn!("updates: {STATUS_TASK}: {e}");
+        }
+    }
+
+    /// The fields read live at every answer (reboot, running task, unattended-upgrades,
+    /// kernel holds).
+    async fn live(&self, s: &mut UpdatesStatus) {
         if self.dry {
             s.reboot_required = true;
             s.reboot_packages = vec!["linux-image-amd64".into()];
@@ -348,7 +393,6 @@ impl Updates {
         s.running_task = self.running_task();
         s.unattended_installed = unattended_installed(&self.config_root);
         s.kernel_held = self.kernel_held();
-        s
     }
 
     pub(crate) fn task_done(&self) {
@@ -537,7 +581,7 @@ pub fn router(st: UpdState) -> Router {
 
 async fn status_get(State(st): State<UpdState>) -> Res<Json<UpdatesStatus>> {
     let u = upd(&st)?;
-    Ok(Json(u.status(false).await))
+    Ok(Json(u.status_now().await))
 }
 
 fn no_apt() -> Error {

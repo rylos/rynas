@@ -71,6 +71,11 @@ pub struct UpdatesStatus {
     /// unattended-upgrades is installed (automatic updates need it).
     #[serde(default)]
     pub unattended_installed: bool,
+    /// apt's state changed since this answer was computed (`read_at_ms`): it is the last one,
+    /// and a newer one is being computed in the background (task `updates.status`; read
+    /// again when it ends).
+    #[serde(default)]
+    pub refreshing: bool,
 }
 
 impl UpdatesStatus {

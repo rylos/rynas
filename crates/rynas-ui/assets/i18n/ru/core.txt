@@ -3848,6 +3848,7 @@ task.tailscale.logout	Выход из Tailscale
 task.tailscale.options	Изменение настроек Tailscale
 task.tailscale.revert	Откат настроек Tailscale
 task.updates.check	Проверка обновлений
+task.updates.status	Чтение доступных обновлений
 task.updates.backports	Изменение настройки Debian backports
 task.updates.repositories	Изменение репозиториев ПО
 task.updates.sources-check	Проверка репозиториев ПО
@@ -3873,6 +3874,7 @@ upd.removals_note	Установка всех обновлений удалит:
 upd.held	Задержаны
 upd.lists_updated	Последняя проверка
 upd.read_at	Прочитано
+upd.refreshing	{when} (состояние apt изменилось: читается заново…)
 upd.install_all	Установить все
 upd.install_security	Установить обновления безопасности
 upd.install_selected	Установить выбранные ({n})

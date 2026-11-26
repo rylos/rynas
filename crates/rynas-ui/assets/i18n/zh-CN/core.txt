@@ -4135,6 +4135,7 @@ nev.space.thin_resumed.title	已恢复 {volume} 的自动清理
 nev.space.thin_resumed.body	{volume} 的快照增长已恢复正常。
 task.updates.check	检查更新
 task.updates.backports	更改 Debian Backports 设置
+task.updates.status	读取可用更新
 task.updates.repositories	更改软件源
 task.updates.sources-check	检查软件源
 task.updates.install	安装更新
@@ -4162,6 +4163,7 @@ upd.held	暂缓更新
 upd.lists_updated	上次检查
 upd.read_at	读取时间
 upd.install_all	全部安装
+upd.refreshing	{when}（apt 状态已更改：正在重新读取…）
 upd.install_security	安装安全更新
 upd.install_selected	安装所选更新（{n}）
 upd.autoremove_n	清理未使用的软件包（{n}）
