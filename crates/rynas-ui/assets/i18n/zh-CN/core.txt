@@ -6698,3 +6698,20 @@ wol.after.stay	保持开机
 wol.pc.not_linked	此电脑尚未关联网络唤醒设备。
 wol.pc.add_link	在「网络唤醒」页面添加此电脑
 wol.pc.add_hint	（在新标签页打开）
+task.apps.photos-sync	将用户的 Photos 文件夹连接到应用
+apps.ph.title	来自 RyNAS 应用的照片
+apps.ph.text	手机会把照片备份到每个用户的 Photos 文件夹。此应用以只读方式读取这些文件夹，绝不会修改或删除其中的内容。
+apps.ph.wired	已连接用户：{n} / {total}
+apps.ph.sync	同步
+apps.ph.synced	Photos 文件夹已同步
+apps.ph.mounted	已挂载
+apps.ph.not_mounted	尚未挂载：请同步
+apps.ph.lib.linked	图库已就绪
+apps.ph.lib.missing	没有图库：请同步
+apps.ph.lib.no-account	没有与该用户邮箱或名称匹配的账户
+apps.ph.lib.ambiguous	有多个账户匹配：请设置该用户的邮箱
+apps.ph.lib.other-owner	已由其他账户的图库读取
+apps.ph.allow	在设置允许的文件夹列表之前，图库的每个账户都能看到所有文件夹。请在图库设置（Users）中为每个账户设置允许的文件夹列表，用 glob 匹配其自己的文件夹，例如 {value}。
+apps.ph.key_hint	要为每个用户创建图库，请向 rynas 提供一个 Immich 管理员的 API 密钥（账户设置 › API 密钥），并授予 adminUser.read、library.read、library.create 和 library.update 权限。
+apps.ph.key_set	rynas 已有 API 密钥。输入新密钥即可替换。
+apps.ph.key_save	保存密钥
