@@ -6773,6 +6773,7 @@ task.space.preview	Anteprima dello spazio
 task.space.delete	Eliminazione snapshot
 task.space.action	Pulizia dello spazio
 task.space.review-delete	Eliminazione elementi rivisti
+task.space.auto-free	Pulizia automatica dello spazio
 nev.space.low_free.title	Poco spazio libero su {volume}
 nev.space.low_free.body	{volume} ha {free} liberi ({free_pct}%). Archiviazione › Spazio mostra cosa occupa spazio e cosa si può eliminare.
 nev.space.free_ok.title	Di nuovo abbastanza spazio libero su {volume}

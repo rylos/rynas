@@ -6853,6 +6853,7 @@ task.space.preview	Предпросмотр места
 task.space.delete	Удаление снимков
 task.space.action	Очистка места
 task.space.review-delete	Удаление проверенных объектов
+task.space.auto-free	Автоматическая очистка места
 nev.space.low_free.title	Мало свободного места на {volume}
 nev.space.low_free.body	На {volume} свободно {free} ({free_pct}%). Хранилище › Пространство показывает, что занимает место и что можно удалить.
 nev.space.free_ok.title	На {volume} снова достаточно места

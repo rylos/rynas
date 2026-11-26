@@ -421,7 +421,11 @@ async fn automatic_cleanup_one_deletion_at_a_time() {
     *w.env.space.lock().unwrap() = (1000, 50);
     w.space.history.lock().unwrap().thin.get_mut("vol1").unwrap().cooldown_until_ms = 0;
     let before = claims.load(Ordering::SeqCst);
-    assert!(w.space.thin_within("vol1", &w.env.vol, &settings, &claim, &|_| {}, Duration::ZERO).is_empty());
+    let (gone, stop) = w.space.thin_within("vol1", &w.env.vol, &settings, &claim, &|_| {}, Duration::ZERO);
+    assert!(gone.is_empty());
+    // the reason the task turns into "partial"
+    assert_eq!(stop, Some(super::model::ThinStop::TimeCap));
+    assert_eq!(w.space.thin_waits("vol1"), None);
     w.space.history.lock().unwrap().thin_suspended.insert("vol1".into());
     assert!(w.space.thin("vol1", &w.env.vol, &settings, &claim, &|_| {}).is_empty());
     assert_eq!(claims.load(Ordering::SeqCst), before);

@@ -1821,21 +1821,79 @@ impl Space {
     /// and failures are one open problem per volume (fixed key, at most one per hour,
     /// resolved when free space is back) and the next pass waits an hour.
     pub fn thin(&self, label: &str, mount: &Path, settings: &SpaceSettings, claim: &dyn Fn() -> Result<Claim, String>, log: &dyn Fn(&str)) -> Vec<String> {
-        self.thin_within(label, mount, settings, claim, log, THIN_TIME_CAP)
+        self.thin_within(label, mount, settings, claim, log, THIN_TIME_CAP).0
     }
 
-    fn thin_within(&self, label: &str, mount: &Path, settings: &SpaceSettings, claim: &dyn Fn() -> Result<Claim, String>, log: &dyn Fn(&str), time_cap: Duration) -> Vec<String> {
+    /// Why an automatic cleanup pass of `label` would not start now (suspended, cooling down,
+    /// the day's limit), without changing anything: the 5-minute watch starts no task then.
+    pub fn thin_waits(&self, label: &str) -> Option<model::ThinStop> {
+        let h = self.history.lock().unwrap();
+        if h.thin_suspended.contains(label) {
+            return Some(model::ThinStop::Suspended);
+        }
+        let mut day = h.thin.get(label).cloned().unwrap_or_default();
+        day.allowance(now_ms()).err()
+    }
+
+    /// Task `space.auto-free` of `label` (subject: the volume; one at a time): a pass of
+    /// [`Space::thin`] that ends **partial** when [`THIN_TIME_CAP`] stops it. `None` when one
+    /// runs already or the task could not start.
+    pub fn spawn_thin(self: &Arc<Self>, label: String, mount: PathBuf) -> Option<String> {
+        let s = self.clone();
+        let subject = label.clone();
+        let r = self.ops.tasks.spawn_once("space.auto-free", &subject, crate::scheduler::SCHEDULER_USER, move |ctx| async move {
+            let (c, rt) = (ctx.clone(), tokio::runtime::Handle::current());
+            let (_, stop) = in_thread(move || {
+                let settings = s.settings();
+                let token = c.token().clone();
+                // the volume is taken for each deletion and given back between them
+                let claim = || -> Result<Claim, String> {
+                    if token.is_cancelled() {
+                        return Err("cancelled".into());
+                    }
+                    let g = rt.block_on(s.claim_volumes(std::slice::from_ref(&mount), "space.auto-free"))?;
+                    Ok(Box::new(g))
+                };
+                let log = |m: &str| {
+                    tracing::info!("space: {m}");
+                    c.log(m);
+                };
+                s.thin_within(&label, &mount, &settings, &claim, &log, THIN_TIME_CAP)
+            })
+            .await?;
+            if ctx.is_cancelled() {
+                return Err("cancelled".into());
+            }
+            if stop == Some(model::ThinStop::TimeCap) {
+                ctx.partial(format!(
+                    "the pass used its {} minutes; the next one goes on within 5 minutes while the volume stays low",
+                    THIN_TIME_CAP.as_secs() / 60
+                ));
+            }
+            Ok(())
+        });
+        match r {
+            Ok(rynas_tasks::Spawned::New(id)) => Some(id),
+            Ok(rynas_tasks::Spawned::Running(_)) => None,
+            Err(e) => {
+                tracing::warn!("space: automatic cleanup: {e}");
+                None
+            }
+        }
+    }
+
+    fn thin_within(&self, label: &str, mount: &Path, settings: &SpaceSettings, claim: &dyn Fn() -> Result<Claim, String>, log: &dyn Fn(&str), time_cap: Duration) -> (Vec<String>, Option<model::ThinStop>) {
         let now = now_ms();
         if self.history.lock().unwrap().thin_suspended.contains(label) {
             log(&format!("{label}: automatic cleanup suspended after an unusual growth of the snapshots"));
-            return Vec::new();
+            return (Vec::new(), Some(model::ThinStop::Suspended));
         }
         let mut day = self.history.lock().unwrap().thin.get(label).cloned().unwrap_or_default();
         let allowance = match day.allowance(now) {
             Ok(n) => n.min(THIN_MAX as u32) as usize,
             Err(why) => {
                 log(&format!("{label}: automatic cleanup waits ({why:?})"));
-                return Vec::new();
+                return (Vec::new(), Some(why));
             }
         };
         let started = Instant::now();
@@ -1939,7 +1997,7 @@ impl Space {
                 self.notifier.emit(field(field(code(ev, "space.auto_free_stuck"), "volume", label), "stopped", &stopped));
             }
         }
-        deleted
+        (deleted, Some(stop))
     }
 
     /// The weekly growth check: snapshots of a volume grew more than the limits in 7 days.
@@ -2237,17 +2295,13 @@ pub fn spawn_loop(s: Arc<Space>) {
             let s2 = s.clone();
             let low = in_thread(move || s2.guard(&|m| tracing::info!("space: {m}"))).await.unwrap_or_default();
             for (label, mount) in low {
-                // the volume is taken for each deletion and given back between them
-                let (s2, rt) = (s.clone(), tokio::runtime::Handle::current());
-                let _ = in_thread(move || {
-                    let settings = s2.settings();
-                    let claim = || -> Result<Claim, String> {
-                        let g = rt.block_on(s2.claim_volumes(std::slice::from_ref(&mount), "space.auto-free"))?;
-                        Ok(Box::new(g))
-                    };
-                    s2.thin(&label, &mount, &settings, &claim, &|m| tracing::info!("space: {m}"))
-                })
-                .await;
+                // a pass is a task (log, Stop, partial at its time limit); none while the
+                // volume's cleanup waits (cooldown, the day's limit, suspended)
+                if let Some(why) = s.thin_waits(&label) {
+                    tracing::debug!("space: {label}: automatic cleanup waits ({why:?})");
+                    continue;
+                }
+                s.spawn_thin(label, mount);
             }
             if last_daily.is_none_or(|t| t.elapsed() >= HOUSEKEEPING_EVERY) {
                 let s2 = s.clone();
