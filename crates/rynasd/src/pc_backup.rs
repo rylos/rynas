@@ -153,16 +153,20 @@ pub trait ReceiveHost: Send + Sync {
     /// (referenced, exclusive) bytes of each snapshot by name, live from the volume's quota
     /// groups; `None` when quotas are off, simple quotas, or marked inconsistent.
     fn quota_sizes(&self, root: &Path, entries: &[Entry]) -> Option<BTreeMap<String, (u64, u64)>>;
+    /// The size of each subvolume's tree by id (`bytes_used` of its root item: what a full
+    /// tree search reads); ids it cannot read are left out. One small search each.
+    fn tree_sizes(&self, root: &Path, ids: &[u64]) -> BTreeMap<u64, u64>;
     /// The space of each line of snapshots ([`rynas_btrfs::pcspace`]), at idle priority:
     /// only the pairs of neighbours not measured before; `walk` false refuses full tree
-    /// searches. `step` before each pair compared. Blocking; `stop` cancels.
+    /// searches. `step(line, what)` before each pair compared and each full search.
+    /// Blocking; `stop` cancels.
     fn measure_space(
         &self,
         lines: &[Vec<rynas_btrfs::pcspace::Snap>],
         walk: bool,
         stop: &(dyn Fn() -> bool + Sync),
         progress: &(dyn Fn(&str) + Sync),
-        step: &(dyn Fn() + Sync),
+        step: &(dyn Fn(usize, rynas_btrfs::pcspace::Step) + Sync),
     ) -> Result<Vec<rynas_btrfs::pcspace::LineSpace>, String>;
     /// `/.rynas/manifest.json` inside snapshot `name` of `root`: `Ok(None)` when it is not
     /// there; refused when bigger than [`MANIFEST_MAX`] or not a regular file.
@@ -866,13 +870,18 @@ impl ReceiveHost for HostReceive {
         Some(out)
     }
 
+    fn tree_sizes(&self, root: &Path, ids: &[u64]) -> BTreeMap<u64, u64> {
+        let Ok(dir) = rynas_btrfs::ioctl::open_dir(root) else { return BTreeMap::new() };
+        ids.iter().filter_map(|&id| rynas_btrfs::extents::subvolume_tree_bytes(&dir, id).ok().flatten().map(|b| (id, b))).collect()
+    }
+
     fn measure_space(
         &self,
         lines: &[Vec<rynas_btrfs::pcspace::Snap>],
         walk: bool,
         stop: &(dyn Fn() -> bool + Sync),
         progress: &(dyn Fn(&str) + Sync),
-        step: &(dyn Fn() + Sync),
+        step: &(dyn Fn(usize, rynas_btrfs::pcspace::Step) + Sync),
     ) -> Result<Vec<rynas_btrfs::pcspace::LineSpace>, String> {
         // a thread of its own: the idle I/O class and the lowest CPU priority stay on it (a
         // blocking pool thread would keep them for the next job)
@@ -882,7 +891,8 @@ impl ReceiveHost for HostReceive {
                 let lim = rynas_btrfs::extents::Limits { max_ranges: 0, max_extents: SPACE_MAX_EXTENTS, stop, progress };
                 lines
                     .iter()
-                    .map(|l| rynas_btrfs::pcspace::measure_line(l, &lim, walk, &mut |_, _| step()).map_err(|e| e.to_string()))
+                    .enumerate()
+                    .map(|(i, l)| rynas_btrfs::pcspace::measure_line(l, &lim, walk, &mut |s| step(i, s)).map_err(|e| e.to_string()))
                     .collect()
             })
             .join()
@@ -1470,13 +1480,17 @@ impl ReceiveHost for MemoryReceive {
         let q = q.as_ref()?;
         Some(entries.iter().filter_map(|e| q.get(&e.name).map(|v| (e.name.clone(), *v))).collect())
     }
+    fn tree_sizes(&self, _: &Path, ids: &[u64]) -> BTreeMap<u64, u64> {
+        // made up: 256 MiB of metadata per subvolume
+        ids.iter().map(|&id| (id, 256 << 20)).collect()
+    }
     fn measure_space(
         &self,
         lines: &[Vec<rynas_btrfs::pcspace::Snap>],
         walk: bool,
         stop: &(dyn Fn() -> bool + Sync),
         _: &(dyn Fn(&str) + Sync),
-        step: &(dyn Fn() + Sync),
+        step: &(dyn Fn(usize, rynas_btrfs::pcspace::Step) + Sync),
     ) -> Result<Vec<rynas_btrfs::pcspace::LineSpace>, String> {
         use rynas_btrfs::extents::WalkError;
         use rynas_btrfs::pcspace::{PairFacts, Snap, Source, measure_with};
@@ -1504,7 +1518,8 @@ impl ReceiveHost for MemoryReceive {
         }
         lines
             .iter()
-            .map(|l| measure_with(l, &mut Fake { line: l, seen: &self.measured, stop }, walk, &mut |_, _| step()).map_err(|e| e.to_string()))
+            .enumerate()
+            .map(|(i, l)| measure_with(l, &mut Fake { line: l, seen: &self.measured, stop }, walk, &mut |s| step(i, s)).map_err(|e| e.to_string()))
             .collect()
     }
     fn read_manifest(&self, root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
@@ -1931,6 +1946,34 @@ struct Manifest {
     boot_copies: Vec<rynas_api_types::pcagent::BootCopy>,
     /// The ESP's mount point of a UEFI PC (`boot.esp` with `boot.uefi`).
     esp: Option<String>,
+    /// Used and total bytes of the filesystems holding the backed-up subvolumes (shown only).
+    pc_size: Option<PcSourceSize>,
+}
+
+/// The PC's size from a manifest: the filesystems named by the subvolumes' `fs_uuid`
+/// (manifests without one: the btrfs filesystems mounted where a backed-up subvolume is).
+fn manifest_pc_size(v: &serde_json::Value) -> Option<PcSourceSize> {
+    use serde_json::Value;
+    let subs = v.pointer("/btrbk/subvolumes").and_then(Value::as_array)?;
+    let field = |s: &Value, k: &str| s.get(k).and_then(Value::as_str).filter(|x| !x.is_empty()).map(str::to_string);
+    let uuids: BTreeSet<String> = subs.iter().take(256).filter_map(|s| field(s, "fs_uuid")).collect();
+    let mounts: BTreeSet<String> = subs.iter().take(256).filter_map(|s| field(s, "mount")).collect();
+    let mut out: Option<PcSourceSize> = None;
+    for f in v.get("filesystems").and_then(Value::as_array)?.iter().take(64) {
+        let uuid = field(f, "uuid").unwrap_or_default();
+        let mounted = f
+            .get("mounts")
+            .and_then(Value::as_array)
+            .is_some_and(|m| m.iter().take(64).any(|m| field(m, "path").is_some_and(|p| mounts.contains(&p))));
+        let named = if uuids.is_empty() { mounted && field(f, "fstype").as_deref() == Some("btrfs") } else { uuids.contains(&uuid) };
+        let num = |k: &str| f.get(k).and_then(Value::as_u64).unwrap_or(0);
+        if named && num("used_bytes") > 0 {
+            let o = out.get_or_insert_with(PcSourceSize::default);
+            o.used_bytes = o.used_bytes.saturating_add(num("used_bytes"));
+            o.size_bytes = o.size_bytes.saturating_add(num("size_bytes"));
+        }
+    }
+    out.map(|o| PcSourceSize { at_ms: v.get("written_at_ms").and_then(Value::as_u64), ..o })
 }
 
 /// A manifest found in a snapshot, or why it cannot be used.
@@ -2021,6 +2064,7 @@ fn parse_manifest(b: &[u8]) -> ManifestRead {
             .filter(|_| v.pointer("/boot/uefi").and_then(serde_json::Value::as_bool) == Some(true))
             .filter(|s| s.starts_with('/') && s.len() <= SHOWN_MAX && !s.chars().any(char::is_control))
             .map(str::to_string),
+        pc_size: manifest_pc_size(&v),
         subvolumes,
         root,
         disks,
@@ -2227,6 +2271,10 @@ struct Stored {
     /// only compares the neighbours that changed).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     space: BTreeMap<String, rynas_btrfs::pcspace::Known>,
+    /// What the agent sent for each snapshot it delivered (compressed stream bytes, by name;
+    /// names no longer in the folder go at the next receive).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    sent: BTreeMap<String, u64>,
     /// The last space measure that failed: (when, why); cleared by one that succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     measure_error: Option<(u64, String)>,
@@ -2266,6 +2314,128 @@ impl Stored {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Registry {
     targets: BTreeMap<String, Stored>,
+    /// How fast space measures ran on this NAS (for the time a first measure takes).
+    #[serde(default)]
+    measure_rates: MeasureRates,
+}
+
+/// Tree bytes a full tree search of the reference NAS reads per second: pc-work on a DS920+
+/// (J4125, disks, 3.6 GB RAM, idle I/O and nice 19), the first measure of 2026-11-26: trees
+/// of 3.98 GB (`@home` 3.22 GB with 2.29 M extents, `@` 0.76 GB) and 18 pairs in 2792 s.
+/// That run did not time the parts, so the default holds the pairs too (with
+/// [`DEFAULT_PAIR_MS`] it predicts about 47 minutes for it).
+const DEFAULT_WALK_TREE_BPS: u64 = 1_500_000;
+/// Seconds per pair of neighbours on the reference NAS, in milliseconds (a guess below the
+/// run above; replaced by the first measure timed here).
+const DEFAULT_PAIR_MS: u64 = 10_000;
+/// A part shorter than this says little about the speed: not recorded.
+const RATE_MIN_MS: u64 = 5_000;
+
+/// Speeds measured on this NAS (0: none yet). Each new figure is averaged with the kept one,
+/// so a busy evening does not throw the estimate off alone.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct MeasureRates {
+    /// Tree bytes a full tree search reads per second.
+    #[serde(default)]
+    walk_tree_bps: u64,
+    /// Milliseconds per pair of neighbours compared.
+    #[serde(default)]
+    pair_ms: u64,
+}
+
+impl MeasureRates {
+    fn walk_bps(&self) -> u64 {
+        if self.walk_tree_bps > 0 { self.walk_tree_bps } else { DEFAULT_WALK_TREE_BPS }
+    }
+
+    fn pair(&self) -> u64 {
+        if self.pair_ms > 0 { self.pair_ms } else { DEFAULT_PAIR_MS }
+    }
+
+    /// Expected milliseconds of a full search over `tree_bytes`.
+    fn walk_ms(&self, tree_bytes: u64) -> u64 {
+        (u128::from(tree_bytes) * 1000 / u128::from(self.walk_bps().max(1))) as u64
+    }
+
+    /// Adds what one measure timed: (tree bytes, ms) of its full searches, ms of its pairs.
+    fn learn(&mut self, walks: (u64, u64), pairs: (u64, u64)) {
+        let mix = |old: u64, new: u64| if old == 0 { new } else { (old + new) / 2 };
+        if walks.1 >= RATE_MIN_MS && walks.0 > 0 {
+            self.walk_tree_bps = mix(self.walk_tree_bps, (u128::from(walks.0) * 1000 / u128::from(walks.1)) as u64).max(1);
+        }
+        if pairs.0 > 0 && pairs.1 >= RATE_MIN_MS {
+            self.pair_ms = mix(self.pair_ms, pairs.1 / pairs.0).max(1);
+        }
+    }
+}
+
+/// The part of a measure running now.
+#[derive(Debug, Clone, Copy)]
+struct MeasurePart {
+    walk: bool,
+    /// Tree bytes of a full search.
+    tree: u64,
+    expected_ms: u64,
+    at: std::time::Instant,
+}
+
+/// The time a measure takes, part by part: the progress and what the next estimate learns.
+#[derive(Debug, Default)]
+struct MeasureClock {
+    cur: Option<MeasurePart>,
+    /// Expected milliseconds of the parts done.
+    done_ms: u64,
+    pct: u8,
+    pair_no: usize,
+    /// (tree bytes, ms) of the full searches done, (count, ms) of the pairs.
+    walks: (u64, u64),
+    pairs: (u64, u64),
+}
+
+impl MeasureClock {
+    /// Ends the running part; a line for the log about a full search.
+    fn close(&mut self) -> Option<String> {
+        let p = self.cur.take()?;
+        let ms = p.at.elapsed().as_millis() as u64;
+        self.done_ms = self.done_ms.saturating_add(p.expected_ms);
+        if p.walk {
+            self.walks = (self.walks.0 + p.tree, self.walks.1 + ms);
+            Some(format!("full tree search done in {} ({} bytes of tree per second)", human_secs(ms / 1000), u128::from(p.tree) * 1000 / u128::from(ms.max(1))))
+        } else {
+            self.pairs = (self.pairs.0 + 1, self.pairs.1 + ms);
+            None
+        }
+    }
+}
+
+/// "1 h 5 min", "12 min", "40 s": durations in the task log.
+fn human_secs(s: u64) -> String {
+    match s {
+        0..60 => format!("{s} s"),
+        60..3600 => format!("{} min", s.div_ceil(60)),
+        _ => format!("{} h {} min", s / 3600, (s % 3600) / 60),
+    }
+}
+
+/// What Measure will do on `lines` and about how long: each full search by its tree size
+/// (`tree_bytes`: by the newest snapshot's UUID), each pair at the pair speed.
+fn measure_plan(lines: &[Vec<rynas_btrfs::pcspace::Snap>], tree_bytes: &BTreeMap<String, u64>, rates: &MeasureRates, auto: bool) -> PcMeasurePlan {
+    use rynas_btrfs::pcspace::{needs_walk, pairs_needed};
+    let pairs: usize = lines.iter().map(|l| pairs_needed(l).len()).sum();
+    let walked: Vec<u64> = if auto {
+        Vec::new()
+    } else {
+        lines.iter().filter(|l| needs_walk(l)).map(|l| l.last().and_then(|s| tree_bytes.get(&s.uuid)).copied().unwrap_or(0)).collect()
+    };
+    let walk_tree_bytes = walked.iter().sum::<u64>();
+    let ms = rates.walk_ms(walk_tree_bytes).saturating_add(rates.pair().saturating_mul(pairs as u64));
+    PcMeasurePlan {
+        pairs: pairs as u32,
+        walks: walked.len() as u32,
+        walk_tree_bytes,
+        estimate_s: ms.div_ceil(1000),
+        measured_here: if walked.is_empty() { rates.pair_ms > 0 } else { rates.walk_tree_bps > 0 },
+    }
 }
 
 /// Called with (device, folder id) when an agent folder is removed.
@@ -2504,6 +2674,7 @@ impl PcBackup {
                 (None, Some(uuid)) => t.sizes.get(uuid).copied(),
                 (None, None) => None,
             };
+            snap.sent_bytes = t.sent.get(&e.name).copied();
         }
         let complete: BTreeSet<String> = s
             .list
@@ -2578,6 +2749,7 @@ impl PcBackup {
         let newest_run = runs.iter().filter(|r| !r.in_progress).find(|r| {
             r.snapshots.iter().any(|n| s.list.iter().any(|x| &x.name == n && !x.incomplete))
         });
+        let pc_size = manifest.as_ref().and_then(|m| m.2.as_ref().ok()).and_then(|m| m.pc_size);
         let bare_metal = bare_metal(&complete, manifest, newest_run);
         // the measured space no longer matches what is there: snapshots came or went (a
         // receive, a retention pass, a delete from the PC or by hand); records from before the
@@ -2628,6 +2800,7 @@ impl PcBackup {
                 error: t.measure_error.as_ref().map(|e| e.1.clone()),
                 error_at_ms: t.measure_error.as_ref().map(|e| e.0),
             },
+            pc_size,
         };
         View { target, list: s.list, runs, quota: quota.is_some() }
     }
@@ -2637,6 +2810,33 @@ impl PcBackup {
         let m = self.measuring.lock().unwrap();
         let id = &m.get(device)?.0;
         self.ops.tasks.get(id).filter(|i| !i.status.is_finished()).map(|_| id.clone())
+    }
+
+    /// The tree size of the newest snapshot of each line a measure has to search in full
+    /// (nothing measured of it yet), by UUID: the cost of the first measure.
+    fn walk_trees(&self, root: &Path, entries: &[Entry], lines: &[Vec<rynas_btrfs::pcspace::Snap>]) -> BTreeMap<String, u64> {
+        let by_uuid: BTreeMap<&str, u64> = entries.iter().filter_map(|e| e.info.as_ref()).filter_map(|i| Some((i.uuid.as_deref()?, i.root_id))).collect();
+        let wanted: Vec<(String, u64)> = lines
+            .iter()
+            .filter(|l| rynas_btrfs::pcspace::needs_walk(l))
+            .filter_map(|l| l.last())
+            .filter_map(|s| Some((s.uuid.clone(), *by_uuid.get(s.uuid.as_str())?)))
+            .collect();
+        if wanted.is_empty() {
+            return BTreeMap::new();
+        }
+        let sizes = self.host.tree_sizes(root, &wanted.iter().map(|w| w.1).collect::<Vec<_>>());
+        wanted.into_iter().filter_map(|(uuid, id)| Some((uuid, *sizes.get(&id)?))).collect()
+    }
+
+    /// What Measure would do now for `t` and about how long (`None`: no folder).
+    fn plan_measure(&self, t: &Stored) -> Option<PcMeasurePlan> {
+        let root = Path::new(&t.path);
+        let (_, entries, _) = self.host.scan(root).ok()??;
+        let lines = space_lines(root, &entries, &t.space);
+        let trees = self.walk_trees(root, &entries, &lines);
+        let rates = self.reg.lock().unwrap().measure_rates;
+        Some(measure_plan(&lines, &trees, &rates, false))
     }
 
     /// Starts the space measure of `device` (one task, `pcbackup.usage`), or answers the one
@@ -2701,33 +2901,96 @@ impl PcBackup {
     /// One space measure of `device` (blocking): the lines of snapshots, the pairs of
     /// neighbours not compared before, then the figures of the list and of every snapshot.
     fn measure(&self, device: &str, auto: bool, ctx: &rynas_tasks::TaskCtx) -> Result<(), String> {
-        use rynas_btrfs::pcspace::{needs_walk, pairs_needed};
+        use rynas_btrfs::pcspace::{Step, needs_walk};
         let t = self.stored(device).map_err(|e| e.2)?;
         let root = Path::new(&t.path);
         let Some((_, entries, _)) = self.host.scan(root)? else {
             return Err(format!("{}: no such folder", t.path));
         };
         let lines = space_lines(root, &entries, &t.space);
-        let pairs: usize = lines.iter().map(|l| pairs_needed(l).len()).sum();
         let walks = lines.iter().filter(|l| needs_walk(l)).count();
         let snaps: usize = lines.iter().map(Vec::len).sum();
         if auto && walks > 0 {
             ctx.log(&format!("{device}: a subvolume was never measured; Measure space measures it (a full tree search)"));
             return Ok(());
         }
-        ctx.log(&format!("{device}: {snaps} snapshots in {} subvolumes; {pairs} pairs of neighbours to compare, {walks} full tree searches", lines.len()));
+        let trees = self.walk_trees(root, &entries, &lines);
+        let rates = self.reg.lock().unwrap().measure_rates;
+        let plan = measure_plan(&lines, &trees, &rates, auto);
+        ctx.log(&format!(
+            "{device}: {snaps} snapshots in {} subvolumes; {} pairs of neighbours to compare, {} full tree searches",
+            lines.len(),
+            plan.pairs,
+            plan.walks
+        ));
+        let speed = if plan.measured_here { "speeds measured on this NAS" } else { "speeds of the reference NAS" };
+        ctx.log(&format!("expected: about {} ({} bytes of trees to search; {speed})", human_secs(plan.estimate_s), plan.walk_tree_bytes));
         let incomplete = entries.iter().filter(|e| e.incomplete()).count();
         if incomplete > 0 {
             ctx.log(&format!("{incomplete} interrupted receives are not counted"));
         }
-        let done = std::sync::atomic::AtomicUsize::new(0);
-        let steps = (pairs + walks).max(1);
-        let step = || {
-            let i = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            ctx.log(&format!("comparing pair {i} of {pairs}"));
-            ctx.progress((i * 100 / steps).min(99) as u8);
+        // progress by the expected time of each part (a full search can take most of it):
+        // the part running counts as it goes, up to 95 % of what it should take
+        let clock = Mutex::new(MeasureClock::default());
+        let total_ms = plan.estimate_s.saturating_mul(1000).max(1);
+        let show = |c: &mut MeasureClock| {
+            let inside = c.cur.map_or(0, |p| (p.at.elapsed().as_millis() as u64).min(p.expected_ms * 95 / 100));
+            let pct = (c.done_ms.saturating_add(inside) * 100 / total_ms).min(99) as u8;
+            if pct > c.pct {
+                c.pct = pct;
+                ctx.progress(pct);
+            }
         };
-        let res = self.host.measure_space(&lines, !auto, &|| ctx.is_cancelled(), &|l| ctx.log(l), &step).map_err(|e| if ctx.is_cancelled() { "cancelled".to_string() } else { e })?;
+        let step = |line: usize, s: Step| {
+            let mut c = clock.lock().unwrap();
+            if let Some(log) = c.close() {
+                ctx.log(&log);
+            }
+            let (walk, tree, expected_ms) = match s {
+                Step::Pair { .. } => {
+                    c.pair_no += 1;
+                    ctx.log(&format!("comparing pair {} of {}", c.pair_no, plan.pairs));
+                    (false, 0, rates.pair())
+                }
+                Step::Walk { index } => {
+                    let tree = lines.get(line).and_then(|l| l.get(index)).and_then(|s| trees.get(&s.uuid)).copied().unwrap_or(0);
+                    let ms = rates.walk_ms(tree);
+                    ctx.log(&format!("full tree search: {tree} bytes of tree, about {}", human_secs(ms.div_ceil(1000))));
+                    (true, tree, ms)
+                }
+            };
+            c.cur = Some(MeasurePart { walk, tree, expected_ms, at: std::time::Instant::now() });
+            show(&mut c);
+        };
+        // the progress also moves inside a long part (a task event only when the percentage
+        // changes); the thread ends with the measure
+        let (tick, ticks) = std::sync::mpsc::channel::<()>();
+        let res = std::thread::scope(|sc| {
+            let (show, clock) = (&show, &clock);
+            sc.spawn(move || {
+                while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = ticks.recv_timeout(Duration::from_secs(15)) {
+                    show(&mut clock.lock().unwrap());
+                }
+            });
+            let r = self.host.measure_space(&lines, !auto, &|| ctx.is_cancelled(), &|l| ctx.log(l), &step);
+            drop(tick);
+            r
+        });
+        {
+            // what this measure timed makes the next estimate (a part cut short by a failure
+            // or Stop says nothing)
+            let mut c = clock.lock().unwrap();
+            if res.is_ok()
+                && let Some(log) = c.close()
+            {
+                ctx.log(&log);
+            }
+            if c.walks.0 > 0 || c.pairs.0 > 0 {
+                let (walks, pairs) = (c.walks, c.pairs);
+                let _ = self.edit(|reg| reg.measure_rates.learn(walks, pairs));
+            }
+        }
+        let res = res.map_err(|e| if ctx.is_cancelled() { "cancelled".to_string() } else { e })?;
         let now = rynas_tasks::now_ms();
         let (mut space, mut sizes) = (BTreeMap::new(), BTreeMap::new());
         let (mut union, mut held, mut own) = (0u64, 0u64, 0u64);
@@ -3803,11 +4066,22 @@ impl PcBackup {
             let after = scan(&s)?;
             let got = after.iter().find(|e| e.name == snapshot).map(agent_entry);
             match (res, got) {
-                (Ok(()), Some(e)) if e.complete => Ok(rynas_api_types::pcagent::AgentBtrfsReceived {
-                    name: snapshot.clone(),
-                    received_uuid: e.received_uuid.unwrap_or_default(),
-                    bytes: read2.load(std::sync::atomic::Ordering::Relaxed),
-                }),
+                (Ok(()), Some(e)) if e.complete => {
+                    let bytes = read2.load(std::sync::atomic::Ordering::Relaxed);
+                    // what this backup sent stays with the snapshot (the names gone since
+                    // leave the record)
+                    let names: BTreeSet<&str> = after.iter().map(|e| e.name.as_str()).collect();
+                    let kept = s.edit(|reg| {
+                        if let Some(x) = reg.targets.get_mut(&dev) {
+                            x.sent.retain(|k, _| names.contains(k.as_str()));
+                            x.sent.insert(snapshot.clone(), bytes);
+                        }
+                    });
+                    if let Err(e) = kept {
+                        tracing::warn!("pc backup: {dev}: keeping the size of {snapshot}: {e}");
+                    }
+                    Ok(rynas_api_types::pcagent::AgentBtrfsReceived { name: snapshot.clone(), received_uuid: e.received_uuid.unwrap_or_default(), bytes })
+                }
                 (res, got) => {
                     // a move that half failed (writable in the folder): never a later parent
                     if got.is_some()
@@ -4181,6 +4455,7 @@ async fn detail_get(
             let nas = t.retention.owner == RetentionOwner::Nas;
             let plan = if nas { s.preview(&t, &t.retention, &t.rules()).map(|p| p.items).unwrap_or_default() } else { Vec::new() };
             PcTargetDetail {
+                measure_plan: s.plan_measure(&t),
                 plan,
                 key_line,
                 key_commands: receive::client_key_commands(&device),
@@ -5128,6 +5403,35 @@ mod tests {
             "btrbk":{"subvolumes":[{"name":"@","mount":"/"}],"boot_copies":"x"}}"#;
         let m = parse_manifest(odd).unwrap();
         assert!(m.disks.is_empty() && m.boot_copies.is_empty() && m.root);
+        assert_eq!(m.pc_size, None);
+        // the PC's size: the filesystems of the backed-up subvolumes (by fs_uuid, else by
+        // where they are mounted), never the others
+        let sized = br#"{"format":1,"written_at_ms":7,
+            "filesystems":[
+              {"uuid":"a","fstype":"btrfs","used_bytes":500,"size_bytes":1000,"mounts":[{"path":"/"}]},
+              {"uuid":"b","fstype":"vfat","used_bytes":9,"size_bytes":90,"mounts":[{"path":"/boot"}]},
+              {"uuid":"c","fstype":"btrfs","used_bytes":40,"size_bytes":400,"mounts":[{"path":"/data"}]}],
+            "btrbk":{"subvolumes":[{"name":"@","mount":"/","fs_uuid":"a"},{"name":"@home","mount":"/home","fs_uuid":"a"}]}}"#;
+        assert_eq!(parse_manifest(sized).unwrap().pc_size, Some(PcSourceSize { used_bytes: 500, size_bytes: 1000, at_ms: Some(7) }));
+        let old = String::from_utf8_lossy(sized).replace(r#","fs_uuid":"a""#, "").replace(r#""mount":"/home""#, r#""mount":"/data""#);
+        assert_eq!(parse_manifest(old.as_bytes()).unwrap().pc_size, Some(PcSourceSize { used_bytes: 540, size_bytes: 1400, at_ms: Some(7) }));
+    }
+
+    #[test]
+    fn measure_speeds_are_learned_and_averaged() {
+        let mut r = MeasureRates::default();
+        // the reference NAS: pc-work's first measure, about 47 minutes
+        assert_eq!((r.walk_ms(3_983_114_240) + 18 * r.pair()) / 60_000, 47);
+        // too short to say anything
+        r.learn((1 << 30, 4_000), (3, 4_000));
+        assert_eq!(r, MeasureRates::default());
+        // a first figure is taken as is, the next ones averaged with it
+        r.learn((4_000_000_000, 2_000_000), (4, 40_000));
+        assert_eq!((r.walk_tree_bps, r.pair_ms), (2_000_000, 10_000));
+        r.learn((4_000_000_000, 1_000_000), (2, 40_000));
+        assert_eq!((r.walk_tree_bps, r.pair_ms), (3_000_000, 15_000));
+        assert_eq!(human_secs(2792), "47 min");
+        assert_eq!(human_secs(3725), "1 h 2 min");
     }
 
     #[test]

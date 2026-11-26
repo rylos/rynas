@@ -145,9 +145,18 @@ pub fn needs_walk(line: &[Snap]) -> bool {
     !line.is_empty() && line.iter().all(|s| s.known.distinct.is_none())
 }
 
+/// What a measure is about to do: for progress and for timing each kind of work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Compare pair `done + 1` of `total` (by the newer snapshot's index).
+    Pair { done: usize, total: usize, newer: usize },
+    /// The full tree search of snapshot `index` (the anchor of the line).
+    Walk { index: usize },
+}
+
 /// Measures one line with `src`; `walk` false refuses full tree searches
-/// ([`WalkError::Unsupported`]); `step(done, total)` before each pair.
-pub fn measure_with(line: &[Snap], src: &mut dyn Source, walk: bool, step: &mut dyn FnMut(usize, usize)) -> Result<LineSpace, WalkError> {
+/// ([`WalkError::Unsupported`]); `step` before each pair and before the full search.
+pub fn measure_with(line: &[Snap], src: &mut dyn Source, walk: bool, step: &mut dyn FnMut(Step)) -> Result<LineSpace, WalkError> {
     let n = line.len();
     let mut out = LineSpace { known: line.iter().map(|s| s.known.clone()).collect(), ..LineSpace::default() };
     if n == 0 {
@@ -159,7 +168,7 @@ pub fn measure_with(line: &[Snap], src: &mut dyn Source, walk: bool, step: &mut 
     let id = |i: usize| line[i].uuid.clone();
     let todo = pairs_needed(line);
     for (j, &b) in todo.iter().enumerate() {
-        step(j, todo.len());
+        step(Step::Pair { done: j, total: todo.len(), newer: b });
         let a = b - 1;
         let f = src.pair(a, b)?;
         out.pairs += 1;
@@ -178,6 +187,7 @@ pub fn measure_with(line: &[Snap], src: &mut dyn Source, walk: bool, step: &mut 
     }
     if out.known.iter().all(|k| k.distinct.is_none()) {
         // the newest stays longest: the anchor of the next measures
+        step(Step::Walk { index: n - 1 });
         out.known[n - 1].distinct = Some(src.distinct(n - 1)?);
         out.walks += 1;
     }
@@ -313,7 +323,7 @@ impl Source for Tree<'_> {
 }
 
 /// Measures one line of snapshots on the volume (root privileges; blocking).
-pub fn measure_line(line: &[Snap], lim: &Limits, walk: bool, step: &mut dyn FnMut(usize, usize)) -> Result<LineSpace, WalkError> {
+pub fn measure_line(line: &[Snap], lim: &Limits, walk: bool, step: &mut dyn FnMut(Step)) -> Result<LineSpace, WalkError> {
     let opened: Vec<Opened> = line.iter().map(|s| freed::open(&s.path, false)).collect::<Result<_, _>>()?;
     let facts = opened.iter().map(|o| o.facts.clone()).collect();
     let mut src = Tree { line: opened, facts, lim, walk };
@@ -362,7 +372,7 @@ mod tests {
 
     fn run(src: &mut Sets, names: &[&str], known: &mut BTreeMap<String, Known>, walk: bool) -> Result<LineSpace, WalkError> {
         let l = line(names, known);
-        let r = measure_with(&l, src, walk, &mut |_, _| {})?;
+        let r = measure_with(&l, src, walk, &mut |_| {})?;
         known.clear();
         for (s, k) in l.iter().zip(&r.known) {
             known.insert(s.uuid.clone(), k.clone());
@@ -451,6 +461,15 @@ mod tests {
         assert_eq!(src.pairs, [(0, 1), (1, 2)]);
         // one full search in all
         assert_eq!(src.walks, [4]);
+    }
+
+    #[test]
+    fn steps_come_before_each_pair_and_the_full_search() {
+        let mut src = Sets { sets: history(3), outside: BTreeSet::new(), pairs: vec![], walks: vec![] };
+        let l = line(&["a", "b", "c"], &BTreeMap::new());
+        let mut steps = Vec::new();
+        measure_with(&l, &mut src, true, &mut |s| steps.push(s)).unwrap();
+        assert_eq!(steps, [Step::Pair { done: 0, total: 2, newer: 1 }, Step::Pair { done: 1, total: 2, newer: 2 }, Step::Walk { index: 2 }]);
     }
 
     #[test]

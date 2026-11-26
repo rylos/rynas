@@ -597,6 +597,67 @@ pub fn search_extent_items(
     }
 }
 
+/// `BTRFS_ROOT_TREE_OBJECTID`: the tree of the trees.
+const ROOT_TREE_OBJECTID: u64 = 1;
+/// `BTRFS_ROOT_ITEM_KEY`.
+const ROOT_ITEM_KEY: u32 = 132;
+/// Offset of `bytes_used` in a `btrfs_root_item`: after the 160-byte inode item,
+/// `generation`, `root_dirid`, `bytenr` and `byte_limit`.
+const ROOT_ITEM_BYTES_USED: usize = 192;
+
+/// `bytes_used` of a `btrfs_root_item` (little endian); `None` when the item is too short.
+fn root_item_bytes_used(item: &[u8]) -> Option<u64> {
+    item.get(ROOT_ITEM_BYTES_USED..ROOT_ITEM_BYTES_USED + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+}
+
+/// The size of subvolume `tree_id`'s own tree: `bytes_used` of its root item, the tree
+/// blocks the kernel has allocated to it (metadata only). A full tree search
+/// ([`subvolume_extents`]) reads all of them, so its cost follows this number. One small
+/// search of the root tree (`CAP_SYS_ADMIN`); `fd`: any descriptor on the filesystem.
+/// `Ok(None)`: no root item for that id.
+pub fn subvolume_tree_bytes(fd: &std::fs::File, tree_id: u64) -> Result<Option<u64>, WalkError> {
+    const BUF: usize = 4096;
+    let mut words = vec![0u64; KEY_WORDS + 1 + BUF / 8];
+    let key = SearchKey {
+        tree_id: ROOT_TREE_OBJECTID,
+        min_objectid: tree_id,
+        max_objectid: tree_id,
+        min_offset: 0,
+        max_offset: u64::MAX,
+        min_transid: 0,
+        max_transid: u64::MAX,
+        min_type: ROOT_ITEM_KEY,
+        max_type: ROOT_ITEM_KEY,
+        nr_items: 1,
+        unused: 0,
+        unused1: [0; 4],
+    };
+    // SAFETY: the buffer is 8-aligned and longer than the key
+    unsafe { std::ptr::write(words.as_mut_ptr() as *mut SearchKey, key) };
+    words[KEY_WORDS] = BUF as u64;
+    // SAFETY: the kernel writes the key back and at most `buf_size` bytes after it
+    if unsafe { libc::ioctl(fd.as_raw_fd(), IOC_TREE_SEARCH_V2 as _, words.as_mut_ptr()) } < 0 {
+        return Err(WalkError::Unsupported(io::Error::last_os_error().to_string()));
+    }
+    // SAFETY: the key the kernel wrote back
+    let nr = unsafe { std::ptr::read(words.as_ptr() as *const SearchKey) }.nr_items as usize;
+    if nr == 0 {
+        return Ok(None);
+    }
+    // SAFETY: the words after the key and the size, viewed as bytes
+    let buf = unsafe { std::slice::from_raw_parts(words.as_ptr().add(KEY_WORDS + 1) as *const u8, BUF) };
+    let bad = || WalkError::Io("malformed tree search result".into());
+    let h = buf.get(..SEARCH_HEADER).ok_or_else(bad)?;
+    let u64_at = |a: usize| u64::from_ne_bytes(h[a..a + 8].try_into().unwrap_or([0; 8]));
+    let u32_at = |a: usize| u32::from_ne_bytes(h[a..a + 4].try_into().unwrap_or([0; 4]));
+    let (objectid, kind, len) = (u64_at(8), u32_at(24), u32_at(28) as usize);
+    if objectid != tree_id || kind != ROOT_ITEM_KEY {
+        return Ok(None);
+    }
+    let item = buf.get(SEARCH_HEADER..SEARCH_HEADER + len).ok_or_else(bad)?;
+    Ok(root_item_bytes_used(item))
+}
+
 /// Distinct extents (packed), deduplicated in batches with a bounded vector.
 #[derive(Default)]
 struct ExtentSet {
@@ -855,6 +916,16 @@ mod tests {
         v.extend_from_slice(&len.to_le_bytes()); // num_bytes
         assert_eq!(v.len(), FILE_EXTENT_ITEM);
         v
+    }
+
+    #[test]
+    fn root_items_give_their_tree_size() {
+        // a btrfs_root_item: inode item (160), generation, root_dirid, bytenr, byte_limit,
+        // then bytes_used
+        let mut item = vec![0u8; 439];
+        item[192..200].copy_from_slice(&3_222_749_184u64.to_le_bytes());
+        assert_eq!(root_item_bytes_used(&item), Some(3_222_749_184));
+        assert_eq!(root_item_bytes_used(&item[..199]), None);
     }
 
     #[test]

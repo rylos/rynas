@@ -5549,6 +5549,20 @@ bkpc.sizes_quota	Le dimensioni arrivano in tempo reale dai gruppi di quota del v
 bkpc.sizes_note	Dimensione: i dati su disco a cui lo snapshot fa riferimento · quanto contiene solo lui (circa quanto libera eliminarlo da solo). La misura confronta ogni snapshot con i vicini a bassa priorità; la prima volta richiede tempo, poi si confrontano solo i backup nuovi, e un PC misurato una volta si aggiorna da solo a ogni nuovo backup.
 bkpc.measuring	misura in corso…
 bkpc.measuring_note	Misura in corso sul NAS a bassa priorità: puoi chiudere questa pagina, l'elenco si aggiorna quando finisce (avanzamento e log nel pannello delle attività).
+bkpc.measure_left	{pct} % · circa {time} alla fine
+bkpc.measure_first	La prima misura richiede circa {time}.
+bkpc.measure_confirm_title	Misurare lo spazio per la prima volta?
+bkpc.measure_confirm_text	La prima misura legge per intero lo snapshot più recente di ogni sottovolume ({tree} di dati dei file). Su questo NAS richiede circa {time} ({speed}). Gira con la priorità più bassa e si può fermare dal pannello delle attività. Il risultato è esatto; le misure successive confrontano solo ciò che è cambiato e richiedono pochi minuti.
+bkpc.measure_speed_here	in base alle misure precedenti su questo NAS
+bkpc.measure_speed_ref	stima da un NAS di riferimento con J4125 e dischi rigidi; la velocità di questo NAS si impara dalla prima misura
+pcb.pc_size	Dimensione sul PC
+pcb.pc_size_text	{used} usati su {size}
+pcb.pc_size_at	come indicato dal PC il {when}
+pcb.pc_size_none	Non indicata (il PC non invia un manifest)
+pcb.pc_size_help	Quanto occupano i filesystem del PC secondo il suo manifest: tutto ciò che contengono, anche quello che non va nel backup (snapshot locali, altri sottovolumi), prima della compressione. Quanto occupano i backup sul NAS è in Spazio.
+pcb.pc_used_short	{size} sul PC
+pcb.added_agent	Quanto ha inviato ogni backup è sulla sua riga in Backup.
+pcb.added_btrbk	btrbk non dice quanto ha inviato ogni backup: Misura lo spazio mostra quanto tiene da solo ogni snapshot.
 bkpc.measure_failed_short	misura non riuscita
 bkpc.measure_failed	L'ultima misura non è riuscita ({when}): {error}
 bkpc.run.lacks	Manca {names}

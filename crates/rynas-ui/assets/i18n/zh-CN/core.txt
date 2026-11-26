@@ -6225,6 +6225,20 @@ bkpc.sizes_quota	大小根据存储卷的配额组实时统计。
 bkpc.sizes_note	引用大小表示快照在磁盘上引用的数据量；独占大小表示只由此快照持有的数据量，接近单独删除它可释放的空间。统计会以低优先级将每个快照与相邻快照比较：第一次需要一些时间，之后只比较新的备份；统计过一次的电脑会在每次新备份后自动更新。
 bkpc.measuring	正在统计…
 bkpc.measuring_note	正在 NAS 上以低优先级统计：可以关闭此页面，完成后列表会自动更新（进度和日志见任务面板）。
+bkpc.measure_left	{pct}% · 约剩 {time}
+bkpc.measure_first	首次统计约需 {time}。
+bkpc.measure_confirm_title	首次统计空间？
+bkpc.measure_confirm_text	首次统计会完整读取每个子卷最新的快照（{tree} 的文件记录）。在此 NAS 上约需 {time}（{speed}）。它以最低优先级运行，可在任务面板中停止。结果是精确的；之后的统计只比较变化部分，只需几分钟。
+bkpc.measure_speed_here	根据此 NAS 以往的统计
+bkpc.measure_speed_ref	按参考 NAS（J4125 加机械硬盘）估算；此 NAS 自身的速度会在首次统计时得出
+pcb.pc_size	电脑上的大小
+pcb.pc_size_text	已用 {used}，共 {size}
+pcb.pc_size_at	电脑于 {when} 报告
+pcb.pc_size_none	未报告（电脑没有发送清单）
+pcb.pc_size_help	按电脑清单显示其文件系统的占用：包括其中所有内容，也包括未备份的部分（本地快照、其他子卷），为压缩前的大小。备份在 NAS 上占用的空间见“占用空间”。
+pcb.pc_used_short	电脑上 {size}
+pcb.added_agent	每次备份传输的数据量显示在“备份”下对应的行中。
+pcb.added_btrbk	btrbk 不报告每次备份传输了多少：“统计空间占用”会显示每个快照独占的数据。
 bkpc.measure_failed_short	统计失败
 bkpc.measure_failed	上次统计失败（{when}）：{error}
 bkpc.run.lacks	缺少 {names}

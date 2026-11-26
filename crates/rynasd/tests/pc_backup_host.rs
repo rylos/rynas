@@ -51,7 +51,7 @@ fn host_receive() {
         })
         .collect();
     let t = Instant::now();
-    let r = h.measure_space(&lines, true, &|| false, &|l| println!("{l}"), &|| {}).unwrap();
+    let r = h.measure_space(&lines, true, &|| false, &|l| println!("{l}"), &|_, _| {}).unwrap();
     println!("space measured in {:?}", t.elapsed());
     let stop = || false;
     let lim = Limits { max_ranges: 0, max_extents: 1 << 23, stop: &stop, progress: &|_| {} };
@@ -81,7 +81,7 @@ fn host_receive() {
             s.known = k.clone();
         }
     }
-    let again = h.measure_space(&lines, false, &|| false, &|_| {}, &|| {}).unwrap();
+    let again = h.measure_space(&lines, false, &|| false, &|_| {}, &|_, _| {}).unwrap();
     assert!(again.iter().zip(&r).all(|(a, b)| a.pairs == 0 && a.walks == 0 && a.union == b.union));
 
     // the manifest of the newest snapshot; a symlink in an older one is refused, never followed

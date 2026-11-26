@@ -210,6 +210,41 @@ pub struct ReceivedSnapshot {
     /// Its size, when known (quota groups, or measured on demand).
     #[serde(default)]
     pub size: Option<SnapshotSize>,
+    /// What the PC's `rynas-agent` sent for it: the bytes of the compressed stream the NAS
+    /// read (what the backup added, as data on the wire). Kept from 0.9.13 on; unknown for
+    /// snapshots received before and for btrbk over SSH.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_bytes: Option<u64>,
+}
+
+/// The size of the PC itself at its last backup, as the PC reported it in the layout
+/// manifest (`rynas-agent` writes it, also next to btrbk): used and total bytes of the
+/// filesystems that hold the backed-up subvolumes. Logical bytes of the whole filesystems
+/// (what is not backed up, such as the PC's own snapshots, counts too): a free figure, not
+/// what the backups take on the NAS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PcSourceSize {
+    pub used_bytes: u64,
+    pub size_bytes: u64,
+    /// When the manifest was written (the PC's clock).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<u64>,
+}
+
+/// What Measure would do now and about how long it takes (`PcTargetDetail::measure_plan`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PcMeasurePlan {
+    /// Pairs of neighbouring snapshots to compare.
+    pub pairs: u32,
+    /// Full tree searches: one per subvolume never measured (of its newest snapshot).
+    pub walks: u32,
+    /// Metadata those searches read: the size of the snapshots' trees.
+    pub walk_tree_bytes: u64,
+    /// About how long it takes, in seconds.
+    pub estimate_s: u64,
+    /// The speed comes from earlier measures on this NAS (otherwise from a reference NAS:
+    /// a J4125 with disks).
+    pub measured_here: bool,
 }
 
 /// The size of one received snapshot.
@@ -461,6 +496,10 @@ pub struct PcTarget {
     /// The space measurement: running now, or how the last one failed.
     #[serde(default)]
     pub measure: PcMeasure,
+    /// The PC's own size at its last backup (from its manifest; none without one). Added in
+    /// 0.9.13.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pc_size: Option<PcSourceSize>,
 }
 
 /// The measurement of a PC's space (task `pcbackup.usage`, started by Measure or after a new
@@ -515,6 +554,10 @@ pub struct PcTargetDetail {
     /// pass (the plan of the saved settings).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plan: Vec<RetentionItem>,
+    /// What Measure would do now and about how long (none while the folder is missing).
+    /// Added in 0.9.13.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measure_plan: Option<PcMeasurePlan>,
 }
 
 /// `POST /api/v1/pc-backups/plan/retention`: what the NAS would delete now with these

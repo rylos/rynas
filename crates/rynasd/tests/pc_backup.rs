@@ -549,10 +549,17 @@ async fn the_space_follows_new_backups_where_they_changed() {
     task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": path, "adopt": true}))).await;
     let pc = |l: Vec<PcTarget>| l.into_iter().find(|t| t.device == "pc").unwrap();
     assert!(pc(list(&e).await).usage.is_none());
+    // before: one full search of a 256 MiB tree at the reference speed (1.5 MB/s) and two
+    // pairs at 10 s each
+    let plan = detail(&e, "pc").await.measure_plan.unwrap();
+    assert_eq!(plan, PcMeasurePlan { pairs: 2, walks: 1, walk_tree_bytes: 256 << 20, estimate_s: 199, measured_here: false });
     // one full search and two pairs
     let t = task(&e, "POST", "/v1/pc-backups/targets/pc/usage", None).await;
     assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
     assert_eq!(e.host.measured.lock().unwrap().len(), 3);
+    // nothing left to do, and the made-up measure was too quick to teach a speed
+    let plan = detail(&e, "pc").await.measure_plan.unwrap();
+    assert_eq!((plan.pairs, plan.walks, plan.estimate_s, plan.measured_here), (0, 0, 0, false));
     let first = pc(list(&e).await).usage.unwrap();
     // a new backup: stale until measured; then only the new pair and the one before it
     let mut entries = e.host.folders.lock().unwrap().get(std::path::Path::new(path)).unwrap().1.clone();
@@ -792,6 +799,10 @@ async fn agent_folder_pairing_listing_and_receive() {
     let (s, b) = agent_call(&e, Some(&tok), "POST", &recv(&n2, &n1), zst(&stream(&n2, u2, Some(&r1.received_uuid)))).await;
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     assert_eq!(listing(&e, &tok).await.snapshots.len(), 2);
+    let r2: rynas_api_types::pcagent::AgentBtrfsReceived = serde_json::from_slice(&b).unwrap();
+    // what each backup sent stays with its snapshot
+    let sent: Vec<(String, Option<u64>)> = detail(&e, "laptop").await.list.into_iter().map(|s| (s.name, s.sent_bytes)).collect();
+    assert!(sent.contains(&(n1.clone(), Some(r1.bytes))) && sent.contains(&(n2.clone(), Some(r2.bytes))), "{sent:?}");
 
     // refused before anything is received: bad names, another subvolume's parent, a parent
     // the NAS does not have, a busy folder

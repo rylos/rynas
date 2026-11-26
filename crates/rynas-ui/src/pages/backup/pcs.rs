@@ -78,6 +78,29 @@ fn measure_running(m: &PcMeasure) -> bool {
     m.task.as_deref().is_some_and(task_running)
 }
 
+/// How far measure task `id` is: "34 % · about 20 min left" (the server weighs its progress
+/// by the time each part should take; the store follows it by events), else "".
+fn measure_progress(id: &str) -> String {
+    let Some((pct, start)) = tasks::tasks().list.with(|l| l.iter().find(|t| t.id == id).and_then(|t| Some((t.progress?, t.start_ms)))) else {
+        return String::new();
+    };
+    let pct = u64::from(pct.clamp(1, 99));
+    let elapsed = (js_sys::Date::now() as u64).saturating_sub(start) / 1000;
+    let left = elapsed * (100 - pct) / pct;
+    tf("bkpc.measure_left", &[("pct", &pct.to_string()), ("time", &rough_time(left))])
+}
+
+/// An expected duration in whole minutes: "45 min", "2 h 10" (at least a minute).
+fn rough_time(secs: u64) -> String {
+    let min = secs.div_ceil(60).max(1);
+    if min >= 60 { i18n::elapsed(min * 60) } else { i18n::approx(min * 60) }
+}
+
+/// The PC's own size from its manifest: "523 GiB used of 930 GiB".
+fn pc_size_text(z: &PcSourceSize) -> String {
+    tf("pcb.pc_size_text", &[("used", &i18n::bytes(z.used_bytes)), ("size", &i18n::bytes(z.size_bytes))])
+}
+
 /// "measured 2 d ago": when a space figure was read (shown while backups came or went since).
 fn measured_ago(at_ms: u64) -> String {
     let now = js_sys::Date::now() as u64;
@@ -617,10 +640,9 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                 let last_sent = paired.as_ref().and_then(|d| d.last_run.as_ref()).filter(|r| r.ok && r.bytes_added > 0).map(|r| tf("pcb.last_sent", &[("size", &i18n::bytes(r.bytes_added))]));
                 // an older figure says when it was measured (snapshots came or went since)
                 let stale = p.usage.filter(|_| p.usage_stale).map(|u| measured_ago(u.read_at_ms));
-                let space_sub = match (stale, last_sent) {
-                    (Some(s), Some(l)) => Some(format!("{s} · {l}")),
-                    (s, l) => s.or(l),
-                };
+                // the PC's own size, as its manifest says (free: nothing measured)
+                let pc_used = p.pc_size.map(|z| tf("pcb.pc_used_short", &[("size", &i18n::bytes(z.used_bytes))]));
+                let space_sub = Some([stale, pc_used, last_sent].into_iter().flatten().collect::<Vec<_>>().join(" · ")).filter(|s| !s.is_empty());
                 let mut cells = vec![
                     ui::cell("bk.col.pc", "wrap", ui::two_lines(view! { <strong>{p.device.clone()}</strong> }.into_any(), sub, "cell-sub small")),
                     ui::cell("col.status", "wrap", {
@@ -653,8 +675,9 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                         let task = p.measure.task.clone();
                         let failed = p.measure.error.clone();
                         let sub = move || {
-                            if task.as_deref().is_some_and(task_running) {
-                                Some(view! { <span class="cell-sub small">{tr("bkpc.measuring")}</span> }.into_any())
+                            if let Some(id) = task.as_deref().filter(|id| task_running(id)) {
+                                let left = measure_progress(id);
+                                Some(view! { <span class="cell-sub small">{tr("bkpc.measuring")}" "{left}</span> }.into_any())
                             } else if let Some(e) = failed.clone() {
                                 Some(view! { <span class="cell-sub small bk-err" title=e>{tr("bkpc.measure_failed_short")}</span> }.into_any())
                             } else {
@@ -1410,7 +1433,11 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             || started.with(|id| id.as_deref().is_some_and(task_running))
             || detail.data.with(|d| d.as_ref().is_some_and(|d| measure_running(&d.target.measure)))
     });
-    let measure = move |_| {
+    // a measure that searches whole snapshots (the first one) says first about how long it
+    // takes and goes only once confirmed; one that compares what changed starts at once
+    let ask_measure = RwSignal::new(None::<PcMeasurePlan>);
+    let start_measure = Callback::new(move |_: ()| {
+        ask_measure.set(None);
         let base = target_url(&dev.get_value());
         starting.set(true);
         measure_err.set(None);
@@ -1428,6 +1455,10 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 }
             }
         });
+    });
+    let measure = move |_| match detail.data.with_untracked(|d| d.as_ref().and_then(|d| d.measure_plan)) {
+        Some(p) if p.walks > 0 => ask_measure.set(Some(p)),
+        _ => start_measure.run(()),
     };
     let remove = Callback::new(move |_| {
         run(pcs, ("DELETE", target_url(&dev.get_value()), None), tf("bk.removed", &[("device", &dev.get_value())]), (busy, error, None), Callback::new(move |_| {
@@ -1583,7 +1614,11 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                         {kept.map(|k| view! { <span class="cell-sub small">{k}</span> })}
                     </div>
                 }.into_any()),
-                ui::text_cell("snap.col.size", "tnum", size_text(s.size)),
+                // the measured size, and below it what the agent sent for it (free)
+                match s.sent_bytes {
+                    Some(b) => ui::cell("snap.col.size", "tnum wrap", ui::two_lines(ui::text(size_text(s.size)), Some(tf("pcb.sent_size", &[("size", &i18n::bytes(b))])), "cell-sub small")),
+                    None => ui::text_cell("snap.col.size", "tnum", size_text(s.size)),
+                },
                 ui::actions(view! {
                     {browse}
                     <span class="tip-wrap" title=wrap_tip>
@@ -1876,16 +1911,35 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             }
             None => ui::text(t("bk.usage_none").to_string()),
         };
-        // a measure running on the NAS (also one started elsewhere or after a backup), else
-        // how the last one failed
+        // before a measure that searches whole snapshots: about how long it takes (from the
+        // speed of earlier measures on this NAS)
+        let first_time = d.measure_plan.filter(|m| m.walks > 0).map(|m| tf("bkpc.measure_first", &[("time", &rough_time(m.estimate_s))]));
+        // a measure running on the NAS (also one started elsewhere or after a backup), its
+        // progress and time left, else how the last one failed
         let failed = p.measure.error.clone().map(|e| tf("bkpc.measure_failed", &[("when", &i18n::datetime(p.measure.error_at_ms.unwrap_or(0))), ("error", &e)]));
+        let running_id = p.measure.task.clone();
         let usage_view = view! {
             {usage_view}
             {move || if measuring.get() {
-                Some(view! { <div class="small muted">{tr("bkpc.measuring_note")}</div> }.into_any())
+                let left = started.get().or_else(|| running_id.clone()).map(|id| measure_progress(&id)).unwrap_or_default();
+                Some(view! { <div class="small muted">{tr("bkpc.measuring_note")}" "{left}</div> }.into_any())
+            } else if let Some(f) = failed.clone() {
+                Some(view! { <div class="small bk-err">{f}</div> }.into_any())
             } else {
-                failed.clone().map(|f| view! { <div class="small bk-err">{f}</div> }.into_any())
+                first_time.clone().map(|f| view! { <div class="small muted">{f}</div> }.into_any())
             }}
+        }
+        .into_any();
+        // the PC's own size (its manifest) and what each backup added: free, nothing measured
+        let pc_size = match p.pc_size {
+            Some(z) => {
+                let at = z.at_ms.map(|ms| tf("pcb.pc_size_at", &[("when", &i18n::datetime(ms))])).unwrap_or_default();
+                view! { <span>{pc_size_text(&z)}</span><div class="small muted">{at}</div> }.into_any()
+            }
+            None => ui::text(t("pcb.pc_size_none").to_string()),
+        };
+        let pc_size_help = view! {
+            <span class="small muted">{tr("pcb.pc_size_help")}" "{tr(if agent { "pcb.added_agent" } else { "pcb.added_btrbk" })}</span>
         }
         .into_any();
         let free = p.free_bytes.zip(p.volume_bytes).map(|(f, v)| tf("bkpc.free_text", &[("free", &i18n::bytes(f)), ("total", &i18n::bytes(v))]));
@@ -1918,6 +1972,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 {kv("bk.col.folder", ui::breakable(&p.path, "mono"))}
                 {(p.incomplete > 0).then(|| kv("bk.incomplete", ui::text(i18n::count(u64::from(p.incomplete)))))}
                 {free.map(|f| kv("bkpc.free", ui::text(f)))}
+                {kv_act("pcb.pc_size", Some(pc_size), None, Some(pc_size_help))}
                 {kv_act("bk.col.space", Some(usage_view), Some(measure_btn), has_snaps.then(|| view! { <span class="small muted">{size_note}</span> }.into_any()))}
                 {kv_act("bk.f.rules", None, prune_btn, Some(ui::text(rules)))}
                 {last_prune.filter(|_| nas).map(|l| kv("bkpc.last_prune", ui::text(l)))}
@@ -2020,6 +2075,11 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         {ui::detail_drawer(title, close, true, body, Some(remove_btn), Some(secondary))}
         {ctl.confirm()}
         {move || ask.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(tf("bk.remove_title", &[("device", &dev.get_value())]), t("bk.remove_text").to_string(), "bk.remove", true, remove, Callback::new(move |_| ask.set(false))) }))}
+        {move || ask_measure.get().map(|p| {
+            let speed = t(if p.measured_here { "bkpc.measure_speed_here" } else { "bkpc.measure_speed_ref" });
+            let text = tf("bkpc.measure_confirm_text", &[("tree", &i18n::bytes(p.walk_tree_bytes)), ("time", &rough_time(p.estimate_s)), ("speed", speed)]);
+            ui::confirm(Confirm::new(t("bkpc.measure_confirm_title").to_string(), text, "bk.measure", false, start_measure, Callback::new(move |_| ask_measure.set(None))))
+        })}
         {move || prune_ask.get().map(|p| {
             let keep = (p.items.len() as u32).saturating_sub(p.delete);
             let mut text = tf("snap.preview_counts", &[("keep", &keep.to_string()), ("delete", &p.delete.to_string())]);

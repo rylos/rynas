@@ -857,9 +857,16 @@ two lines would count in both, a lone snapshot's own data is its whole size (sho
 note). A comparison that cannot be made (a writable snapshot, a send that fails) falls back to the
 difference of the two full extent lists.
 
-**Expected cost on the DS920+** (from the figures above, not yet measured with this code): the
-first measure of pc-work ≈ one full search of `@` and `@home` (≈ 7–9 min) plus 18 pair
-comparisons (≈ 3–6 min); every later one, a few pairs: about a minute.
+**Real cost on the DS920+** (first measure of pc-work, 2026-11-26, rynas 0.9.12): **2792 s**
+(46.5 min), one core busy at nice 19, the disks mostly idle. 21 snapshots in 3 lines, 18 pairs
+and 3 full tree searches: `@home.20261125T2000` 2 292 360 distinct extents, 397 850 136 576 bytes;
+`@.20261125T2000` 707 273 extents, 57 445 564 416 bytes; the tiny line 2 extents. The pairs found
+1 764 801 candidate extents (124 981 649 408 bytes born, 73 966 706 688 gone). Result: 529 GB on
+disk (77 GB held by one snapshot alone, 452 GB shared), 2.89 TB of data in the snapshots. That
+log did not time the parts, so how the 46 minutes split between the searches and the pairs is not
+known; the earlier estimate (7–9 min of searches) was far off. The tree sizes of the searched
+snapshots (`bytes_used` of their root items, read afterwards) were 3.22 GB (`@home`), 0.76 GB
+(`@`) and 16 KiB. Measures after the first only compare the new pairs.
 
 **Running it.** One task `pcbackup.usage` per device (`…/sizes` starts the same), single-flight:
 a second request answers the running task. It runs on its own thread at I/O class idle and nice
@@ -877,6 +884,100 @@ the task store through the event stream the list and an open drawer read the PC 
 is a toast and stays on the row ("measuring failed", the reason in the drawer). Nothing polls. The
 On disk column sits under its head (`td.num > .cell-main` right-aligned; the cell wraps instead of
 widening the table).
+
+#### 11.12.1 Free numbers, the exact measure on request (decision of 2026-11-26)
+
+The first measure scales with the data (46 minutes for 400 GB on the DS920+ above; tens of TB
+would take hours), so the owner decided: **numbers that cost nothing are always shown; the exact
+space stays a measure on request**, with its duration said before it starts.
+
+**Free, always shown (no I/O, nothing measured).**
+
+- *The PC's own size at its last backup* (`PcTarget.pc_size` {used_bytes, size_bytes, at_ms}):
+  from the layout manifest the agent writes into the snapshot (`/.rynas/manifest.json`, also
+  written next to btrbk by the drop-in), already read and cached for the restore check. It adds
+  `used_bytes`/`size_bytes` of the filesystems named by the backed-up subvolumes' `fs_uuid`
+  (older manifests: the btrfs filesystems mounted where one of them is). These are logical
+  numbers of whole filesystems: on pc-work 583 GB used, against 455 GB of distinct data in the
+  newest `@` and `@home` on the NAS, because the PC also holds its own local snapshots, a package
+  cache and logs that are not sent. The list shows it as "543 GiB on the PC" under On disk, the
+  drawer as "Size on the PC" with that caveat. A btrbk PC without the manifest shows "not
+  reported".
+- *What each backup added*: the agent reports per run what it sent (compressed bytes,
+  `pcagent::PcRun.bytes_added`; the list's "last backup +8.92 GiB", each run row in the drawer).
+  Since 0.9.13 rynasd also keeps per snapshot what the agent's stream to it weighed (the bytes of
+  the zstd body it read: `Stored.sent` by name, `ReceivedSnapshot.sent_bytes`), so the drawer
+  says which subvolume brought what, also after the agent's own history has rotated. btrbk over
+  SSH receives outside rynasd: nothing is known there, and the drawer says so ("btrbk does not
+  tell what each backup sent: Measure space shows what each snapshot holds alone").
+
+**Why the agent's size is not the starting point of the measure.** The first measure needs one
+number per line: the bytes of the distinct extents the newest snapshot references on the NAS
+(`distinct(newest)`, the anchor; §11.12 "How"). Everything else, including every "frees if
+deleted" (the exclusive bytes) and every `died`, comes from the pair comparisons and is exact
+without it. The PC's size cannot stand in for the anchor: it is per filesystem, not per
+subvolume; it counts what is not backed up (local snapshots, uncaptured subvolumes); it is
+logical while the anchor is on-disk bytes after the NAS' compression; and reflinked or
+deduplicated data counts once on the NAS and per file on the PC. On pc-work it would be 28 %
+high for the two lines together and gives nothing for each line alone. A result built on it would
+have to be labelled an estimate while the cost saved (the anchor searches) is part of the work
+anyway, so the measure keeps the exact anchor. No other source on the NAS gives it without a
+search: quota groups would (below), the send stream of the first full backup gives the logical
+size of a snapshot long gone.
+
+**The measure on request.**
+
+- *Before it starts* the drawer shows what it will do and about how long
+  (`PcTargetDetail.measure_plan` {pairs, walks, walk_tree_bytes, estimate_s, measured_here}).
+  A full tree search reads every leaf of the snapshot's tree, so its cost follows the tree's size,
+  which btrfs keeps for free: `bytes_used` of the subvolume's root item
+  (`rynas_btrfs::extents::subvolume_tree_bytes`, one small search of the root tree; 3.22 GB for
+  pc-work's `@home`). The estimate is tree bytes ÷ the search speed plus pairs × the time per
+  pair. When the measure needs a full search (the first one, or a new subvolume) Measure asks
+  first: "searches the newest snapshot of each subvolume in full (3.98 GB of file records). On
+  this NAS that takes about 47 min (…)"; a measure of pairs only starts at once.
+- *The speeds are learned per NAS* (`Registry.measure_rates`, in `pc-backups.json`): each full
+  search and each pair is timed, a new figure is averaged with the kept one, parts under 5 s are
+  not counted. Until a NAS has its own figures the reference NAS stands in: pc-work's first
+  measure on the DS920+ (J4125, disks, idle I/O and nice 19), 3.98 GB of trees and 18 pairs in
+  2792 s. That run did not time the parts, so the default search speed (1.5 MB of tree per second)
+  includes the pairs of a typical first measure and a pair counts 10 s; together they predict 47
+  minutes for that run. The task log now says each search's tree size, its expected and its real
+  time, so the next measure on any NAS replaces both. (The owner's rough figure, about 1000
+  extents per second, agrees: 2.3 M extents in about 40 minutes.)
+- *While it runs* the task's progress is weighted by the expected time of each part, and the part
+  running counts as it goes (up to 95 % of what it should take: a server-side clock moves the
+  percentage every 15 s; only a changed percentage becomes a task event). The list and the drawer
+  show "measuring… 34 % · about 20 min left", the time left computed from the task's start and
+  progress as the events bring them. Nothing polls.
+- *After each backup* only PCs measured before are measured again, by pairs (unchanged); a first
+  measure never starts by itself.
+
+**Why not quota groups.** btrfs has two accounting modes
+([Qgroups](https://btrfs.readthedocs.io/en/latest/Qgroups.html),
+[btrfs-quota](https://btrfs.readthedocs.io/en/latest/btrfs-quota.html),
+[btrfs-qgroup](https://btrfs.readthedocs.io/en/latest/btrfs-qgroup.html)):
+
+- *Full qgroups* give referenced and exclusive bytes per subvolume for free once on, but the
+  accounting runs at every transaction commit on the write path for the whole filesystem: the
+  documentation warns that with many snapshots it "can slow down transaction commits and lead to
+  unacceptable latencies", turning it on needs a full rescan, and it is global, so the NAS'
+  shares, apps and every other PC would pay for one PC's figures. A backup volume holds exactly
+  the many-snapshot case. rynas never turns quotas on (D-SPACE); when an administrator has them
+  on, full and consistent, the per-snapshot sizes are read live (`quota_sizes`).
+- *Simple quotas* (squota, kernel 6.7+) avoid the back-reference work, but enabling them sets
+  the `simple_quota` feature, one of the incompat flags of the superblock
+  ([btrfs-man5, filesystem features](https://btrfs.readthedocs.io/en/latest/btrfs-man5.html);
+  `BTRFS_FEATURE_INCOMPAT_SIMPLE_QUOTA` in the kernel), so the volume's format changes and older
+  kernels and tools refuse it; the owner of an extent is recorded when it is allocated, so
+  extents written before enabling (the kernel keeps the enable generation) are never accounted;
+  and they "account all extents to the subvolume that first allocated it" for the extent's whole
+  life ([Qgroups](https://btrfs.readthedocs.io/en/latest/Qgroups.html)), so a received
+  snapshot's unchanged data stays charged to the oldest snapshot (even after that one is
+  deleted): neither "what deleting this frees" nor a per-PC total comes out of it.
+
+Both are rejected for the same reason as the walk with `btrfs filesystem du`: a cost or a format
+change paid by the whole volume, for a figure only asked for now and then.
 
 ## 12. Implemented: the file method, phase 1 (2026-11-11)
 

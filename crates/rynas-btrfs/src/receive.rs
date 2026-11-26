@@ -211,6 +211,7 @@ pub fn summarize(entries: &[Entry], policy: &DeletePolicy, now_ms: u64) -> Summa
             not_subvolume: e.info.is_none(),
             parent: parents.contains(&e.name),
             size: None,
+            sent_bytes: None,
         });
     }
     s.groups = groups.into_values().collect();
