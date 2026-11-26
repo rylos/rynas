@@ -2585,7 +2585,7 @@ async fn uninstall_post(
         ctx.log(&format!("stopping and removing the containers of {n2}"));
         compose_run(s, &ctx, &n2, &l, ComposeAction::Down).await?;
         // the users' Photos folders mounted for the app (never into a folder being deleted)
-        crate::photos::release(s, &ctx, &n2, req.delete_data).await;
+        crate::photos::release(s, &ctx, &n2).await;
         if let Some(w) = web {
             let (n3, log) = (n2.clone(), ctx.clone());
             match blocking(move || w.remove_stack_routes(&who2, &n3, &|m| log.log(m))).await {

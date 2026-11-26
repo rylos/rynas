@@ -3,7 +3,7 @@
 #
 # Ordered before the container engine so the apps start with their users' folders. Before=
 # without Requires= only orders, and the command never fails the unit: Docker starts anyway,
-# and rynasd mounts what is still missing once it runs (it checks every minute).
+# and rynasd mounts what is still missing when it starts and when the mount table changes.
 [Unit]
 Description=rynas: mount the chosen users' Photos folders for photo apps
 Documentation=https://github.com/rylos/rynas

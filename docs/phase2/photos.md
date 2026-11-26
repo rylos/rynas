@@ -87,9 +87,13 @@ now:
   root folder nobody else may change, and mounts **from that descriptor**: `open_tree` +
   `mount_setattr` (read-only, nosuid, nodev, noexec, **nosymfollow**, private) +
   `move_mount`, so the mount has its attributes before it is attached. Kernels without these
-  calls get a bind of `/proc/self/fd/N` on a private scratch mount point
-  (`/run/rynas-photos-<pid>`), remounted there read-only, nosuid, nodev, noexec,
-  `MS_NOSYMFOLLOW`, then moved onto the target with `MS_MOVE`: no app ever sees it writable.
+  calls get a bind of `/proc/self/fd/N` in a private scratch folder (`/run/rynas-photos`, made
+  once as a private mount of itself, one subfolder per helper process; subfolders of helpers
+  that died are cleaned when a helper starts), remounted there read-only, nosuid, nodev,
+  noexec, `MS_NOSYMFOLLOW`, then moved onto the target with `MS_MOVE`: no app ever sees it
+  writable. On both paths the mount is checked with `statvfs` afterwards (`ST_RDONLY`,
+  `ST_NOSUID`, `ST_NODEV`, `ST_NOEXEC`, `ST_NOSYMFOLLOW`): a mount the kernel gave less is
+  taken away and refused.
   A link swapped in after the check changes nothing: the mount holds the folder, not its name.
 - Review 2026-11-26 (2nd, H2): links are never followed inside a mount. Every user sits below
   the same container folder, so `ln -s /mnt/photos/alice ~/Photos/x` would otherwise show
@@ -103,10 +107,14 @@ now:
   it is; a new `Photos` (same user, another folder) replaces the old mount.
 - At boot, the unit `rynas-photos-mounts.service` (`rynasd photos-restore`, oneshot,
   `Before=docker.service`, wanted by it, never failing) mounts the chosen users' folders from
-  `<state>/docker/photos/<stack>.json` with the same checks before the apps start. rynasd also
-  mounts what is missing when it starts and **every minute** (a home on a volume mounted
-  later, a failed helper), stack by stack under the stack's busy mark; the apps' `rslave` binds
-  pick the mounts up. The user list is checked first: an unreadable or empty passwd changes
+  `<state>/docker/photos/<stack>.json` with the same checks before the apps start (rynasd's
+  unit is ordered after it), skipping stacks whose compose file is gone. rynasd also mounts
+  what is missing when it starts, after each sync, and **when the mount table changes** (a
+  home on a volume mounted later): a thread sleeps in `poll(2)` on `/proc/self/mountinfo`
+  (`POLLPRI`, no wakeup otherwise), changes are gathered for 3 s, and only if a chosen folder
+  of an installed stack is not mounted does rynasd mount it, stack by stack, reading the
+  choices and the mount table under the stack's busy mark. No timer runs for this; the apps'
+  `rslave` binds pick the mounts up. Uninstall removes the choices with the staging folder. The user list is checked first: an unreadable or empty passwd changes
   nothing (every chosen user would look gone).
 - Users leave the mounts only when they leave passwd (logged: the app may move the photos to
   its trash) or when an administrator leaves them out.
@@ -115,6 +123,12 @@ now:
   only bits added, default ACLs on folders), walked from the checked descriptor
   (`idremap::grant_fd`; a path through `/proc/self/fd` would stop at its `self` link), so apps
   that run as that account (PiGallery2) read the folders; Immich's server runs as root.
+  Skipping a hard-linked file only withholds the ACL entry: a file the user made world-readable
+  elsewhere and hard-linked into `Photos` stays readable through the mount by that user's own
+  library, which exposes nothing the user could not read already.
+- A sync of a user mounted already compares the mounted folder with the source (same folder:
+  left as it is; another one: the old mount is replaced after the staging folder is checked
+  through its root-owned parent) and never touches the mounted folder's mode.
 - Uninstall: the mounts are taken away after the containers stop; with the data, the
   staging folder (only empty folders are removed) and the choices go too.
 
@@ -189,7 +203,8 @@ is over after 45 s without another upload, or 10 minutes after its first upload 
 keep coming (`Debounce`); then rynas asks every Immich where the user is confirmed and not
 blocked to scan **the library of the confirmed account on the user's path** (`scan_target`),
 and no other. A missed one is caught by Immich's daily scan. Nothing is persisted: a restart
-forgets a pending batch.
+forgets a pending batch. The worker sleeps while nothing is queued and is woken by an upload;
+then it sleeps only until the next batch is due (no periodic timer).
 
 ## 8. API
 
@@ -213,8 +228,8 @@ Sync).
 
 ## 9. Open points
 
-- A home on a volume mounted after Docker starts is empty in the app until the minute check
-  mounts it. Immich only trashes photos it finds missing during a scan (its daily scan runs at
+- A home on a volume mounted after Docker starts is empty in the app until that mount shows
+  in the mount table and rynasd mounts the folder (a few seconds). Immich only trashes photos it finds missing during a scan (its daily scan runs at
   midnight by default) and takes them back when they return.
 - After updating PiGallery2 from 1.x the staging folder is bound at the first Sync.
 - Per-user allow lists in PiGallery2 stay manual (no API key there).

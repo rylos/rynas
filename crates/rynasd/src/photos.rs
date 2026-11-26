@@ -60,8 +60,6 @@ pub const APP_DIR: &str = "/home/Photos";
 pub const QUIET: Duration = Duration::from_secs(45);
 /// …and at the latest this long after the first upload of a batch.
 pub const MAX_WAIT: Duration = Duration::from_secs(600);
-/// How often due scans are looked for.
-const TICK: Duration = Duration::from_secs(10);
 /// Name of the libraries rynas creates.
 pub const LIBRARY_NAME: &str = "Photos from the RyNAS app";
 /// PiGallery2's directory allow list of a user (`{user}` replaced by the UI).
@@ -127,6 +125,10 @@ pub struct Store {
     /// only confirmed users then.
     #[serde(default)]
     pub api: bool,
+    /// The stack folder when the choices last changed: the boot unit mounts nothing for a
+    /// stack whose compose file is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_dir: Option<String>,
 }
 
 fn photos_dir(d: &DockerSvc) -> PathBuf {
@@ -159,7 +161,16 @@ pub fn save_store(path: &Path, s: &Store) -> Result<(), String> {
 /// Makes the staging folder (0755, rynasd's: root) with a folder per chosen user and the
 /// entry's mount points; a folder that is a link is refused.
 pub fn ensure_staging<'a>(root: &Path, names: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    ensure_staging_in(&mountinfo(), root, names)
+}
+
+/// [`ensure_staging`] with the mount table given: a folder that is a mount point (a user's
+/// folder mounted there) is left as it is (it shows the user's folder, read-only).
+pub fn ensure_staging_in<'a>(mountinfo: &str, root: &Path, names: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
     for (dir, what) in std::iter::once((root.to_path_buf(), "staging")).chain(names.into_iter().map(|n| (root.join(n), n))) {
+        if crate::photos_mount::is_mount_point(mountinfo, &dir) {
+            continue;
+        }
         match std::fs::symlink_metadata(&dir) {
             Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
             Ok(_) => return Err(format!("{} ({what}) is not a folder", dir.display())),
@@ -467,9 +478,10 @@ async fn unmount_user(d: &Arc<DockerSvc>, root: &Path, user: &str) -> Result<(),
     Ok(())
 }
 
-/// Unmounts every user of a stack's staging folder (uninstall); with `delete`, the folder and
-/// the choices go too.
-pub(crate) async fn release(d: &Arc<DockerSvc>, ctx: &TaskCtx, stack: &str, delete: bool) {
+/// Unmounts every user of a stack's staging folder (uninstall); the folder and the choices go
+/// too, so nothing is ever mounted again for a stack that is not installed.
+pub(crate) async fn release(d: &Arc<DockerSvc>, ctx: &TaskCtx, stack: &str) {
+    let _ = std::fs::remove_file(store_path(d, stack));
     let root = staging_root(d, stack);
     if !root.exists() {
         return;
@@ -480,14 +492,17 @@ pub(crate) async fn release(d: &Arc<DockerSvc>, ctx: &TaskCtx, stack: &str, dele
             Err(e) => ctx.log(&format!("warning: {user}'s Photos folder: {e}")),
         }
     }
-    if delete {
-        // only empty folders: never into a mount that is still there
-        for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
-            let _ = std::fs::remove_dir(e.path());
-        }
-        let _ = std::fs::remove_dir(&root);
-        let _ = std::fs::remove_file(store_path(d, stack));
+    // only empty folders: never into a mount that is still there
+    for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        let _ = std::fs::remove_dir(e.path());
     }
+    let _ = std::fs::remove_dir(&root);
+}
+
+/// Whether the stack of a choices file is installed: its compose file is where the last
+/// change saw it (below `root`).
+pub fn installed(store: &Store, root: &Path) -> bool {
+    store.stack_dir.as_deref().is_some_and(|d| rynas_docker::under(root, d).join(COMPOSE_FILE).is_file())
 }
 
 /// The staging folder an install binds (made now, with the entry's mount points).
@@ -513,6 +528,11 @@ impl Debounce {
         self.pending.entry(user.to_string()).and_modify(|e| e.1 = now).or_insert((now, now));
     }
 
+    /// When the next batch is due (`None`: nothing queued, nothing to wait for).
+    pub fn next_due(&self) -> Option<Instant> {
+        self.pending.values().map(|(first, last)| (*last + QUIET).min(*first + MAX_WAIT)).min()
+    }
+
     /// The users whose batch is over (quiet for [`QUIET`], or [`MAX_WAIT`] since its first
     /// upload); they leave the queue.
     pub fn due(&mut self, now: Instant) -> Vec<String> {
@@ -532,41 +552,104 @@ impl Debounce {
 struct Photos {
     apps: Arc<AppsSvc>,
     queue: Mutex<Debounce>,
+    /// An upload was queued: the rescan worker wakes (it sleeps while the queue is empty).
+    queued: tokio::sync::Notify,
 }
 
 static PHOTOS: OnceLock<Arc<Photos>> = OnceLock::new();
 
-/// Starts the rescan queue and mounts the chosen users' folders again (once, with the app
-/// catalogue; the apps' binds follow the mounts made after they started).
+/// How long mount table changes are gathered before the chosen folders are checked.
+const MOUNTS_SETTLE: Duration = Duration::from_secs(3);
+
+/// Starts the rescan worker and the mount watcher, and mounts the chosen users' folders again
+/// (once, with the app catalogue; the apps' binds follow the mounts made after they started).
+/// Nothing runs on a timer: the worker sleeps until an upload is queued and then only until
+/// the batch is due; the watcher sleeps in `poll(2)` until the mount table changes.
 pub fn spawn(apps: Arc<AppsSvc>) {
-    let p = Arc::new(Photos { apps, queue: Mutex::new(Debounce::default()) });
+    let p = Arc::new(Photos { apps, queue: Mutex::new(Debounce::default()), queued: tokio::sync::Notify::new() });
     if PHOTOS.set(p.clone()).is_err() {
         return;
     }
+    let w = p.clone();
+    tokio::spawn(async move {
+        loop {
+            let next = w.queue.lock().unwrap().next_due();
+            match next {
+                None => w.queued.notified().await,
+                Some(at) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(at.into()) => {}
+                        _ = w.queued.notified() => continue,
+                    }
+                }
+            }
+            let due = w.queue.lock().unwrap().due(Instant::now());
+            for user in due {
+                rescan(&w.apps, &user).await;
+            }
+        }
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+    std::thread::Builder::new()
+        .name("photos-mounts".into())
+        .spawn(move || watch_mounts(&tx))
+        .map(|_| ())
+        .unwrap_or_else(|e| tracing::warn!("photos: no mount watcher: {e}"));
     tokio::spawn(async move {
         restore(&p.apps).await;
-        let mut t = tokio::time::interval(TICK);
-        let mut n: u64 = 0;
-        loop {
-            t.tick().await;
-            n += 1;
-            let due = p.queue.lock().unwrap().due(Instant::now());
-            for user in due {
-                rescan(&p.apps, &user).await;
-            }
-            // chosen folders still missing (a volume mounted later, a failed helper)
-            if n.is_multiple_of(RECHECK_TICKS) {
+        while rx.recv().await.is_some() {
+            // a burst of changes (a container starting) is one check
+            tokio::time::sleep(MOUNTS_SETTLE).await;
+            while rx.try_recv().is_ok() {}
+            if missing_anywhere(&photos_dir(&p.apps.docker), &p.apps.docker.root) {
                 restore(&p.apps).await;
             }
         }
     });
 }
 
-/// The chosen users' folders checked again every minute (in ticks of [`TICK`]).
-const RECHECK_TICKS: u64 = 6;
+/// Blocks in `poll(2)` on `/proc/self/mountinfo` and sends one message per change of the mount
+/// table (the kernel signals `POLLPRI`/`POLLERR`; no wakeup otherwise).
+fn watch_mounts(tx: &tokio::sync::mpsc::Sender<()>) {
+    use std::io::{Read, Seek};
+    use std::os::fd::AsRawFd;
+    let Ok(mut f) = std::fs::File::open("/proc/self/mountinfo") else { return };
+    let mut buf = Vec::new();
+    loop {
+        // reading the table to its end arms the next event
+        buf.clear();
+        if f.rewind().is_err() || f.read_to_end(&mut buf).is_err() {
+            return;
+        }
+        let mut pfd = libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLPRI | libc::POLLERR, revents: 0 };
+        // SAFETY: poll on one valid descriptor, no timeout
+        let r = unsafe { libc::poll(&mut pfd, 1, -1) };
+        if r < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return;
+        }
+        if tx.try_send(()).is_err() && tx.is_closed() {
+            return;
+        }
+    }
+}
 
-/// The users of a stack to mount at start or in the minute check: chosen, confirmed when the
-/// app has an API, not blocked, and not mounted yet.
+/// Whether a chosen folder of any photo stack is not mounted (only the choices files and the
+/// mount table are read: most mount changes are not about photos).
+pub fn missing_anywhere(dir: &Path, root: &Path) -> bool {
+    let mi = mountinfo();
+    std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+        let p = e.path();
+        let Some(stack) = p.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".json")) else { return false };
+        let store = load_store(&p);
+        installed(&store, root) && !to_restore(&store, &mounted_users(&mi, &dir.join(stack))).is_empty()
+    })
+}
+
+/// The users of a stack to mount (at start, after a change of the mount table, at boot):
+/// chosen, confirmed when the app has an API, not blocked, and not mounted yet.
 pub fn to_restore(store: &Store, mounted: &BTreeSet<String>) -> Vec<String> {
     store
         .users
@@ -576,8 +659,9 @@ pub fn to_restore(store: &Store, mounted: &BTreeSet<String>) -> Vec<String> {
         .collect()
 }
 
-/// The mounts of every photo app as chosen, made where missing (no call to the apps: a block
-/// found by the last sync stays). A stack busy with another task is left to the next check.
+/// The mounts of every installed photo app as chosen, made where missing (no call to the
+/// apps: a block found by the last sync stays). A stack busy with another task is skipped:
+/// its task ends with a sync or leaves the mounts as they were.
 async fn restore(a: &Arc<AppsSvc>) {
     let (cat, _) = a.catalog().await;
     let Ok(users) = users_checked(&passwd(a)) else { return };
@@ -587,14 +671,11 @@ async fn restore(a: &Arc<AppsSvc>) {
         if app.manifest.user_photos.is_none() {
             continue;
         }
+        let Ok(_guard) = mark_busy(&a.docker, &d.stack) else { continue };
+        // the choices and the mount table read under the busy mark
         let store = load_store(&store_path(&a.docker, &d.stack));
         let root = staging_root(&a.docker, &d.stack);
-        let missing = to_restore(&store, &mounted_users(&mountinfo(), &root));
-        if missing.is_empty() {
-            continue;
-        }
-        let Ok(_guard) = mark_busy(&a.docker, &d.stack) else { continue };
-        for name in missing {
+        for name in to_restore(&store, &mounted_users(&mountinfo(), &root)) {
             let Some(u) = users.iter().find(|u| u.name == name) else { continue };
             match mount_user(&a.docker, &root, u, gid).await {
                 Ok(out) => tracing::info!("photos: {}: {name}: {out}", d.stack),
@@ -606,7 +687,8 @@ async fn restore(a: &Arc<AppsSvc>) {
 
 /// `rynasd photos-restore` (the boot unit, before the container engine): the chosen users'
 /// folders of every photo stack under `<state>/docker/photos`, mounted with the same checks.
-/// Never fails: what it cannot mount, rynasd retries every minute.
+/// Never fails: what it cannot mount, rynasd tries again when it starts and when the mount
+/// table changes (a volume mounted later). Stacks that are not installed are skipped.
 pub fn boot_restore(docker_state: &Path, root: &Path) -> Vec<String> {
     let mut log = Vec::new();
     let users = match users_checked(&std::fs::read_to_string(rynas_docker::under(root, "/etc/passwd")).unwrap_or_default()) {
@@ -623,6 +705,10 @@ pub fn boot_restore(docker_state: &Path, root: &Path) -> Vec<String> {
         }
         let staging = dir.join(&stack);
         let store = load_store(&p);
+        if !installed(&store, root) {
+            log.push(format!("{stack}: not installed: nothing mounted"));
+            continue;
+        }
         for name in to_restore(&store, &mounted_users(&mi, &staging)) {
             let Some(u) = users.iter().find(|u| u.name == name) else { continue };
             let r = real_home(root, u).and_then(|home| {
@@ -647,6 +733,7 @@ pub fn uploaded(user: &str, dir: &str) {
     }
     if let Some(p) = PHOTOS.get() {
         p.queue.lock().unwrap().poke(user, Instant::now());
+        p.queued.notify_one();
     }
 }
 
@@ -800,7 +887,7 @@ async fn user_post(
     let Json(req) = body?;
     // busy first: the choices are read and written under it, and the sync runs under it
     let guard = mark_busy(&a.docker, &stack)?;
-    let (cat, _, d) = photo_app(&a, &stack).await?;
+    let (cat, l, d) = photo_app(&a, &stack).await?;
     let app = cat.get(&d.meta.app).ok_or_else(|| Error::not_found("no such app"))?;
     let api = app.manifest.user_photos.as_ref().is_some_and(|u| u.key_env.is_some());
     if !nas_users(&passwd(&a)).iter().any(|u| u.name == user) {
@@ -827,6 +914,7 @@ async fn user_post(
         }
     }
     store.api = api;
+    store.stack_dir = Some(l.stack(&stack));
     save_store(&path, &store).map_err(Error::internal)?;
     audit(&who, if req.include { "photos-user-chosen" } else { "photos-user-left-out" }, &format!("{stack} {user}"));
     start_sync(&a, &who, stack, guard)
@@ -885,7 +973,8 @@ pub(crate) async fn sync_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, stack: &str) -> R
     let users = users_checked(&passwd(a))?;
     let mounted = mounted_users(&mountinfo(), &root);
     let api = up.key_env.is_some();
-    let (steps, kept) = plan(&store, &users, &mounted, api, view.as_ref().map(|(x, y)| (x.as_slice(), y.as_slice())), &up.target);
+    let (steps, mut kept) = plan(&store, &users, &mounted, api, view.as_ref().map(|(x, y)| (x.as_slice(), y.as_slice())), &up.target);
+    kept.stack_dir = Some(l.stack(stack));
     save_store(&path, &kept)?;
     let gid = a.apps_ids().map(|i| i.1);
     let mut ready = Vec::new();
@@ -996,7 +1085,7 @@ mod tests {
     }
 
     fn store(v: &[(&str, Option<&str>)]) -> Store {
-        Store { users: v.iter().map(|(n, a)| (n.to_string(), Member { account: a.map(str::to_string), blocked: None })).collect(), api: false }
+        Store { users: v.iter().map(|(n, a)| (n.to_string(), Member { account: a.map(str::to_string), blocked: None })).collect(), api: false, stack_dir: None }
     }
 
     #[test]
@@ -1115,7 +1204,7 @@ mod tests {
     }
 
     /// Review 2 M4/M5 and the boot gap: another account next to the user's own library still
-    /// blocks; an empty or unreadable user list changes nothing; the minute check and the
+    /// blocks; an empty or unreadable user list changes nothing; the mount-table check and the
     /// boot unit mount only what is chosen, confirmed, not blocked and still missing.
     #[test]
     fn guards_of_the_review() {
@@ -1140,7 +1229,18 @@ mod tests {
         std::fs::create_dir_all(t.path().join("etc")).unwrap();
         std::fs::create_dir_all(t.path().join("home/ann")).unwrap();
         std::fs::write(t.path().join("etc/passwd"), "ann:x:1000:100::/home/ann:/bin/sh\n").unwrap();
-        save_store(&t.path().join("state/docker/photos/pigallery2.json"), &store(&[("ann", None)])).unwrap();
+        let choices = t.path().join("state/docker/photos/pigallery2.json");
+        let mut s = store(&[("ann", None)]);
+        save_store(&choices, &s).unwrap();
+        // a stack that is not installed (no compose file where it was): nothing for it
+        let log = boot_restore(&t.path().join("state/docker"), t.path());
+        assert_eq!(log, ["pigallery2: not installed: nothing mounted"]);
+        assert!(!missing_anywhere(&t.path().join("state/docker/photos"), t.path()));
+        std::fs::create_dir_all(t.path().join("vol1/docker/stacks/pigallery2")).unwrap();
+        std::fs::write(t.path().join("vol1/docker/stacks/pigallery2/compose.yaml"), "services: {}\n").unwrap();
+        s.stack_dir = Some("/vol1/docker/stacks/pigallery2".into());
+        save_store(&choices, &s).unwrap();
+        assert!(missing_anywhere(&t.path().join("state/docker/photos"), t.path()), "ann is chosen and not mounted");
         let log = boot_restore(&t.path().join("state/docker"), t.path());
         assert_eq!(log.len(), 1, "{log:?}");
         assert!(log[0].starts_with("pigallery2: ann: ") && !log[0].ends_with("mounted"), "{log:?}");
@@ -1155,6 +1255,14 @@ mod tests {
         assert_eq!(std::fs::metadata(root.join("ann")).unwrap().mode() & 0o777, 0o755);
         std::os::unix::fs::symlink("/", root.join("bob")).unwrap();
         assert!(ensure_staging(&root, ["bob"]).unwrap_err().contains("not a folder"));
+        // the second sync: a mounted user's folder is never touched (it shows the user's
+        // Photos, read-only: a chmod there failed with EROFS and dropped the user)
+        std::fs::set_permissions(root.join("ann"), std::fs::Permissions::from_mode(0o775)).unwrap();
+        let mounted = format!("40 30 0:5 /x {} ro master:1 - btrfs /dev/sdb rw\n", root.join("ann").display());
+        ensure_staging_in(&mounted, &root, ["ann", "Shared"]).unwrap();
+        assert_eq!(std::fs::metadata(root.join("ann")).unwrap().mode() & 0o777, 0o775);
+        ensure_staging_in("", &root, ["ann"]).unwrap();
+        assert_eq!(std::fs::metadata(root.join("ann")).unwrap().mode() & 0o777, 0o755, "not mounted: made 0755");
         // nothing mounted in a fresh folder
         assert!(mounted_users("", &root).is_empty());
         let mi = format!("40 30 0:5 /x {} ro master:1 - btrfs /dev/sdb rw\n", root.join("ann").display());
@@ -1165,8 +1273,10 @@ mod tests {
     fn debounce_waits_for_quiet_or_the_longest_wait() {
         let t0 = Instant::now();
         let mut d = Debounce::default();
+        assert_eq!(d.next_due(), None, "nothing queued: nothing to wake up for");
         d.poke("ann", t0);
         d.poke("ann", t0 + Duration::from_secs(30));
+        assert_eq!(d.next_due(), Some(t0 + Duration::from_secs(30) + QUIET));
         assert!(d.due(t0 + Duration::from_secs(60)).is_empty(), "the batch goes on");
         assert_eq!(d.due(t0 + Duration::from_secs(30) + QUIET), ["ann"]);
         assert!(d.due(t0 + Duration::from_secs(1000)).is_empty(), "left the queue");

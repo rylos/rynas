@@ -207,17 +207,88 @@ fn sys_mount(src: Option<&CString>, target: &CString, flags: libc::c_ulong) -> R
     if r != 0 { Err(errno()) } else { Ok(()) }
 }
 
-/// Older kernels: the bind is made and made read-only on a private scratch mount point
-/// (nothing propagates from there), then moved onto the target: an app never sees it
-/// writable. A kernel without `MS_NOSYMFOLLOW` refuses the remount: nothing is mounted.
+/// `statvfs` flags every mount of a Photos folder must have (`sys/statvfs.h`).
+pub const ST_RDONLY: u64 = 1;
+pub const ST_NOSUID: u64 = 2;
+pub const ST_NODEV: u64 = 4;
+pub const ST_NOEXEC: u64 = 8;
+pub const ST_NOSYMFOLLOW: u64 = 0x2000;
+pub const REQUIRED_ST: u64 = ST_RDONLY | ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_NOSYMFOLLOW;
+
+/// The flags of [`REQUIRED_ST`] missing from `flags` (`statvfs` `f_flag`), by name.
+pub fn missing_flags(flags: u64) -> Vec<&'static str> {
+    [(ST_RDONLY, "read-only"), (ST_NOSUID, "nosuid"), (ST_NODEV, "nodev"), (ST_NOEXEC, "noexec"), (ST_NOSYMFOLLOW, "nosymfollow")]
+        .into_iter()
+        .filter(|(f, _)| flags & f == 0)
+        .map(|(_, n)| n)
+        .collect()
+}
+
+/// Checks the mount at `path` with `statvfs`: what the kernel really applied.
+fn verify_flags(path: &CString) -> Result<(), String> {
+    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: statvfs fills `st`; checked by its return value
+    if unsafe { libc::statvfs(path.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return Err(format!("statvfs: {}", errno()));
+    }
+    // SAFETY: statvfs succeeded
+    #[allow(clippy::unnecessary_cast)]
+    let flags = unsafe { st.assume_init() }.f_flag as u64;
+    match missing_flags(flags).as_slice() {
+        [] => Ok(()),
+        m => Err(format!("the kernel did not apply {}: not mounted", m.join(", "))),
+    }
+}
+
+/// The private scratch folder of the older kernels' path: made once, a mount of itself made
+/// private, so nothing mounted inside propagates anywhere.
+const SCRATCH: &str = "/run/rynas-photos";
+
+fn scratch_root() -> Result<std::path::PathBuf, String> {
+    let root = std::path::PathBuf::from(SCRATCH);
+    if !root.is_dir() {
+        std::fs::DirBuilder::new().mode(0o700).create(&root).map_err(|e| format!("{SCRATCH}: {e}"))?;
+    }
+    let s = cstr(&root)?;
+    if !mounted(&root) {
+        sys_mount(Some(&s), &s, libc::MS_BIND).map_err(|e| format!("{SCRATCH}: bind: {e}"))?;
+    }
+    sys_mount(None, &s, libc::MS_PRIVATE).map_err(|e| format!("{SCRATCH}: private: {e}"))?;
+    // what a helper killed halfway left: subfolders of processes that are gone
+    for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.parse::<u32>().is_ok_and(|pid| !Path::new(&format!("/proc/{pid}")).exists()) {
+            clean_scratch(&e.path());
+        }
+    }
+    Ok(root)
+}
+
+fn clean_scratch(dir: &Path) {
+    let inner = dir.join("m");
+    for _ in 0..16 {
+        if !mounted(&inner) {
+            break;
+        }
+        if let Ok(i) = cstr(&inner) {
+            // SAFETY: umount2 with a NUL-terminated path
+            unsafe { libc::umount2(i.as_ptr(), libc::MNT_DETACH) };
+        }
+    }
+    let _ = std::fs::remove_dir(&inner);
+    let _ = std::fs::remove_dir(dir);
+}
+
+/// Older kernels: the bind is made and made read-only on the private scratch folder (nothing
+/// propagates from there), checked with `statvfs`, then moved onto the target: an app never
+/// sees it writable. A kernel without `MS_NOSYMFOLLOW` refuses the remount, or leaves the flag
+/// out (checked): nothing is mounted.
 fn mount_old_api(src: &OwnedFd, target: &CString) -> Result<(), String> {
-    let scratch = std::path::PathBuf::from(format!("/run/rynas-photos-{}", std::process::id()));
-    std::fs::DirBuilder::new().mode(0o700).create(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
-    let inner = scratch.join("m");
+    let dir = scratch_root()?.join(std::process::id().to_string());
+    clean_scratch(&dir);
+    std::fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let inner = dir.join("m");
     let r = (|| {
-        let s = cstr(&scratch)?;
-        sys_mount(Some(&s), &s, libc::MS_BIND).map_err(|e| format!("scratch bind: {e}"))?;
-        sys_mount(None, &s, libc::MS_PRIVATE).map_err(|e| format!("scratch private: {e}"))?;
         std::fs::DirBuilder::new().mode(0o700).create(&inner).map_err(|e| format!("{}: {e}", inner.display()))?;
         let i = cstr(&inner)?;
         let from = CString::new(format!("/proc/self/fd/{}", src.as_raw_fd())).unwrap_or_default();
@@ -226,16 +297,33 @@ fn mount_old_api(src: &OwnedFd, target: &CString) -> Result<(), String> {
             Some(libc::EINVAL) => "this kernel cannot keep links from being followed in a mount (Linux 5.10 or later is needed): not mounted".to_string(),
             _ => format!("read-only remount: {e}"),
         })?;
+        verify_flags(&i)?;
         sys_mount(Some(&i), target, libc::MS_MOVE).map_err(|e| format!("move: {e}"))
     })();
-    // whatever happened: the scratch mounts go (a bind left there is detached with them)
-    if let Ok(s) = cstr(&scratch) {
-        // SAFETY: umount2 with a NUL-terminated path
-        unsafe { libc::umount2(s.as_ptr(), libc::MNT_DETACH) };
-    }
-    let _ = std::fs::remove_dir(&inner);
-    let _ = std::fs::remove_dir(&scratch);
+    // whatever happened: what is left in the scratch folder goes
+    clean_scratch(&dir);
     r
+}
+
+/// What [`mount`] does with a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountPlan {
+    /// Not a mount point: checked (root's) and mounted.
+    New,
+    /// The same folder is mounted there: nothing to do.
+    Already,
+    /// Another folder is mounted there: unmounted, then mounted.
+    Replace,
+}
+
+/// The plan for a target: a mount point shows the mounted folder (the user's, never root's),
+/// so it is compared with the source instead of being checked as a staging folder.
+pub fn plan_mount(is_mount: bool, same_source: bool) -> MountPlan {
+    match (is_mount, same_source) {
+        (false, _) => MountPlan::New,
+        (true, true) => MountPlan::Already,
+        (true, false) => MountPlan::Replace,
+    }
 }
 
 /// What [`mount`] did.
@@ -251,23 +339,38 @@ pub enum Mounted {
 /// (root's, [`check_target`]). A failed check changes nothing at the target.
 pub fn mount(home: &Path, uid: u32, target: &Path) -> Result<Mounted, String> {
     let src = open_photos(home, uid)?;
-    check_target(target)?;
     let t = cstr(target)?;
-    if mounted(target) {
+    let is_mount = mounted(target);
+    let same = is_mount && {
+        // a mounted target shows the user's folder: compare it with the source
         let a = fstat(src.as_raw_fd())?;
         let b = std::fs::metadata(target).map_err(|e| e.to_string())?;
         use std::os::unix::fs::MetadataExt;
-        if a.st_dev == b.dev() && a.st_ino == b.ino() {
-            return Ok(Mounted::Already);
+        a.st_dev == b.dev() && a.st_ino == b.ino()
+    };
+    match plan_mount(is_mount, same) {
+        MountPlan::Already => return Ok(Mounted::Already),
+        MountPlan::Replace => {
+            // another folder (the user made a new Photos): the staging folder is checked
+            // through its parent (root's), then the old mount goes and the target itself
+            let parent = target.parent().ok_or("the target has no parent")?;
+            check_target(parent)?;
+            unmount(target)?;
+            check_target(target)?;
         }
-        // another folder (the user made a new Photos): the new one replaces it
-        unmount(target)?;
+        MountPlan::New => check_target(target)?,
     }
     match mount_new_api(&src, &t) {
-        Ok(()) => Ok(Mounted::New),
-        Err(Some(e)) => Err(e),
-        Err(None) => mount_old_api(&src, &t).map(|_| Mounted::New),
+        Ok(()) => {}
+        Err(Some(e)) => return Err(e),
+        Err(None) => mount_old_api(&src, &t)?,
     }
+    // what the kernel applied, whatever the path: a mount without a flag goes away
+    if let Err(e) = verify_flags(&t) {
+        let _ = unmount(target);
+        return Err(e);
+    }
+    Ok(Mounted::New)
 }
 
 #[cfg(test)]
@@ -344,9 +447,22 @@ mod tests {
             assert_eq!(mount_attrs() & a, a);
         }
         assert_eq!(remount_flags() & 256, 256, "MS_NOSYMFOLLOW");
+        // the statvfs check after the mount: every flag, by name when missing
+        assert!(missing_flags(REQUIRED_ST).is_empty());
+        assert_eq!(missing_flags(REQUIRED_ST & !ST_NOSYMFOLLOW), ["nosymfollow"]);
+        assert_eq!(missing_flags(0).len(), 5);
         for f in [libc::MS_REMOUNT, libc::MS_BIND, libc::MS_RDONLY, libc::MS_NOSUID, libc::MS_NODEV, libc::MS_NOEXEC] {
             assert_eq!(remount_flags() & f, f);
         }
+    }
+
+    /// Real-kernel test finding: a second mount of a mounted user never checks the mounted
+    /// (user-owned) folder as a staging folder; it compares the source instead.
+    #[test]
+    fn a_mounted_target_is_compared_not_checked() {
+        assert_eq!(plan_mount(false, false), MountPlan::New);
+        assert_eq!(plan_mount(true, true), MountPlan::Already);
+        assert_eq!(plan_mount(true, false), MountPlan::Replace);
     }
 
     #[test]
