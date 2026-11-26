@@ -155,10 +155,12 @@ const DISK_TEST_CHECK: Duration = Duration::from_secs(300);
 /// The test time assumed when the drive does not say (minutes).
 const DISK_TEST_DEFAULT_MIN: u64 = 120;
 
-/// Asks the drive about its self-test (`smartctl -c -l selftest`).
+/// Asks the drive about its self-test (`smartctl -n standby -c -l selftest`: a drive that
+/// spun down is never woken for it, and a sleeping drive runs no test).
 fn self_test(p: &Protection, disk: &str) -> crate::claims::SelfTest {
     let dev = format!("/dev/{disk}");
-    match p.ops.config.system().output(&Cmd::new("smartctl").args(["-c", "-l", "selftest", &dev]).env_clear()) {
+    match p.ops.config.system().output(&Cmd::new("smartctl").args(["-n", "standby", "-c", "-l", "selftest", &dev]).env_clear()) {
+        Ok(o) if asleep_answer(&o.stdout) => crate::claims::SelfTest { in_progress: Some(false), ..Default::default() },
         // smartctl's exit code is a bit mask of disk states: read the output whatever it is
         Ok(o) => crate::claims::parse_self_test(&o.stdout),
         Err(e) => {
@@ -166,6 +168,12 @@ fn self_test(p: &Protection, disk: &str) -> crate::claims::SelfTest {
             crate::claims::SelfTest::default()
         }
     }
+}
+
+/// smartctl's `-n standby` answer for a drive in standby or asleep ("Device is in STANDBY
+/// mode, exit(2)"): nothing else was asked.
+fn asleep_answer(out: &str) -> bool {
+    out.lines().any(|l| l.starts_with("Device is in") && (l.contains("STANDBY") || l.contains("SLEEP")))
 }
 
 /// After the unit of a SMART long test of `disk` ended: keep its disk claimed while the drive
@@ -1806,6 +1814,13 @@ pub fn tick(p: &Protection) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sleeping_drive_answers_standby() {
+        assert!(asleep_answer("smartctl 7.4\n\nDevice is in STANDBY mode, exit(2)\n"));
+        assert!(asleep_answer("Device is in SLEEP mode, exit(2)\n"));
+        assert!(!asleep_answer("Self-test execution status:      (   0)\tThe previous self-test routine completed\n"));
+    }
 
     /// A start of a due interval task that leaves its last run where it was (the gate skipped
     /// it) is tried again later and later, never every few minutes; a new last run resets it.

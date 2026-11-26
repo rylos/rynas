@@ -3287,7 +3287,18 @@ pub async fn check_updates(s: &Arc<DockerSvc>, ctx: &TaskCtx, spread: bool) -> R
         .filter(|i| !out.iter().any(|l| &l.image == i))
         .collect();
     s.resolve_updates(&gone);
-    if let Some(apps) = s.apps.get().and_then(|w| w.upgrade()) {
+    // the app candidates read every stack's compose files: not while the stacks' disks sleep
+    // (the last ones stay; the next check with the disks awake brings them up to date)
+    let stacks_asleep = match s.layout() {
+        Some(l) => {
+            let dir = l.stacks();
+            !tokio::task::spawn_blocking(move || crate::disk_standby::path_awake(&dir)).await.unwrap_or(true)
+        }
+        None => false,
+    };
+    if stacks_asleep {
+        ctx.log("the stacks' disks sleep: the app updates found by the last check stay");
+    } else if let Some(apps) = s.apps.get().and_then(|w| w.upgrade()) {
         let c = apps.auto_candidates().await;
         for a in &c {
             ctx.log(&format!(

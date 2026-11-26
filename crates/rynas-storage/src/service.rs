@@ -67,8 +67,41 @@ impl std::fmt::Display for StorageError {
 #[derive(Debug, Clone)]
 struct MdCache {
     read_ms: u64,
+    /// What `/proc/mdstat` and sysfs said of the array when it was read ([`md_state_key`]).
+    state: String,
     export: Option<Export>,
     detail: Option<Detail>,
+}
+
+/// `mdadm --detail` reads every member's superblock from the disk (O_DIRECT: 2 reads per
+/// call, never from the page cache): read again only when the kernel's view of the array
+/// changed, else at most this often. A read every few minutes kept the disks from ever
+/// reaching their spin-down delay.
+const MD_UNCHANGED_MAX_AGE_MS: u64 = 24 * 3_600_000;
+
+/// The kernel's view of an array (memory only: mdstat and sysfs) that a new `mdadm --detail`
+/// would reflect: its state, members, sync, degraded count, errors. `array_state` is left out
+/// (it flips between clean and active with every write).
+fn md_state_key(st: &md::StatArray, sys: &md::SysMd) -> String {
+    let mut members: Vec<_> = sys.members.iter().collect();
+    members.sort_by(|a, b| a.0.cmp(b.0));
+    let sync = st.sync.as_ref().map(|s| (s.action.clone(), s.waiting.clone()));
+    format!(
+        "{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        st.active,
+        st.read_only,
+        st.level,
+        st.members,
+        st.map,
+        st.raid_disks,
+        st.working,
+        sync,
+        sys.degraded,
+        sys.sync_action,
+        sys.reshape_position,
+        sys.component_size,
+        members
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -90,7 +123,8 @@ struct Cache {
     md: HashMap<String, MdCache>,
     fs: HashMap<String, FsCache>,
     /// LVM reports by physical volume set (comma-joined device paths): (when, report).
-    lvm: HashMap<String, (u64, crate::lvm::LvmReport)>,
+    /// By set of physical volumes: when read, the lsblk shape it was read with, the report.
+    lvm: HashMap<String, (u64, String, crate::lvm::LvmReport)>,
     /// The last full inventory and when it was taken (ms): shared by the list views, the
     /// tree and the planners for [`Storage::inventory_max_age`].
     inventory: Option<(u64, Arc<Inventory>)>,
@@ -660,9 +694,13 @@ impl Storage {
                     .filter_map(|d| g.get(d))
                     .any(|d| asleep(self.power_of(d)));
                 let cached = self.cache.lock().unwrap().md.get(&st.name).cloned();
-                let fresh = cached
-                    .as_ref()
-                    .is_some_and(|c| now.saturating_sub(c.read_ms) < max_age);
+                let state = md_state_key(st, &sys);
+                // young, or nothing changed for the kernel since it was read (a sync in
+                // progress changes the key at every pass: then the detail follows it)
+                let fresh = cached.as_ref().is_some_and(|c| {
+                    let age = now.saturating_sub(c.read_ms);
+                    age < max_age || (c.state == state && st.sync.is_none() && age < MD_UNCHANGED_MAX_AGE_MS)
+                });
                 let mut stale = false;
                 let entry = if fresh || !st.active {
                     cached
@@ -679,6 +717,7 @@ impl Storage {
                         .map(|s| md::parse_detail(&s));
                     let c = MdCache {
                         read_ms: now,
+                        state,
                         export,
                         detail,
                     };
@@ -943,19 +982,32 @@ impl Storage {
             let paths: Vec<String> = pvs.iter().map(|d| d.path.clone()).collect();
             let key = paths.join(",");
             let cached = self.cache.lock().unwrap().lvm.get(&key).cloned();
-            let fresh = cached
-                .as_ref()
-                .is_some_and(|(at, _)| now.saturating_sub(*at) < max_age);
+            // `pvs`/`vgs`/`lvs` read the labels from the disks: again only when lsblk shows a
+            // change under these volumes (or rynas changed them: `invalidate`), else daily
+            let shape: String = pvs
+                .iter()
+                .map(|d| format!("{}:{}:{:?};", d.kname, d.size, d.fstype))
+                .chain(
+                    g.devs
+                        .values()
+                        .filter(|d| d.kind == "lvm" && d.parents.iter().any(|p| pvs.iter().any(|v| &v.kname == p)))
+                        .map(|d| format!("{}:{};", d.kname, d.size)),
+                )
+                .collect();
+            let fresh = cached.as_ref().is_some_and(|(at, s, _)| {
+                let age = now.saturating_sub(*at);
+                age < max_age || (*s == shape && age < MD_UNCHANGED_MAX_AGE_MS)
+            });
             let sleeping = pvs
                 .iter()
                 .flat_map(|d| g.disks_under(&d.kname))
                 .filter_map(|d| g.get(&d))
                 .any(|d| asleep(self.power_of(d)));
             let r = if fresh {
-                cached.map(|(_, r)| r)
+                cached.map(|(_, _, r)| r)
             } else if sleeping {
                 stale.extend(pvs.iter().map(|d| d.kname.clone()));
-                cached.map(|(_, r)| r)
+                cached.map(|(_, _, r)| r)
             } else {
                 let run = |prog: &str| {
                     let args = crate::lvm::args(prog, &paths);
@@ -975,7 +1027,7 @@ impl Storage {
                         .lock()
                         .unwrap()
                         .lvm
-                        .insert(key, (now, r.clone()));
+                        .insert(key, (now, shape, r.clone()));
                 }
                 Some(r)
             };
@@ -1619,6 +1671,26 @@ mod tests {
             );
         }
         h
+    }
+
+    /// `mdadm --detail` and the LVM reports read the disks: past `detail_max_age` they are read
+    /// again only when the kernel's view or lsblk changed (or rynas changed something).
+    #[test]
+    fn md_and_lvm_are_not_read_again_while_nothing_changed() {
+        let h = Arc::new(flex_host());
+        let mut s = Storage::new(h.clone());
+        s.detail_max_age = Duration::ZERO;
+        let disk_reads = |h: &FakeHost| h.ran().iter().filter(|c| c.starts_with("mdadm ") || c.starts_with("pvs ") || c.starts_with("vgs ") || c.starts_with("lvs ")).count();
+        s.inventory().unwrap();
+        let first = disk_reads(&h);
+        assert!(first > 3, "{:?}", h.ran());
+        s.inventory().unwrap();
+        s.inventory().unwrap();
+        assert_eq!(disk_reads(&h), first);
+        // a change made by rynas: read again
+        s.invalidate();
+        s.inventory().unwrap();
+        assert_eq!(disk_reads(&h), first * 2);
     }
 
     #[test]

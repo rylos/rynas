@@ -119,6 +119,78 @@ watches.
 | rynas-web: metrics sampled every second | every second while a client listens, every 10 s otherwise (history by time; a first client wakes the collector at once) | 60/min → 6/min |
 | QNAP worker 8 Hz (buttons, blink) | 4 Hz when nothing blinks and no button moves, 8 Hz otherwise; a level change is confirmed by a second read 30 ms later (gpio-f7188x has no interrupts), so a 150 ms tap is caught 60 % of the time instead of 20 % | 480/min → 240/min |
 
+## A NAS at rest
+
+Owner's rule (2026-11-26): **a NAS at rest consumes little and lets the disks spin down.** For
+every job: *what does it do when nothing happens? → nothing* (rule S1c of
+[guidelines.md](../quality/guidelines.md)). The audit of that day found the daily `space.scan`
+working the data disk of a DS920+ for 45 minutes every day (stopped at its budget, "not measured",
+ended "ok").
+
+**Disks awake.** `rynasd::disk_standby` answers without waking anything:
+
+- `disks_awake(mount)`: every disk under the volume mounted there spins (the storage service's
+  `mount_asleep`: lsblk/sysfs, mountinfo, ATA CHECK POWER MODE on a read-only non-blocking
+  descriptor; NVMe counts as awake; unknown counts as awake). `path_awake(path)` resolves the
+  longest mount point first.
+- `when_awake(mount, deadline)`: returns `Awake` at once or after a turn of the standby watcher
+  (every 30 s, reading `/proc/diskstats`) saw block I/O on a rotational disk, i.e. after someone
+  else woke the disks; `Deadline` when the deadline passed with the disks asleep. No loop of its
+  own: deferred work rides on the first I/O.
+
+**Space measures.** No timer measures space. `space.scan` runs:
+
+- on request (Storage › Space › Measure): `GET /api/v1/space/plan` first says what it does
+  (pairs of neighbouring snapshots to compare, full tree searches, sources walked file by file)
+  and about how long (the PC backups' measured speeds, else the reference NAS: 1.5 MB/s of tree,
+  10 s per pair); the page asks for confirmation when a search or a walk is needed or it takes
+  10 minutes or more, and shows the task's progress (by expected time of each part);
+- incrementally (`ScanMode::Changes`, subject = the volume) after `space::snapshots_changed`:
+  a snapshot job or a replication ended (scheduler `task-finished`), a PC retention pass deleted
+  snapshots, an agent receive ended, Space deleted snapshots. Changes settle 30 s, the volume is
+  marked pending (`SpaceOverview.pending`, shown on the page) and updated once its disks are
+  awake (no deadline: the numbers are not urgent). It only compares the pairs not compared
+  before; Docker, the leftovers and the recycle bins keep their last sizes.
+
+Each line of snapshots is measured by neighbours (`rynas_btrfs::pcspace`, the same method as the
+PC backups' measure, numbers per snapshot UUID in `<state>/space/known.json`, the PC backups'
+numbers reused): with a live folder, what removing the line frees ≈ the `died` of every snapshot
+but the newest + what the newest holds alone (no full search ever); without one, the line's
+union (one full search of the newest the first time, on request only). Lines that cannot be
+compared pair by pair (writable snapshots, a lone snapshot of a live folder) are walked as before,
+on request only. A time budget (on request: 45 minutes or 3 × the estimate per volume; after a
+change: 10 minutes) ends **partial** naming the sources left; a source not measured keeps its last
+numbers and the volume keeps the age of its oldest number.
+
+Expected costs on the DS920+ (one HDD, a PC folder of 21 snapshots in 3 lines and a deleted
+job): before, 2700 s of disk every day for nothing; now, nothing on a quiet day; after a nightly
+PC backup ~2 pairs per line (≈ 1 min, disks already awake); the first Measure ≈ the PC measure's
+first run (≈ 45 min) unless the PC measure already ran (then ≈ 0).
+
+**Periodic jobs and the data disks** (2026-11-26; "data disks" = volumes on HDDs, not the system
+disk, `/var/lib/rynas`, `/run`, `/proc`, `/sys`):
+
+| Job | Period | Before | Now |
+|---|---|---|---|
+| `space.scan` | daily | full measure of every volume (discover, FIEMAP walks, `docker system df`, recycle walks), skipped sleeping volumes only after discovering them; 45 min/volume budget, ended "ok" | never on a timer: on request, and incrementally after snapshot changes once the volume's disks are awake; partial at the budget |
+| Space low-space watch (`guard`) | 5 min | `statvfs` per volume | unchanged: btrfs answers `statfs` from memory |
+| Space auto-free (`thin`) | in the watch, only below the low limit with auto-free on | deletes snapshots | unchanged (urgent by definition) |
+| Space recycle-bin cleanup | daily | walked every bin on every volume | per volume once its disks are awake (deadline: the next day's turn, then skipped for that day: a bin's retention is in days) |
+| Space pin pruning | daily | `stat` of every pinned path | per volume once its disks are awake (same deadline) |
+| Space thumbnail eviction | daily | system disk | unchanged |
+| `pcbackup.retention` (scheduler, hourly) | 1 h | each PC folder: lock, readdir, subvolume info, deletes; then the freshness check scanned every folder again | a folder whose disks sleep is skipped (nothing arrived: a receive wakes them; no deadline); the freshness check uses the folder's last view while its disks sleep (lateness still counts from now) |
+| `docker.update-check` (scheduler, daily) | 24 h | registry checks, then read every stack's compose and `.env` for the app updates | the app-update part is skipped while the stacks' disks sleep (last candidates stay) |
+| Syncthing detection | 60 s and Docker hints | read every stack's compose and `.env` (even without Syncthing) | while the stacks' disks sleep the stacks found last stay; Docker still says what runs |
+| Gate: long SMART test follow-up | 5 min while a scheduled long test is held | `smartctl -c -l selftest` (wakes a drive that spun down after its test) | `smartctl -n standby …`; a sleeping drive counts as "test over" |
+| Storage health watch | 5 min | lsblk, ATA power check, SMART (`-n standby`, SG_IO: not block I/O) on awake disks every 10 min; `mdadm --detail` and `--detail --export` every pass with the disks awake: they read each member's superblock with O_DIRECT (measured on the DS920+: 4 reads, 18 sectors on the data disk every 5 minutes), so a spin-down delay above 5 minutes was never reached; `pvs`/`vgs`/`lvs` (flexible RAID) the same | md details read again only when the kernel's view of the array changes (mdstat, sysfs: state, members, sync, degraded, errors) or after 24 h; LVM reports when lsblk shows a change under them or after 24 h; `invalidate` after rynas's own changes as before |
+| Disk standby watcher | 30 s | `/proc/diskstats`, ATA power check, `smartctl -n standby -c` before a spin-down | unchanged; also tells deferred work about disk I/O |
+| `pc-maintenance`, `docker-auto-update`, dedup, snapshot jobs, replication, scrub, SMART tests, recycle cleanup tasks | user/preset schedule | work on the data on purpose | unchanged (dedup already skips sleeping volumes with "only if awake") |
+| `updates.check`, `apps.catalog-refresh`, `kernel-update` | daily | system disk, network | unchanged |
+| rynas-web metrics, notifications, TLS, devices; rynasd network, clock, UPS, removable drives, Docker event sweep (`statvfs` of Docker's root), web access, DDNS | seconds to minutes | `/proc`, `/sys`, state files, memory, network | unchanged: no data-disk I/O |
+
+Outside rynas: containers and their own scans (Syncthing rescans, media servers) and the
+hardware daemon's temperature reads keep disks awake by their own choice.
+
 ## Not converted yet
 
 The base above is in place; these follow it feature by feature (new code follows the rules
@@ -133,11 +205,11 @@ from now on):
   sync`), the PC backup measure; `cmd_ok` in `pc_backup` still ignores cancellation (its
   callers have no task).
 - **Time budgets that should end partial**: the space auto-free pass (15 min), other budgets
-  found per feature.
+  found per feature (`space.scan` ends partial since 2026-11-26).
 - **Loops still on a timer**: rynas-web TLS reload check (10 s) and listen check (5 s), web
   access sync (30 s), the storage notification watch and the degraded-start check (60 s, could
   subscribe to `sysevents`), rynas-web hardware notification check (30 s), the automatic Docker
   update tick (60 s), disk standby (30 s, reads diskstats by design); in the UI the
   `live::poll` timers of the task panel's queue, storage, scheduler, schedule, Wake-on-LAN,
   Syncthing and the hardware module pages, and the `poll_while` progress loops (scrub, dedup,
-  space scan, PC receive) that task progress events could replace.
+  PC receive; the space scan follows its task since 2026-11-26) that task progress events could replace.

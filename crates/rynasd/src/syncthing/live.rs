@@ -824,8 +824,15 @@ impl Live {
 
     async fn detect(self: &Arc<Self>, apps: &Arc<AppsSvc>) {
         let a = apps.clone();
+        // the stacks' folder sleeps: the stacks are what detection found last (installing or
+        // changing one writes there and wakes the disks); Docker still says what runs
+        let once = self.detected_once.load(std::sync::atomic::Ordering::Acquire);
+        let last: Vec<_> = lock(&self.detected).iter().map(|d| (d.installed.stack.clone(), d.installed.version.clone(), d.binds.clone(), d.api.clone())).collect();
         let found = tokio::task::spawn_blocking(move || {
             let Some(l) = a.docker.layout() else { return Vec::new() };
+            if once && !crate::disk_standby::path_awake(&l.stacks()) {
+                return last;
+            }
             a.on_disk()
                 .into_iter()
                 .filter(|d| d.meta.app == APP_ID)

@@ -474,6 +474,22 @@ interface shows in English and switches when the file arrives.
   pending-change events. A timer is allowed only as a slow safety net (≥ 60 s) next to an event
   source, or while someone watches (the metrics collector samples every second only while a
   client listens). New loops state their wake-ups per minute in the review.
+- S1c MUST (2026-11-26, [tasks.md](../phase1/tasks.md) "A NAS at rest"): **a NAS at rest consumes
+  little and lets its disks spin down.** Reviewer checklist for every scheduled, periodic or
+  event-driven job: *what does this do when nothing happens? → nothing.* In particular:
+  - nothing reads a **data volume** on a timer (readdir, stat, compose files, snapshot folders,
+    recycle bins, tree walks, `docker system df`): the result is computed from what is in memory,
+    or the job runs when the thing it looks at changes (an event, the task that changed it);
+  - work that can wait asks `rynasd::disk_standby::disks_awake(mount)` / `path_awake(path)` and,
+    while the disks sleep, defers with `when_awake(mount, deadline)` (it rides on the first I/O
+    someone else makes; no loop of its own). The deadline is stated per job, and is "none" when
+    nothing can change while the disks sleep (a write wakes them);
+  - every `smartctl` that only reads passes `-n standby` (a sleeping drive is never woken to be
+    asked; a sleeping drive runs no self-test);
+  - no full measure on a timer: measures run on request (with the expected time and progress)
+    and incrementally after the events that change their answer; a time budget ends **partial**,
+    never "ok" with nothing measured;
+  - a new periodic job gets a row in the table of tasks.md (period, disks touched, why).
 - S2 MUST: charts on `<canvas>`; series data and sizes read once per sample (or layout change),
   theme colors once per theme (`getComputedStyle` forces a style recalculation of the page), and
   nothing read from the DOM inside the animation loop: `clientWidth` in a frame forces a layout.
