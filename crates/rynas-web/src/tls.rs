@@ -53,7 +53,7 @@ pub const DEFAULT_CERT: &str = "/etc/rynas/tls/ui.crt";
 pub const DEFAULT_KEY: &str = "/etc/rynas/tls/ui.key";
 /// Longest TLS handshake (slow or idle clients).
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// How often the files are checked for a change.
+/// How often the files are checked for a change where inotify is missing.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Request extension: the request came over HTTPS (the session cookie gets `Secure`).
@@ -290,14 +290,19 @@ impl Resolver {
     }
 }
 
-/// Re-checks the files every `every` and on `SIGHUP`.
+/// Re-checks the files when their folder changes (inotify; every
+/// [`crate::fswatch::SAFETY_NET`] as well), every `every` where inotify is missing, and on
+/// `SIGHUP`.
 pub fn spawn_watch(r: Arc<CertReloader>, every: Duration) {
     tokio::spawn(async move {
         let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).ok();
         let mut failing = false;
+        // rynasd renames new files into the certificate folder: inotify wakes the check (the
+        // safety net covers a folder made later); `every` only without inotify
+        let mut changes = r.cert.parent().and_then(|d| crate::fswatch::watch_dirs(&[d]));
         loop {
             let forced = tokio::select! {
-                _ = tokio::time::sleep(every) => false,
+                _ = crate::fswatch::next(&mut changes, every) => false,
                 Some(_) = async {
                     match hup.as_mut() {
                         Some(h) => h.recv().await,

@@ -23,8 +23,11 @@ use crate::rynasd_client::RynasdClient;
 const QUEUE: usize = 64;
 /// Keys remembered by [`WebNotifier::emit_once`] (M1); past the cap the memory is cleared.
 const MAX_RECENT: usize = 1000;
-/// How often the hardware watch looks at the provider and the temperatures.
-pub const HW_CHECK: Duration = Duration::from_secs(30);
+/// How often the hardware watch looks at the provider and the temperatures. A timer on
+/// purpose: temperatures and fans have no event source; each turn reads the metrics store
+/// (memory) and the provider's state, never a data disk. A minute is soon enough for a fan
+/// that stopped or a disk getting hot (the provider's own protection acts at once).
+pub const HW_CHECK: Duration = Duration::from_secs(60);
 
 pub struct WebNotifier {
     client: Arc<RynasdClient>,

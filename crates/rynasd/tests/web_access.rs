@@ -1109,6 +1109,11 @@ fn drift_and_host_changes_are_followed() {
     let loads = e.caddy.loads();
     // someone changed the running configuration through the socket
     e.caddy.state.lock().unwrap().config = json!({"apps": {}});
+    // the same engine process and render: not read again before the hourly recheck
+    e.svc.sync(&|_| {}).unwrap();
+    assert_eq!(e.caddy.loads(), loads);
+    // an hour later: the change is found and undone
+    e.svc.recheck_engine_now();
     e.svc.sync(&|_| {}).unwrap();
     assert_eq!(e.caddy.loads(), loads + 1);
     assert_eq!(e.caddy.config(), e.svc.render(&e.applied(), &facts()).1);

@@ -376,8 +376,19 @@ pub fn spawn_storage_watch(
         // let the system settle after boot (arrays assembling, mounts)
         tokio::time::sleep(Duration::from_secs(60).min(interval)).await;
         let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // a disk that went or an array that changed is told at once (the kernel's storage
+        // events); the timer stays for what has no event (SMART verdicts, fill levels)
+        let mut changes = Some(crate::sysevents::storage_changes());
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {}
+                r = async { changes.as_mut().expect("guarded").recv().await }, if changes.is_some() => {
+                    if matches!(r, Err(RecvError::Closed)) {
+                        changes = None;
+                    }
+                }
+            }
             match crate::server::inventory(&st).await {
                 Ok(inv) => {
                     let health: Vec<_> = inv.disks.iter().map(|d| (d.name.clone(), d.health)).collect();

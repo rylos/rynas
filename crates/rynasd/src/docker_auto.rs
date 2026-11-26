@@ -563,7 +563,12 @@ pub fn spawn_auto_window(
                             return Ok(());
                         }
                         ctx.log(&format!("automatic updates wait: {why}"));
-                        tokio::time::sleep(TICK).await;
+                        // only inside an open window while rynas maintenance runs (bounded by
+                        // the window's end); a Stop ends the wait at once
+                        tokio::select! {
+                            _ = tokio::time::sleep(TICK) => {}
+                            _ = ctx.token().cancelled() => {}
+                        }
                     }
                 }
             }

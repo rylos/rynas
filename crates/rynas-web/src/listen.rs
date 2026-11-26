@@ -13,7 +13,8 @@
 //!   work before the plain port leaves the network: with HTTPS off, not bound or without a
 //!   certificate, the plain port stays where it is, so nobody is locked out.
 //!
-//! The state is checked every [`CHECK_INTERVAL`]. A move stops accepting on the old socket
+//! The state is checked when inotify reports a change in its folder, and every
+//! [`crate::fswatch::SAFETY_NET`] (every [`CHECK_INTERVAL`] where inotify is missing). A move stops accepting on the old socket
 //! (open connections, event streams included, carry on) and binds the new one; when the new
 //! address cannot be bound, the old one is bound again and the move retried on the next check.
 //! Caddy dials `127.0.0.1:PORT` in both states, so the proxy never notices.
@@ -39,7 +40,7 @@ use crate::conn::ConnAddrs;
 pub const DEFAULT_PROXY_STATE: &str = "/run/rynas/web-access.ui";
 /// Port of `auto` without one.
 pub const DEFAULT_PORT: u16 = 8080;
-/// How often the proxy state is read.
+/// How often the proxy state is read where inotify is missing.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 /// `--listen`.
@@ -220,12 +221,14 @@ impl Plain {
         grace: Duration,
     ) {
         let mut shutdown = std::pin::pin!(shutdown);
-        let mut tick = tokio::time::interval(self.check);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        tick.tick().await;
+        // the proxy state is written by rynasd: inotify on its folder wakes the check, the
+        // HTTPS readiness (a certificate loaded) is seen within the safety net; without
+        // inotify the state is read every `check` as before
+        let auto = matches!(self.mode, PlainListen::Auto(_));
+        let mut changes = if auto { self.proxy_state.parent().and_then(|d| crate::fswatch::watch_dirs(&[d])) } else { None };
         loop {
             tokio::select! {
-                _ = tick.tick(), if matches!(self.mode, PlainListen::Auto(_)) => {}
+                _ = crate::fswatch::next(&mut changes, self.check), if auto => {}
                 _ = &mut shutdown => break,
             }
             let want = self.desired();

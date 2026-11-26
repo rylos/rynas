@@ -97,8 +97,18 @@ pub const AVAHI_UNIT: &str = "avahi-daemon.service";
 pub const UI_STATE: &str = "/run/rynas/web-access.ui";
 /// How long a change of the interface's route waits for its confirmation.
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
-/// How often the host facts and the running configuration are checked.
-pub const WATCH_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the host facts (addresses, names: no event source in rynasd yet; a host rename
+/// wakes the sync at once) are checked. Each turn reads memory and the system disk; the
+/// engine's running configuration is read only after a change ([`ENGINE_RECHECK`]).
+pub const WATCH_INTERVAL: Duration = Duration::from_secs(60);
+/// The engine's running configuration is compared with the render at least this often even
+/// when nothing changed (someone loaded another one by hand): an hourly safety net instead of
+/// a `GET /config/` (a line in the engine's log) every turn.
+pub const ENGINE_RECHECK: Duration = Duration::from_secs(3600);
+
+/// The render's hash, the engine's admin socket (inode, mtime) and when the engine's
+/// configuration was read ([`WebAccessSvc::push`]).
+type SeenRunning = (u64, (u64, i64), std::time::Instant);
 /// Where the engine's unit file may be (the package installs it in the first).
 const UNIT_FILES: &[&str] = &[
     "/usr/lib/systemd/system/rynas-caddy.service",
@@ -431,6 +441,11 @@ pub struct WebAccessSvc {
     confirm_gen: AtomicU64,
     /// One engine push at a time (apply, watch, sync).
     push_lock: Mutex<()>,
+    /// The last render the engine was seen running (hash), the engine's admin socket then
+    /// (inode, mtime: the engine makes it again at every start) and when the engine's own
+    /// configuration was last read: the periodic sync reads it again only when one of these
+    /// changed or [`ENGINE_RECHECK`] passed (each read is a line in the engine's log).
+    seen_running: Mutex<Option<SeenRunning>>,
     /// The routes' local names, published through Avahi's D-Bus API.
     pub names: avahi::LocalNames,
     /// rynasd's state folder (`/var/lib/rynas`): the record sets written for the domains.
@@ -531,6 +546,7 @@ impl WebAccessSvc {
             confirm: Mutex::new(None),
             confirm_gen: AtomicU64::new(0),
             push_lock: Mutex::new(()),
+            seen_running: Mutex::new(None),
             names: avahi::LocalNames::new(),
             state_dir: under_root(&root, Path::new("/var/lib/rynas")),
             root,
@@ -958,6 +974,12 @@ impl WebAccessSvc {
         f(&mut self.engine.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
+    /// The next sync reads the engine's running configuration whatever changed (as when
+    /// [`ENGINE_RECHECK`] passed).
+    pub fn recheck_engine_now(&self) {
+        *self.seen_running.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     /// Brings the running engine to the render of `cfg`: certificate, comparison with the
     /// running configuration, `/load` when they differ, `last-good.json`. Returns whether a
     /// load happened. Needs the engine running (built-in mode, installed).
@@ -1020,7 +1042,33 @@ impl WebAccessSvc {
             });
             return Err(m);
         }
+        let render_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            json.to_string().hash(&mut h);
+            h.finish()
+        };
+        let socket = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&self.admin.socket).map(|m| (m.ino(), m.mtime())).unwrap_or_default()
+        };
+        // the same render, the same engine process, read within the hour: nothing to compare
+        let unchanged = self
+            .seen_running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|(h, s, at)| h == render_hash && s == socket && at.elapsed() < ENGINE_RECHECK);
+        if !cert_changed && unchanged {
+            // the facts count as seen, as after a comparison that found the same render
+            self.note(|e| {
+                e.in_sync = Some(true);
+                e.facts = Some(facts.fingerprint());
+            });
+            self.publish_ui(&resolved.ui);
+            return Ok(false);
+        }
         if !cert_changed && self.admin.config().is_ok_and(|cur| cur == json) {
+            *self.seen_running.lock().unwrap_or_else(|e| e.into_inner()) = Some((render_hash, socket, std::time::Instant::now()));
             // the facts count as seen without a load too: a change that leaves the render
             // as it is (another address in the same subnet) must not write it again forever
             self.note(|e| {
@@ -1046,6 +1094,7 @@ impl WebAccessSvc {
         self.write_last_good(&json)
             .map_err(|e| format!("{LAST_GOOD}: {e}"))?;
         self.publish_ui(&resolved.ui);
+        *self.seen_running.lock().unwrap_or_else(|e| e.into_inner()) = Some((render_hash, socket, std::time::Instant::now()));
         self.note(|e| {
             e.in_sync = Some(true);
             e.last_error = None;

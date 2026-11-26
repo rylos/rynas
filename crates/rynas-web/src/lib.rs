@@ -8,6 +8,7 @@ pub mod devices;
 pub mod error;
 pub mod events;
 pub mod files;
+pub mod fswatch;
 pub mod hardware;
 pub mod listen;
 pub mod metrics;
