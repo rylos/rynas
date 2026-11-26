@@ -1,6 +1,6 @@
 <h1 align="center">rynas</h1>
 
-<h3 align="center">A complete NAS on plain Debian, in 33 MB of RAM.</h3>
+<h3 align="center">A complete NAS on plain Debian, light enough for a 2 GB box.</h3>
 
 <p align="center">
 Flexible RAID, shares, snapshots, backups, Docker apps and HTTPS from one web interface.<br>
@@ -40,7 +40,7 @@ browser. Underneath it is all plain Debian: mdadm, LVM, btrfs, Samba, NFS, syste
 | **Idle memory** | **~33 MB** for the whole manager: daemon 23 MB + web server 10 MB (resident) |
 | **API answers** | **0.5 ms** for the full storage tree (median of 20 requests) |
 | **Download** | one **33 MB** `.deb`; the whole interface loads as **~2 MB** of compressed WebAssembly |
-| **Oldest box it runs on** | a 2014 dual-core Celeron J1800 with **2 GB of RAM**, daily, with room to spare |
+| **Runs daily on** | a 2014 dual-core Celeron J1800 with **2 GB of RAM**, daily, with room to spare |
 
 <sub>Measured on rynas 0.9.11, idle: a DS920+ (Celeron J4125, 4 GB) running Debian 13 through
 synodeb, and a QNAP HS-251 (Celeron J1800, 2 GB). Memory is resident set size (`ps`/`smaps_rollup`);
@@ -84,7 +84,7 @@ short by a power failure continues where it stopped. Classic levels (0, 1, 5, 6,
 | **Shares** | SMB (with Time Machine), NFS, per-user and per-group permissions, quotas, recycle bin |
 | **Snapshots** | scheduled btrfs snapshots, file restore, rollback, system restore points, replication |
 | **Backup** | encrypted, deduplicated (restic format) to a NAS, USB disk or cloud; bare-metal backups of Linux PCs |
-| **Docker & apps** | compose stacks with an editor, image update checks, and 27 curated apps installed in a few clicks |
+| **Docker & apps** | compose stacks with an editor, image update checks, and a curated app catalogue installed in a few clicks |
 | **Web access** | HTTPS for the interface and every app: `.local` names, Let's Encrypt via DNS, LAN/VPN rules, Tailscale |
 | **System** | users and groups, 2FA, network with safe rollback, apt repositories, scheduler, notifications, UPS |
 
@@ -121,10 +121,10 @@ administrator account of the server. The PC backup agent ships in the same relea
 ## Synology and QNAP hardware
 
 rynas runs on any Debian box. On Synology hardware, use
-[**synodeb**](https://github.com/rylos/synodeb): it installs Debian 13 on the DS920+, DS923+
-and DS423+ with fans, LEDs, buttons, beeper, power schedule, UPS and every bay working. rynas
+[**synodeb**](https://github.com/rylos/synodeb): it installs Debian 13 on
+[supported Synology models](https://github.com/rylos/synodeb#supported-models) with fans, LEDs, buttons, beeper, power schedule, UPS and every bay working. rynas
 detects it and adds the hardware screens (the real chassis, fan modes, LEDs, power schedule);
-on other machines they stay hidden. The QNAP HS-251 has its own module: bays, fans, LEDs and
+on other machines they stay hidden. QNAP units have their own module, starting with the HS-251: bays, fans, LEDs and
 power recovery.
 
 ## More
