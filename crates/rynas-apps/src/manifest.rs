@@ -103,6 +103,10 @@ pub struct AppManifest {
     /// A list of shares the user chooses, each mounted at `<target>/<name>` of one service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_set: Option<ShareSet>,
+    /// The `Photos` folder of every NAS user's home, mounted read-only at `<target>/<user>`
+    /// of one service: the folders the RyNAS app's photo backup writes into (D-PHOTOS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_photos: Option<UserPhotos>,
     /// `"user"`: the installer may choose a NAS user the app runs as (`PUID`/`PGID` of that
     /// user instead of the `docker-apps` account), for apps whose files belong to a person
     /// (a sync tool writing files that arrive from that person's devices).
@@ -396,6 +400,27 @@ pub struct ShareSet {
     pub access: Access,
 }
 
+/// `[user_photos]`: the `Photos` folder of each NAS user's home (where the RyNAS app's photo
+/// backup writes, `YYYY/MM` below it), mounted read-only at `<target>/<user>` of `service`.
+/// rynas fills the list from the NAS users (never the whole homes) and keeps it in `.env`
+/// under `env` like a share set ([`crate::render::encode_share_set`]); the compose file does
+/// not mention it. `key_env` names an `.env` variable that keeps an API key an administrator
+/// gives rynas to wire the app (never referenced by compose, never generated).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserPhotos {
+    /// The `.env` variable holding the encoded list (never referenced by compose).
+    pub env: String,
+    /// The compose service the folders are mounted into.
+    pub service: String,
+    /// Absolute folder inside the container; each user's folder is `<target>/<user>`.
+    pub target: String,
+    pub description: String,
+    /// The `.env` variable keeping the app's API key for rynas (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_env: Option<String>,
+}
+
 /// Who an app may run as besides the `docker-apps` account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -681,6 +706,27 @@ impl AppManifest {
             }
             if ss.label.trim().is_empty() || ss.description.trim().is_empty() {
                 err("share_set: label and description must not be empty".into());
+            }
+        }
+        if let Some(up) = &self.user_photos {
+            let mut own = BTreeSet::new();
+            for e in std::iter::once(up.env.as_str()).chain(up.key_env.as_deref()) {
+                if !is_env_name(e) {
+                    err(format!("user_photos: `{e}` is not an env name ([A-Z][A-Z0-9_]*)"));
+                }
+                if PROVIDED_VARS.contains(&e) || e == RUN_AS_ENV {
+                    err(format!("user_photos: `{e}` is provided by rynas and cannot be declared"));
+                }
+                let in_set = self.share_set.as_ref().is_some_and(|s| s.env == e);
+                if envs.contains(e) || in_set || !own.insert(e) {
+                    err(format!("user_photos: `{e}` is declared twice"));
+                }
+            }
+            if !is_container_dir(&up.target) {
+                err(format!("user_photos: target `{}` must be an absolute container folder ([A-Za-z0-9._-] segments)", up.target));
+            }
+            if up.description.trim().is_empty() {
+                err("user_photos: description must not be empty".into());
             }
         }
 

@@ -1,2 +1,10 @@
 [shares]
 PHOTOS = "/volume1/photos"
+
+[[user_photos]]
+name = "ann"
+path = "/home/ann/Photos"
+
+[[user_photos]]
+name = "bob"
+path = "/volume1/homes/bob/Photos"

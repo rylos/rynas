@@ -7,3 +7,11 @@ EXTERNAL_LIBRARY = "/volume1/photo"
 
 [folders]
 DB_DATA_LOCATION = "/volume2/ssd/immich-db"
+
+[[user_photos]]
+name = "ann"
+path = "/home/ann/Photos"
+
+[[user_photos]]
+name = "bob"
+path = "/volume1/homes/bob/Photos"

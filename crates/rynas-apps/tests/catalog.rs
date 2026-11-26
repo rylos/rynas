@@ -504,6 +504,105 @@ fn lint_checks_share_sets_and_long_binds() {
 }
 
 #[test]
+fn user_photos_mount_each_folder_read_only() {
+    let c = catalog();
+    for (id, service, target) in [("immich", "immich-server", "/mnt/photos"), ("pigallery2", "pigallery2", "/app/data/images")] {
+        let app = c.get(id).unwrap();
+        let up = app.manifest.user_photos.as_ref().expect("user_photos");
+        assert_eq!((up.env.as_str(), up.service.as_str(), up.target.as_str()), ("USER_PHOTOS", service, target));
+        let p = Provided::example(id);
+        let r = render::render(app, "rynas", &p, &app.test_request()).unwrap();
+        check_rendered(app, &r);
+        assert_eq!(r.env["USER_PHOTOS"], "ann=/home/ann/Photos;bob=/volume1/homes/bob/Photos");
+        let doc: Value = yaml_serde::from_str(&String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap()).unwrap();
+        for (user, src) in [("ann", "/home/ann/Photos"), ("bob", "/volume1/homes/bob/Photos")] {
+            let b = bind_of(&doc, service, &format!("{target}/{user}")).unwrap_or_else(|| panic!("{id}: bind of {user}"));
+            assert_eq!(b["source"].as_str(), Some(src));
+            assert_eq!(b["read_only"].as_bool(), Some(true), "{id}: never writable");
+            assert!(b.get("bind").is_none());
+            if let Value::Mapping(m) = b {
+                compose::long_volume_ok(m).unwrap();
+            }
+        }
+        // the folders are not the app's to make nor to own
+        assert!(!r.folders.iter().any(|f| f.env.starts_with("USER_PHOTOS")));
+        // read back from .env by an update, the API key included
+        let mut req = app.test_request();
+        if up.key_env.is_some() {
+            req.user_photos_key = Some("AbC123-key_xyz".into());
+        }
+        let r = render::render(app, "rynas", &p, &req).unwrap();
+        let back = render::request_from_env(app, id, &r.env);
+        assert_eq!(back.user_photos, app.test_request().user_photos);
+        assert_eq!(back.user_photos_key, req.user_photos_key);
+        // none: no extra bind
+        req.user_photos.clear();
+        let r = render::render(app, "rynas", &p, &req).unwrap();
+        assert_eq!(r.env["USER_PHOTOS"], "");
+        // never a name that is not a user, a stack folder or a followed mount
+        for bad in [("Ann", "/home/Ann/Photos", false), ("ann", "./photos", false), ("ann", "/home/ann/Photos", true), ("a/b", "/x", false)] {
+            let mut req = app.test_request();
+            req.user_photos = vec![render::ShareSetItem { name: bad.0.into(), path: bad.1.into(), follow: bad.2 }];
+            assert!(matches!(render::render(app, "rynas", &p, &req), Err(RenderError::InvalidValue { field, .. }) if field == "USER_PHOTOS"), "{bad:?}");
+        }
+    }
+    // the Immich key: kept unquoted, never anything that could break the line
+    let im = c.get("immich").unwrap();
+    let r = render::render(im, "rynas", &Provided::example("immich"), &im.test_request()).unwrap();
+    assert_eq!(r.env["PHOTOS_API_KEY"], "");
+    let text = String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap();
+    assert!(!text.contains("PHOTOS_API_KEY"), "the key never reaches a container");
+    let mut req = im.test_request();
+    req.user_photos_key = Some("bad key'".into());
+    assert!(matches!(render::render(im, "rynas", &Provided::example("immich"), &req), Err(RenderError::InvalidValue { field, .. }) if field == "PHOTOS_API_KEY"));
+    // an entry without user_photos refuses them
+    let vw = c.get("vaultwarden").unwrap();
+    let mut req = vw.test_request();
+    req.user_photos = im.test_request().user_photos;
+    assert_eq!(render::render(vw, "rynas", &Provided::example("vaultwarden"), &req), Err(RenderError::UnknownValue("user_photos".into())));
+}
+
+/// PiGallery2 1.x showed the shared folder as the whole gallery; 2.0.0 moves it to Shared,
+/// next to the users' Photos folders, and says so in the update dialog.
+#[test]
+fn pigallery2_2_moves_the_shared_folder() {
+    let c = catalog();
+    let pg = c.get("pigallery2").unwrap();
+    let p = Provided::example("pigallery2");
+    let mut req = pg.test_request();
+    req.user_photos.clear();
+    let now = render::render(pg, "rynas", &p, &req).unwrap();
+    let text = String::from_utf8(now.file("compose.yaml").unwrap().contents.clone()).unwrap();
+    assert!(text.contains("${PHOTOS}:/app/data/images/Shared:ro"), "{text}");
+    let old_compose = text.replace("version: 2.0.0", "version: 1.0.1");
+    let old_env: String = String::from_utf8(now.file(".env").unwrap().contents.clone()).unwrap().lines().filter(|l| !l.starts_with("USER_PHOTOS=")).map(|l| format!("{l}\n")).collect();
+    let plan = plan::update_plan(pg, &old_compose, &old_env).unwrap();
+    assert_eq!(plan.migrations.iter().map(|v| v.to_string()).collect::<Vec<_>>(), ["2.0.0"]);
+    assert!(pg.migrations.iter().any(|m| m.description.contains("indexes the photos again")));
+    let up = plan::prepare_update(pg, "rynas", &p, "pigallery2", &old_compose, &old_env, &BTreeMap::new()).unwrap();
+    check_rendered(pg, &up);
+    assert_eq!(up.env["PHOTOS"], "/volume1/photos");
+    assert_eq!(up.env["USER_PHOTOS"], "");
+}
+
+#[test]
+fn lint_checks_user_photos() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dst = tmp.path().join("immich");
+    copy_dir(&apps_dir().join("immich"), &dst);
+    let t = fs::read_to_string(dst.join("app.toml")).unwrap();
+    let broken = t
+        .replace("service = \"immich-server\"\ntarget = \"/mnt/photos\"", "service = \"nope\"\ntarget = \"mnt/../photos\"")
+        .replace("key_env = \"PHOTOS_API_KEY\"", "key_env = \"DB_PASSWORD\"");
+    assert_ne!(broken, t);
+    fs::write(dst.join("app.toml"), broken).unwrap();
+    let text = CatalogApp::load(&dst).unwrap_err().to_string();
+    for needle in ["user_photos: `DB_PASSWORD` is declared twice", "user_photos: target `mnt/../photos` must be an absolute container folder", "names service `nope`"] {
+        assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
+    }
+}
+
+#[test]
 fn run_as_a_chosen_user() {
     let c = catalog();
     let st = c.get("syncthing").unwrap();

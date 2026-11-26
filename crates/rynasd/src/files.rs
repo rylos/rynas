@@ -720,6 +720,7 @@ async fn handle(st: FilesState, req: Request) -> Res<Response> {
             let wants = rynas_files::conn_routes::wants_conns(&probe);
             let f = files.clone();
             let init = route == "init";
+            let uploader = w.user.name.clone();
             let ctx = off_thread(move || -> Res<Context> {
                 let mut ctx = context(&f, &w, wants)?;
                 if init {
@@ -747,8 +748,16 @@ async fn handle(st: FilesState, req: Request) -> Res<Response> {
             rynas_files::api::refuse_read_only(&ctx.shares, &route, |k| query.get(k).cloned())?;
             let app_roots = app_roots_of(&ctx, method.as_str(), &route, &query)?;
             let share_roots = share_roots_of(&ctx, method.as_str(), &route, &query, &app_roots);
+            // an upload into the RyNAS app's photos folder: the user's photo libraries rescan
+            let photos = (route == "upload").then(|| query.get("dir").cloned()).flatten().map(|d| (uploader, d));
             let wr = WorkerRequest { method, route, query, length, range, ctx };
-            run_worker(&files, wr, body, deadline, &app_roots, share_roots.as_deref()).await
+            let r = run_worker(&files, wr, body, deadline, &app_roots, share_roots.as_deref()).await;
+            if let (Ok(resp), Some((user, dir))) = (&r, photos)
+                && resp.status().is_success()
+            {
+                crate::photos::uploaded(&user, &dir);
+            }
+            r
         }
     }
 }

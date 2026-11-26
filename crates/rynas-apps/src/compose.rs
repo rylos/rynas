@@ -253,7 +253,7 @@ pub(crate) fn lint(app: &AppManifest, doc: &Value, label: &str, known: &BTreeSet
     if !names.contains(app.main_service.as_str()) {
         err(format!("main_service `{}` is not a service", app.main_service));
     }
-    for s in app.security.privileged.iter().chain(&app.security.docker_socket).chain(&app.security.devices).chain(app.ports.iter().map(|p| &p.service)).chain(app.share_set.iter().map(|s| &s.service)) {
+    for s in app.security.privileged.iter().chain(&app.security.docker_socket).chain(&app.security.devices).chain(app.ports.iter().map(|p| &p.service)).chain(app.share_set.iter().map(|s| &s.service)).chain(app.user_photos.iter().map(|u| &u.service)) {
         if !names.contains(s.as_str()) {
             err(format!("app.toml names service `{s}`, which is not in the compose file"));
         }

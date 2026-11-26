@@ -104,6 +104,19 @@ pub struct InstallRequest {
     /// keeps the name in `.env` ([`crate::manifest::RUN_AS_ENV`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_as: Option<String>,
+    /// The users' `Photos` folders of an entry with `[user_photos]`: name = the NAS user,
+    /// path = the real folder (filled by rynasd, never by the caller's choice).
+    #[serde(default)]
+    pub user_photos: Vec<ShareSetItem>,
+    /// The API key kept under `[user_photos].key_env` (`None`: empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_photos_key: Option<String>,
+}
+
+/// An API key rynas keeps in `.env` for an app: 1-256 characters of `[A-Za-z0-9._~+/=-]`
+/// (what the apps' keys are made of), so it is written unquoted and never interpolated.
+pub fn valid_api_key(k: &str) -> bool {
+    !k.is_empty() && k.len() <= 256 && k.bytes().all(|c| c.is_ascii_alphanumeric() || b"._~+/=-".contains(&c))
 }
 
 /// One share of a `[share_set]`: mounted at `<target>/<name>` of the set's service.
@@ -159,6 +172,22 @@ pub fn check_share_set(field: &str, items: &[ShareSetItem]) -> Result<(), Render
         }
         if !paths.insert(it.path.trim_end_matches('/')) {
             return Err(bad(format!("{} is chosen twice", it.path)));
+        }
+    }
+    Ok(())
+}
+
+/// Checks the users' `Photos` folders of `[user_photos]`: a share set whose names are NAS
+/// user names and whose paths are absolute host folders, never following host mounts.
+pub fn check_user_photos(field: &str, items: &[ShareSetItem]) -> Result<(), RenderError> {
+    check_share_set(field, items)?;
+    let bad = |reason: String| RenderError::InvalidValue { field: field.to_owned(), reason };
+    for it in items {
+        if !crate::manifest::is_user_name(&it.name) {
+            return Err(bad(format!("`{}` is not a user name", it.name)));
+        }
+        if it.path.starts_with("./") || it.follow {
+            return Err(bad(format!("{}: `{}` must be an absolute folder", it.name, it.path)));
         }
     }
     Ok(())
@@ -420,6 +449,9 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
     if m.share_set.is_none() && !req.share_set.is_empty() {
         return Err(RenderError::UnknownValue("share_set".into()));
     }
+    if m.user_photos.is_none() && (!req.user_photos.is_empty() || req.user_photos_key.is_some()) {
+        return Err(RenderError::UnknownValue("user_photos".into()));
+    }
     match (&req.run_as, m.run_as) {
         (Some(_), None) => return Err(RenderError::UnknownValue("run_as".into())),
         (Some(u), Some(_)) if !crate::manifest::is_user_name(u) => {
@@ -490,6 +522,17 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
             });
         }
     }
+    if let Some(up) = &m.user_photos {
+        check_user_photos(&up.env, &req.user_photos)?;
+        env.push((up.env.clone(), encode_share_set(&req.user_photos)));
+        if let Some(k) = &up.key_env {
+            let key = req.user_photos_key.clone().unwrap_or_default();
+            if !key.is_empty() && !valid_api_key(&key) {
+                return Err(RenderError::InvalidValue { field: k.clone(), reason: "not an API key".into() });
+            }
+            env.push((k.clone(), key));
+        }
+    }
     for s in &m.secrets {
         let v = match req.secrets.get(&s.env) {
             Some(v) if !v.is_empty() => v.clone(),
@@ -503,6 +546,10 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
     let (mut doc, applied) = merged_compose(app, &env_map);
     if let Some(ss) = &m.share_set {
         add_share_set_volumes(&mut doc, &ss.service, &ss.target, ss.access == crate::manifest::Access::Ro, &req.share_set)?;
+    }
+    if let Some(up) = &m.user_photos {
+        // always read-only: an app never changes nor deletes what a phone backed up
+        add_share_set_volumes(&mut doc, &up.service, &up.target, true, &req.user_photos)?;
     }
     for r in compose::refs(&doc).map_err(RenderError::Compose)? {
         if !env_map.contains_key(&r.name) {
@@ -610,6 +657,11 @@ pub fn request_from_env(app: &CatalogApp, stack: &str, env: &BTreeMap<String, St
         // a broken line is kept as read: the render then names the bad item instead of
         // silently unmounting the shares
         req.share_set = split_share_set(v).unwrap_or_else(|_| vec![ShareSetItem { name: String::new(), path: v.clone(), follow: false }]);
+    }
+    if let Some(up) = &m.user_photos {
+        // a broken line is dropped: rynasd fills the list again from the users
+        req.user_photos = env.get(&up.env).and_then(|v| decode_share_set(v).ok()).unwrap_or_default();
+        req.user_photos_key = up.key_env.as_ref().and_then(|k| env.get(k)).filter(|k| !k.is_empty()).cloned();
     }
     for (name, field) in &app.form.properties {
         let Some(v) = env.get(name) else { continue };

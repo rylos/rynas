@@ -1,7 +1,7 @@
 schema = 1
 id = "pigallery2"
 name = "PiGallery2"
-version = "1.0.1"
+version = "2.0.0"
 app_version = "3.8.0"
 update_policy = "minor"
 description = "Fast photo gallery for your folders, made for small systems: no machine learning, no separate database."
@@ -64,10 +64,16 @@ description = "Thumbnails and converted videos, made again if deleted"
 [[shares]]
 env = "PHOTOS"
 label = "Photos"
-description = "The shared folder with your photos, mounted read-only"
+description = "A shared folder with photos for everyone, mounted read-only and shown as the folder Shared"
 access = "ro"
 required = false
 fallback = "photos"
+
+[user_photos]
+env = "USER_PHOTOS"
+service = "pigallery2"
+target = "/app/data/images"
+description = "The Photos folder of each NAS user's home, where the RyNAS app backs up the phone's photos, read-only as the folder named after the user"
 
 [[notes]]
 level = "warning"
@@ -75,4 +81,4 @@ text = "Sign in with admin / admin and change the password right away: the galle
 
 [[notes]]
 level = "info"
-text = "The gallery shows what is in the shared folder. To back up a phone into it, install Syncthing with the same shared folder and use a Syncthing app on the phone, or any app that copies photos over SMB or WebDAV."
+text = "To back up a phone, use the photo backup of the RyNAS app: it writes into the user's Photos folder, which the gallery shows as a folder named after the user. Every gallery account sees every folder until you give it a directory allow list in the gallery's settings (Users); the app's page in rynas lists the values to enter."

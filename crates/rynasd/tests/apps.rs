@@ -852,6 +852,62 @@ async fn move_behind_the_proxy() {
     assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, error_codes::CONFLICT));
 }
 
+/// Photos from the RyNAS app: an install mounts the users' Photos folders read-only (never a
+/// link, never a whole home), the page lists them, Sync adds a folder made later, and the key
+/// is only for apps with an API.
+#[tokio::test]
+async fn user_photos_folders_are_mounted_and_synced() {
+    use std::os::unix::fs::MetadataExt;
+    let e = env();
+    let root = e.root();
+    for d in ["etc", "home/ann/Photos/2026/11", "home/bob", "home/cid"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+    }
+    std::os::unix::fs::symlink(root.join("etc"), root.join("home/cid/Photos")).unwrap();
+    let me = std::fs::metadata(root.join("home/ann")).unwrap().uid();
+    std::fs::write(
+        root.join("etc/passwd"),
+        format!("root:x:0:0::/root:/bin/sh\nann:x:{me}:100::/home/ann:/bin/sh\nbob:x:{me}:100::/home/bob:/bin/sh\ncid:x:{me}:100::/home/cid:/bin/sh\n"),
+    )
+    .unwrap();
+    let (_, log) = install(&e, "pigallery2", json!({})).await;
+    assert!(log.contains("cid: Photos is a link"), "{log}");
+    let dir = e.stack("pigallery2");
+    let envf = std::fs::read_to_string(dir.join(".env")).unwrap();
+    // a dry system makes no folder: bob has none yet
+    assert!(envf.contains("USER_PHOTOS=ann=/home/ann/Photos\n"), "{envf}");
+    let compose = std::fs::read_to_string(dir.join("compose.yaml")).unwrap();
+    assert!(compose.contains("target: /app/data/images/ann") && compose.contains("read_only: true") && !compose.contains("/home/cid"), "{compose}");
+    let (s, b) = call(&e, "GET", "/v1/apps/installed/pigallery2", None).await;
+    assert!(json_of::<InstalledAppDetail>(s, &b).app.user_photos);
+    let (s, b) = call(&e, "GET", "/v1/apps/installed/pigallery2/photos", None).await;
+    let st: PhotosState = json_of(s, &b);
+    let rows: Vec<(&str, bool)> = st.users.iter().map(|u| (u.user.as_str(), u.mounted)).collect();
+    assert_eq!(rows, [("ann", true), ("bob", false), ("cid", false)]);
+    assert_eq!((st.api, st.allow_list.as_deref()), (None, Some("/{user}/*")));
+    // no key for an app without an API
+    let (s, _) = call(&e, "POST", "/v1/apps/installed/pigallery2/photos/key", Some(json!({"key": "abc"}))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    // bob's phone made the folder: Sync mounts it and the stack goes up again
+    std::fs::create_dir_all(root.join("home/bob/Photos")).unwrap();
+    let (s, b) = call(&e, "POST", "/v1/apps/installed/pigallery2/photos/sync", None).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t: TaskStarted = serde_json::from_slice(&b).unwrap();
+    let (info, log) = wait_task(&e, &t.task_id).await;
+    assert_eq!(info.status, TaskStatus::Ok, "{log}");
+    assert!(log.contains("mounting the Photos folders again") && log.contains("up --detach"), "{log}");
+    let envf = std::fs::read_to_string(dir.join(".env")).unwrap();
+    assert!(envf.contains("USER_PHOTOS='ann=/home/ann/Photos;bob=/home/bob/Photos'\n"), "{envf}");
+    // again: nothing changed, no restart
+    let (_, b) = call(&e, "POST", "/v1/apps/installed/pigallery2/photos/sync", None).await;
+    let t: TaskStarted = serde_json::from_slice(&b).unwrap();
+    let (_, log) = wait_task(&e, &t.task_id).await;
+    assert!(log.contains("up to date") && !log.contains("up --detach"), "{log}");
+    // an app that does not read the folders
+    let (s, _) = call(&e, "GET", "/v1/apps/installed/nope/photos", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
 /// An entry with `run_as`: plans offer the NAS users, refuse root, system accounts and the
 /// apps' account, and an install writes the user's ids and name.
 #[tokio::test]
@@ -1076,6 +1132,8 @@ async fn non_admins_get_403_on_every_route() {
         include_str!("../src/tls.rs"),
         include_str!("../src/web_access/mod.rs"),
         include_str!("../src/syncthing/mod.rs"),
+        // the router only: its tests serve a fake app's API
+        include_str!("../src/photos.rs").split("#[cfg(test)]").next().unwrap_or_default(),
     ] {
         let routes = routes_of(src);
         assert!(routes.len() >= 2, "routes not found");

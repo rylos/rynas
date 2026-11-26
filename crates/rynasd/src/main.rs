@@ -1416,6 +1416,8 @@ fn main() -> std::io::Result<()> {
                 rynasd::syncthing::live::install(live.clone());
                 rynasd::syncthing::live::spawn(live, apps.clone());
             }
+            // photos from the RyNAS app: a scan of the user's library after an upload batch
+            rynasd::photos::spawn(apps.clone());
             state.apps = Some(apps);
             state.docker = Some(docker);
         }

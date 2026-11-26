@@ -899,6 +899,81 @@ pub struct InstalledApp {
     /// removes them).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub added_grants: Vec<AppAddedGrant>,
+    /// The entry reads the users' `Photos` folders (`[user_photos]`): the app's page shows
+    /// their wiring (`GET /api/v1/apps/installed/{stack}/photos`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub user_photos: bool,
+}
+
+// ------------------------------------------------------------------ photos (D-PHOTOS)
+
+/// `GET /api/v1/apps/installed/{stack}/photos`: how the users' `Photos` folders (where the
+/// RyNAS app backs up phones) reach a photo app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PhotosState {
+    /// One row per NAS user with a home.
+    pub users: Vec<PhotosUser>,
+    /// The app wires each folder through its API (Immich); `None` for an app where the
+    /// folders are only mounted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<PhotosApi>,
+    /// The folder in the app's own view of each user (PiGallery2: the value of the user's
+    /// directory allow list, `/<user>/*`), for apps whose per-user access is set by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_list: Option<String>,
+}
+
+/// The API wiring of a photo app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PhotosApi {
+    /// rynas has an API key for the app.
+    pub key: bool,
+    /// The app did not answer or refused the key (English, from rynasd).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One NAS user's `Photos` folder in a photo app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PhotosUser {
+    pub user: String,
+    /// The host folder (`<home>/Photos`).
+    pub folder: String,
+    /// Mounted (read-only) into the app now.
+    pub mounted: bool,
+    /// The app's library of the folder (apps with an API).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<PhotosLibrary>,
+}
+
+/// Where a user's folder stands in an app's libraries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PhotosLibrary {
+    /// A library of the user's account reads the folder.
+    Linked,
+    /// The user has an account; "Sync" creates the library.
+    #[default]
+    Missing,
+    /// No account of the app matches the user (same email, else same name).
+    NoAccount,
+    /// Several accounts match: none is chosen.
+    Ambiguous,
+    /// A library of another account reads the folder (left as it is).
+    OtherOwner,
+}
+
+/// `POST /api/v1/apps/installed/{stack}/photos/key`: the API key rynas keeps for the app
+/// (empty: forget it). Never returned by any route.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PhotosKeyRequest {
+    pub key: String,
+}
+
+impl std::fmt::Debug for PhotosKeyRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhotosKeyRequest").field("key", &if self.key.is_empty() { "" } else { "********" }).finish()
+    }
 }
 
 /// `GET /api/v1/apps/installed/{stack}`.

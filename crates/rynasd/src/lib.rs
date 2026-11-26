@@ -38,6 +38,7 @@ pub mod network;
 pub mod notifications;
 pub mod ops;
 pub mod pam;
+pub mod photos;
 pub mod pc_agent;
 pub mod pc_backup;
 pub mod places;
