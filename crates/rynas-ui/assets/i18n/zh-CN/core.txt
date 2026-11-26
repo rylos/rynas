@@ -333,7 +333,7 @@ nev.updates.available.title_2	有 {updates} 项可用更新
 nev.updates.available.body	可更新的软件包：{packages}。
 nev.updates.up_to_date.title	系统已是最新版本
 nev.repositories.unsupported.title	不受支持的软件源
-nev.repositories.unsupported.body	Rynas 未对来自 {sources} 的软件包进行测试，更新和技术支持可能受到影响。
+nev.repositories.unsupported.body	rynas 未对来自 {sources} 的软件包进行测试，更新和技术支持可能受到影响。
 nev.repositories.supported.title	当前软件源均受支持
 nev.updates.kernel_available.title	有可用内核 {kernel}
 nev.updates.kernel_available.body	有 {behind} 个比当前版本更新的内核，包含 {cves} 项已编号的漏洞修复。
@@ -1148,7 +1148,7 @@ plan.e.disk_too_small	硬盘 {subject} 的容量不足。
 plan.e.no_such_array	找不到阵列 {subject}。
 plan.e.array_not_healthy	阵列 {subject} 状态异常，请先修复。
 plan.e.array_busy	阵列 {subject} 正在重新同步、校验或重整，请等待操作完成。
-plan.e.level_unsupported	{subject} 的 RAID 级别不支持通过 Rynas 扩容。
+plan.e.level_unsupported	{subject} 的 RAID 级别不支持通过 rynas 扩容。
 plan.e.level_change_unsupported	不支持所选的 RAID 级别变更。当前支持添加镜像盘、扩展 RAID 5/6、将双盘 RAID 1 转换为 RAID 5，以及将 RAID 5 转换为 RAID 6。
 plan.e.not_a_member	{subject} 不是阵列的成员
 plan.e.no_redundancy	{subject} 没有冗余，无法更换成员设备。
@@ -1167,7 +1167,7 @@ plan.w.smr_slow_writes	叠瓦式（SMR）硬盘（{items}）在持续写入时�
 plan.w.single_no_redundancy	单盘存储卷没有冗余。硬盘故障会导致存储卷丢失。可以在之后添加镜像盘。
 plan.w.raid0_no_redundancy	RAID 0 没有冗余。任意一块硬盘故障都会导致整个存储卷丢失。
 plan.w.raid5_rebuild	硬盘容量较大或数量较多时，RAID 5 重建耗时较长。重建期间再坏一块硬盘会导致存储卷丢失。可考虑 RAID 6。
-plan.w.encrypted	此存储卷已加密。每次重启后需在 Rynas 解锁。请在 NAS 之外保存恢复密钥和 LUKS 卷头备份。
+plan.w.encrypted	此存储卷已加密。每次重启后需在 rynas 解锁。请在 NAS 之外保存恢复密钥和 LUKS 卷头备份。
 plan.w.compression_off	当前已关闭压缩。zstd 级别 1 的 CPU 开销较低，通常可节省存储空间。
 plan.w.ssd_trim_off	加密 SSD 的 TRIM 默认关闭，因为它会暴露哪些数据块未使用。如能接受，可在 crypttab 中设置 discard。
 plan.w.disk_larger_than_members	{subject} 容量大于现有成员设备。全部成员设备更换前，多出的容量暂不可用。
@@ -1241,7 +1241,7 @@ plan.w.flex_unused_space	{items} 上有 {size} 暂未使用。需要另一块容
 plan.w.flex_long_reshape	各层级会依次重整，需迁移 {size}，合计约 {n} 小时。存储卷保持在线。
 plan.w.flex_reduced_tolerance_window	{subject} 正在转换为 RAID 6，此层级在转换完成前只能容忍一块硬盘故障。
 plan.w.disk_short_of_tier	{subject} 的容量比第 {n} 层要求少 {size}，因此仅加入较低的层级。
-plan.e.flex_layout_unsupported	Rynas 无法更改此弹性 RAID。布局不符合层级规则，或所选更改尚未受支持。
+plan.e.flex_layout_unsupported	rynas 无法更改此弹性 RAID。布局不符合层级规则，或所选更改尚未受支持。
 plan.e.flex_growth_pending	此存储卷上次扩容中途停止，请先完成上次操作。
 plan.e.tolerance_change_unsupported	弹性 RAID 的容错能力无法更改。
 plan.w.flex_no_recent_scrub	过去 {n} 天，{subject} 未成功完成过无错误的校验。重整阵列时的主要风险是读取错误，请先运行数据校验。
@@ -1429,7 +1429,7 @@ sto.default_v	默认值（{v}）
 sto.read_ahead	预读大小（KiB）
 sto.ra_invalid	预读大小须为 0 至 65536 之间的数值。
 sto.standby	空闲后停转
-sto.standby_hint	留空则使用本机默认值（硬件支持组件未指定时默认关闭）。硬盘连续无读写达到设定时间后，Rynas 会让它停转，即使硬盘忽略自身的停转定时器。正在执行 SMART 测试的硬盘会被跳过。停转只适合闲置数小时的硬盘，例如归档盘或备份盘。
+sto.standby_hint	留空则使用本机默认值（硬件支持组件未指定时默认关闭）。硬盘连续无读写达到设定时间后，rynas 会让它停转，即使硬盘忽略自身的停转定时器。正在执行 SMART 测试的硬盘会被跳过。停转只适合闲置数小时的硬盘，例如归档盘或备份盘。
 sto.hdd_only	仅适用于机械硬盘。
 sto.not_set	不设置（由硬盘自行管理）
 sto.never	从不
@@ -1613,10 +1613,10 @@ sto.bt.go_convert	恢复冗余
 sto.bt.boot	开机后
 sto.bt.auto	启动后自动降级挂载
 sto.bt.auto_text	开机时若设备缺失，但每个数据块仍有完整副本，系统会以降级模式挂载存储卷并通知管理员。关闭此设置时，系统会等待管理员手动处理。
-sto.proposal	Rynas 建议值
+sto.proposal	rynas 建议值
 sto.stripe	条带缓存（条目数）
 sto.kernel_default	内核默认值（256）
-sto.use_proposal	{n}（Rynas 建议值）
+sto.use_proposal	{n}（rynas 建议值）
 wiz.subtitle	选择硬盘、RAID 级别和存储卷设置。执行前可以查看操作计划。
 wiz.steps	步骤
 wiz.s_disks	硬盘
@@ -2410,7 +2410,7 @@ dev.subtitle	管理与本 NAS 配对的手机，可重命名、撤销授权或�
 dev.pair	配对设备
 dev.list	已配对的设备
 dev.none	暂无已配对的设备
-dev.none_text	用手机上的 Rynas 应用扫描此处显示的二维码，然后在此页面批准配对。
+dev.none_text	用手机上的 rynas 应用扫描此处显示的二维码，然后在此页面批准配对。
 dev.col.name	名称
 dev.col.model	型号
 dev.col.user	用户
@@ -3035,9 +3035,9 @@ dd.st.running	正在运行
 dd.st.estimating	正在估算
 dd.st.waiting	等待中
 dd.engine_missing	尚未安装数据去重引擎（oans）。
-dd.engine_unavailable	尚未安装数据去重引擎（rynas-oans）。此 NAS 的软件源中没有该软件包，Rynas 仅为 x86-64 处理器发布此包。
+dd.engine_unavailable	尚未安装数据去重引擎（rynas-oans）。此 NAS 的软件源中没有该软件包，rynas 仅为 x86-64 处理器发布此包。
 dd.download_failed	无法下载数据去重引擎。若此 NAS 无法联网，请在其他电脑上通过下方地址下载软件包，放到 {dir} 后再次点击「安装」。
-dd.engine_unsupported	当前 oans 版本为 {version}，超出 Rynas 已测试的版本范围（{min} 至 {max}），无法运行。
+dd.engine_unsupported	当前 oans 版本为 {version}，超出 rynas 已测试的版本范围（{min} 至 {max}），无法运行。
 dd.install	安装
 dd.waiting_for	等待 {task} 完成
 dd.starting	正在启动…
@@ -3298,7 +3298,7 @@ snap.f.min	最低保留要求
 snap.f.min_help	填写 latest 以保留最新快照，all 以保留全部快照，也可填写 1d、12h、2w 等最短保留时间。
 snap.v.name	使用英文字母、数字、_ 和 -，以字母或数字开头，最多 48 个字符。
 snap.v.source	请选择共享文件夹，或输入子卷的绝对路径。
-snap.system_help	APT 安装或升级软件包前，Rynas 会创建系统只读快照。如果引导配置支持，可从快照列表回滚系统和内核，并在重启后生效。否则需通过控制台回滚。
+snap.system_help	APT 安装或升级软件包前，rynas 会创建系统只读快照。如果引导配置支持，可从快照列表回滚系统和内核，并在重启后生效。否则需通过控制台回滚。
 snap.system_enabled	更新前创建系统还原点
 snap.system_enabled_help	要求系统根文件系统为 Btrfs。
 snap.system_keep	还原点保留数量
@@ -3372,7 +3372,7 @@ repl.f.trust	信任这些密钥
 repl.f.enabled	启用快照复制
 repl.f.after	每次快照后运行
 repl.f.after_help	关闭后，可为此目标单独设置运行计划，例如每天夜间。
-repl.f.retention_help	此策略独立于源端快照的保留策略。目标端只会删除由 Rynas 创建的快照副本。
+repl.f.retention_help	此策略独立于源端快照的保留策略。目标端只会删除由 rynas 创建的快照副本。
 repl.f.compress	传输压缩
 repl.compress.no	无
 repl.compress.zstd	zstd
@@ -3381,7 +3381,7 @@ repl.compress.gzip	gzip
 repl.f.rate	传输限速（KiB/s）
 repl.f.rate_help	留空或填 0 表示不限速。
 repl.f.folder_help	在目标存储卷根目录新建文件夹。请选择尚未使用的名称。
-repl.key.none	Rynas 使用专用密钥对连接服务器，仅用于快照复制。
+repl.key.none	rynas 使用专用密钥对连接服务器，仅用于快照复制。
 repl.key.create	创建密钥
 repl.key.public	此 NAS 的公钥
 repl.key.line	目标服务器的 SSH 授权配置
@@ -3417,7 +3417,7 @@ bk.help	每个任务将选定的文件夹备份到加密存储库。只传输变
 bk.create	创建备份任务
 bk.crypt_note	加密共享文件夹的备份保存其加密目录，锁定时也可备份。恢复得到的仍是加密数据，需要该文件夹的密码或恢复密钥。
 bk.empty	暂无备份任务
-bk.empty_text	创建任务，将共享文件夹、Docker 应用数据或 Rynas 配置备份到另一台 NAS、USB 硬盘或云存储。
+bk.empty_text	创建任务，将共享文件夹、Docker 应用数据或 rynas 配置备份到另一台 NAS、USB 硬盘或云存储。
 bk.no_offsite	目前的备份都留在本机。火灾或设备被盗可能同时导致原数据和备份丢失。可添加指向另一台 NAS 或云存储的任务。
 bk.col.job	任务与来源
 bk.col.where	目标
@@ -3434,7 +3434,7 @@ bk.u.d	天
 bk.u.w	周
 bk.u.m	月
 bk.u.y	年
-bk.src.config	Rynas 配置
+bk.src.config	rynas 配置
 bk.src.config_help	备份设置、用户、共享和任务配置，并使用存储库密码加密。
 bk.failed	失败
 bk.never	从未运行
@@ -3480,7 +3480,7 @@ bk.f.host	服务器
 bk.f.port	端口
 bk.f.folder	服务器上的文件夹
 bk.f.ssh_key	此 NAS 的 SSH 密钥
-bk.f.ssh_key_help	Rynas 使用 SSH 密钥对登录。生成密钥对后，将公钥添加到服务器的 ~/.ssh/authorized_keys。
+bk.f.ssh_key_help	rynas 使用 SSH 密钥对登录。生成密钥对后，将公钥添加到服务器的 ~/.ssh/authorized_keys。
 bk.f.ssh_key_paste	将此行添加到目标服务器对应用户的 ~/.ssh/authorized_keys。首次连接时会记录服务器主机密钥。
 bk.f.ssh_generate	生成密钥对
 bk.f.endpoint	服务端点
@@ -3506,7 +3506,7 @@ bk.test.failed	无法连接目标
 bk.f.pw_mode	存储库密码
 bk.pw.generate	生成强密码
 bk.pw.own	使用自定密码
-bk.pw.generate_help	保存后，Rynas 会显示随机生成的密码一次。
+bk.pw.generate_help	保存后，rynas 会显示随机生成的密码一次。
 bk.pw.kept	密码已在此 NAS 上加密保存，用于解密现有备份版本。此任务的存储库密码无法修改。如需使用其他密码，请创建新任务。
 bk.f.dest_change	更改目标后，请重新填写访问凭据，如密码、密钥或 rclone 配置。已保存的凭据属于旧目标。
 bk.f.ssh_replace	已有 SSH 密钥对。生成新的密钥对后，请更新目标服务器 authorized_keys 中的公钥。
@@ -3524,7 +3524,7 @@ bk.f.repo_password_help	密码至少 8 个字符。若使用已存在的存储�
 bk.pw.title	保存存储库密码
 bk.pw.warning	恢复备份必须使用此密码。即使此 NAS 丢失，也需要该密码才能读取备份。请在 NAS 之外妥善保存，例如存入密码管理器或打印保存。
 bk.pw.download	下载为文件
-bk.pw.file_note	Rynas 备份存储库密码（restic 格式）。请妥善保管。
+bk.pw.file_note	rynas 备份存储库密码（restic 格式）。请妥善保管。
 bk.pw.saved	我已保存密码
 bk.pw.done	完成
 bk.copy	复制
@@ -4000,7 +4000,7 @@ sp.kind.pc_backup	电脑备份
 sp.kind.incoming_replica	接收的副本
 sp.prot.incoming_replica	由另一台 NAS 发送
 sp.rev.received_unknown_owner	已接收，所属来源未知
-sp.journal_admin	管理员设置的系统日志上限：{size}。Rynas 未设置上限。
+sp.journal_admin	管理员设置的系统日志上限：{size}。rynas 未设置上限。
 sp.journal_in_force	当前生效的系统日志上限：{size}。
 sp.journal_default	保存此设置前，系统日志采用默认上限，即所在文件系统的 10%，最多 4 GiB。
 sp.approx	≈ {size}
@@ -4085,7 +4085,7 @@ sp.notify_growth_help	快照在 7 天内的增长量超过下方阈值时发送�
 sp.growth_gib	增长阈值（GiB）
 sp.growth_pct	增长阈值（%）
 sp.auto_free	自动释放空间
-sp.auto_free_help	默认关闭。存储卷的可用空间低于告警阈值时，Rynas 会从最早的开始删除该卷上的任务快照、应用快照和还原点，直至可用空间超过恢复阈值。受保护或已固定的快照和电脑备份会保留。每次删除都会记录并发送通知。
+sp.auto_free_help	默认关闭。存储卷的可用空间低于告警阈值时，rynas 会从最早的开始删除该卷上的任务快照、应用快照和还原点，直至可用空间超过恢复阈值。受保护或已固定的快照和电脑备份会保留。每次删除都会记录并发送通知。
 sp.auto_free_on	在 {volume} 上启用
 sp.journal_cap	系统日志上限（MiB）
 sp.journal_cap_help	留空时取 2 GiB 与所在文件系统容量的 5% 两者中的较小值。填 0 使用系统默认值。
@@ -4189,12 +4189,12 @@ upd.refresh_kernel	再次读取内核和启动状态
 upd.kernel_held	已设为暂缓更新
 upd.kernel_held_help	请在「内核更新」中安装内核。
 repo.title	软件源
-repo.subtitle	APT 可从 Debian 官方仓库、Rynas 软件源和第三方软件源获取软件包。
+repo.subtitle	APT 可从 Debian 官方仓库、rynas 软件源和第三方软件源获取软件包。
 repo.open_text	管理 Debian 镜像站、套件、Backports 和第三方软件源，并检查其状态。
 repo.check	立即检查
 repo.open	打开「软件源」
 repo.unsupported_title	不受支持的配置：
-repo.unsupported	Rynas 未对来自 {list} 的软件包进行测试，更新和技术支持可能受到影响。
+repo.unsupported	rynas 未对来自 {list} 的软件包进行测试，更新和技术支持可能受到影响。
 repo.summary	状态概览
 repo.status	状态
 repo.status_good	正常
@@ -4206,9 +4206,9 @@ repo.convert	转换为新版格式
 repo.convert_help	部分文件使用旧版单行格式。Debian 13 使用 Deb822 格式的 .sources 文件。旧文件将以 .bak 后缀保留。
 repo.convert_title	转换为新版格式？
 repo.debian	Debian 官方软件源
-repo.deb_help	当前 Debian 发行版的官方软件源。Rynas 会先显示变更，再将这些条目写入 debian.sources 并运行 apt-get update。
+repo.deb_help	当前 Debian 发行版的官方软件源。rynas 会先显示变更，再将这些条目写入 debian.sources 并运行 apt-get update。
 repo.deb_system_layer	此系统的 Debian 软件源由硬件支持组件管理。下方列表仅供查看。
-repo.deb_not_debian	此系统并非标准 Debian 环境，Rynas 会保留系统现有的 Debian 软件源。
+repo.deb_not_debian	此系统并非标准 Debian 环境，rynas 会保留系统现有的 Debian 软件源。
 repo.suites	套件
 repo.s_main	发行版
 repo.s_main_help	当前 Debian 发行版的软件包。始终启用。
@@ -4217,8 +4217,8 @@ repo.s_security_help	Debian 安全团队发布的修复。
 repo.s_updates	稳定版更新
 repo.s_updates_help	在下一个小版本发布前提供的紧急修复。
 repo.s_backports	Debian Backports（向后移植）
-repo.s_backports_help	Backports 提供为当前 Debian 发行版重新构建的新版本软件包（APT 优先级为 100）。启用后，只有明确指定时才会从中安装或升级软件包。如果 UPS 需要更新的 NUT，Rynas 会从这里获取。
-repo.bp_system	Backports 目前在其他文件中配置。在这里保存会将其移至 Rynas 管理的文件。
+repo.s_backports_help	Backports 提供为当前 Debian 发行版重新构建的新版本软件包（APT 优先级为 100）。启用后，只有明确指定时才会从中安装或升级软件包。如果 UPS 需要更新的 NUT，rynas 会从这里获取。
+repo.bp_system	Backports 目前在其他文件中配置。在这里保存会将其移至 rynas 管理的文件。
 repo.s_proposed	拟议更新
 repo.s_proposed_help	等待纳入下一个小版本的软件包，尚未完成测试。
 repo.proposed_warn	拟议更新用于在正式发布前测试小版本。正在使用的 NAS 应保持关闭此选项。
@@ -4246,7 +4246,7 @@ repo.use	使用
 repo.deb_save	保存…
 repo.no_change	没有需要应用的变更。
 repo.deb_preview	更改 Debian 软件源？
-repo.preview_text	将写入以下文件，旧文件保存在 Rynas 的状态目录中。写入后会运行 apt-get update。
+repo.preview_text	将写入以下文件，旧文件保存在 rynas 的状态目录中。写入后会运行 apt-get update。
 repo.ch_rename	重命名为 {to}
 repo.ch_remove	删除
 repo.ch_edit	修改
@@ -4255,12 +4255,12 @@ repo.apply	应用
 repo.entries	软件源列表
 repo.add	添加软件源
 repo.k_debian	Debian
-repo.k_rynas	Rynas
+repo.k_rynas	rynas
 repo.k_system	硬件支持
 repo.k_third	第三方
 repo.k_disc	安装光盘
 repo.k_local	本地目录
-repo.ro_rynas	请在 Rynas 的对应页面管理。
+repo.ro_rynas	请在 rynas 的对应页面管理。
 repo.ro_system	由硬件支持组件管理。
 repo.ro_debian_system	Debian 软件源由硬件支持组件管理。
 repo.manage	管理
@@ -4285,7 +4285,7 @@ repo.enable_title	启用此软件源？
 repo.disable_title	停用此软件源？
 repo.toggle_text	{what}。随后会运行 apt-get update。
 repo.remove_text	软件源文件及其在 /etc/apt/keyrings 中的密钥将被移除，系统会保留备份。通过此源安装的软件包会保留。
-repo.add_warn	Rynas 未对第三方软件源中的软件包进行测试，它们可能替换 Debian 的软件包。请仅添加可信的软件源。
+repo.add_warn	rynas 未对第三方软件源中的软件包进行测试，它们可能替换 Debian 的软件包。请仅添加可信的软件源。
 repo.f_name	名称
 repo.f_name_help	文件名可使用小写字母、数字、英文句点和连字符。
 repo.f_uris	地址
@@ -4300,7 +4300,7 @@ repo.f_archs_help	留空时使用本机架构。
 repo.f_key	签名公钥
 repo.f_key_help	粘贴 ASCII 装甲格式的公钥，或在下方填写公钥地址。
 repo.f_key_url	公钥地址
-repo.f_key_url_help	填写以 https:// 开头的公钥地址，Rynas 会下载公钥。
+repo.f_key_url_help	填写以 https:// 开头的公钥地址，rynas 会下载公钥。
 repo.read_key	读取公钥
 repo.key_expires	将于 {when} 到期
 repo.key_expired	已于 {when} 到期
@@ -4823,7 +4823,7 @@ dk.au.o_updated	自动更新 {when}.
 dk.au.o_rolled_back	自动更新回滚 {when} :
 dk.au.o_held	未安装的 {when} 自动更新：
 dk.au.o_failed	自动更新 {when} 失败：
-dk.g.rynas	由Rynas管理
+dk.g.rynas	由 rynas 管理
 dk.g.portainer	由Portainer公司管理
 dk.g.untracked	其他组成项目
 dk.m.rynas	rynas
@@ -5008,7 +5008,7 @@ stg.shared_with.other	已与 {n} 台设备共享
 stg.dev_offline	未连接
 stg.dev_in_sync	已同步
 stg.dev_pct	{pct}，尚有 {size} 未同步
-stg.paused_by_rynas	加密共享文件夹锁定期间，Rynas 会暂停此文件夹的同步，并在解锁后恢复。
+stg.paused_by_rynas	加密共享文件夹锁定期间，rynas 会暂停此文件夹的同步，并在解锁后恢复。
 stg.locked_help	请先解锁共享文件夹
 stg.pause	暂停同步
 stg.resume	恢复同步
@@ -5093,9 +5093,9 @@ stg.ad.grants	共享文件夹权限
 stg.ad.grants_help	每条授权也允许此账号通过 SMB 和 NFS 访问相应共享文件夹。
 stg.grant.also	此操作也会授予 {who} 通过 SMB 和 NFS 访问 {share} 的权限。
 stg.grant.apps	应用账号（docker-apps）
-stg.ad.compose	此容器属于 Compose 项目 {project}（{dir}）。接管后 Rynas 会移除该容器。请在原管理工具中移除该项目，以免再次启动使用同一设备 ID 的实例。
-stg.ad.compose_nodir	此容器属于 Compose 项目 {project}。接管后 Rynas 会移除该容器。请在原管理工具中移除该项目，以免再次启动使用同一设备 ID 的实例。
-stg.ad.gui_tls	旧实例的管理界面使用 HTTPS。接管后，实例本身会关闭 HTTPS，由 Rynas 的代理通过 HTTPS 提供该界面。
+stg.ad.compose	此容器属于 Compose 项目 {project}（{dir}）。接管后 rynas 会移除该容器。请在原管理工具中移除该项目，以免再次启动使用同一设备 ID 的实例。
+stg.ad.compose_nodir	此容器属于 Compose 项目 {project}。接管后 rynas 会移除该容器。请在原管理工具中移除该项目，以免再次启动使用同一设备 ID 的实例。
+stg.ad.gui_tls	旧实例的管理界面使用 HTTPS。接管后，实例本身会关闭 HTTPS，由 rynas 的代理通过 HTTPS 提供该界面。
 stg.ad.listen	旧实例使用其他地址监听同步连接：{list}。应用仅开放 22000 端口，必须恢复默认监听地址。
 stg.ad.reset_listen	恢复默认同步监听地址
 stg.ad.reset_listen_help	原本连接到固定地址的设备可通过设备发现重新找到 NAS，也可改用默认端口。
@@ -5119,14 +5119,14 @@ nev.syncthing.devices_unseen.title	有 {count} 台设备至少 {days} 天未连�
 nev.syncthing.devices_unseen.body	以下设备至少 {days} 天未连接到 Syncthing：{devices}。这些设备上的变更无法同步到 NAS。
 nev.syncthing.device_seen.title	设备 {device} 已重新连接
 nev.syncthing.down.title	Syncthing 未响应
-nev.syncthing.down.body	应用 {stack} 正在运行，但其接口已有 {minutes} 分钟未响应。文件夹未同步，Rynas 无法查看其状态。
+nev.syncthing.down.body	应用 {stack} 正在运行，但其接口已有 {minutes} 分钟未响应。文件夹未同步，rynas 无法查看其状态。
 nev.syncthing.up.title	Syncthing 已恢复响应
 nev.syncthing.folder_kept_paused.title	Syncthing 文件夹 {folder} 仍处于暂停状态
-nev.syncthing.folder_kept_paused.body	{share} 解锁后，Rynas 未找到同步文件夹的标记（.stfolder），因此未恢复同步。请检查文件夹，再在 Syncthing 中恢复同步。
+nev.syncthing.folder_kept_paused.body	{share} 解锁后，rynas 未找到同步文件夹的标记（.stfolder），因此未恢复同步。请检查文件夹，再在 Syncthing 中恢复同步。
 nev.syncthing.duplicate_stopped.title	已停止另一个使用 {stack} 设备 ID 的 Syncthing 实例
-nev.syncthing.duplicate_stopped.body	{what} 使用了接管为 {stack} 的 Syncthing 实例的配置目录（{home}）或设备 ID。使用同一设备 ID 的两个实例不能同时运行。Rynas 已停止该实例并关闭自动重启，请将其移除。
+nev.syncthing.duplicate_stopped.body	{what} 使用了接管为 {stack} 的 Syncthing 实例的配置目录（{home}）或设备 ID。使用同一设备 ID 的两个实例不能同时运行。rynas 已停止该实例并关闭自动重启，请将其移除。
 nev.syncthing.compose_leftover.title	请移除 Compose 项目 {project}
-nev.syncthing.compose_leftover.body	接管为 {stack} 的 Syncthing 实例原属 Compose 项目 {project}（{dir}）的一个容器。Rynas 已移除该容器。请在管理此项目的工具中移除该项目，以免再次执行 compose up 时启动使用同一设备 ID 的实例。
+nev.syncthing.compose_leftover.body	接管为 {stack} 的 Syncthing 实例原属 Compose 项目 {project}（{dir}）的一个容器。rynas 已移除该容器。请在管理此项目的工具中移除该项目，以免再次执行 compose up 时启动使用同一设备 ID 的实例。
 apps.subtitle	浏览精选容器应用和可扩展 rynas 功能的插件
 apps.docker_first	应用在 Docker 容器中运行。请先安装 Docker，再从应用目录选择并安装应用。
 apps.plg.docker_above	请先在页面顶部安装 Docker 插件，之后才能安装应用。
@@ -5960,7 +5960,7 @@ bk.problem.sshd_missing	SSH 服务未安装或未运行，电脑无法发送备�
 bk.problem.sshd_allow_list	SSH 服务限制了登录用户或用户组。请在 AllowUsers 或 AllowGroups 中允许 {subject} 登录，以便电脑发送备份。
 bk.problem.sudo_missing	备份账号需要通过 sudo 运行 btrfs。请安装 sudo。
 bk.problem.btrfs_missing	尚未安装 btrfs-progs。
-bk.problem.filter_missing	缺少命令过滤器 {subject}，请重新安装 Rynas。
+bk.problem.filter_missing	缺少命令过滤器 {subject}，请重新安装 rynas。
 bk.mode	快照保存位置
 bk.mode.new	新建文件夹
 bk.mode.new_help	创建新的 Btrfs 子卷，仅管理员可读取。
@@ -6023,7 +6023,7 @@ bk.step.key	1. 生成电脑端密钥
 bk.step.config	2. btrbk.conf
 bk.step.test	3. 首次连接与测试
 bk.step.line	写入 NAS authorized_keys 的配置行
-bk.steps_note	此密钥只能通过 Rynas 的命令过滤器接收 Btrfs 快照、按上述规则删除此电脑的快照，以及运行 btrbk 所需的只读命令。该密钥的权限仅限此备份文件夹。
+bk.steps_note	此密钥只能通过 rynas 的命令过滤器接收 Btrfs 快照、按上述规则删除此电脑的快照，以及运行 btrbk 所需的只读命令。该密钥的权限仅限此备份文件夹。
 bk.no_snapshots	尚未收到快照
 bk.snap.protected	受 NAS 保留策略保护
 bk.snap.incomplete	中断
@@ -6376,7 +6376,7 @@ pca.code_valid	此配对码只能使用一次，有效至 {until}。
 pca.fingerprint	此 NAS 证书
 pca.step.install	1. 在电脑上安装 rynas-agent
 pca.step.pair	2. 配对
-pca.step.note	配对命令包含证书指纹，以便代理确认此 NAS 的身份。如果命令未包含指纹，代理会显示指纹供核对。配对后，代理会信任此 NAS 的本地证书颁发机构，NAS 的名称、地址或证书变化后无需重新配对。随后运行 systemctl enable --now rynas-agent.service 启动服务。Rynas 发布页提供适用于 Arch、Debian 和 Fedora 的安装包。
+pca.step.note	配对命令包含证书指纹，以便代理确认此 NAS 的身份。如果命令未包含指纹，代理会显示指纹供核对。配对后，代理会信任此 NAS 的本地证书颁发机构，NAS 的名称、地址或证书变化后无需重新配对。随后运行 systemctl enable --now rynas-agent.service 启动服务。rynas 发布页提供适用于 Arch、Debian 和 Fedora 的安装包。
 pca.f.folder	存储库所在文件夹
 pca.f.folder_help	选择存储卷内的文件夹。已有备份组仍使用原来的位置。
 pca.f.default_quota	新备份组配额（GiB）

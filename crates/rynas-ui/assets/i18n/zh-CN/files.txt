@@ -543,7 +543,7 @@ files.pane.location	位置
 files.pane.n_tracks	{n} 条轨道
 files.settings.list_grid_columns	列表、网格与显示列
 files.common.nas_unreachable	无法连接 NAS
-files.conns.rynas_key	使用 Rynas 密钥
+files.conns.rynas_key	使用 rynas 密钥
 files.health.browser_blocked_window_allow_pop	浏览器已拦截窗口。请允许此站点打开弹出窗口。
 files.health.transfer_service_not_running_copies	传输服务尚未运行，暂时无法复制、移动或删除文件。
 files.health.no_access_files_ask_administrator	当前账号没有文件管理器访问权限，请联系管理员。
