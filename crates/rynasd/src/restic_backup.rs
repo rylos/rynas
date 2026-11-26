@@ -1184,6 +1184,8 @@ async fn op_in(
     };
     let mut changed = Vec::new();
     let mut f = follow(ctx);
+    // forget, prune, check, restore: the kept browser answers go before and after
+    repo_changed(job);
     let r = run_worker(&s.launch, &job.name, &req, ctx.token(), &limits, |ev| {
         if let WorkerEvent::SecretChanged { name, content } = ev {
             changed.push((name.clone(), content.clone()));
@@ -1191,6 +1193,7 @@ async fn op_in(
         f(ev)
     })
     .await;
+    repo_changed(job);
     store_changed(s, job, &changed, Some(ctx));
     r
 }
@@ -1781,6 +1784,8 @@ async fn run_job(
             },
         )
         .await;
+        // a new snapshot (or a part of one): the browser reads the repository again
+        repo_changed(job);
         store_changed(s, job, &changed, Some(ctx));
         r?;
         let mut st = status::read(&state_dir, &job.name);
@@ -2038,10 +2043,37 @@ async fn snapshots(
     if q.all_hosts {
         scope = scope.any_owner();
     }
-    match read_op(&s, &name, WorkerOp::Snapshots { scope: Some(scope) }).await? {
+    // kept per repository until a task changes it (crate::read_cache)
+    let key = format!("snapshots:{}", serde_json::to_string(&scope).unwrap_or_default());
+    match read_op_cached(&s, &name, WorkerOp::Snapshots { scope: Some(scope) }, &key).await? {
         WorkerEvent::Snapshots { list } => Ok(Json(list)),
         _ => Err(Error::internal("unexpected answer")),
     }
+}
+
+/// The [`crate::read_cache`] key of a job's repository: its name and where it is (a job
+/// pointed at another repository does not see the old one's answers).
+fn repo_cache_key(job: &BackupJob) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(&job.destination).unwrap_or_default().hash(&mut h);
+    format!("job:{}:{:016x}", job.name, h.finish())
+}
+
+/// Something may change the job's repository: its kept read answers go.
+fn repo_changed(job: &BackupJob) {
+    crate::read_cache::global().invalidate(&repo_cache_key(job));
+}
+
+/// [`read_op`] whose answer is kept per repository under `key` until a task changes the
+/// repository ([`crate::read_cache`]).
+async fn read_op_cached(s: &Arc<ResticSvc>, name: &str, op: WorkerOp, key: &str) -> Res<WorkerEvent> {
+    let job = {
+        let (s2, n) = (s.clone(), name.to_string());
+        blocking(&s.prot, move |_| applied_job(&s2, &n)).await?.0
+    };
+    let repo = repo_cache_key(&job);
+    crate::read_cache::cached(&repo, key, read_op(s, name, op)).await
 }
 
 #[derive(Deserialize)]
@@ -2075,17 +2107,14 @@ async fn browse(
     check_name(&name)?;
     check_snapshot_id(&q.snapshot)?;
     check_inner_path(&q.path)?;
-    match read_op(
-        &s,
-        &name,
-        WorkerOp::Ls {
-            snapshot: q.snapshot,
-            path: q.path,
-            scope: Some(scope_of(&s, &name).await),
-        },
-    )
-    .await?
-    {
+    // going back and forth in the browser reads each folder once (crate::read_cache)
+    let key = format!("ls:{}:{}", q.snapshot, q.path);
+    let op = WorkerOp::Ls {
+        snapshot: q.snapshot,
+        path: q.path,
+        scope: Some(scope_of(&s, &name).await),
+    };
+    match read_op_cached(&s, &name, op, &key).await? {
         WorkerEvent::Entries { mut list } => {
             list.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.cmp(&b.name)));
             Ok(Json(list))

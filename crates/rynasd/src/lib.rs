@@ -48,6 +48,7 @@ pub mod places;
 pub mod power;
 pub mod processes;
 pub mod protection;
+pub mod read_cache;
 pub mod removable;
 pub mod replication;
 pub mod restic_backup;

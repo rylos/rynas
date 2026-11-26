@@ -272,7 +272,11 @@ async fn op(svc: &PcAgent, g: &Grp, name: &str, op: WorkerOp, launch: &Launch, c
         ..Default::default()
     };
     let cancel = ctx.map(|c| c.token().clone()).unwrap_or_default();
-    run_worker(launch, &format!("pc-{name}"), &req, &cancel, &limits, |ev| {
+    // a task's operation (forget, prune, check): the kept browser answers go before and after
+    if ctx.is_some() {
+        super::repo_changed(name);
+    }
+    let r = run_worker(launch, &format!("pc-{name}"), &req, &cancel, &limits, |ev| {
         if let Some(c) = ctx {
             match ev {
                 WorkerEvent::Step { title } => c.log(title),
@@ -281,7 +285,11 @@ async fn op(svc: &PcAgent, g: &Grp, name: &str, op: WorkerOp, launch: &Launch, c
             }
         }
     })
-    .await
+    .await;
+    if ctx.is_some() {
+        super::repo_changed(name);
+    }
+    r
 }
 
 // ------------------------------------------------------------------ pairing
@@ -698,6 +706,10 @@ pub fn bound_step(b: &mut BtrfsStep) {
 
 /// The end of a run, from the agent.
 pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
+    // a run ended: the versions and folders the restore browser kept are read again
+    if let Ok(d) = svc.device(device) {
+        super::repo_changed(&d.group);
+    }
     let mut run = r.run;
     trunc(&mut run.run_id, 64);
     if let Some(e) = &mut run.error {

@@ -1011,6 +1011,13 @@ impl PcAgent {
         out
     }
 
+    /// [`PcAgent::read_op`] whose answer is kept per group repository under `key` until the
+    /// repository changes (an agent's report, a maintenance operation: [`repo_changed`]).
+    pub async fn read_op_cached(self: &Arc<Self>, device: &str, op: WorkerOp, key: &str) -> Res<WorkerEvent> {
+        let group = self.device(device)?.group;
+        crate::read_cache::cached(&repo_cache_key(&group), key, self.read_op(device, op)).await
+    }
+
     /// One worker read on a device's repository (with a timeout, no task slot), inside the
     /// memory budget and never while the group is maintained.
     pub async fn read_op(self: &Arc<Self>, device: &str, op: WorkerOp) -> Res<WorkerEvent> {
@@ -1058,6 +1065,17 @@ impl PcAgent {
         let b = std::fs::read(self.manifest_path(device)).ok()?;
         serde_json::from_slice(&b).ok()
     }
+}
+
+/// The [`crate::read_cache`] key of a group's repository.
+pub(crate) fn repo_cache_key(group: &str) -> String {
+    format!("pc:{group}")
+}
+
+/// Something may change the group's repository (an agent's run ended, a maintenance
+/// operation): its kept read answers go.
+pub(crate) fn repo_changed(group: &str) {
+    crate::read_cache::global().invalidate(&repo_cache_key(group));
 }
 
 fn not_found(device: &str) -> Error {
@@ -1875,7 +1893,7 @@ async fn versions_get(
     let svc = pa(&st)?;
     check_name(&device)?;
     match svc
-        .read_op(&device, WorkerOp::Snapshots { scope: Some(scope(&device)) })
+        .read_op_cached(&device, WorkerOp::Snapshots { scope: Some(scope(&device)) }, &format!("versions:{device}"))
         .await?
     {
         WorkerEvent::Snapshots { list } => {
@@ -1969,14 +1987,16 @@ async fn browse_get(
     check_version(&q.version)?;
     let path = q.path.unwrap_or_else(|| "/".into());
     check_inner(&path)?;
+    let key = format!("ls:{device}:{}:{path}", q.version);
     match svc
-        .read_op(
+        .read_op_cached(
             &device,
             WorkerOp::Ls {
                 snapshot: q.version,
                 path,
                 scope: Some(scope(&device)),
             },
+            &key,
         )
         .await?
     {
