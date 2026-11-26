@@ -199,25 +199,70 @@ the Syncthing containers. The disk never went to standby in that hour.
 Outside rynas: containers and their own scans (Syncthing rescans, media servers) and the
 hardware daemon's temperature reads keep disks awake by their own choice.
 
+## Converted on 2026-11-26 (second pass)
+
+- **Encrypted share creation**: the recovery key waits in rynasd (memory and a root-only 0600
+  file, at most 7 days) until its creator confirms it is saved; the Shares page lists the
+  waiting keys (`GET /api/v1/crypt/recovery-pending`), so a browser closed during the creation
+  loses nothing ([encrypted-folders.md](../phase2/encrypted-folders.md) §2.2).
+- **PC backup folder for a paired agent PC**: the move of the PC to the new folder is part of
+  `pcbackup.create` (`PcTargetCreate.link_device`), partial when it fails.
+- **Replication "Run now"**: `replication.run` with subject `<job>/<target>` (`spawn_once`),
+  the row follows it with `use_task`; `btrbk clean` at idle priority with the 10-minute stall
+  watchdog. btrbk's own progress needs mbuffer (`--progress`): not used, the row shows running.
+- **Restore browsers** (restic jobs, PC agent repositories): `rynasd::read_cache` keeps the
+  snapshot lists and folder listings per repository (15 minutes at most), dropped by every task
+  operation on the repository and by an agent's report of a finished run.
+- **Scheduled scrub**: `btrfs scrub start|resume -B -d -c 3` (idle I/O class), progress from
+  `btrfs scrub status -R` every 10 s while it runs (in the unit or in rynasd).
+- **Updates page**: `GET /v1/updates` never runs apt's simulations when apt's state changed:
+  it answers the last status marked `refreshing` and task `updates.status` computes the new one
+  (the page reads it again when that task ends). Only the first answer after rynasd's start,
+  before anything was computed, waits for them.
+- **Storage inventory**: views answer the last inventory at once and read a new one in the
+  background when it is older than 5 s; the kernel's storage events (`sysevents`) forget it and
+  read it again at once; plans and checks still use the strict one. SMART was already read for
+  every disk at once; the disk settings refresh now too. smartctl runs with `-n standby` on every
+  disk that can sleep (NVMe has no standby).
+- **Docker engine move and stack move**: a `du` that fails is logged and stops the task before
+  anything changes; "Copy without the space check" (`unmeasured_ok`) goes on after such a stop.
+- **Rollback and PC backup actions**: a failure is a toast like `run_and_report` (also when the
+  dialog was closed), not only a line in the dialog.
+- **Space auto-free**: each pass is task `space.auto-free` (subject: the volume), started by the
+  5-minute watch only when a pass may run; it ends **partial** when its 15 minutes stop it.
+
+| Loop | Now | Wake-ups when idle |
+|---|---|---|
+| rynas-web TLS reload check (10 s) | inotify on the certificate folder, safety net 60 s (10 s without inotify) | 6/min → 1/min |
+| rynas-web listen check (5 s) | inotify on the proxy state's folder, safety net 60 s (5 s without inotify) | 12/min → 1/min |
+| Web access sync (30 s, `GET /config/` of the engine each time) | 60 s for the host facts; the engine's configuration is read only when the render or the engine process changed (admin socket inode), or hourly | 2/min + 2 engine requests/min → 1/min + 1/h |
+| Storage notification watch (5 min) | also woken by the storage events (a disk gone is told at once); the timer stays for SMART verdicts and fill levels, which have no event | unchanged |
+| Degraded-start check (60 s) | unchanged: only inside the boot window (a glance at `/proc/mdstat`), then it ends | 0 after boot |
+| rynas-web hardware notification check (30 s) | 60 s: temperatures and fans have no event source; it reads the metrics store and the provider's state | 2/min → 1/min |
+| Automatic Docker update tick (60 s) | unchanged, now cancellable: it only waits inside an open update window while rynas maintenance runs | 0 outside windows |
+| Disk standby watcher (30 s) | unchanged and cheap: one read of `/proc/diskstats`, sysfs `rotational`, one configuration read; the ATA power check and `smartctl -n standby -c` only for a disk past its spin-down delay | 2/min, no device I/O |
+
 ## Not converted yet
 
 The base above is in place; these follow it feature by feature (new code follows the rules
 from now on):
 
+- **File manager tools** (checksum, duplicates, compare, space analysis, folder usage) still
+  run inside the request (`rynas-files` `api.rs`, `checksum.rs`; the space analysis is cut at
+  40 s): to become jobs of the files job manager with idle I/O and a cache by path + mtime.
+- **Restore browsers**: the worker still starts once per folder not seen before; keeping it
+  alive while someone browses (idle shutdown) needs a session mode in the backup worker.
 - **Pages that follow a task only while open** (`follow`/`run_task` in a dialog, result lost on
-  reload): PC agent actions, replication, encrypted shares, restic, dedup, UPS, Docker stacks
-  and images, user homes, share folders. Each gets a subject on the server and `use_task` on
-  the page.
+  reload): PC agent actions, restic, dedup, UPS, Docker stacks and images, user homes, share
+  folders; the share editor still chains folder, share and apply in the page. Each gets a
+  subject on the server and `use_task` on the page.
 - **Heavy commands not yet on `heavy_cmd`**: stack data copies (`docker::copy_cmd`, `cp -a`),
   home copies (`rsync`, `cp -a /etc/skel`), the space measures (FIEMAP walk, `btrfs subvolume
   sync`), the PC backup measure; `cmd_ok` in `pc_backup` still ignores cancellation (its
   callers have no task).
-- **Time budgets that should end partial**: the space auto-free pass (15 min), other budgets
-  found per feature (`space.scan` ends partial since 2026-11-26).
-- **Loops still on a timer**: rynas-web TLS reload check (10 s) and listen check (5 s), web
-  access sync (30 s), the storage notification watch and the degraded-start check (60 s, could
-  subscribe to `sysevents`), rynas-web hardware notification check (30 s), the automatic Docker
-  update tick (60 s), disk standby (30 s, reads diskstats by design); in the UI the
-  `live::poll` timers of the task panel's queue, storage, scheduler, schedule, Wake-on-LAN,
-  Syncthing and the hardware module pages, and the `poll_while` progress loops (scrub, dedup,
-  PC receive; the space scan follows its task since 2026-11-26) that task progress events could replace.
+- **Time budgets that should end partial**: other budgets found per feature.
+- **UI loops while a page is open**: the `live::poll` timers of the task panel's queue,
+  storage, scheduler, schedule, Wake-on-LAN, Syncthing and the hardware module pages, and the
+  `poll_while` progress loops (scrub, dedup, PC receive). They run only while a tab is visible
+  (someone watches, S1b) and read what `TaskInfo.progress` does not carry (bytes scrubbed,
+  errors, bytes received): replacing them needs richer task progress events.
