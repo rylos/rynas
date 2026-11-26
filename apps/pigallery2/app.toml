@@ -1,7 +1,7 @@
 schema = 1
 id = "pigallery2"
 name = "PiGallery2"
-version = "2.0.0"
+version = "2.0.1"
 app_version = "3.8.0"
 update_policy = "minor"
 description = "Fast photo gallery for your folders, made for small systems: no machine learning, no separate database."

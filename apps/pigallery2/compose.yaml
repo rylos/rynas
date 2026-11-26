@@ -6,7 +6,7 @@
 # bound at Shared, and rynas mounts each chosen user's Photos folder as /app/data/images/<user>.
 services:
   pigallery2:
-    image: bpatrik/pigallery2:3.8.0@sha256:290de6eb5216218b0be7561ec04d719260e551a213257300abeaba7d72c4a5f5
+    image: bpatrik/pigallery2:3.8.0@sha256:11c93ac881c1422a2385805e52ad84714bd401f2b659e78dd4384aa90254a1e1
     restart: unless-stopped
     user: "${PUID}:${PGID}"
     ports:
