@@ -610,7 +610,10 @@ fn vol_card(v: Vol, unlock: RwSignal<Option<String>>) -> AnyView {
                 {level.map(|l| view! { <span class="chip accent">{l}</span> })}
                 {v.encrypted.then(|| view! { <span class="chip" title=t("sto.encrypted")><Icon icon=icons::KEY size=12 />{tr("sto.encrypted")}</span> })}
             </div>
-            {if sized {
+            // not mounted: its usage is unknown, never "0 B of …"
+            {if v.mountpoint.is_none() {
+                view! { <div class="vol-card-usage"><span class="muted small">{tr("rm.not_mounted")}</span></div> }.into_any()
+            } else if sized {
                 view! {
                     <div class="vol-card-usage">
                         <span class="vol-card-pct tnum">{i18n::pct(pct)}</span>
