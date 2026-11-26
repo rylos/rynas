@@ -36,6 +36,10 @@ pub struct Tasks {
     pub now_ms: RwSignal<f64>,
     /// The event stream is connected: no need to poll a followed task.
     pub stream_live: Signal<bool>,
+    /// Tasks a page reports itself ([`follow`], [`Tasks::claim`]): no global toast at their end.
+    followed: StoredValue<std::collections::HashSet<String>>,
+    /// Task types a mounted view shows in place ([`use_task`]), with how many views.
+    watched: StoredValue<std::collections::HashMap<String, u32>>,
 }
 
 thread_local! {
@@ -57,6 +61,8 @@ impl Tasks {
             open,
             now_ms: RwSignal::new(js_sys::Date::now()),
             stream_live,
+            followed: StoredValue::new(Default::default()),
+            watched: StoredValue::new(Default::default()),
         };
         TASKS.with(|c| c.set(Some(s)));
         set_interval(
@@ -94,11 +100,50 @@ impl Tasks {
         self.open.set(false);
     }
 
+    /// A page reports the outcome of task `id` itself: no global toast at its end.
+    pub fn claim(self, id: &str) {
+        self.followed.update_value(|f| {
+            f.insert(id.to_string());
+        });
+    }
+
+    /// The end of a task the signed-in user started, seen live in this tab: unless a page
+    /// reports it ([`Tasks::claim`], [`follow`], a view of [`use_task`] for its type), a
+    /// toast says how it went, with the log one click away. Decided a moment later, so that
+    /// a page that started it and follows it has registered by then.
+    fn report_later(self, task: TaskInfo) {
+        let me = auth().session.with_untracked(|s| s.as_ref().map(|s| s.user.username.clone()));
+        if me.as_deref() != Some(task.user.as_str()) || task.kind.starts_with("config.") || task.status == TaskStatus::Cancelled {
+            return;
+        }
+        set_timeout(
+            move || {
+                let followed = self.followed.try_with_value(|f| f.contains(&task.id)).unwrap_or(true);
+                let watched = self.watched.try_with_value(|w| w.get(&task.kind).is_some_and(|n| *n > 0)).unwrap_or(true);
+                if followed || watched {
+                    return;
+                }
+                let name = task_label(&task.kind);
+                if task.is_full_success() {
+                    toast(Tone::Ok, i18n::tf("task.done_named", &[("task", &name)]));
+                } else {
+                    let text = format!("{name}: {}", task_error(&task));
+                    crate::toast::toast_task(task_tone(&task), text, task.id.clone());
+                }
+            },
+            Duration::from_millis(1500),
+        );
+    }
+
     /// A `task.*` event (or a fresh `GET /tasks/{id}`): insert or replace by id.
     pub fn upsert(self, task: TaskInfo) {
         let finished_config = task.status.is_finished() && task.kind.starts_with("config.");
         let finished_docker = task.status.is_finished() && (task.kind.starts_with("docker.") || task.kind.starts_with("apps."));
         let known = finished_docker && self.list.with_untracked(|l| l.iter().any(|t| t.id == task.id && t.status.is_finished()));
+        // ended now, after this tab saw it run
+        if task.status.is_finished() && self.list.with_untracked(|l| l.iter().any(|t| t.id == task.id && !t.status.is_finished())) {
+            self.report_later(task.clone());
+        }
         self.list.update(|l| match l.iter_mut().find(|t| t.id == task.id) {
             Some(t) => *t = task,
             None => {
@@ -143,6 +188,8 @@ pub async fn follow(id: &str) -> Result<TaskInfo, ApiErr> {
 /// have ended, e.g. a rename that moved the page's address away.
 pub async fn follow_or_lost(id: &str, lost_ms: Option<u32>) -> Result<TaskInfo, ApiErr> {
     let s = tasks();
+    // whoever follows a task reports its end
+    s.claim(id);
     let url = format!("/api/v1/tasks/{}", api::encode(id));
     let mut waited = 0u32;
     // the last time the server was known to answer
@@ -219,12 +266,12 @@ pub fn run_and_report(start: impl std::future::Future<Output = Result<String, Ap
         };
         let _ = busy.try_set(false);
         match r {
-            Ok(task) if task.status == TaskStatus::Ok => {
+            Ok(task) if task.is_full_success() => {
                 toast(Tone::Ok, ok);
                 done.try_run(());
             }
             Ok(task) => {
-                toast(Tone::Err, task_error(&task));
+                toast(task_tone(&task), task_error(&task));
                 done.try_run(());
             }
             Err(e) => {
@@ -234,6 +281,75 @@ pub fn run_and_report(start: impl std::future::Future<Output = Result<String, Ap
     });
 }
 
+
+/// A finished task still counts as "just ended" for [`use_task`] this long after its end.
+const RECENT_MS: u64 = 10 * 60 * 1000;
+
+/// The task of one type that the server runs (or has just run) for what a view shows,
+/// found in the task store ([`use_task`]): nothing is polled, the store follows the event
+/// stream, and the store is read again after a reload, so the view shows "running",
+/// progress, the log and Stop whoever started the task and whenever the page was opened.
+#[derive(Clone, Copy)]
+pub struct UseTask {
+    /// The newest matching task: running, or ended while the view was open or within the
+    /// last minutes.
+    pub task: Memo<Option<TaskInfo>>,
+    pub running: Signal<bool>,
+}
+
+impl UseTask {
+    /// `f` once for each matching task that ends while the view is mounted (read the result,
+    /// reload what the view shows).
+    pub fn on_end(self, f: impl Fn(TaskInfo) + 'static) {
+        let prev = StoredValue::new(None::<(String, bool)>);
+        Effect::new(move |_| {
+            let Some(t) = self.task.get() else { return };
+            let was_running = prev.with_value(|p| p.as_ref().is_some_and(|(id, r)| *id == t.id && *r));
+            prev.set_value(Some((t.id.clone(), !t.status.is_finished())));
+            if was_running && t.status.is_finished() {
+                f(t);
+            }
+        });
+    }
+}
+
+/// [`UseTask`] for type `kind` about `subject` ([`TaskInfo::subject`]; `None`: whatever it
+/// is about). While the view is mounted it reports the task's end itself, so the global
+/// toast stays quiet for that type.
+pub fn use_task(kind: &'static str, subject: Signal<Option<String>>) -> UseTask {
+    use_task_by(kind, move |t| subject.with(|s| s.is_none() || t.subject == *s))
+}
+
+/// The calling view (while it is mounted) says itself how tasks of type `kind` end: the
+/// global toast stays quiet for them. [`use_task`] does it; a page that follows its tasks
+/// another way (the list names the running task) calls it alone.
+pub fn reports(kind: &'static str) {
+    let s = tasks();
+    s.watched.update_value(|w| *w.entry(kind.to_string()).or_default() += 1);
+    on_cleanup(move || {
+        let _ = s.watched.try_update_value(|w| {
+            if let Some(n) = w.get_mut(kind) {
+                *n = n.saturating_sub(1);
+            }
+        });
+    });
+}
+
+/// [`use_task`] with a filter of its own (`keep`: the user who started it, ...).
+pub fn use_task_by(kind: &'static str, keep: impl Fn(&TaskInfo) -> bool + Send + Sync + 'static) -> UseTask {
+    let s = tasks();
+    reports(kind);
+    let mounted = js_sys::Date::now() as u64;
+    let task = Memo::new(move |_| {
+        s.list.with(|l| {
+            l.iter()
+                .find(|t| t.kind == kind && keep(t) && (!t.status.is_finished() || t.end_ms.is_some_and(|e| e + RECENT_MS >= mounted)))
+                .cloned()
+        })
+    });
+    let running = Signal::derive(move || task.with(|t| t.as_ref().is_some_and(|t| !t.status.is_finished())));
+    UseTask { task, running }
+}
 
 /// Translated name of a task type (`task.<type>` in i18n), the type itself when unknown.
 pub fn task_label(kind: &str) -> String {
@@ -246,6 +362,10 @@ pub fn task_label(kind: &str) -> String {
 pub fn task_error(task: &TaskInfo) -> String {
     match task.status {
         TaskStatus::Cancelled => t("task.st.cancelled").to_string(),
+        TaskStatus::Ok => match &task.partial {
+            Some(why) if !why.is_empty() => format!("{}{}{why}", t("task.partial"), crate::api::DETAIL_SEP),
+            _ => t("task.partial").to_string(),
+        },
         _ => match &task.error {
             Some(e) if !e.is_empty() => format!("{}{}{e}", t("task.failed"), crate::api::DETAIL_SEP),
             _ => t("task.failed").to_string(),
@@ -261,6 +381,16 @@ pub fn status_tone(s: TaskStatus) -> Tone {
         TaskStatus::Running => Tone::Info,
         TaskStatus::Queued => Tone::Unknown,
     }
+}
+
+/// [`status_tone`] of a task: a partial end is a warning, never a success.
+pub fn task_tone(task: &TaskInfo) -> Tone {
+    if task.is_partial() { Tone::Warn } else { status_tone(task.status) }
+}
+
+/// [`status_key`] of a task, "Partial" for a partial end.
+pub fn task_status_key(task: &TaskInfo) -> &'static str {
+    if task.is_partial() { "task.st.partial" } else { status_key(task.status) }
 }
 
 pub fn status_key(s: TaskStatus) -> &'static str {
@@ -322,10 +452,10 @@ pub fn TaskPanel() -> impl IntoView {
         } else {
             match s.list.with(|l| l.first().cloned()) {
                 Some(last) => {
-                    let tone = status_tone(last.status);
+                    let tone = task_tone(&last);
                     view! {
                         <span class="tasks-summary">{format!("{}: {}", t("tasks.last"), task_label(&last.kind))}</span>
-                        <Status tone=tone text=t(status_key(last.status)).to_string() />
+                        <Status tone=tone text=t(task_status_key(&last)).to_string() />
                     }
                     .into_any()
                 }
@@ -421,7 +551,7 @@ fn TaskList(queue: RwSignal<Vec<QueueEntry>>) -> impl IntoView {
                     row_flag(
                         vec![
                             cell("tasks.col_task", "", link),
-                            cell("col.status", "", status(status_tone(st), format!("{}{pct}", t(status_key(st))))),
+                            cell("col.status", "", status(task_tone(task), format!("{}{pct}", t(task_status_key(task))))),
                             cell("tasks.col_user", "", text(task.user.clone())),
                             cell("tasks.col_start", "tnum", text(i18n::datetime(task.start_ms))),
                             cell("tasks.col_duration", "num", (move || elapsed(&t2, s.now_ms.get())).into_any()),
@@ -605,7 +735,11 @@ fn LogView(id: String) -> impl IntoView {
                     <strong class="ellipsis">{move || task.with(|t| t.as_ref().map(|t| task_label(&t.kind)).unwrap_or_default())}</strong>
                     <span class="mono small muted ellipsis" title=id_full.clone()>{id_full.clone()}</span>
                 </div>
-                {move || task.get().map(|tk| view! { <Status tone=status_tone(tk.status) text=t(status_key(tk.status)).to_string() /> })}
+                {move || task.get().map(|tk| view! { <Status tone=task_tone(&tk) text=t(task_status_key(&tk)).to_string() /> })}
+                {move || task.with(|tk| tk.as_ref().and_then(|tk| tk.partial.clone())).map(|why| {
+                    let tip = why.clone();
+                    view! { <span class="small muted ellipsis" title=tip>{why}</span> }
+                })}
                 <Show when=move || running.get()>
                     <button class="btn ghost sm" disabled=move || cancelling.get() on:click={
                         let id = cancel_id.clone();
@@ -657,11 +791,12 @@ pub fn TaskRun(id: String, on_done: Callback<TaskInfo>) -> impl IntoView {
     }
     let status = Signal::derive(move || task.with(|t| t.as_ref().map(|t| t.status).unwrap_or(TaskStatus::Queued)));
     let running = Signal::derive(move || !status.get().is_finished());
+    let tone = Signal::derive(move || task.with(|t| t.as_ref().map(task_tone).unwrap_or(Tone::Unknown)));
     let cancel_id = StoredValue::new(id.clone());
     view! {
         <div class="task-run" aria-live="polite">
             <div class="task-run-head">
-                {move || view! { <Status tone=status_tone(status.get()) text=t(status_key(status.get())).to_string() /> }}
+                {move || view! { <Status tone=tone.get() text=t(task.with(|t| t.as_ref().map(task_status_key).unwrap_or("task.st.queued"))).to_string() /> }}
                 <span class="small muted ellipsis">{move || task.with(|t| t.as_ref().map(|t| task_label(&t.kind)).unwrap_or_default())}</span>
                 <span class="row-end tnum small">{move || task.with(|t| t.as_ref().and_then(|t| t.progress)).map(|p| i18n::pct(p as f64))}</span>
             </div>
@@ -669,9 +804,9 @@ pub fn TaskRun(id: String, on_done: Callback<TaskInfo>) -> impl IntoView {
                 pct=Signal::derive(move || {
                     task.with(|t| t.as_ref().map(|t| if t.status.is_finished() { 100.0 } else { t.progress.unwrap_or(0) as f64 }).unwrap_or(0.0))
                 })
-                tone=Signal::derive(move || status_tone(status.get()))
+                tone=tone
             />
-            {move || task.with(|t| t.as_ref().filter(|t| t.status.is_finished() && t.status != TaskStatus::Ok).map(task_error)).map(|e| view! {
+            {move || task.with(|t| t.as_ref().filter(|t| t.status.is_finished() && !t.is_full_success()).map(task_error)).map(|e| view! {
                 <p class="form-error" role="alert"><Icon icon=icons::CIRCLE_X size=16 />{crate::ui::err_view(e)}</p>
             })}
             {crate::form::form_error(lost)}

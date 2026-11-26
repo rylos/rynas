@@ -379,6 +379,7 @@ pub fn routes() -> Router<AppState> {
         .route("/apps/catalog-source", get(forward))
         .route("/apps/catalog-source/check", post(forward))
         .route("/apps/installed", get(forward))
+        .route("/apps/update-many", post(forward))
         .route("/apps/installed/{stack}", get(forward))
         .route("/apps/installed/{stack}/update", get(forward).post(forward))
         .route("/apps/installed/{stack}/share-set", put(forward))

@@ -209,24 +209,14 @@ pub fn SpacePage() -> impl IntoView {
         delete_err.set(None);
         spawn_local(async move {
             let body = serde_json::to_string(&SpacePreviewRequest { paths }).ok();
-            let r = match api::start_task(&format!("{URL}/preview"), body).await {
-                Ok(id) => match tasks::follow(&id).await {
-                    Ok(_) => api::get::<SpacePreview>(&format!("{URL}/previews/{}", api::encode(&id))).await,
-                    Err(e) => Err(e),
-                },
-                Err(e) => Err(e),
-            };
-            match r {
-                Ok(p) => {
-                    let _ = preview.try_set(Some(PreviewState::Ready(p)));
-                }
-                Err(e) => {
-                    let _ = preview.try_set(None);
-                    toast(Tone::Err, e.text());
-                }
+            // the task store brings its progress and end ([`follow_preview`])
+            if let Err(e) = api::start_task(&format!("{URL}/preview"), body).await {
+                let _ = preview.try_set(None);
+                toast(Tone::Err, e.text());
             }
         });
     };
+    follow_preview(preview);
 
     let pin = move |path: String, on: bool| {
         spawn_local(async move {
@@ -511,6 +501,58 @@ fn review_row(r: ReviewItem, sel: RwSignal<BTreeSet<String>>) -> AnyView {
         </li>
     }
     .into_any()
+}
+
+/// Where the last preview shown (or closed) is remembered, so that it opens once only.
+const PREVIEW_SEEN: &str = "rynas.space.preview.seen";
+
+/// The preview runs on the server (`space.preview`): the dialog follows the newest one the
+/// signed-in user started, from the task store, also when it was started before a reload or
+/// in a tab since closed. Its answer opens once ([`PREVIEW_SEEN`]); a measuring dialog the
+/// user closed stays closed.
+fn follow_preview(preview: RwSignal<Option<PreviewState>>) {
+    let me = crate::auth::auth().session.with_untracked(|s| s.as_ref().map(|s| s.user.username.clone())).unwrap_or_default();
+    let job = tasks::use_task_by("space.preview", move |t| t.user == me);
+    let seen = StoredValue::new(crate::prefs::storage_get(PREVIEW_SEEN));
+    // the preview this page opened the measuring dialog for
+    let opened = StoredValue::new(None::<String>);
+    Effect::new(move |_| {
+        let Some(task) = job.task.get() else { return };
+        if seen.with_value(|s| s.as_deref() == Some(task.id.as_str())) {
+            return;
+        }
+        let mine = opened.with_value(|o| o.as_deref() == Some(task.id.as_str()));
+        let closed = mine && preview.with_untracked(Option::is_none);
+        if !task.status.is_finished() {
+            if !mine {
+                opened.set_value(Some(task.id.clone()));
+                preview.set(Some(PreviewState::Measuring));
+            }
+            return;
+        }
+        seen.set_value(Some(task.id.clone()));
+        crate::prefs::storage_set(PREVIEW_SEEN, &task.id);
+        if closed {
+            return;
+        }
+        if task.status != rynas_api_types::TaskStatus::Ok {
+            preview.set(None);
+            crate::toast::toast_task(tasks::task_tone(&task), tasks::task_error(&task), task.id);
+            return;
+        }
+        let id = task.id;
+        spawn_local(async move {
+            match api::get::<SpacePreview>(&format!("{URL}/previews/{}", api::encode(&id))).await {
+                Ok(p) => {
+                    let _ = preview.try_set(Some(PreviewState::Ready(p)));
+                }
+                Err(e) => {
+                    let _ = preview.try_set(None);
+                    toast(Tone::Err, e.text());
+                }
+            }
+        });
+    });
 }
 
 fn preview_dialog(

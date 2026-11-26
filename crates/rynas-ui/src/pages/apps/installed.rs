@@ -4,8 +4,7 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::TaskStatus;
-use rynas_api_types::apps::{AppRollbackRequest, AppUninstallRequest, AppUpdatePlan, AppUpdateRequest, ImageChangeKind, InstalledApp, InstalledAppDetail, PhotosKeyRequest, PhotosLibrary, PhotosState, PhotosUserRequest};
+use rynas_api_types::apps::{AppRollbackRequest, AppUninstallRequest, AppUpdateManyRequest, AppUpdatePlan, AppUpdateRequest, ImageChangeKind, InstalledApp, InstalledAppDetail, PhotosKeyRequest, PhotosLibrary, PhotosState, PhotosUserRequest};
 use rynas_api_types::docker::{DockerSettingsState, StackSnapshot};
 
 use super::{AppDetail, app_icon, apps, open_href};
@@ -122,6 +121,19 @@ pub fn updates() -> AnyView {
     let update = RwSignal::new(None::<String>);
     let picked = RwSignal::new(Vec::<String>::new());
     let ask = RwSignal::new(false);
+    // "Update selected" runs on the server: shown here whoever started it, also after a
+    // reload; its end reloads the list and says how it went
+    let job = crate::tasks::use_task("apps.update-many", Signal::stored(None));
+    job.on_end(move |task| {
+        a.reload();
+        if task.is_full_success() {
+            toast(Tone::Ok, t("apps.upd.all_done").to_string());
+        } else if task.is_partial() {
+            crate::toast::toast_task(Tone::Warn, t("apps.upd.partly").to_string(), task.id);
+        } else {
+            crate::toast::toast_task(crate::tasks::task_tone(&task), crate::tasks::task_error(&task), task.id);
+        }
+    });
     let pending = Memo::new(move |_| a.inst.data.with(|l| l.as_ref().map(|l| l.iter().filter(|x| x.update_available).cloned().collect::<Vec<_>>()).unwrap_or_default()));
     let content = move || {
         let list = pending.get();
@@ -154,7 +166,14 @@ pub fn updates() -> AnyView {
         view! {
             <div class="toolbar">
                 <span class="small muted">{move || tf("apps.upd.count", &[("n", &pending.with(Vec::len).to_string())])}</span>
-                <button class="btn primary" disabled=move || picked.with(Vec::is_empty) on:click=move |_| ask.set(true)>
+                {move || job.task.get().filter(|t| !t.status.is_finished()).map(|t| {
+                    let id = t.id.clone();
+                    view! {
+                        <span class="small" role="status"><span class="btn-spinner" aria-hidden="true"></span>" "{tr("apps.upd.running")}{t.progress.map(|p| format!(" · {}", i18n::pct(p as f64)))}</span>
+                        <button class="btn ghost sm" on:click=move |_| crate::tasks::tasks().show(&id)>{tr("tasks.log_open")}</button>
+                    }
+                })}
+                <button class="btn primary" disabled=move || picked.with(Vec::is_empty) || job.running.get() on:click=move |_| ask.set(true)>
                     <Icon icon=icons::DOWNLOAD size=16 /><span class="btn-label">{tr("apps.upd.selected")}</span>
                 </button>
             </div>
@@ -177,41 +196,29 @@ pub fn updates() -> AnyView {
     .into_any()
 }
 
-/// "Update selected": the default snapshot setting for each, one after the other; an app
-/// whose update needs answers is left for its own dialog.
+/// "Update selected": one server task `apps.update-many` (the default snapshot setting for
+/// each, one after the other; an app whose update needs answers is skipped, left for its own
+/// dialog). The dialog closes once the task started; the list follows it ([`updates`]).
 fn update_many(picked: RwSignal<Vec<String>>, close: Callback<()>) -> AnyView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let names = picked.get_untracked().join(", ");
-    let a = apps();
     let go = Callback::new(move |_| {
         busy.set(true);
-        let list = picked.get_untracked();
+        error.set(None);
+        let body = serde_json::to_string(&AppUpdateManyRequest { stacks: picked.get_untracked() }).ok();
         spawn_local(async move {
-            let mut skipped = Vec::new();
-            let mut failed = Vec::new();
-            for s in &list {
-                match api::get::<AppUpdatePlan>(&inst_url(s, "/update")).await {
-                    Ok(p) if !p.missing_values.is_empty() => skipped.push(s.clone()),
-                    Ok(_) => match crate::tasks::run_task(&inst_url(s, "/update"), serde_json::to_string(&AppUpdateRequest::default()).ok()).await {
-                        Ok(tk) if tk.status == TaskStatus::Ok => {}
-                        _ => failed.push(s.clone()),
-                    },
-                    Err(_) => failed.push(s.clone()),
+            let r = api::start_task("/api/v1/apps/update-many", body).await;
+            let _ = busy.try_set(false);
+            match r {
+                Ok(_) => {
+                    let _ = picked.try_set(Vec::new());
+                    close.try_run(());
+                }
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
                 }
             }
-            let _ = busy.try_set(false);
-            let _ = picked.try_set(Vec::new());
-            a.reload();
-            if !skipped.is_empty() {
-                toast(Tone::Warn, tf("apps.upd.skipped", &[("names", &skipped.join(", "))]));
-            }
-            if failed.is_empty() {
-                toast(Tone::Ok, t("apps.upd.all_done").to_string());
-            } else {
-                toast(Tone::Err, tf("apps.upd.failed", &[("names", &failed.join(", "))]));
-            }
-            close.try_run(());
         });
     });
     ui::confirm(Confirm { busy, error, ..Confirm::new(t("apps.upd.selected_title").to_string(), tf("apps.upd.many_text", &[("names", &names)]), "apps.update", false, go, close) })

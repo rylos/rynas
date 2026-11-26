@@ -671,6 +671,7 @@ dict! { BLOB, LENS;
     // tasks and configuration (`{type}` shows the task name of `task.<type>`)
     "nev.task.failed.title" => "Task failed: {type}";
     "nev.task.succeeded.title" => "Task succeeded: {type}";
+    "nev.task.partial.title" => "Task finished only in part: {type}";
     "nev.config.apply_failed.title" => "Applying the configuration failed";
     "nev.config.apply_ok.title" => "Configuration apply succeeded";
     "nev.sched.task_failed.title" => "Task {name} failed";
@@ -818,6 +819,9 @@ dict! { BLOB, LENS;
     "tasks.col_start" => "Started";
     "tasks.col_duration" => "Duration";
     "tasks.log" => "Task log";
+    "tasks.log_open" => "Log";
+    "task.done_named" => "{task}: done";
+    "task.partial" => "Finished only in part";
     "tasks.cancel" => "Stop";
     "tasks.close_log" => "Close log";
     "tasks.background" => "You can close this window: the task keeps running.";
@@ -827,6 +831,7 @@ dict! { BLOB, LENS;
     "task.st.ok" => "OK";
     "task.st.error" => "Error";
     "task.st.cancelled" => "Canceled";
+    "task.st.partial" => "Partial";
     "task.st.running" => "Running";
     "task.st.queued" => "Queued";
     "task.config.apply" => "Apply configuration";
@@ -5591,6 +5596,7 @@ dict! { BLOB, LENS;
     "task.apps.install" => "Install app";
     "task.wol.wake" => "Wake a device";
     "task.apps.update" => "Update app";
+    "task.apps.update-many" => "Update apps";
     "task.apps.rollback" => "Roll back an app";
     "task.apps.uninstall" => "Uninstall app";
     "task.apps.proxy" => "Move app behind the proxy";
@@ -6577,8 +6583,8 @@ dict! { BLOB, LENS;
     "apps.upd.selected" => "Update selected";
     "apps.upd.selected_title" => "Update the selected apps?";
     "apps.upd.many_text" => "One after the other, each with a snapshot first when its folder allows it: {names}.";
-    "apps.upd.skipped" => "Need answers, update them one by one: {names}";
-    "apps.upd.failed" => "Not updated: {names}";
+    "apps.upd.running" => "Updating the selected apps…";
+    "apps.upd.partly" => "Some apps were skipped: their new version needs answers, update them one by one.";
     "apps.upd.all_done" => "The selected apps are updated";
     "apps.chg.added" => "Added";
     "apps.chg.removed" => "Removed";
@@ -8180,7 +8186,9 @@ mod tests {
                 || s.ends_with(".log")
                 || s.starts_with("fuse.")
                 || s.contains("example")
-                || matches!(s, "a.b" | "metrics.sample" | "hardware.status" | "task.started" | "task.updated" | "task.finished" | "removable.state" | "docker.stats" | "docker.changed")
+                || matches!(s, "a.b" | "metrics.sample" | "hardware.status" | "task.started" | "task.updated" | "task.finished" | "removable.state" | "docker.stats" | "docker.changed" | "storage.changed" | "config.pending")
+                // task types named to the task store (`tasks::use_task`, `tasks::reports`)
+                || matches!(s, "space.preview" | "pcbackup.usage")
         };
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for e in std::fs::read_dir(dir).expect("src dir").flatten() {

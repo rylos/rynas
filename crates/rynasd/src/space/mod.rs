@@ -1898,6 +1898,10 @@ async fn preview(State(st): State<SpaceState>, h: HeaderMap, body: Result<Json<S
             let paths = req.paths.clone();
             let p = in_thread(move || s3.run_preview(&paths, &|| c.is_cancelled(), &|m| c.log(m))).await?;
             ctx.log(&format!("{} snapshots can go, {} kept: {}", p.paths.len(), p.refused.len(), bytes_text(p.freed_bytes)));
+            // stopped at the preview's time limit: no number, never a plain success
+            if let Some(m) = p.timed_out_minutes {
+                ctx.partial(format!("not measured: measuring took longer than {m} min"));
+            }
             let err = p.error.clone();
             s2.keep_preview(ctx.id().to_string(), p);
             err.map_or(Ok(()), Err)

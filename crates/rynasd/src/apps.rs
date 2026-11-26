@@ -2375,6 +2375,122 @@ async fn update_post(
     Ok(accepted(id))
 }
 
+/// Most apps one "Update selected" may name.
+const UPDATE_MANY_MAX: usize = 100;
+/// Tasks looked at for an `apps.update-many` already running (the newest first).
+const UPDATE_MANY_SCAN: usize = 100;
+
+/// `POST /v1/apps/update-many` (body [`AppUpdateManyRequest`]): one task `apps.update-many`
+/// updates the named apps one after the other, each like `apps.update` with the default
+/// snapshot settings, on the server: closing the page changes nothing, the outcome comes
+/// as one task. An app whose new version needs answers, or that is up to date by then, is
+/// skipped (the task ends partial); a failed one fails the task at the end (the others are
+/// still updated). Unused images are removed once, after the last.
+async fn update_many_post(
+    State(st): State<AppsState>,
+    hd: HeaderMap,
+    body: axum::body::Bytes,
+) -> Res<Response> {
+    let a = asvc(&st)?;
+    let who = admin(&a, &hd)?;
+    let req: AppUpdateManyRequest = optional_body(&body)?;
+    let mut stacks = req.stacks;
+    stacks.sort();
+    stacks.dedup();
+    if stacks.is_empty() || stacks.len() > UPDATE_MANY_MAX {
+        return Err(Error::invalid("stacks", format!("1 to {UPDATE_MANY_MAX} apps")));
+    }
+    if let Some(running) = a
+        .docker
+        .ops
+        .tasks
+        .list(UPDATE_MANY_SCAN)
+        .into_iter()
+        .find(|t| t.kind == "apps.update-many" && !t.status.is_finished())
+    {
+        return Err(Error::new(
+            StatusCode::CONFLICT,
+            error_codes::BUSY,
+            format!("an update of several apps is running ({})", running.id),
+        ));
+    }
+    audit(&who, "update-many", &stacks.join(" "));
+    let a2 = a.clone();
+    let id = a.docker.ops.tasks.spawn("apps.update-many", &who, move |ctx| async move {
+        let (mut done, mut skipped, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+        let n = stacks.len();
+        for (i, stack) in stacks.iter().enumerate() {
+            if ctx.is_cancelled() {
+                return Err("cancelled".into());
+            }
+            ctx.progress((i * 100 / n) as u8);
+            ctx.log(&format!("== {stack} ({} of {n})", i + 1));
+            match a2.update_plan(stack).await {
+                Ok((.., p)) if p.up_to_date || p.downgrade => {
+                    ctx.log(&format!("{stack}: nothing to update"));
+                    skipped.push(stack.clone());
+                    continue;
+                }
+                Ok((.., p)) if !p.missing_values.is_empty() => {
+                    ctx.log(&format!(
+                        "{stack}: the new version needs answers ({}): update it on its own",
+                        p.missing_values.join(", ")
+                    ));
+                    skipped.push(stack.clone());
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    ctx.log(&format!("{stack}: {}", e.2));
+                    failed.push(stack.clone());
+                    continue;
+                }
+            }
+            let r = async {
+                let (job, plan) = a2
+                    .prepare_update_job(stack, &AppUpdateRequest::default())
+                    .await
+                    .map_err(|e| e.2)?;
+                let _guard = mark_busy(&a2.docker, stack).map_err(|e| e.2)?;
+                ctx.log(&format!("{stack}: {} -> {}", plan.from_version, plan.to_version));
+                update_task(&a2.docker, &ctx, job).await.map(|_| ())
+            }
+            .await;
+            match r {
+                Ok(()) => done.push(stack.clone()),
+                Err(e) => {
+                    ctx.log(&format!("{stack}: {e}"));
+                    failed.push(stack.clone());
+                }
+            }
+        }
+        ctx.progress(100);
+        if !done.is_empty()
+            && let Err(e) = crate::docker::prune_images(&a2.docker, &ctx).await
+        {
+            ctx.log(&format!("unused images not removed: {e}"));
+        }
+        ctx.log(&format!(
+            "updated: {}; skipped: {}; failed: {}",
+            list_or_none(&done),
+            list_or_none(&skipped),
+            list_or_none(&failed)
+        ));
+        if !failed.is_empty() {
+            return Err(format!("not updated: {}", failed.join(", ")));
+        }
+        if !skipped.is_empty() {
+            ctx.partial(format!("skipped: {}", skipped.join(", ")));
+        }
+        Ok(())
+    })?;
+    Ok(accepted(id))
+}
+
+fn list_or_none(v: &[String]) -> String {
+    if v.is_empty() { "none".into() } else { v.join(", ") }
+}
+
 impl AppsSvc {
     /// The update of an installed app, checked and rendered (values migrated, secrets kept):
     /// what `apps.update` runs. 409 when up to date or for a downgrade; 400 for a missing
@@ -2955,6 +3071,7 @@ pub fn router(st: AppsState) -> Router {
             "/v1/apps/installed/{stack}/update",
             get(update_plan_get).post(update_post),
         )
+        .route("/v1/apps/update-many", post(update_many_post))
         .route("/v1/apps/installed/{stack}/rollback", post(rollback_post))
         .route("/v1/apps/installed/{stack}/convert", post(convert_post))
         .route("/v1/apps/installed/{stack}/uninstall", post(uninstall_post))

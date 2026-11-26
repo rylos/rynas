@@ -21,6 +21,9 @@ use crate::auth::auth;
 
 /// Samples kept in memory: 10 minutes at 1/s.
 pub const HISTORY_CAP: usize = 600;
+/// The storage overview read again for its fill levels (everything else arrives as
+/// `storage.changed`).
+const STORAGE_LEVELS: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Conn {
@@ -53,6 +56,9 @@ pub struct Live {
     pub ups: RwSignal<Option<rynas_api_types::ups::UpsStatus>>,
     /// Removable drives (`removable.state` events; the stream sends the latest on connect).
     pub removable: RwSignal<Option<rynas_api_types::removable::RemovableState>>,
+    /// Bumped on every `storage.changed` (disks, arrays, block-device mounts): the storage
+    /// pages read their inventory again when it changes, instead of polling.
+    pub storage_gen: RwSignal<u64>,
 }
 
 /// A polled resource (for error states and Retry).
@@ -74,6 +80,7 @@ struct Stream {
     _on_task: Closure<dyn Fn(MessageEvent)>,
     _on_notif: Closure<dyn Fn(MessageEvent)>,
     _on_docker: Closure<dyn Fn(MessageEvent)>,
+    _on_hint: Closure<dyn Fn(MessageEvent)>,
     _on_resync: Closure<dyn Fn(MessageEvent)>,
     _on_open: Closure<dyn Fn()>,
     _on_err: Closure<dyn Fn()>,
@@ -165,6 +172,7 @@ impl Live {
             hardware_err: RwSignal::new(None),
             ups: RwSignal::new(None),
             removable: RwSignal::new(None),
+            storage_gen: RwSignal::new(0),
         }
     }
 
@@ -337,7 +345,9 @@ impl Live {
         if POLLING.with(|p| p.replace(true)) {
             return;
         }
-        // hardware changes arrive on the event stream (`hardware.status`): no polling
+        // hardware changes arrive on the event stream (`hardware.status`), disks, arrays and
+        // mounts as `storage.changed`: only the fill levels move without an event, read
+        // again every few minutes while the tab is visible
         set_interval(
             move || {
                 // the storage pages read the inventory themselves meanwhile
@@ -345,7 +355,7 @@ impl Live {
                     self.refresh_storage();
                 }
             },
-            Duration::from_secs(30),
+            STORAGE_LEVELS,
         );
     }
 
@@ -492,6 +502,18 @@ impl Live {
         for name in ["docker.stats", "docker.changed"] {
             let _ = es.add_event_listener_with_callback(name, on_docker.as_ref().unchecked_ref());
         }
+        // pushed hints: the storage overview and the pending changes may have changed
+        let on_hint = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
+            if ev.type_() == "storage.changed" {
+                self.refresh_storage();
+                self.storage_gen.update(|n| *n += 1);
+            } else {
+                crate::config::config().refresh();
+            }
+        });
+        for name in ["storage.changed", "config.pending"] {
+            let _ = es.add_event_listener_with_callback(name, on_hint.as_ref().unchecked_ref());
+        }
         // missed events: re-read that collection
         let on_resync = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
             let data = ev.data().as_string().unwrap_or_default();
@@ -512,6 +534,9 @@ impl Live {
                 self.refresh_removable();
             } else if data.contains("\"docker\"") {
                 crate::docker::docker().resync();
+            } else if data.contains("\"storage\"") {
+                self.refresh_storage();
+                self.storage_gen.update(|n| *n += 1);
             }
         });
         let _ = es.add_event_listener_with_callback("resync", on_resync.as_ref().unchecked_ref());
@@ -539,7 +564,7 @@ impl Live {
             }
         });
         es.set_onerror(Some(on_err.as_ref().unchecked_ref()));
-        let st = Stream { es, _on_sample: on_sample, _on_hardware: on_hardware, _on_ups: on_ups, _on_removable: on_removable, _on_task: on_task, _on_notif: on_notif, _on_docker: on_docker, _on_resync: on_resync, _on_open: on_open, _on_err: on_err };
+        let st = Stream { es, _on_sample: on_sample, _on_hardware: on_hardware, _on_ups: on_ups, _on_removable: on_removable, _on_task: on_task, _on_notif: on_notif, _on_docker: on_docker, _on_hint: on_hint, _on_resync: on_resync, _on_open: on_open, _on_err: on_err };
         STREAM.with(|s| *s.borrow_mut() = Some(st));
     }
 

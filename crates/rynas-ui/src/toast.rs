@@ -18,6 +18,8 @@ struct Toast {
     id: u32,
     tone: Tone,
     text: String,
+    /// A task whose log the toast opens.
+    task: Option<String>,
 }
 
 thread_local! {
@@ -75,6 +77,16 @@ fn expire(id: u32, ms: u64) {
 /// Show a toast; errors stay longer. `text` may carry a server detail
 /// ([`crate::api::ApiErr::text`]).
 pub fn toast(tone: Tone, text: String) {
+    push(tone, text, None);
+}
+
+/// [`toast`] with a "Log" button that opens task `task` in the task panel (a task that
+/// ended without a page to report it: [`crate::tasks`]).
+pub fn toast_task(tone: Tone, text: String, task: String) {
+    push(tone, text, Some(task));
+}
+
+fn push(tone: Tone, text: String, task: Option<String>) {
     let id = NEXT.with(|n| {
         let v = n.get();
         n.set(v.wrapping_add(1));
@@ -84,7 +96,7 @@ pub fn toast(tone: Tone, text: String) {
         if l.len() >= MAX {
             l.remove(0);
         }
-        l.push(Toast { id, tone, text });
+        l.push(Toast { id, tone, text, task });
     });
     expire(id, if tone == Tone::Err { 8000 } else { 4000 });
 }
@@ -116,6 +128,9 @@ pub fn Toasts() -> impl IntoView {
                             <div class=format!("toast {}", x.tone.class())>
                                 <Icon icon=x.tone.icon() size=16 />
                                 <span class="toast-text">{err_view(x.text)}</span>
+                                {x.task.map(|task| view! {
+                                    <button class="btn ghost sm" on:click=move |_| crate::tasks::tasks().show(&task)>{tr("tasks.log_open")}</button>
+                                })}
                                 <button class="icon-btn sm" aria-label=tr("close") on:click=move |ev| {
                                     // the focused button leaves the page without a `focusout`: the
                                     // hold would last for good and no later toast would go away

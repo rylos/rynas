@@ -558,6 +558,8 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
     // the PC again and a toast says how it went (a failure always; a success only of a
     // measure someone started, not of the one that follows a backup)
     let told = StoredValue::new(std::collections::BTreeSet::<String>::new());
+    // while this page is open it reports the measures itself: no global toast for them
+    tasks::reports("pcbackup.usage");
     Effect::new(move |_| {
         let running: Vec<String> = pcs.list.data.with(|l| l.iter().flatten().filter_map(|p| p.measure.task.clone()).collect());
         if running.is_empty() {

@@ -4,8 +4,9 @@
 //!
 //! Pages that stage a change (`PUT /api/v1/<domain>`, a restore, a drift import) call
 //! [`changed`] afterwards; the bar also re-reads `/config/pending` when a `config.*` task
-//! ends (events), when the tab becomes visible again and every 30 s while visible (there is
-//! no event for staging, and another user's apply can turn a change into a conflict).
+//! ends and on every `config.pending` event of the stream (a stage, discard or apply by
+//! anyone: another user's apply can turn a change into a conflict), and when the tab
+//! becomes visible again. Nothing is polled.
 
 use std::cell::Cell;
 use std::time::Duration;
@@ -22,9 +23,6 @@ use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::tasks::{self, task_error, tasks};
 use crate::ui::{self, Confirm, DlgKind, Skeleton, Status, Tone, cell, confirm, dialog, row, status, table, text};
-
-/// Re-read of the pending set while the tab is visible.
-const POLL: Duration = Duration::from_secs(30);
 
 /// Outcome of the last apply, shown in the bar.
 #[derive(Clone, PartialEq)]
@@ -118,14 +116,6 @@ impl Config {
             failures: RwSignal::new(0),
         };
         CONFIG.with(|x| x.set(Some(c)));
-        set_interval(
-            move || {
-                if auth().is_ready() && !document().hidden() {
-                    c.refresh();
-                }
-            },
-            POLL,
-        );
         let _ = window_event_listener(leptos::ev::visibilitychange, move |_| {
             if auth().is_ready() && !document().hidden() {
                 c.refresh();

@@ -129,6 +129,7 @@ nev.storage.volume_full.body	存储卷 {volume} 已使用 {used_gib} GiB（{used
 nev.storage.volume_ok.title	存储卷 {volume} 的使用率已低于 {limit_pct}%，目前为 {used_pct}%
 nev.task.failed.title	任务失败：{type}
 nev.task.succeeded.title	任务已成功：{type}
+nev.task.partial.title	任务仅部分完成：{type}
 nev.config.apply_failed.title	应用配置失败
 nev.config.apply_ok.title	配置应用程序成功
 nev.sched.task_failed.title	任务 {name} 失败
@@ -269,6 +270,9 @@ tasks.col_user	用户
 tasks.col_start	开始
 tasks.col_duration	会期
 tasks.log	任务日志
+tasks.log_open	日志
+task.done_named	{task}：已完成
+task.partial	仅部分完成
 tasks.cancel	停止
 tasks.close_log	关闭日志
 tasks.background	您可以关闭此窗口：任务会持续运行。
@@ -278,6 +282,7 @@ tech_details	技术细节：
 task.st.ok	确定
 task.st.error	错误
 task.st.cancelled	已取消
+task.st.partial	部分完成
 task.st.running	运行
 task.st.queued	已排队
 task.config.apply	应用配置
@@ -4959,6 +4964,7 @@ no	否
 task.apps.install	安装应用
 task.wol.wake	唤醒设备
 task.apps.update	更新应用
+task.apps.update-many	更新多个应用
 task.apps.rollback	回滚应用
 task.apps.uninstall	卸载应用
 task.apps.proxy	改用网页访问代理
@@ -5920,8 +5926,8 @@ apps.upd.pick	选择
 apps.upd.selected	更新所选应用
 apps.upd.selected_title	更新所选应用？
 apps.upd.many_text	将依次更新 {names}。支持快照的应用会在更新前创建快照。
-apps.upd.skipped	以下应用需要填写配置，请逐一更新（{names}）。
-apps.upd.failed	更新失败（{names}）。
+apps.upd.running	正在更新所选应用…
+apps.upd.partly	部分应用已跳过：其新版本需要填写配置，请逐一更新。
 apps.upd.all_done	所选应用已更新
 apps.chg.added	已添加
 apps.chg.removed	已移除

@@ -129,6 +129,7 @@ nev.storage.volume_full.body	{volume} usa {used_gib} GiB, circa {free_gib} GiB l
 nev.storage.volume_ok.title	Volume {volume} di nuovo sotto soglia: {used_pct}% (limite {limit_pct}%)
 nev.task.failed.title	Attività non riuscita: {type}
 nev.task.succeeded.title	Attività riuscita: {type}
+nev.task.partial.title	Attività completata solo in parte: {type}
 nev.config.apply_failed.title	Applicazione della configurazione non riuscita
 nev.config.apply_ok.title	Applicazione della configurazione riuscita
 nev.sched.task_failed.title	Attività {name} non riuscita
@@ -222,6 +223,9 @@ tasks.col_user	Utente
 tasks.col_start	Avvio
 tasks.col_duration	Durata
 tasks.log	Log dell'attività
+tasks.log_open	Log
+task.done_named	{task}: fatto
+task.partial	Completata solo in parte
 tasks.cancel	Interrompi
 tasks.close_log	Chiudi log
 tasks.background	Puoi chiudere questa finestra: l'attività continua.
@@ -231,6 +235,7 @@ tech_details	Dettagli tecnici:
 task.st.ok	OK
 task.st.error	Errore
 task.st.cancelled	Annullata
+task.st.partial	Parziale
 task.st.running	In esecuzione
 task.st.queued	In coda
 tasks.queue	Attività pianificate in attesa
@@ -4429,6 +4434,7 @@ no	No
 task.apps.install	Installazione dell'app
 task.wol.wake	Accensione di un dispositivo
 task.apps.update	Aggiornamento dell'app
+task.apps.update-many	Aggiornamento delle app
 task.apps.rollback	Ritorno alla versione precedente dell'app
 task.apps.uninstall	Disinstallazione dell'app
 task.apps.proxy	Spostamento dell'app dietro il proxy
@@ -5243,8 +5249,8 @@ apps.upd.pick	Seleziona
 apps.upd.selected	Aggiorna le selezionate
 apps.upd.selected_title	Aggiornare le app selezionate?
 apps.upd.many_text	Una dopo l'altra, ciascuna con uno snapshot prima quando la sua cartella lo consente: {names}.
-apps.upd.skipped	Richiedono risposte, aggiornale una per una: {names}
-apps.upd.failed	Non aggiornate: {names}
+apps.upd.running	Aggiornamento delle app selezionate…
+apps.upd.partly	Alcune app sono state saltate: la nuova versione richiede risposte, aggiornale una per una.
 apps.upd.all_done	Le app selezionate sono aggiornate
 apps.chg.added	Aggiunta
 apps.chg.removed	Rimossa

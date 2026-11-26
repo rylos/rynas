@@ -129,6 +129,7 @@ nev.storage.volume_full.body	{volume}: занято {used_gib} ГиБ, своб�
 nev.storage.volume_ok.title	Заполнение тома {volume} снова ниже {limit_pct}% ({used_pct}%)
 nev.task.failed.title	Ошибка задачи: {type}
 nev.task.succeeded.title	Задача выполнена: {type}
+nev.task.partial.title	Задача выполнена частично: {type}
 nev.config.apply_failed.title	Не удалось применить конфигурацию
 nev.config.apply_ok.title	Конфигурация применена
 nev.sched.task_failed.title	Ошибка задачи «{name}»
@@ -222,6 +223,9 @@ tasks.col_user	Пользователь
 tasks.col_start	Начало
 tasks.col_duration	Длительность
 tasks.log	Журнал задачи
+tasks.log_open	Журнал
+task.done_named	{task}: готово
+task.partial	Выполнено частично
 tasks.cancel	Остановить
 tasks.close_log	Закрыть журнал
 tasks.background	Это окно можно закрыть: задача продолжит выполняться.
@@ -231,6 +235,7 @@ tech_details	Технические подробности:
 task.st.ok	OK
 task.st.error	Ошибка
 task.st.cancelled	Отменено
+task.st.partial	Частично
 task.st.running	Выполняется
 task.st.queued	В очереди
 tasks.queue	Запланированные задачи в ожидании
@@ -4475,6 +4480,7 @@ no	Нет
 task.apps.install	Установка приложения
 task.wol.wake	Включение устройства
 task.apps.update	Обновление приложения
+task.apps.update-many	Обновление приложений
 task.apps.rollback	Откат приложения
 task.apps.uninstall	Удаление приложения
 task.apps.proxy	Перевод приложения за прокси
@@ -5289,8 +5295,8 @@ apps.upd.pick	Выбрать
 apps.upd.selected	Обновить выбранные
 apps.upd.selected_title	Обновить выбранные приложения?
 apps.upd.many_text	По очереди, перед каждым — снимок, если его папка это позволяет: {names}.
-apps.upd.skipped	Требуют ответов, обновите их по одному: {names}
-apps.upd.failed	Не обновлены: {names}
+apps.upd.running	Обновление выбранных приложений…
+apps.upd.partly	Некоторые приложения пропущены: новая версия требует ответов, обновите их по одному.
 apps.upd.all_done	Выбранные приложения обновлены
 apps.chg.added	Добавлено
 apps.chg.removed	Убрано
