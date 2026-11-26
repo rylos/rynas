@@ -22,13 +22,10 @@ pub fn watch_dirs(dirs: &[&Path]) -> Option<watch::Receiver<u64>> {
     if fd < 0 {
         return None;
     }
-    let mask = libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO | libc::IN_MOVED_FROM | libc::IN_CREATE | libc::IN_DELETE | libc::IN_ATTRIB;
-    let mut watched: Vec<PathBuf> = Vec::new();
+    let mut watched: std::collections::HashMap<i32, PathBuf> = std::collections::HashMap::new();
     for d in dirs {
-        let Ok(c) = std::ffi::CString::new(d.as_os_str().as_encoded_bytes()) else { continue };
-        // SAFETY: valid descriptor and C string
-        if unsafe { libc::inotify_add_watch(fd, c.as_ptr(), mask) } >= 0 {
-            watched.push(d.to_path_buf());
+        if let Some(wd) = add_watch(fd, d) {
+            watched.insert(wd, d.to_path_buf());
         }
     }
     if watched.is_empty() {
@@ -36,6 +33,7 @@ pub fn watch_dirs(dirs: &[&Path]) -> Option<watch::Receiver<u64>> {
         unsafe { libc::close(fd) };
         return None;
     }
+    let names: Vec<PathBuf> = watched.values().cloned().collect();
     let (tx, rx) = watch::channel(0u64);
     let spawned = std::thread::Builder::new().name("fswatch".into()).spawn(move || {
         let mut buf = [0u8; 4096];
@@ -47,6 +45,23 @@ pub fn watch_dirs(dirs: &[&Path]) -> Option<watch::Receiver<u64>> {
                 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
+                break;
+            }
+            // a watched folder deleted or moved: its watch is gone; watched again when it is
+            // there (made again at once), else this watch ends and the waiters fall back to
+            // their timer instead of waiting for good
+            for (wd, mask) in events(&buf[..r as usize]) {
+                if mask & (libc::IN_IGNORED | libc::IN_DELETE_SELF | libc::IN_MOVE_SELF) != 0
+                    && let Some(path) = watched.remove(&wd)
+                {
+                    // SAFETY: our descriptor; a watch already gone is an error we ignore
+                    unsafe { libc::inotify_rm_watch(fd, wd) };
+                    if let Some(new) = add_watch(fd, &path) {
+                        watched.insert(new, path);
+                    }
+                }
+            }
+            if watched.is_empty() {
                 break;
             }
             // the rest of a burst (the second rename of an update) joins this wake-up
@@ -62,8 +77,39 @@ pub fn watch_dirs(dirs: &[&Path]) -> Option<watch::Receiver<u64>> {
     if spawned.is_err() {
         return None;
     }
-    tracing::debug!("fswatch: watching {watched:?}");
+    tracing::debug!("fswatch: watching {names:?}");
     Some(rx)
+}
+
+/// Watches the folder `d` on `fd`: its watch descriptor.
+fn add_watch(fd: i32, d: &Path) -> Option<i32> {
+    let mask = libc::IN_CLOSE_WRITE
+        | libc::IN_MOVED_TO
+        | libc::IN_MOVED_FROM
+        | libc::IN_CREATE
+        | libc::IN_DELETE
+        | libc::IN_ATTRIB
+        | libc::IN_DELETE_SELF
+        | libc::IN_MOVE_SELF;
+    let c = std::ffi::CString::new(d.as_os_str().as_encoded_bytes()).ok()?;
+    // SAFETY: valid descriptor and C string
+    let wd = unsafe { libc::inotify_add_watch(fd, c.as_ptr(), mask) };
+    (wd >= 0).then_some(wd)
+}
+
+/// `(watch descriptor, mask)` of each `struct inotify_event` in a read.
+fn events(buf: &[u8]) -> Vec<(i32, u32)> {
+    const HEAD: usize = 16; // wd, mask, cookie, len
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + HEAD <= buf.len() {
+        let wd = i32::from_ne_bytes(buf[i..i + 4].try_into().unwrap_or_default());
+        let mask = u32::from_ne_bytes(buf[i + 4..i + 8].try_into().unwrap_or_default());
+        let len = u32::from_ne_bytes(buf[i + 12..i + 16].try_into().unwrap_or_default()) as usize;
+        out.push((wd, mask));
+        i += HEAD + len;
+    }
+    out
 }
 
 /// Waits for the next change in `rx`, or `fallback` when there is no watch (or it ended), or
@@ -98,5 +144,13 @@ mod tests {
         let woke = tokio::time::timeout(Duration::from_secs(5), next(&mut rx, Duration::from_secs(3600))).await;
         assert!(woke.is_ok());
         assert!(watch_dirs(&[Path::new("/nonexistent/rynas")]).is_none());
+        // the folder goes: the watch ends and the waiter falls back to its timer, it never
+        // waits for good
+        std::fs::remove_dir_all(d.path()).unwrap();
+        for _ in 0..3 {
+            let r = tokio::time::timeout(Duration::from_secs(5), next(&mut rx, Duration::from_millis(50))).await;
+            assert!(r.is_ok());
+        }
+        assert!(rx.is_none());
     }
 }
