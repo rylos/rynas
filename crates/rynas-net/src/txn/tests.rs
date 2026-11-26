@@ -1173,6 +1173,29 @@ fn exited_ifupdown_with_loopback_only_does_not_block_the_repair() {
     assert!(r.starts_with(resolv::HEADER), "{r}");
 }
 
+/// A file written by an older rynas (no `options` line) is brought up to date by the next
+/// refresh, without a "repaired" notification: it already had servers.
+#[test]
+fn an_older_rynas_file_gets_the_resolver_options() {
+    let t = migrated_at_boot(true);
+    let old = format!(
+        "{}\n# rynas keeps it up to date while it runs the network; replace it to manage it yourself.\nnameserver 198.51.100.53\n",
+        resolv::HEADER
+    );
+    t.os.write_config("/etc/resolv.conf", &old);
+    let _ = event_codes(&t.e);
+    let what = t.e.sync_resolv(&log).expect("rewritten");
+    assert!(what.contains("198.51.100.53"), "{what}");
+    let r = t.os.read_config(Path::new("/etc/resolv.conf")).unwrap();
+    assert!(r.contains(&format!("\n{}\n", resolv::OPTIONS)), "{r}");
+    assert!(!event_codes(&t.e).contains(&"net.dns_repaired".to_string()));
+    // a file the administrator replaced is still left alone
+    t.os.write_config("/etc/resolv.conf", "nameserver 192.0.2.10\n");
+    assert!(t.e.sync_resolv(&log).is_none());
+    let r = t.os.read_config(Path::new("/etc/resolv.conf")).unwrap();
+    assert_eq!(r, "nameserver 192.0.2.10\n");
+}
+
 #[test]
 fn migration_at_boot_without_dns_goes_back_to_ifupdown() {
     let t = migrated_at_boot(false);
