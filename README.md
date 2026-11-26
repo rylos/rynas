@@ -1,6 +1,6 @@
 <h1 align="center">rynas</h1>
 
-<h3 align="center">A complete NAS on plain Debian, light enough for a 2 GB box.</h3>
+<h3 align="center">A complete NAS on plain Debian, in about 33 MB of RAM.</h3>
 
 <p align="center">
 Flexible RAID, shares, snapshots, backups, Docker apps and HTTPS from one web interface.<br>
