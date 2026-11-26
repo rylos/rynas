@@ -10,7 +10,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::space::{
     MeasureMethod, PinRequest, Protection, ReviewDeleteRequest, ReviewItem, ReviewKind, SafeAction, SafeActionKind, SnapshotSource,
-    SourceBudget, SourceKind, SpaceCategory, SpaceDeleteRequest, SpaceOverview, SpacePreview, SpacePreviewRequest, SpaceSettings, VolumeSpace,
+    SourceBudget, SourceKind, SpaceCategory, SpaceDeleteRequest, SpaceOverview, SpacePreview, SpacePreviewRequest, SpaceScanPlan, SpaceSettings, VolumeSpace,
 };
 
 use super::SubNav;
@@ -175,9 +175,12 @@ enum PreviewState {
 #[component]
 pub fn SpacePage() -> impl IntoView {
     let ov = Remote::<SpaceOverview>::new(URL);
-    // a scan running: read again until it ends
-    crate::live::poll_while(3000, move || ov.data.with(|o| o.as_ref().is_some_and(|o| o.scanning)), move || ov.reload());
+    // a scan (asked here, or after snapshots changed): its progress, the numbers at its end
+    let scan_task = tasks::use_task("space.scan", Signal::stored(None));
+    scan_task.on_end(move |_| ov.reload());
+    let scan_pct = move || scan_task.task.with(|t| t.as_ref().filter(|_| scan_task.running.get()).and_then(|t| t.progress));
     let scan_busy = RwSignal::new(false);
+    let scan_ask = RwSignal::new(None::<SpaceScanPlan>);
     let selected = RwSignal::new(BTreeSet::<String>::new());
     let open = RwSignal::new(BTreeSet::<String>::new());
     let sort = RwSignal::new("size".to_string());
@@ -189,14 +192,28 @@ pub fn SpacePage() -> impl IntoView {
     let action_ask = RwSignal::new(None::<SafeAction>);
     let budget = RwSignal::new(None::<SnapshotSource>);
 
-    let scan = move |_| {
+    let start_scan = Callback::new(move |_: ()| {
+        scan_ask.set(None);
         scan_busy.set(true);
         spawn_local(async move {
             match api::start_task(&format!("{URL}/scan"), None).await {
                 Ok(_) => ov.reload(),
                 Err(e) => toast(Tone::Err, e.text()),
             }
-            scan_busy.set(false);
+            let _ = scan_busy.try_set(false);
+        });
+    });
+    // what Measure does first: long work (a full search, a file walk) is confirmed with its time
+    let scan = move |_| {
+        scan_busy.set(true);
+        spawn_local(async move {
+            let r = api::get::<SpaceScanPlan>(&format!("{URL}/plan")).await;
+            let _ = scan_busy.try_set(false);
+            match r {
+                Ok(p) if p.walks > 0 || p.full_walks > 0 || p.estimate_s >= 600 => scan_ask.set(Some(p)),
+                Ok(_) => start_scan.run(()),
+                Err(e) => toast(Tone::Err, e.text()),
+            }
         });
     };
 
@@ -293,10 +310,16 @@ pub fn SpacePage() -> impl IntoView {
         ov.data.with(|o| {
             o.as_ref().map(|o| {
                 let when = o.scanned_at_ms.map(|ms| tf("sp.scanned", &[("when", &i18n::datetime(ms))])).unwrap_or_else(|| t("sp.never_scanned").to_string());
+                let running = o.scanning.then(|| match scan_pct() {
+                    Some(p) => format!("{} · {p} %", t("sp.scanning")),
+                    None => t("sp.scanning").to_string(),
+                });
+                let pending = (!o.pending.is_empty()).then(|| tf("sp.pending", &[("volumes", &o.pending.join(", "))]));
                 view! {
                     <p class="muted small space-scan-line">
-                        {o.scanning.then(|| ui::status(Tone::Info, t("sp.scanning").to_string()))}
+                        {running.map(|r| ui::status(Tone::Info, r))}
                         <span>{when}</span>
+                        {pending.map(|p| view! { <span>{p}</span> })}
                     </p>
                 }
             })
@@ -380,6 +403,13 @@ pub fn SpacePage() -> impl IntoView {
                     }));
                 });
                 confirm(Confirm { on_confirm: go, ..c })
+            })}
+            {move || scan_ask.get().map(|p| {
+                let mut text = tf("sp.measure_text", &[("time", &i18n::approx(p.estimate_s.max(60)))]);
+                if p.full_walks > 0 {
+                    text = format!("{text} {}", tf("sp.measure_walks", &[("n", &p.full_walks.to_string())]));
+                }
+                confirm(Confirm::new(t("sp.measure_title").to_string(), text, "sp.scan_now", false, start_scan, Callback::new(move |_| scan_ask.set(None))))
             })}
             {move || budget.get().map(|s| view! { <BudgetDialog source=s on_close=Callback::new(move |_| { budget.set(None); ov.reload(); }) /> })}
         </div>

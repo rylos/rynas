@@ -101,7 +101,9 @@ The answer is cached in `<state>/space/<volume>.json` and `<state>/space/_global
 
 Two methods: an exact one for the deletion preview, by diffs (§5.2.1), and a full walk for the
 scan of whole sources and as the preview's fallback (§5.2.2). Quota groups go first when they
-can answer (§5.2.3).
+can answer (§5.2.3). Since 2026-11-26 the scan measures whole sources by neighbours first
+(§5.2.4) and runs only on request and after snapshot changes, never on a timer
+([tasks.md](../phase1/tasks.md) "A NAS at rest").
 
 #### 5.2.1 Preview: diffs and an exact check
 
@@ -169,10 +171,29 @@ send stream of at most 512 MiB. Time: 5 minutes for a preview (`timed_out_minute
 never a partial number), the task's cancel; the task log has a line per comparison and the
 count of candidates and freed extents.
 
-#### 5.2.2 Full walk (scan, preview fallback)
+#### 5.2.4 Whole sources by neighbours (scan, 2026-11-26)
 
-The scan measures whole sources (all snapshots against the live subvolume, which is writable:
-nothing to compare with), so it keeps the full walk. `rynas_btrfs::extents::measure(set,
+The snapshots of a source are grouped in lines (the name before its time) and each line is
+measured with `rynas_btrfs::pcspace` (PC backups' measure, `docs/research/pc-backup.md` §11.12):
+per pair of neighbours `born`, `died`, `exclusive` from the diff and `LOGICAL_INO_V2`, kept per
+snapshot UUID in `<state>/space/known.json` (the PC backups' numbers are read first), so later
+scans compare only the pairs that changed (a new snapshot: two pairs; a deleted one: one).
+
+- **With a live folder** (share jobs, restore points, app stacks): freed ≈ Σ `died` of every
+  snapshot but the newest + `exclusive` of the newest. No full search ever. It leaves out what
+  the newest shares with older snapshots and the live folder changed since (a low number; the
+  preview measures a selection exactly). "Freed at least" = Σ `exclusive`.
+- **Without one** (PC folders, received, orphans): the line's union (`distinct(newest) + Σ died`),
+  which needs one full tree search of the newest the first time (on request only).
+- A pair needs both snapshots read-only; a line with a writable snapshot, without UUIDs, or a
+  lone snapshot of a live folder falls back to the full walk (§5.2.2) on request, and keeps its
+  last numbers after a change.
+
+#### 5.2.2 Full walk (scan fallback, preview fallback)
+
+A source whose snapshots cannot be compared by neighbours (§5.2.4) is measured whole (all
+snapshots against the live subvolume, which is writable: nothing to compare with) by the full
+walk, only in a scan a person asked for. `rynas_btrfs::extents::measure(set,
 keep)` reads the subvolume trees, not the files (`measure_tree`):
 
 1. `BTRFS_IOC_TREE_SEARCH_V2` (root privileges) over each subvolume's tree gives every
@@ -285,7 +306,8 @@ Configuration key `space` (`SpaceSettings`, staged and applied like every domain
   MiB, or 0 for journald's own default. On a change journald is restarted (its streams survive
   in the file descriptor store) and the journal cut with `journalctl --vacuum-size`.
 - **Recycle bins**: daily cleanup of the shares' and homes' `#recycle` honouring
-  `retention_days` (on by default, `recycle_daily`).
+  `retention_days` (on by default, `recycle_daily`), each volume's bins once its disks are awake
+  that day (never woken for it).
 - **Thumbnails**: daily LRU eviction to `thumbs_cap_mib` (2048).
 
 ### 5.6 API
@@ -293,7 +315,8 @@ Configuration key `space` (`SpaceSettings`, staged and applied like every domain
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/v1/space` | — | `SpaceOverview` {volumes: [`VolumeSpace`], safe_actions, review, scanning, scanned_at_ms?} |
-| POST | `/api/v1/space/scan?volume=` | — | 202 `space.scan`; 409 `busy` while one runs |
+| POST | `/api/v1/space/scan?volume=` | — | 202 `space.scan` (a full measure: on request only); 409 `busy` while one runs |
+| GET | `/api/v1/space/plan` | — | `SpaceScanPlan` {pairs, walks, walk_tree_bytes, full_walks, estimate_s, measured_here}: what Measure does and about how long |
 | POST | `/api/v1/space/preview` | `SpacePreviewRequest` {paths} | 202 `space.preview` |
 | GET | `/api/v1/space/previews/{task_id}` | — | `SpacePreview` {paths, refused, freed_bytes?, freed_at_least_bytes?, method, done, error?} |
 | POST | `/api/v1/space/delete` | `SpaceDeleteRequest` {paths, confirm} | 202 `space.delete`; 400 `confirmation_required` |

@@ -1870,8 +1870,9 @@ discovers again first and refuses protected snapshots.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/api/v1/space` | — | `SpaceOverview` {volumes: [`VolumeSpace` {volume, mount, total_bytes, used_bytes, free_bytes, categories: [`CategoryUsage`], sources: [`SnapshotSource`], reclaimable_bytes, scanned_at_ms?, scan_s, auto_free, low_free, btrfs}], safe_actions: [`SafeAction`], review: [`ReviewItem`], scanning, scanned_at_ms?} (cached scan + live totals) |
-| POST | `/api/v1/space/scan?volume=` | — | 202 `space.scan`; 404 unknown volume; 409 `busy` |
+| GET | `/api/v1/space` | — | `SpaceOverview` {volumes: [`VolumeSpace` {volume, mount, total_bytes, used_bytes, free_bytes, categories: [`CategoryUsage`], sources: [`SnapshotSource`], reclaimable_bytes, scanned_at_ms?, scan_s, auto_free, low_free, btrfs}], safe_actions: [`SafeAction`], review: [`ReviewItem`], scanning, scanned_at_ms?, pending: [volume]} (cached scan + live totals; `pending`: volumes whose snapshots changed, updated when their disks are next awake) |
+| POST | `/api/v1/space/scan?volume=` | — | 202 `space.scan` (subject: the volume, if any; a full measure, on request only; ends partial when its time budget leaves sources unmeasured); 404 unknown volume; 409 `busy` |
+| GET | `/api/v1/space/plan` | — | `SpaceScanPlan` {pairs, walks, walk_tree_bytes, full_walks, estimate_s, measured_here} (reads the snapshot folders: on request) |
 | POST | `/api/v1/space/preview` | `SpacePreviewRequest` {paths} | 202 `space.preview` |
 | GET | `/api/v1/space/previews/{task_id}` | — | `SpacePreview` {paths, refused: [{path, protected?}], freed_bytes?, freed_at_least_bytes?, method none\|qgroup\|extent_walk, done, error?} |
 | POST | `/api/v1/space/delete` | `SpaceDeleteRequest` {paths, confirm = number of paths} | 202 `space.delete` (nothing deleted when one path is protected); 400 `confirmation_required` |

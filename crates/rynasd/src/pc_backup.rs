@@ -2496,6 +2496,10 @@ pub struct PcBackup {
     /// Space measures running, by device: the task, and whether it was asked again meanwhile
     /// (it then measures once more at its end; `true`: someone asked, full searches allowed).
     measuring: Mutex<BTreeMap<String, (String, Option<bool>)>>,
+    /// The hourly freshness check's last view of each device's folder: used while the
+    /// folder's disks sleep (nothing arrived then: a receive wakes them), so the check reads
+    /// nothing from a sleeping volume.
+    last_views: Mutex<BTreeMap<String, PcTarget>>,
 }
 
 /// Most manifests remembered (a few per device).
@@ -2549,6 +2553,7 @@ impl PcBackup {
             agent_running: std::sync::OnceLock::new(),
             facts: Mutex::new(BTreeMap::new()),
             measuring: Mutex::new(BTreeMap::new()),
+            last_views: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -3087,7 +3092,17 @@ impl PcBackup {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         for (d, t) in all {
-            let v = self.view(&d, &t, now).target;
+            // the folder's disks sleep: its last view still holds (lateness is counted from
+            // `now`), nothing is read
+            let cached = self.last_views.lock().unwrap().get(&d).cloned();
+            let v = match cached {
+                Some(v) if !crate::disk_standby::path_awake(&t.path) => v,
+                _ => {
+                    let v = self.view(&d, &t, now).target;
+                    self.last_views.lock().unwrap().insert(d.clone(), v.clone());
+                    v
+                }
+            };
             let hours = v.alert_after_hours();
             let (late, quiet) = freshness_alert(&v, self.missed(&d).is_some(), now);
             if (late || quiet) != t.alerted {
@@ -3451,18 +3466,29 @@ impl PcBackup {
 
     /// Retention passes of every device whose retention the NAS owns (hourly).
     pub fn prune_all(&self) {
-        let devices: Vec<String> = self
+        let devices: Vec<(String, String)> = self
             .reg
             .lock()
             .unwrap()
             .targets
             .iter()
             .filter(|(_, t)| t.retention.owner == RetentionOwner::Nas)
-            .map(|(d, _)| d.clone())
+            .map(|(d, t)| (d.clone(), t.path.clone()))
             .collect();
-        for d in devices {
+        for (d, path) in devices {
+            // asleep: nothing arrived (a receive wakes them) and nothing else writes there, so
+            // what expired meanwhile frees nothing anyone waits for: it goes at the first
+            // hourly pass with the disks awake. No deadline: waking them only to delete would
+            // be work for nothing
+            if !crate::disk_standby::path_awake(&path) {
+                tracing::debug!("pc backup {d}: the folder's disks sleep, retention left for when they are awake");
+                continue;
+            }
             match self.prune(&d, &|l| tracing::info!("pc backup {d}: {l}")) {
                 Ok(r) if r.deleted > 0 || r.error.is_some() => {
+                    if r.deleted > 0 {
+                        crate::space::snapshots_changed(Some(Path::new(&path)));
+                    }
                     tracing::info!("pc backup {d}: retention deleted {} ({})", r.deleted, r.error.unwrap_or_default())
                 }
                 Ok(_) => {}
@@ -4108,6 +4134,10 @@ impl PcBackup {
                 if let Err(e) = self.start_measure(device, MEASURE_USER, true) {
                     tracing::warn!("pc backup: {device}: measuring the new backup: {}", e.2);
                 }
+                // Storage › Space follows too (the disks are awake: the receive just wrote)
+                if let Ok(t) = self.stored(device) {
+                    crate::space::snapshots_changed(Some(Path::new(&t.path)));
+                }
             }
             Err(e) => tracing::warn!("pc backup: {device}: receive refused or failed: {}", e.2),
         }
@@ -4248,6 +4278,20 @@ impl PcBackup {
     /// disk access): the file manager shows them to administrators (`@backups/<device>`).
     pub fn snapshot_folders(&self) -> Vec<(String, String)> {
         self.reg.lock().unwrap().targets.iter().map(|(d, t)| (d.clone(), t.path.clone())).collect()
+    }
+
+    /// What the PCs' space measures found out per snapshot UUID (memory only): Storage ›
+    /// Space starts from it, so a PC folder measured here is never searched again there.
+    pub fn space_known(&self) -> BTreeMap<String, rynas_btrfs::pcspace::Known> {
+        self.reg.lock().unwrap().targets.values().flat_map(|t| t.space.iter().map(|(k, v)| (k.clone(), v.clone()))).collect()
+    }
+
+    /// The speeds of space measures on this NAS: (tree bytes a full tree search reads per
+    /// second, milliseconds per pair of neighbours, whether they were measured here rather
+    /// than taken from the reference NAS).
+    pub fn measure_speed(&self) -> (u64, u64, bool) {
+        let r = self.reg.lock().unwrap().measure_rates;
+        (r.walk_bps(), r.pair(), r.walk_tree_bps > 0 || r.pair_ms > 0)
     }
 
     /// A restore's view of the folder of `device`: every snapshot with its state and size,

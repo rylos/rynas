@@ -39,11 +39,13 @@ use rynas_api_types::snapshots::SnapshotsConfig;
 use rynas_api_types::space::{
     CategoryUsage, MeasureMethod, PinRequest, PinnedSnapshots, RefusedPath, ReviewDeleteRequest, ReviewItem, ReviewKind,
     SPACE_KEY, SafeAction, SafeActionKind, SnapshotSource, SourceCaps, SourceKind, SpaceCategory, SpaceDeleteRequest,
-    SpaceOverview, SpacePreview, SpacePreviewRequest, SpaceSettings, SpaceSnapshot, VolumeSpace,
+    SpaceOverview, SpacePreview, SpacePreviewRequest, SpaceScanPlan, SpaceSettings, SpaceSnapshot, VolumeSpace,
 };
 use rynas_api_types::{SharesConfig, TaskStarted, error_codes};
 use rynas_btrfs::SNAPSHOTS_KEY;
+use rynas_btrfs::extents::WalkError;
 use rynas_btrfs::freed::Line;
+use rynas_btrfs::pcspace::{Known, LineSpace, Snap as PcSnap, Step};
 use rynas_notify::Notifier;
 use rynas_notify::event::{code, field, firing, oneshot, quietly, resolved};
 use rynas_services::SHARES_KEY;
@@ -54,10 +56,55 @@ use self::discover::{Facts, JobFact, Probe, Source, SystemFact};
 use self::model::History;
 use crate::ops::{Error, Ops, Res, user};
 
-/// How long one volume's measurements may take in a scan before the rest is left unmeasured.
+/// The least time one volume's measurements may take in a scan a person started before the
+/// rest is left unmeasured (the task then ends partial); three times the expected time when
+/// that is longer.
 pub const VOLUME_BUDGET: Duration = Duration::from_secs(45 * 60);
-/// A scan is due after this long.
-pub const SCAN_EVERY: Duration = Duration::from_secs(24 * 3600);
+/// The time one volume's update after a change may take (pairs of neighbours only: seconds
+/// each); beyond it the task ends partial and the rest waits for the next change or Measure.
+pub const CHANGES_BUDGET: Duration = Duration::from_secs(10 * 60);
+/// The daily housekeeping (recycle bins, thumbnails, pins) is due after this long; a volume's
+/// part of it waits for its disks to be awake.
+pub const HOUSEKEEPING_EVERY: Duration = Duration::from_secs(24 * 3600);
+/// Changes of snapshots arriving within this time make one update.
+const CHANGES_SETTLE: Duration = Duration::from_secs(30);
+/// Speeds of the reference NAS (a J4125 with disks, the PC backups' first measure of
+/// 2026-11-26) when this NAS has not timed a measure yet: tree bytes a full tree search reads
+/// per second, milliseconds per pair of neighbours.
+const REF_WALK_BPS: u64 = 1_500_000;
+const REF_PAIR_MS: u64 = 10_000;
+
+/// What a scan measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanMode {
+    /// Asked by a person ("Measure"): every source, with the full tree searches and file
+    /// walks it needs, Docker's usage, the leftovers and the recycle bins.
+    Full,
+    /// After snapshots changed (rynas made or removed some), with the volume's disks awake:
+    /// only the pairs of neighbours not compared before. Nothing is searched or walked in
+    /// full; a source that would need it keeps its last numbers, and so do Docker, the
+    /// leftovers and the recycle bins.
+    Changes,
+}
+
+/// How a scan ended.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScanEnd {
+    /// Sources left unmeasured by the time budget (`None`: none).
+    pub partial: Option<String>,
+}
+
+/// Sends "the snapshots under this path changed" to Space (`None`: every volume).
+static CHANGES: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<Option<PathBuf>>> = std::sync::OnceLock::new();
+
+/// Snapshots under `path` were made or removed by rynas (a snapshot job, a retention pass, a
+/// receive, a deletion): Space brings that volume's numbers up to date when its disks are
+/// next awake. `None`: any volume. Does nothing before Space runs.
+pub fn snapshots_changed(path: Option<&Path>) {
+    if let Some(tx) = CHANGES.get() {
+        let _ = tx.send(path.map(Path::to_path_buf));
+    }
+}
 /// Most ranges a measurement keeps per range set (16 bytes each). With the set's and the
 /// kept members' sets, vector growth and the merge's copy, the peak stays under 128 MiB
 /// (2 × 3 × 16 MiB); more shared extents than that are "not measured".
@@ -122,6 +169,16 @@ pub trait Env: Send + Sync {
     fn receiving(&self, dir: &Path) -> bool;
     /// The filesystem holding `path` (its UUID), when it can be read.
     fn fs_id(&self, path: &Path) -> Option<String>;
+    /// Measures one line of read-only snapshots (oldest first) by comparing neighbours
+    /// ([`rynas_btrfs::pcspace`]); `anchor` false: the pairs only, never a full tree search.
+    /// Not available by default (canned trees: the source is then walked as before).
+    fn measure_line(&self, _line: &[PcSnap], _anchor: bool, _stop: &dyn Fn() -> bool, _progress: &dyn Fn(&str), _step: &mut dyn FnMut(Step)) -> Result<LineSpace, WalkError> {
+        Err(WalkError::Unsupported("no neighbour comparison here".into()))
+    }
+    /// Bytes of a subvolume's tree: what a full tree search of it reads.
+    fn subvolume_tree_bytes(&self, _path: &Path) -> Option<u64> {
+        None
+    }
 }
 
 /// The machine. `dry`: nothing is deleted or run (logged instead).
@@ -283,6 +340,17 @@ impl Env for HostEnv {
         self.shares.as_ref().is_some_and(|s| crate::services::path_asleep(s, &mount.display().to_string()))
     }
 
+    fn measure_line(&self, line: &[PcSnap], anchor: bool, stop: &dyn Fn() -> bool, progress: &dyn Fn(&str), step: &mut dyn FnMut(Step)) -> Result<LineSpace, WalkError> {
+        let lim = rynas_btrfs::extents::Limits { max_ranges: MAX_RANGES, max_extents: MAX_EXTENTS, stop, progress };
+        rynas_btrfs::pcspace::measure_line_opts(line, &lim, false, anchor, step)
+    }
+
+    fn subvolume_tree_bytes(&self, path: &Path) -> Option<u64> {
+        let f = rynas_btrfs::ioctl::open_dir(path).ok()?;
+        let id = rynas_btrfs::ioctl::subvol_info(&f).ok()?.root_id;
+        rynas_btrfs::extents::subvolume_tree_bytes(&f, id).ok().flatten()
+    }
+
     fn run(&self, c: Cmd) -> Result<String, String> {
         if self.dry {
             tracing::info!("space (dry system): would run {c:?}");
@@ -387,6 +455,13 @@ pub struct Space {
     /// The images each app stack runs now, read before a scan and before the identical
     /// snapshots action ([`Space::refresh_stack_images`]).
     stack_images: Mutex<Option<BTreeMap<String, discover::ImageSet>>>,
+    /// What the neighbour comparisons found out per snapshot UUID (`<state>/space/known.json`):
+    /// a later scan compares only the pairs that changed.
+    known: Mutex<BTreeMap<String, Known>>,
+    /// Volumes whose snapshots changed since their last numbers.
+    pending: Mutex<BTreeSet<String>>,
+    /// Volumes with an update waiting for their disks.
+    waiting: Mutex<BTreeSet<String>>,
 }
 
 /// Previews kept in memory.
@@ -446,6 +521,7 @@ impl Space {
     pub fn new(ops: Arc<Ops>, notifier: Arc<dyn Notifier>, env: Arc<dyn Env>, state_dir: PathBuf, thumbs: PathBuf, catalog: PathBuf, pins: Arc<pins::Pins>) -> Arc<Self> {
         let dir = state_dir.join("space");
         let history = std::fs::read(dir.join("history.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let known = std::fs::read(dir.join("known.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         Arc::new(Self {
             ops,
             notifier,
@@ -462,6 +538,9 @@ impl Space {
             previews: Mutex::new(HashMap::new()),
             history: Mutex::new(history),
             stack_images: Mutex::new(None),
+            known: Mutex::new(known),
+            pending: Mutex::new(BTreeSet::new()),
+            waiting: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -679,44 +758,204 @@ impl Space {
             scanned_at_ms: g.scanned_at_ms,
             journal_cap_bytes,
             journal_cap_by_admin,
+            pending: self.pending.lock().unwrap().iter().cloned().collect(),
         }
     }
 
-    /// Measures and records everything (blocking; run in a thread of its own).
-    /// `only`: one volume; `automatic`: sleeping volumes are left alone.
-    pub fn scan(&self, only: Option<&str>, automatic: bool, docker: &DockerFacts, log: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<(), String> {
+    /// The speeds measures run at on this NAS (the PC backups time them): tree bytes a full
+    /// tree search reads per second, milliseconds per pair, measured here.
+    fn speeds(&self) -> (u64, u64, bool) {
+        self.pc.as_ref().map(|p| p.measure_speed()).unwrap_or((REF_WALK_BPS, REF_PAIR_MS, false))
+    }
+
+    /// What the PC backups' measures know (the same snapshots, never measured twice).
+    fn pc_known(&self) -> BTreeMap<String, Known> {
+        self.pc.as_ref().map(|p| p.space_known()).unwrap_or_default()
+    }
+
+    /// What a full scan of `d` (one volume with `only`) would compare and search, and about
+    /// how long that takes.
+    fn plan_of(&self, d: &Discovered, only: Option<&str>) -> SpaceScanPlan {
+        let (known, pc) = (self.known.lock().unwrap().clone(), self.pc_known());
+        let (bps, pair_ms, here) = self.speeds();
+        let mut p = SpaceScanPlan { measured_here: here, ..SpaceScanPlan::default() };
+        for (label, sources) in &d.sources {
+            if only.is_some_and(|o| o != label) {
+                continue;
+            }
+            for s in sources.iter().filter(|s| !s.snaps.is_empty()) {
+                let live = has_live(s);
+                let lines = source_lines(s, live, &known, &pc);
+                if lines.iter().any(|l| !l.cheap) {
+                    p.full_walks += 1;
+                    continue;
+                }
+                for l in &lines {
+                    p.pairs += rynas_btrfs::pcspace::pairs_needed(&l.snaps).len() as u32;
+                    if !live && rynas_btrfs::pcspace::needs_walk(&l.snaps) {
+                        p.walks += 1;
+                        p.walk_tree_bytes += l.snaps.last().and_then(|x| self.env.subvolume_tree_bytes(&x.path)).unwrap_or(0);
+                    }
+                }
+            }
+        }
+        let ms = (u128::from(p.walk_tree_bytes) * 1000 / u128::from(bps.max(1))) as u64 + pair_ms.saturating_mul(u64::from(p.pairs));
+        p.estimate_s = ms.div_ceil(1000);
+        p
+    }
+
+    /// `GET /v1/space/plan`: what "Measure" would do now (blocking: it reads the snapshot
+    /// folders, as the person asked).
+    pub fn plan(&self) -> Result<SpaceScanPlan, String> {
         let d = self.discover()?;
+        Ok(self.plan_of(&d, None))
+    }
+
+    /// What removing every snapshot of `s` frees, by comparing neighbours (cached per
+    /// snapshot, so only the pairs that changed are read). `None`: this mode cannot tell
+    /// without walking (a line that cannot be compared pair by pair, or in
+    /// [`ScanMode::Changes`] a line without a live folder never measured): [`ScanMode::Full`]
+    /// then walks the files as before, [`ScanMode::Changes`] keeps the last numbers. `part`
+    /// gets the expected milliseconds of each part as it begins (the progress).
+    fn measure_by_lines(&self, s: &Source, mode: ScanMode, pc: &BTreeMap<String, Known>, stop: &dyn Fn() -> bool, log: &dyn Fn(&str), part: &dyn Fn(u64)) -> Result<Option<Measured>, WalkError> {
+        let live = has_live(s);
+        let known = self.known.lock().unwrap().clone();
+        let lines = source_lines(s, live, &known, pc);
+        if lines.is_empty() || lines.iter().any(|l| !l.cheap) {
+            return Ok(None);
+        }
+        if mode == ScanMode::Changes && !live && lines.iter().any(|l| rynas_btrfs::pcspace::needs_walk(&l.snaps)) {
+            return Ok(None);
+        }
+        let (bps, pair_ms, _) = self.speeds();
+        let (mut freed, mut own) = (0u64, 0u64);
+        for l in &lines {
+            let mut step = |st: Step| match st {
+                Step::Pair { .. } => part(pair_ms),
+                Step::Walk { index } => {
+                    let path = l.snaps.get(index).map(|x| x.path.clone()).unwrap_or_default();
+                    let tree = self.env.subvolume_tree_bytes(&path).unwrap_or(0);
+                    log(&format!("full tree search of {}: {tree} bytes of tree", path.display()));
+                    part((u128::from(tree) * 1000 / u128::from(bps.max(1))) as u64)
+                }
+            };
+            let r = match self.env.measure_line(&l.snaps, !live, stop, log, &mut step) {
+                Ok(r) => r,
+                Err(WalkError::Unsupported(e)) => {
+                    log(&format!("{}: {e}", s.dir.display()));
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            };
+            {
+                let mut k = self.known.lock().unwrap();
+                for (x, kn) in l.snaps.iter().zip(&r.known) {
+                    k.insert(x.uuid.clone(), kn.clone());
+                }
+            }
+            freed = freed.saturating_add(line_freed(&r, live));
+            own = own.saturating_add(r.known.iter().map(|k| k.exclusive.as_ref().map_or(0, |e| e.bytes)).sum::<u64>());
+        }
+        Ok(Some(Measured { freed: Some(freed), at_least: Some(own), method: MeasureMethod::ExtentWalk }))
+    }
+
+    /// Measures and records (blocking; run in a thread of its own). `only`: one volume;
+    /// `mode`: what is measured ([`ScanMode`]); `pct`: the progress by expected time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn scan(&self, only: Option<&str>, mode: ScanMode, docker: &DockerFacts, log: &dyn Fn(&str), pct: &dyn Fn(u8), cancelled: &dyn Fn() -> bool) -> Result<ScanEnd, String> {
+        let full = mode == ScanMode::Full;
+        // after a change only that volume is read (the others may sleep)
+        let d = if full { self.discover()? } else { self.discover_in(only)? };
         let settings = self.settings();
         let now = now_ms();
+        let plan = self.plan_of(&d, only);
+        let pc = self.pc_known();
+        if full {
+            let speed = if plan.measured_here { "speeds measured on this NAS" } else { "speeds of a reference NAS" };
+            log(&format!(
+                "{} pairs of neighbours to compare, {} full tree searches ({} bytes of trees), {} sources walked file by file; expected: about {} s for the comparisons and searches ({speed})",
+                plan.pairs, plan.walks, plan.walk_tree_bytes, plan.full_walks, plan.estimate_s
+            ));
+        } else {
+            log(&format!("snapshots changed: {} pairs of neighbours to compare", plan.pairs));
+        }
+        // the progress: the expected time of the parts begun so far
+        let total_ms = plan.estimate_s.saturating_mul(1000).max(1);
+        let done_ms = std::sync::atomic::AtomicU64::new(0);
+        let shown = std::sync::atomic::AtomicU8::new(0);
+        let part = |ms: u64| {
+            let before = done_ms.fetch_add(ms, Ordering::AcqRel);
+            let p = (before.saturating_mul(100) / total_ms).min(99) as u8;
+            if p > shown.load(Ordering::Acquire) {
+                shown.store(p, Ordering::Release);
+                pct(p);
+            }
+        };
         let mut hist = self.history.lock().unwrap().clone();
         let mut review: Vec<ReviewItem> = Vec::new();
         let mut recycle_old = (0u64, 0u32);
+        let mut stopped: Vec<String> = Vec::new();
         let identical: Vec<&discover::Snap> =
             d.sources.values().flatten().filter(|s| s.kind == SourceKind::AppStack).flat_map(|s| s.snaps.iter()).filter(|x| x.identical && x.protected.is_none()).collect();
         let shares: SharesConfig = self.ops.config.applied(SHARES_KEY).ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
         let homes: Vec<String> = std::fs::read_to_string(self.env.root().join("etc/passwd")).map(|t| actions::homes_of(&t)).unwrap_or_default();
         let now_s = (now / 1000) as i64;
         let mut live_ids = BTreeSet::new();
+        let read_prev = |label: &str| -> Option<VolumeSpace> { std::fs::read(self.dir.join(format!("{label}.json"))).ok().and_then(|b| serde_json::from_slice(&b).ok()) };
+        let prev_global: Global = std::fs::read(self.dir.join("_global.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         for (label, mount, _base) in &d.volumes {
             if only.is_some_and(|o| o != label) {
                 continue;
             }
-            if automatic && self.env.asleep(mount) {
-                log(&format!("{label}: its disks sleep, left for later"));
+            if !full && self.env.asleep(mount) {
+                log(&format!("{label}: its disks sleep, left for when they are awake"));
                 continue;
             }
+            // changes from now on make the volume pending again
+            self.pending.lock().unwrap().remove(label);
+            let prev = read_prev(label);
+            let prev_cat = |c: SpaceCategory| prev.as_ref().and_then(|v| v.categories.iter().find(|x| x.category == c)).map(|x| (x.bytes, x.reclaimable_bytes)).unwrap_or_default();
             let started = Instant::now();
-            let deadline = started + VOLUME_BUDGET;
+            let budget = if full { VOLUME_BUDGET.max(Duration::from_secs(plan.estimate_s.saturating_mul(3))) } else { CHANGES_BUDGET };
+            let deadline = started + budget;
             let stop = || cancelled() || Instant::now() > deadline;
             log(&format!("{label}: measuring"));
             let (total, free) = self.env.space(mount).unwrap_or((0, 0));
             let mut sources = Vec::new();
+            let mut all_fresh = true;
             for s in d.sources.get(label).into_iter().flatten() {
                 let set: Vec<PathBuf> = s.snaps.iter().map(|x| x.path.clone()).collect();
                 let keep: Vec<PathBuf> = s.live.iter().filter(|l| l.exists()).cloned().collect();
-                let m = if set.is_empty() || stop() { Measured::default() } else { self.env.measure(mount, &set, &keep, &stop, log) };
-                let mut api = to_api(label, s, m);
-                hist.record(&api.id, now, api.freed_bytes.unwrap_or(0));
+                let by_lines = if set.is_empty() || stop() { Ok(None) } else { self.measure_by_lines(s, mode, &pc, &stop, log, &part) };
+                let m = match by_lines {
+                    Ok(Some(m)) => Some(m),
+                    Ok(None) if set.is_empty() => Some(Measured::default()),
+                    Ok(None) if full && !stop() => Some(self.env.measure(mount, &set, &keep, &stop, log)),
+                    Ok(None) => None,
+                    Err(e) => {
+                        log(&format!("{label}: {} {}: not measured: {e}", kind_word(s.kind), s.name));
+                        None
+                    }
+                };
+                // the time budget left it without a number: the task ends partial
+                if !set.is_empty() && !cancelled() && Instant::now() > deadline && m.is_none_or(|m| m.freed.is_none()) {
+                    stopped.push(format!("{label}: {}", s.name));
+                }
+                let mut api = match m {
+                    Some(m) => to_api(label, s, m),
+                    // not measured now: the last numbers of the source stay
+                    None => {
+                        all_fresh = false;
+                        let mut a = to_api(label, s, Measured::default());
+                        if let Some(l) = prev.as_ref().and_then(|v| v.sources.iter().find(|x| x.id == s.id)) {
+                            (a.freed_bytes, a.freed_at_least_bytes, a.method) = (l.freed_bytes, l.freed_at_least_bytes, l.method);
+                        }
+                        a
+                    }
+                };
+                if let Some(b) = api.freed_bytes {
+                    hist.record(&api.id, now, b);
+                }
                 api.growth_7d_bytes = hist.growth(&api.id, now, 7);
                 if let Some(b) = settings.budget(&api.id) {
                     api.caps.max_count = b.max_count;
@@ -739,9 +978,17 @@ impl Space {
             }
             let mut leftover_bytes = 0u64;
             for l in d.leftovers.get(label).into_iter().flatten() {
-                let bytes = if stop() { None } else { self.env.tree_bytes(&l.path, &stop) };
+                let id = format!("{}:{}", kind_id(l.kind), l.path.display());
+                // after a change a leftover keeps its last size (each size is a walk of a tree)
+                let bytes = if !full {
+                    prev_global.review.iter().find(|r| r.id == id).and_then(|r| r.bytes)
+                } else if stop() {
+                    None
+                } else {
+                    self.env.tree_bytes(&l.path, &stop)
+                };
                 leftover_bytes += bytes.unwrap_or(0);
-                review.push(ReviewItem { id: format!("{}:{}", kind_id(l.kind), l.path.display()), kind: l.kind, volume: Some(label.clone()), label: l.path.display().to_string(), bytes, created_ms: l.created_ms });
+                review.push(ReviewItem { id, kind: l.kind, volume: Some(label.clone()), label: l.path.display().to_string(), bytes, created_ms: l.created_ms });
             }
             // top-level rollback copies of the system (not mounted: no size)
             if label == rynas_api_types::storage::SYSTEM_VOLUME {
@@ -749,27 +996,34 @@ impl Space {
                     review.push(ReviewItem { id: format!("rollback-top:{id}:{name}"), kind: ReviewKind::RollbackCopy, volume: Some(label.clone()), label: name.clone(), bytes: None, created_ms: discover::leftover_of(&name).and_then(|x| x.1) });
                 }
             }
-            // recycle bins of the shares and homes on this volume
-            let mut bins = 0u64;
-            let mut bin_paths: Vec<(String, u32)> = shares.shares.iter().filter(|sh| sh.smb.recycle.enabled).map(|sh| (sh.path.clone(), sh.smb.recycle.retention_days)).collect();
-            bin_paths.extend(homes.iter().map(|h| (h.clone(), shares.smb.homes.recycle.retention_days)));
-            let mounts: Vec<(String, PathBuf)> = d.volumes.iter().map(|(l, m, _)| (l.clone(), m.clone())).collect();
-            for (path, days) in bin_paths {
-                if discover::volume_of(Path::new(&path), &mounts) != Some(label.as_str()) || stop() {
-                    continue;
-                }
-                if let Ok(u) = rynas_services::recycle::usage(&path, days, now_s, &stop) {
-                    bins += u.total_bytes;
-                    recycle_old.0 += u.old_bytes;
-                    recycle_old.1 += u.old_items as u32;
+            // recycle bins of the shares and homes on this volume: a walk of each bin, only
+            // when a person asked (after a change the last size stays)
+            let mut bins = prev_cat(SpaceCategory::RecycleBins).0;
+            if full {
+                bins = 0;
+                let mut bin_paths: Vec<(String, u32)> = shares.shares.iter().filter(|sh| sh.smb.recycle.enabled).map(|sh| (sh.path.clone(), sh.smb.recycle.retention_days)).collect();
+                bin_paths.extend(homes.iter().map(|h| (h.clone(), shares.smb.homes.recycle.retention_days)));
+                let mounts: Vec<(String, PathBuf)> = d.volumes.iter().map(|(l, m, _)| (l.clone(), m.clone())).collect();
+                for (path, days) in bin_paths {
+                    if discover::volume_of(Path::new(&path), &mounts) != Some(label.as_str()) || stop() {
+                        continue;
+                    }
+                    if let Ok(u) = rynas_services::recycle::usage(&path, days, now_s, &stop) {
+                        bins += u.total_bytes;
+                        recycle_old.0 += u.old_bytes;
+                        recycle_old.1 += u.old_items as u32;
+                    }
                 }
             }
-            // Docker and the system's own files
-            let docker_bytes = if docker.volume.as_deref() == Some(label.as_str()) {
+            // Docker (read before a full scan only: `docker system df` sizes every volume)
+            // and the system's own files
+            let (docker_bytes, docker_free) = if !full {
+                prev_cat(SpaceCategory::Docker)
+            } else if docker.volume.as_deref() == Some(label.as_str()) {
                 let u = docker.usage;
-                u.images_bytes + u.containers_bytes + u.volumes_bytes + u.build_cache_bytes
+                (u.images_bytes + u.containers_bytes + u.volumes_bytes + u.build_cache_bytes, docker.usage.build_cache_bytes + docker.dangling.iter().map(|x| x.1).sum::<u64>())
             } else {
-                0
+                (0, 0)
             };
             let system_bytes = if mount == Path::new("/") {
                 let root = self.env.root();
@@ -791,14 +1045,16 @@ impl Space {
             let categories = vec![
                 CategoryUsage { category: SpaceCategory::Snapshots, bytes: snap_bytes, reclaimable_bytes: unprotected, exact: snap_exact },
                 CategoryUsage { category: SpaceCategory::RecycleBins, bytes: bins, reclaimable_bytes: 0, exact: true },
-                CategoryUsage { category: SpaceCategory::Docker, bytes: docker_bytes, reclaimable_bytes: docker.usage.build_cache_bytes + docker.dangling.iter().map(|x| x.1).sum::<u64>(), exact: true },
+                CategoryUsage { category: SpaceCategory::Docker, bytes: docker_bytes, reclaimable_bytes: docker_free, exact: true },
                 CategoryUsage { category: SpaceCategory::System, bytes: system_bytes, reclaimable_bytes: 0, exact: true },
                 CategoryUsage { category: SpaceCategory::Leftovers, bytes: leftover_bytes, reclaimable_bytes: 0, exact: false },
                 CategoryUsage { category: SpaceCategory::Data, bytes: used.saturating_sub(accounted), reclaimable_bytes: 0, exact: snap_exact },
             ];
-            let snap_total: u64 = snap_bytes;
-            hist.record(&format!("volume:{label}"), now, snap_total);
+            hist.record(&format!("volume:{label}"), now, snap_bytes);
             let btrfs = self.env.probe().subvol(mount).is_some() || sources.iter().any(|s| s.count > 0);
+            // the age shown is that of the oldest number: an update that kept some last
+            // numbers keeps the last time
+            let scanned_at_ms = if full || all_fresh { Some(now_ms()) } else { prev.as_ref().and_then(|v| v.scanned_at_ms) };
             let v = VolumeSpace {
                 volume: label.clone(),
                 mount: mount.display().to_string(),
@@ -808,7 +1064,7 @@ impl Space {
                 reclaimable_bytes: unprotected,
                 categories,
                 sources,
-                scanned_at_ms: Some(now_ms()),
+                scanned_at_ms,
                 scan_s: started.elapsed().as_secs(),
                 auto_free: settings.auto_free.contains(label),
                 low_free: hist.low.contains(label),
@@ -816,6 +1072,28 @@ impl Space {
             };
             self.write_json(&format!("{label}.json"), &v);
             log(&format!("{label}: done in {} s", v.scan_s));
+        }
+        // what the comparisons learnt (a full scan of every volume forgets snapshots gone)
+        {
+            let mut k = self.known.lock().unwrap();
+            if only.is_none() && full {
+                let seen: BTreeSet<&str> = d.sources.values().flatten().flat_map(|s| s.snaps.iter()).filter_map(|x| x.facts.uuid.as_deref()).collect();
+                k.retain(|u, _| seen.contains(u.as_str()));
+            }
+            let k = k.clone();
+            self.write_json("known.json", &k);
+        }
+        if !full {
+            // after a change only the volume's review entries and the history move
+            *self.history.lock().unwrap() = hist;
+            self.save_history();
+            if let Some(o) = only {
+                let mut g = prev_global;
+                g.review.retain(|r| r.volume.as_deref() != Some(o) || matches!(r.kind, ReviewKind::OldKernel | ReviewKind::UnusedImage | ReviewKind::UnusedVolume));
+                g.review.extend(review);
+                self.write_json("_global.json", &g);
+            }
+            return Ok(ScanEnd { partial: partial_of(&stopped) });
         }
         // the global part
         let root = self.env.root();
@@ -862,7 +1140,7 @@ impl Space {
         }
         g.safe_actions = safe_actions;
         self.write_json("_global.json", &g);
-        Ok(())
+        Ok(ScanEnd { partial: partial_of(&stopped) })
     }
 
     /// The journal's cap in force (what journald reads now, never below the administrator's
@@ -885,6 +1163,64 @@ impl Space {
             .unwrap_or_default();
         actions::old_kernels(&actions::parse_kernels(&out), &running, &held)
     }
+}
+
+/// The reason of a partial end: the sources the time budget left without a number.
+fn partial_of(stopped: &[String]) -> Option<String> {
+    (!stopped.is_empty()).then(|| format!("the time limit left {} sources unmeasured ({}); Measure goes on from what is known", stopped.len(), stopped.join(", ")))
+}
+
+/// The source's live folder exists (what keeps sharing the snapshots' data).
+fn has_live(s: &Source) -> bool {
+    s.live.as_ref().is_some_and(|l| l.exists())
+}
+
+/// One line of a source as the neighbour comparison sees it.
+struct SourceLine {
+    /// Oldest first, with what is known of each.
+    snaps: Vec<PcSnap>,
+    /// Neighbours compare without walks: every snapshot read-only with a UUID, and not a lone
+    /// snapshot of a live folder (what it holds alone needs the live folder compared).
+    cheap: bool,
+}
+
+/// The lines of `s` (`known`, then the PC backups' `pc`: by snapshot UUID).
+fn source_lines(s: &Source, live: bool, known: &BTreeMap<String, Known>, pc: &BTreeMap<String, Known>) -> Vec<SourceLine> {
+    let mut lines: BTreeMap<&str, Vec<&discover::Snap>> = BTreeMap::new();
+    for x in s.snaps.iter().rev() {
+        lines.entry(line_of(&x.name)).or_default().push(x);
+    }
+    lines
+        .into_values()
+        .map(|l| {
+            let readonly = l.windows(2).all(|w| rynas_btrfs::pcspace::pair_cheap(w[0].facts.readonly, w[1].facts.readonly));
+            let ids = l.iter().all(|x| x.facts.uuid.is_some());
+            let cheap = ids && readonly && (!live || l.len() >= 2);
+            let snaps = l
+                .iter()
+                .map(|x| {
+                    let uuid = x.facts.uuid.clone().unwrap_or_default();
+                    // Space's own numbers, else what a PC's measure found (never searched twice)
+                    let known = known.get(&uuid).or_else(|| pc.get(&uuid)).cloned().unwrap_or_default();
+                    PcSnap { path: x.path.clone(), uuid, known }
+                })
+                .collect();
+            SourceLine { snaps, cheap }
+        })
+        .collect()
+}
+
+/// What removing a measured line frees. Without a live folder: the whole line (each extent
+/// once). With one: what every snapshot but the newest holds and its newer neighbour dropped,
+/// plus what the newest holds alone (≈: data the newest shares with older ones and the live
+/// folder changed since is left out; the preview of a deletion measures it exactly).
+fn line_freed(r: &LineSpace, live: bool) -> u64 {
+    let k = &r.known;
+    if !live || k.is_empty() {
+        return r.union;
+    }
+    let died: u64 = k[..k.len() - 1].iter().map(|x| x.died.as_ref().map_or(0, |e| e.bytes)).sum();
+    died.saturating_add(k[k.len() - 1].exclusive.as_ref().map_or(0, |e| e.bytes))
 }
 
 /// The line of snapshots a name belongs to: the name before its time (`@home.20261110T0300`
@@ -1063,6 +1399,8 @@ impl Space {
         // the only time a pin goes with its snapshot (pinned ones never get here anyway)
         let _ = self.pins.set(path, false);
         log(&format!("deleted {path}"));
+        // its neighbours meet now: their pair is compared at the volume's next update
+        snapshots_changed(Some(&x.path));
         Ok(())
     }
 
@@ -1264,6 +1602,7 @@ impl Space {
                     self.env.delete_subvolume(&x.path)?;
                     let _ = std::fs::remove_file(s.dir.join(format!("{}.json", x.name)));
                     log(&format!("deleted {}", x.path.display()));
+                    snapshots_changed(Some(&x.path));
                 }
                 // the folder itself only when nothing is left in it and it is a plain folder
                 if self.env.probe().subvol(&s.dir).is_none() {
@@ -1342,6 +1681,13 @@ impl Space {
     /// Empties the recycle bins of the shares and homes of what is older than their
     /// retention (0: kept).
     pub fn clean_bins(&self, log: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<(), String> {
+        self.clean_bins_in(None, log, cancelled)
+    }
+
+    /// [`Space::clean_bins`] of the bins on the volume mounted at `mount` only (`None`: all).
+    pub fn clean_bins_in(&self, mount: Option<&Path>, log: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<(), String> {
+        let mounts: Vec<(String, PathBuf)> = self.env.volumes().into_iter().map(|(l, m, _)| (l, m)).collect();
+        let on = |p: &str| mount.is_none_or(|m| discover::volume_of(Path::new(p), &mounts).and_then(|l| mounts.iter().find(|x| x.0 == l)).is_some_and(|x| x.1 == m));
         let shares: SharesConfig = self.ops.config.applied(SHARES_KEY).ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
         let homes: Vec<String> = std::fs::read_to_string(self.env.root().join("etc/passwd")).map(|t| actions::homes_of(&t)).unwrap_or_default();
         let mut bins: Vec<(String, String, u32)> = shares.shares.iter().filter(|s| s.smb.recycle.enabled).map(|s| (s.name.clone(), s.path.clone(), s.smb.recycle.retention_days)).collect();
@@ -1352,7 +1698,7 @@ impl Space {
         // the system's files somewhere else than `/`: the dry system (and tests) touch no bin
         let dry = self.env.root() != Path::new("/");
         for (name, path, days) in bins {
-            if days == 0 || cancelled() {
+            if days == 0 || cancelled() || !on(&path) {
                 continue;
             }
             if dry {
@@ -1372,8 +1718,15 @@ impl Space {
     /// mounted and the snapshot's folder is there, on that volume's filesystem, without it.
     /// A missing or unmounted volume keeps every pin.
     pub fn prune_pins(&self) {
+        self.prune_pins_in(None);
+    }
+
+    /// [`Space::prune_pins`] of the pins on the volume mounted at `mount` only (`None`: all;
+    /// the others are not even looked at, so a sleeping volume is not read).
+    pub fn prune_pins_in(&self, mount: Option<&Path>) {
         let mounts: Vec<(String, PathBuf)> = self.env.volumes().into_iter().map(|(l, m, _)| (l, m)).collect();
-        self.pins.prune(&|p| !pin_gone(Path::new(p), &mounts, self.env.as_ref()));
+        let on = |p: &Path| mount.is_none_or(|m| discover::volume_of(p, &mounts).and_then(|l| mounts.iter().find(|x| x.0 == l)).is_some_and(|x| x.1 == m));
+        self.pins.prune(&|p| !on(Path::new(p)) || !pin_gone(Path::new(p), &mounts, self.env.as_ref()));
     }
 
     /// Evicts the least recently used thumbnails above the cap.
@@ -1745,25 +2098,37 @@ impl Space {
         *self.stack_images.lock().unwrap() = now;
     }
 
-    /// Starts task `space.scan` (one at a time).
-    pub fn spawn_scan(self: &Arc<Self>, who: &str, only: Option<String>, automatic: bool) -> Res<String> {
+    /// Starts task `space.scan` (one at a time; `only`: one volume, its subject).
+    pub fn spawn_scan(self: &Arc<Self>, who: &str, only: Option<String>, mode: ScanMode) -> Res<String> {
         if self.scanning.swap(true, Ordering::AcqRel) {
             return Err(Error::new(StatusCode::CONFLICT, error_codes::BUSY, "a scan is running".into()));
         }
         let s = self.clone();
-        let r = self.ops.tasks.spawn("space.scan", who, move |ctx| async move {
+        let subject = only.clone();
+        let r = self.ops.tasks.spawn_on("space.scan", subject.as_deref(), who, move |ctx| async move {
             let s2 = s.clone();
-            let docker = docker_facts(&s.docker).await;
+            // `docker system df` sizes every Docker volume: only when a person asked
+            let docker = if mode == ScanMode::Full { docker_facts(&s.docker).await } else { DockerFacts::default() };
             s.refresh_stack_images().await;
             let c = ctx.clone();
             let r = in_thread(move || {
                 background_priority();
-                s2.scan(only.as_deref(), automatic, &docker, &|m| c.log(m), &|| c.is_cancelled())
+                s2.scan(only.as_deref(), mode, &docker, &|m| c.log(m), &|p| c.progress(p), &|| c.is_cancelled())
             })
             .await;
             s.scanning.store(false, Ordering::Release);
             s.growth_check();
-            r?
+            // changes that came while it ran: their volumes again, when awake
+            let left: Vec<String> = s.pending.lock().unwrap().iter().cloned().collect();
+            for v in left {
+                if let Some((_, m, _)) = s.env.volumes().into_iter().find(|x| x.0 == v) {
+                    snapshots_changed(Some(&m));
+                }
+            }
+            if let Some(why) = r??.partial {
+                ctx.partial(why);
+            }
+            Ok(())
         });
         match r {
             Ok(id) => Ok(id),
@@ -1773,11 +2138,83 @@ impl Space {
             }
         }
     }
+
+    /// The volume labels holding `paths` (`None`: every volume).
+    fn volumes_of(&self, paths: &[Option<PathBuf>]) -> BTreeSet<String> {
+        let vols: Vec<(String, PathBuf)> = self.env.volumes().into_iter().map(|(l, m, _)| (l, m)).collect();
+        let mut out = BTreeSet::new();
+        for p in paths {
+            match p {
+                None => out.extend(vols.iter().map(|v| v.0.clone())),
+                Some(p) => out.extend(discover::volume_of(p, &vols).map(str::to_string)),
+            }
+        }
+        out
+    }
+
+    /// Brings `volume` up to date after a change, once its disks are awake: never woken for
+    /// it, no deadline (the numbers are not urgent; the page says they are pending). One wait
+    /// per volume.
+    fn update_when_awake(self: &Arc<Self>, volume: String) {
+        if !self.waiting.lock().unwrap().insert(volume.clone()) {
+            return;
+        }
+        let s = self.clone();
+        tokio::spawn(async move {
+            let Some((_, mount, _)) = s.env.volumes().into_iter().find(|x| x.0 == volume) else {
+                s.waiting.lock().unwrap().remove(&volume);
+                return;
+            };
+            let m = mount.display().to_string();
+            // a week at a time: the wait itself costs nothing
+            while crate::disk_standby::when_awake(&m, tokio::time::Instant::now() + Duration::from_secs(7 * 86_400)).await == crate::disk_standby::Woke::Deadline {}
+            s.waiting.lock().unwrap().remove(&volume);
+            if let Err(e) = s.spawn_scan("rynas", Some(volume.clone()), ScanMode::Changes) {
+                // a scan runs: it hands the pending volumes back when it ends
+                tracing::debug!("space: {volume}: {}", e.2);
+            }
+        });
+    }
 }
 
-/// The background loop: the low-space watch every 5 minutes, the daily scan, recycle
-/// cleanup, thumbnail eviction and pin pruning.
+/// The changes of snapshots (from [`snapshots_changed`]): each volume is marked pending and
+/// brought up to date when its disks are awake. Waits on the channel: nothing runs while
+/// nothing changes.
+fn spawn_changes(s: Arc<Space>) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Option<PathBuf>>();
+    if CHANGES.set(tx).is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        while let Some(first) = rx.recv().await {
+            // a retention pass removes many: one update after they settle
+            let mut paths = vec![first];
+            let settle = tokio::time::sleep(CHANGES_SETTLE);
+            tokio::pin!(settle);
+            loop {
+                tokio::select! {
+                    p = rx.recv() => match p {
+                        Some(p) => paths.push(p),
+                        None => break,
+                    },
+                    _ = &mut settle => break,
+                }
+            }
+            let vols = s.volumes_of(&paths);
+            s.pending.lock().unwrap().extend(vols.iter().cloned());
+            for v in vols {
+                s.update_when_awake(v);
+            }
+        }
+    });
+}
+
+/// The background work: the low-space watch every 5 minutes (free space from `statvfs`,
+/// which btrfs answers from memory) and the daily housekeeping (recycle bins, thumbnails,
+/// pins), each volume's part only while its disks are awake. Space is never measured on a
+/// timer: on request ("Measure") and after snapshots changed ([`snapshots_changed`]).
 pub fn spawn_loop(s: Arc<Space>) {
+    spawn_changes(s.clone());
     tokio::spawn(async move {
         // let the system settle after a start
         tokio::time::sleep(Duration::from_secs(120)).await;
@@ -1800,27 +2237,46 @@ pub fn spawn_loop(s: Arc<Space>) {
                 })
                 .await;
             }
-            let due = last_daily.is_none_or(|t| t.elapsed() >= SCAN_EVERY);
-            if due {
-                let stale = s.overview().scanned_at_ms.is_none_or(|t| now_ms().saturating_sub(t) >= SCAN_EVERY.as_millis() as u64);
-                if stale && let Err(e) = s.spawn_scan("rynas", None, true) {
-                    tracing::info!("space: daily scan: {}", e.2);
-                }
+            if last_daily.is_none_or(|t| t.elapsed() >= HOUSEKEEPING_EVERY) {
                 let s2 = s.clone();
                 let _ = in_thread(move || {
                     background_priority();
-                    if s2.settings().recycle_daily {
-                        let _ = s2.clean_bins(&|m| tracing::info!("space: recycle: {m}"), &|| false);
-                    }
+                    // the thumbnail cache is on the system disk
                     s2.evict_thumbs(&|m| tracing::info!("space: {m}"));
-                    s2.prune_pins();
                 })
                 .await;
+                // the bins and the pins are on the data volumes: each when its disks spin
+                housekeeping_when_awake(&s);
                 last_daily = Some(Instant::now());
             }
             tokio::time::sleep(Duration::from_secs(300)).await;
         }
     });
+}
+
+/// The daily recycle-bin cleanup and pin pruning of each volume, once its disks are awake
+/// (deadline: the next day's turn; a bin's retention is in days, so a day late frees the
+/// same items a day later and nothing is lost).
+fn housekeeping_when_awake(s: &Arc<Space>) {
+    for (label, mount, _) in s.env.volumes() {
+        let s = s.clone();
+        tokio::spawn(async move {
+            let m = mount.display().to_string();
+            let deadline = tokio::time::Instant::now() + HOUSEKEEPING_EVERY - Duration::from_secs(600);
+            if crate::disk_standby::when_awake(&m, deadline).await == crate::disk_standby::Woke::Deadline {
+                tracing::debug!("space: {label}: disks asleep all day, housekeeping left for tomorrow");
+                return;
+            }
+            let _ = in_thread(move || {
+                background_priority();
+                if s.settings().recycle_daily {
+                    let _ = s.clean_bins_in(Some(&mount), &|m| tracing::info!("space: recycle: {m}"), &|| false);
+                }
+                s.prune_pins_in(Some(&mount));
+            })
+            .await;
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1831,6 +2287,7 @@ pub fn router(st: SpaceState) -> Router {
     Router::new()
         .route("/v1/space", get(overview))
         .route("/v1/space/scan", post(scan))
+        .route("/v1/space/plan", get(plan))
         .route("/v1/space/preview", post(preview))
         .route("/v1/space/previews/{id}", get(preview_get))
         .route("/v1/space/delete", post(delete))
@@ -1873,7 +2330,16 @@ async fn scan(State(st): State<SpaceState>, h: HeaderMap, Query(q): Query<ScanQu
     {
         return Err(Error::not_found(format!("volume {v}")));
     }
-    Ok(started(s.spawn_scan(&who, q.volume, false)?))
+    Ok(started(s.spawn_scan(&who, q.volume, ScanMode::Full)?))
+}
+
+/// `GET /v1/space/plan`: what Measure would compare and search, and about how long.
+async fn plan(State(st): State<SpaceState>, h: HeaderMap) -> Res<Json<SpaceScanPlan>> {
+    let s = sp(&st)?;
+    admin(&s, &h)?;
+    let s2 = s.clone();
+    let p = tokio::task::spawn_blocking(move || s2.plan()).await.map_err(Error::internal)?;
+    Ok(Json(p.map_err(Error::internal)?))
 }
 
 fn check_paths(paths: &[String]) -> Res<()> {
@@ -2175,5 +2641,64 @@ mod unit_tests {
         assert_eq!(l[0][1], (p("@.20261102T0300"), true));
         assert_eq!(l[0][6], (p("@.20261107T0300"), false));
         assert_eq!(line_of("@home.20261110T0300"), "@home");
+    }
+
+    fn ro(name: &str, uuid: &str) -> discover::Snap {
+        let mut s = snap(name);
+        s.facts.readonly = true;
+        s.facts.uuid = Some(uuid.into());
+        s
+    }
+
+    fn source(snaps: Vec<discover::Snap>) -> Source {
+        Source { id: "job:docs".into(), kind: SourceKind::ShareJob, name: "docs".into(), dir: PathBuf::from("/v/pc"), live: None, keep_count: None, snaps }
+    }
+
+    #[test]
+    fn lines_compare_by_neighbours_only_when_read_only_with_uuids() {
+        let edge = |u: &str, b| Some(rynas_btrfs::pcspace::Edge { uuid: u.into(), bytes: b });
+        let mut pc = BTreeMap::new();
+        pc.insert("a".to_string(), Known { distinct: Some(7), ..Known::default() });
+        pc.insert("b".to_string(), Known { distinct: Some(9), ..Known::default() });
+        let mut own = BTreeMap::new();
+        own.insert("b".to_string(), Known { born: edge("a", 3), ..Known::default() });
+        // newest first, as discovery gives them; lines come oldest first
+        let s = source(vec![ro("@.20261102T0300", "b"), ro("@.20261101T0300", "a")]);
+        let l = source_lines(&s, false, &own, &pc);
+        assert_eq!(l.len(), 1);
+        assert!(l[0].cheap);
+        assert_eq!(l[0].snaps.iter().map(|x| x.uuid.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        // Space's own numbers first, else the PC backups'
+        assert_eq!(l[0].snaps[0].known.distinct, Some(7));
+        assert_eq!(l[0].snaps[1].known.born, edge("a", 3));
+        assert_eq!(l[0].snaps[1].known.distinct, None);
+        // a writable snapshot, a missing UUID, a lone snapshot of a live folder: walked
+        let mut w = ro("@.20261102T0300", "b");
+        w.facts.readonly = false;
+        assert!(!source_lines(&source(vec![w, ro("@.20261101T0300", "a")]), false, &own, &pc)[0].cheap);
+        assert!(!source_lines(&source(vec![snap("@.20261102T0300"), ro("@.20261101T0300", "a")]), false, &own, &pc)[0].cheap);
+        assert!(!source_lines(&source(vec![ro("@.20261101T0300", "a")]), true, &own, &pc)[0].cheap);
+        assert!(source_lines(&source(vec![ro("@.20261101T0300", "a")]), false, &own, &pc)[0].cheap);
+    }
+
+    #[test]
+    fn what_a_line_frees_with_and_without_a_live_folder() {
+        let edge = |u: &str, b| Some(rynas_btrfs::pcspace::Edge { uuid: u.into(), bytes: b });
+        let excl = |b| Some(rynas_btrfs::pcspace::Excl { bytes: b, older: None, newer: None });
+        let r = LineSpace {
+            known: vec![
+                Known { died: edge("b", 10), exclusive: excl(4), ..Known::default() },
+                Known { died: edge("c", 20), exclusive: excl(5), ..Known::default() },
+                Known { exclusive: excl(6), ..Known::default() },
+            ],
+            union: 1000,
+            ..LineSpace::default()
+        };
+        // with a live folder: what the older ones dropped plus what the newest holds alone
+        assert_eq!(line_freed(&r, true), 10 + 20 + 6);
+        // without one everything goes
+        assert_eq!(line_freed(&r, false), 1000);
+        assert_eq!(partial_of(&[]), None);
+        assert!(partial_of(&["volume1: docs".into()]).unwrap().contains("volume1: docs"));
     }
 }

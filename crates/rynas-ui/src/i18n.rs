@@ -4592,10 +4592,14 @@ dict! { BLOB, LENS;
     "sp.tab" => "Space";
     "sp.open" => "Space";
     "sp.subtitle" => "What takes room on each volume and how to get it back";
-    "sp.scan_now" => "Scan now";
-    "sp.scanning" => "Scanning";
-    "sp.scanned" => "Scanned {when}";
-    "sp.never_scanned" => "Not scanned yet: the first scan runs in the background, or start it now.";
+    "sp.scan_now" => "Measure";
+    "sp.scanning" => "Measuring";
+    "sp.scanned" => "Measured {when}";
+    "sp.never_scanned" => "Not measured yet: Measure reads the snapshots once, then only what changed.";
+    "sp.pending" => "Snapshots changed on {volumes}: the numbers follow when its disks are next awake.";
+    "sp.measure_title" => "Measure the space?";
+    "sp.measure_text" => "This measure reads snapshots never measured before: about {time} on this NAS, at the lowest priority, and it can be stopped from the task panel. Later measures, and the updates after snapshots are made or removed, only compare what changed.";
+    "sp.measure_walks" => "{n} sources cannot be compared snapshot by snapshot and are read file by file: that adds time.";
     "sp.volumes" => "Volumes";
     "sp.used_of" => "Used {size}";
     "sp.free" => "Free";
@@ -8202,7 +8206,7 @@ mod tests {
                 || s.contains("example")
                 || matches!(s, "a.b" | "metrics.sample" | "hardware.status" | "task.started" | "task.updated" | "task.finished" | "removable.state" | "docker.stats" | "docker.changed" | "storage.changed" | "config.pending")
                 // task types named to the task store (`tasks::use_task`, `tasks::reports`)
-                || matches!(s, "space.preview" | "pcbackup.usage")
+                || matches!(s, "space.preview" | "space.scan" | "pcbackup.usage")
         };
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for e in std::fs::read_dir(dir).expect("src dir").flatten() {

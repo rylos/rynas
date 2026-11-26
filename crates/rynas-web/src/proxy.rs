@@ -158,6 +158,7 @@ pub fn routes() -> Router<AppState> {
         // Storage > Space: what takes room, previews and deletions as tasks, pins, guardrails
         .route("/space", get(forward))
         .route("/space/scan", post(forward))
+        .route("/space/plan", get(forward))
         .route("/space/preview", post(forward))
         .route("/space/previews/{id}", get(forward))
         .route("/space/delete", post(forward))

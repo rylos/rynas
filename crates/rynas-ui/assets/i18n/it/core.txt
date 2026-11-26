@@ -6632,10 +6632,14 @@ nev.device.password_kept.body	Dispositivi: {devices}. Revoca quelli che non rico
 sp.tab	Spazio
 sp.open	Spazio
 sp.subtitle	Cosa occupa spazio su ogni volume e come recuperarlo
-sp.scan_now	Analizza ora
-sp.scanning	Analisi in corso
-sp.scanned	Analizzato il {when}
-sp.never_scanned	Non ancora analizzato: la prima analisi parte in background, oppure avviala ora.
+sp.scan_now	Misura
+sp.scanning	Misura in corso
+sp.scanned	Misurato il {when}
+sp.never_scanned	Non ancora misurato: Misura legge gli snapshot una volta, poi solo ciò che è cambiato.
+sp.pending	Snapshot cambiati su {volumes}: i numeri si aggiornano quando i suoi dischi sono di nuovo attivi.
+sp.measure_title	Misurare lo spazio?
+sp.measure_text	Questa misura legge snapshot mai misurati prima: circa {time} su questo NAS, alla priorità più bassa, e si può fermare dal pannello attività. Le misure successive, e gli aggiornamenti dopo che gli snapshot vengono creati o eliminati, confrontano solo ciò che è cambiato.
+sp.measure_walks	{n} origini non si possono confrontare snapshot per snapshot e vengono lette file per file: il tempo aumenta.
 sp.volumes	Volumi
 sp.used_of	Usato {size}
 sp.free	Libero

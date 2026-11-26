@@ -920,7 +920,13 @@ async fn finished(
         crate::gate::import_spool(p);
         // (a gated system task runs in the system's unit, not in one of rynas's)
         let start = p.probe.start_ms(&rynas_scheduler::units::service_of(&tid));
-        record_end(p, &tid, &f, start, rynas_tasks::now_ms())
+        let r = record_end(p, &tid, &f, start, rynas_tasks::now_ms());
+        // a snapshot job or a replication made or removed snapshots: Storage › Space brings
+        // their volume up to date (its disks are awake: the job just wrote)
+        for dir in snapshot_dirs_of(p, &tid) {
+            crate::space::snapshots_changed(Some(std::path::Path::new(&dir)));
+        }
+        r
     })
     .await?;
     p.invalidate();
@@ -934,6 +940,29 @@ async fn finished(
         let _ = tokio::task::spawn_blocking(move || collect_output(&p2, &id, run_id, notify)).await;
     });
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The snapshot folders a run of task `id` changes: a snapshot job's, and for a replication
+/// also its local destination (applied configuration; empty for any other task).
+fn snapshot_dirs_of(p: &Protection, id: &str) -> Vec<String> {
+    let read = |key: &str| p.ops.config.applied(key).ok().flatten();
+    let Some(task) = read(SCHEDULER_KEY).and_then(|v| serde_json::from_value::<SchedulerConfig>(v).ok()).and_then(|c| c.tasks.into_iter().find(|t| t.id == id)) else {
+        return Vec::new();
+    };
+    let (job, target) = match &task.action {
+        TaskAction::Snapshot { job } => (job.clone(), None),
+        TaskAction::Replicate { job, target } => (job.clone(), Some(target.clone())),
+        _ => return Vec::new(),
+    };
+    let snaps: SnapshotsConfig = read(SNAPSHOTS_KEY).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let Some(j) = snaps.jobs.iter().find(|j| j.name == job) else { return Vec::new() };
+    let mut out = vec![j.snapshot_dir.clone()];
+    if let Some(t) = target.and_then(|t| j.replicas.iter().find(|r| r.id == t))
+        && let rynas_api_types::replication::ReplicaDestination::Local { path } = &t.destination
+    {
+        out.push(path.clone());
+    }
+    out
 }
 
 /// Records the end of run `f.invocation_id` of task `id` (from `task-finished`, or from the

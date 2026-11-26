@@ -3981,10 +3981,14 @@ task.tailscale.revert	回滚 Tailscale 设置
 sp.tab	空间
 sp.open	存储空间
 sp.subtitle	查看各存储卷的空间占用并释放空间
-sp.scan_now	立即扫描
-sp.scanning	正在扫描
-sp.scanned	上次扫描于 {when}
-sp.never_scanned	尚未扫描。首次扫描会在后台启动，也可立即开始扫描。
+sp.scan_now	测量
+sp.scanning	正在测量
+sp.scanned	测量于 {when}
+sp.never_scanned	尚未测量：“测量”会完整读取一次快照，之后只读取变化部分。
+sp.pending	{volumes} 上的快照已变化：其磁盘下次唤醒时更新数字。
+sp.measure_title	测量空间？
+sp.measure_text	此次测量会读取从未测量过的快照：在这台 NAS 上约需 {time}，以最低优先级运行，可在任务面板中停止。之后的测量，以及创建或删除快照后的更新，只比较变化部分。
+sp.measure_walks	有 {n} 个来源无法逐个快照比较，将逐个文件读取：耗时会增加。
 sp.volumes	存储卷
 sp.used_of	已用 {size}
 sp.free	可用

@@ -308,6 +308,30 @@ pub struct SpaceOverview {
     /// That limit is the administrator's own `SystemMaxUse=` (rynas then writes none).
     #[serde(default)]
     pub journal_cap_by_admin: bool,
+    /// Volumes whose snapshots changed since their last result: brought up to date when
+    /// their disks are next awake (never woken for it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<String>,
+}
+
+/// `GET /api/v1/space/plan`: what "Measure" would do now and about how long it takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SpaceScanPlan {
+    /// Pairs of neighbouring snapshots to compare (the ones not compared before).
+    pub pairs: u32,
+    /// Full tree searches: one per line of snapshots without a live folder never measured.
+    pub walks: u32,
+    /// Metadata those searches read.
+    pub walk_tree_bytes: u64,
+    /// Sources whose snapshots cannot be compared pair by pair (writable snapshots, a lone
+    /// snapshot of a live folder): walked file by file, not in the estimate.
+    #[serde(default)]
+    pub full_walks: u32,
+    /// About how long it takes, in seconds (the pairs and the tree searches).
+    pub estimate_s: u64,
+    /// The speeds come from earlier measures on this NAS (otherwise a reference NAS).
+    #[serde(default)]
+    pub measured_here: bool,
 }
 
 /// `POST /api/v1/space/preview`: measures exactly what removing these snapshots frees
