@@ -18,7 +18,9 @@
 //! - [`sysvol`]: the system volume's folder (D-ROOTVOL), the top-level subvolume
 //!   `@rynas-system` mounted on `/srv/rynas/system` on a btrfs root;
 //! - [`domain`]: the `snapshots` configuration domain;
-//! - [`extents`]: what removing a set of snapshots gives back (a `FIEMAP` walk, Space).
+//! - [`extents`]: what removing a set of snapshots gives back (a `FIEMAP` walk, Space);
+//!   [`pcspace`]: the space a PC's received snapshots take, kept per snapshot and updated by
+//!   comparing neighbours.
 //!
 //! Ported in part from btrbk-nas (MIT, same author): `snapshot.rs`, `btrfs.rs`, `browse.rs`.
 //! No qgroups: nothing here enables or reads quotas.
@@ -31,6 +33,7 @@ pub mod extents;
 pub mod freed;
 pub mod ioctl;
 pub mod name;
+pub mod pcspace;
 pub mod readahead;
 pub mod receive;
 pub mod receive_filter;

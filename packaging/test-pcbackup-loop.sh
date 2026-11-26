@@ -42,6 +42,8 @@ printf '{"format":1,"boot":{"loader":"systemd-boot"},"btrbk":{"subvolumes":[{"na
 head -c 50M /dev/urandom > "$mnt/src/data/big1"
 btrfs -q subvolume snapshot -r "$mnt/src" "$mnt/snaps/@.20261109T0300"
 head -c 30M /dev/urandom > "$mnt/src/data/big2"
+# big1 lives in the middle snapshot only: its own data, and gone in the newest
+rm "$mnt/src/data/big1"
 btrfs -q subvolume snapshot -r "$mnt/src" "$mnt/snaps/@.20261110T0300"
 
 # the NAS side: the device folder, received incrementally (full, then with parents)

@@ -6005,7 +6005,7 @@ bk.measure	统计空间占用
 bk.measured	已统计空间占用
 bk.usage_text	磁盘占用 {disk} · {backups}中的数据量为 {data} · 统计于 {ago}
 bk.on_disk	磁盘占用 {size}
-bk.usage_title	这些快照独占 {excl}，共享数据 {shared} 仅计一次（统计于 {when}）。
+bk.usage_title	仅由单个快照持有 {excl}，多个快照共享 {shared}（仅计一次，统计于 {when}）
 bk.usage_stale	上次统计于 {ago}，此后备份发生了变动。
 bk.usage_measured	统计于 {ago}
 bk.usage_none	尚未统计
@@ -6216,7 +6216,11 @@ bkpc.view	分组方式
 bkpc.view.run	按备份批次
 bkpc.size_text	引用 {ref} · 独占 {excl}
 bkpc.sizes_quota	大小根据存储卷的配额组实时统计。
-bkpc.sizes_note	引用大小表示快照使用的数据量，接近恢复需要传输的数据量。独占大小表示只由此快照持有的数据量，接近单独删除它可释放的空间。统计会以低优先级读取各文件的数据区段，每个快照只统计一次，可能需要一些时间。
+bkpc.sizes_note	引用大小表示快照在磁盘上引用的数据量；独占大小表示只由此快照持有的数据量，接近单独删除它可释放的空间。统计会以低优先级将每个快照与相邻快照比较：第一次需要一些时间，之后只比较新的备份；统计过一次的电脑会在每次新备份后自动更新。
+bkpc.measuring	正在统计…
+bkpc.measuring_note	正在 NAS 上以低优先级统计：可以关闭此页面，完成后列表会自动更新（进度和日志见任务面板）。
+bkpc.measure_failed_short	统计失败
+bkpc.measure_failed	上次统计失败（{when}）：{error}
 bkpc.run.lacks	缺少 {names}
 bkpc.run.partial	部分完成
 bkpc.run.running	进行中

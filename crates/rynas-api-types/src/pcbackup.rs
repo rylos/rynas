@@ -151,23 +151,24 @@ impl Default for DeletePolicy {
     }
 }
 
-/// `btrfs filesystem du -s` of a device folder (on demand, a task).
+/// The space of a device folder (task `pcbackup.usage`): whole data extents by their on-disk
+/// size, measured per snapshot and kept (`rynas_btrfs::pcspace`). Records from before
+/// 2026-11-26 hold `btrfs filesystem du -s` columns (Total, Exclusive, Set shared).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ReceiveUsage {
-    /// Data referenced by all snapshots.
+    /// The snapshots' sizes added up (shared data once per snapshot): the data they hold.
     pub total_bytes: u64,
-    /// Data only these snapshots hold (freed if the folder went).
+    /// Data each snapshot alone references, added up.
     pub exclusive_bytes: u64,
-    /// `du`'s "Set shared": data the snapshots share (among themselves or with other
-    /// subvolumes), counted once. Records written before this note hold the same column.
+    /// Data several snapshots share, counted once.
     pub shared_bytes: u64,
     pub read_at_ms: u64,
 }
 
 impl ReceiveUsage {
-    /// About what the snapshots take on the disk: what only they hold plus what they share,
-    /// counted once (Exclusive + Set shared). `total_bytes` counts shared data once per
-    /// snapshot, so it is the data the backups hold, not the space they take.
+    /// What the snapshots take on the disk: what each holds alone plus what they share,
+    /// counted once. `total_bytes` counts shared data once per snapshot, so it is the data
+    /// the backups hold, not the space they take.
     pub fn on_disk_bytes(&self) -> u64 {
         self.exclusive_bytes.saturating_add(self.shared_bytes)
     }
@@ -214,7 +215,7 @@ pub struct ReceivedSnapshot {
 /// The size of one received snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SnapshotSize {
-    /// Data the snapshot references: about what a restore transfers.
+    /// Data the snapshot references, on disk (compressed data counts what it takes).
     pub referenced_bytes: u64,
     /// Data only this snapshot holds: about what deleting it alone frees.
     pub exclusive_bytes: u64,
@@ -457,6 +458,23 @@ pub struct PcTarget {
     /// counted the same way in the list and in the drawer.
     #[serde(default)]
     pub runs: u32,
+    /// The space measurement: running now, or how the last one failed.
+    #[serde(default)]
+    pub measure: PcMeasure,
+}
+
+/// The measurement of a PC's space (task `pcbackup.usage`, started by Measure or after a new
+/// backup when the PC was measured before).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PcMeasure {
+    /// The task measuring now (its progress and log are in the task panel).
+    #[serde(default)]
+    pub task: Option<String>,
+    /// Why the last measurement failed (cleared by the next one that succeeds).
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_at_ms: Option<u64>,
 }
 
 impl PcTarget {

@@ -433,7 +433,7 @@ The first slice of phase 2: Linux PCs push btrbk snapshots to the NAS (`target s
   - interrupted receives: writable without a received UUID, as btrbk's "garbled";
   - folders with a snapshot name that are not subvolumes;
   - state: ok, late, waiting, or missing.
-- **Space** on demand (task, `btrfs filesystem du -s --raw`): exclusive, total and shared bytes, kept with the record. Qgroups are not used, as everywhere in rynas.
+- **Space** on demand (task, `btrfs filesystem du -s --raw`; since 2026-11-26 by comparing neighbouring snapshots, §11.12): exclusive, total and shared bytes, kept with the record. Qgroups are not used, as everywhere in rynas.
 - **Late alert**: per PC, `alert_days` (default 3, 0 = off). An hourly check opens `pcbackup.late` (firing, warning) once and closes it with `pcbackup.resumed` when a new snapshot arrives.
 - **Retention.**
   - btrbk's `target_preserve` on the PC deletes through the filter (`--delete`, on by default).
@@ -621,7 +621,7 @@ For PCs that already push with btrbk over SSH (§10). Code: `crates/rynasd/src/p
 - **Snapshot table.** Each snapshot carries `parent` (below) and `size` {referenced, exclusive}. The drawer groups them by subvolume or by **run** (`PcRun`: the snapshots with one btrbk timestamp, `_N` suffix ignored, with the expected subvolumes it lacks and the summed sizes).
 - **Sizes, measured cost** (loop image, 3 received snapshots of 20 000 files + 80 MiB, `packaging/test-pcbackup-loop.sh`):
   - quota groups on (non-simple, not marked inconsistent): read live from `/sys/fs/btrfs/<fsid>/qgroups/0_<subvolid>/{referenced,exclusive}`, two small reads per snapshot, 0.1 ms for the folder, no command and no walk;
-  - otherwise **Measure sizes** (task `pcbackup.sizes`): `ionice -c3 nice -n19 btrfs filesystem du -s --raw` per snapshot, one at a time, cancellable, 0.21–0.26 s per 20 000-file snapshot here (warm cache): it reads every file's extents, so a 1 M-file PC on HDDs takes minutes per snapshot. Each snapshot is measured **once** (results kept by subvolume UUID; received snapshots are read-only so the referenced size never changes; the exclusive one grows as neighbours go, `?again=true` measures again). No measure ever runs per request.
+  - otherwise **Measure sizes** (task `pcbackup.sizes`; replaced on 2026-11-26 by the measure by neighbours, §11.12): `ionice -c3 nice -n19 btrfs filesystem du -s --raw` per snapshot, one at a time, cancellable, 0.21–0.26 s per 20 000-file snapshot here (warm cache): it reads every file's extents, so a 1 M-file PC on HDDs takes minutes per snapshot. Each snapshot is measured **once** (results kept by subvolume UUID; received snapshots are read-only so the referenced size never changes; the exclusive one grows as neighbours go, `?again=true` measures again). No measure ever runs per request.
 - **NAS-side retention** (`retention.owner: nas`, Marco's decision 3: the default for new PCs, `pc` for adopted folders):
   - the key line gets `--delete-interrupted` instead of `--delete`: the filter accepts `btrfs subvolume delete` only for interrupted receives (btrbk removes its own "garbled" target before sending again). The same now applies to `delete.allowed: false`, which until now refused even those, against §10.2;
   - the GFS counts are the snapshot jobs' `Retention` (presets and custom, `min` as btrbk's `*_preserve_min`), computed in Rust by btrbk's rules: per subvolume, the first snapshot of each hour/day/week (from Sunday)/month/year within that many of them, by the time in the name (the PC's clock, as btrbk counts), in the NAS's local calendar;
@@ -800,6 +800,83 @@ Bugs found by this run: the duplicate received copy in *add* (above, fixed and c
 grub.cfg of the restored debian-grub has no os-prober entry (only "Debian GNU/Linux" and its submenu); the image has no os-prober package, so this shows the hook is put back, not that it kept an entry out. Found: in scripted mode a LUKS restore without `--passphrase-file` erases and partitions the disk before it fails ("a LUKS container needs a passphrase", `restore/exec.rs:439`); the dry run does not flag it either. Checking it in `run_execute` (`restore/mod.rs:279`) before `exec::execute` would fail at once. The harness's `cycle.sh` had dropped the `EXTRA="--passphrase-file /root/pass"` the earlier LUKS runs used.
 
 Not verified in either run: the TUI on a real terminal, very large streams through rynas-web over TLS, the UI at 390 px in a browser, real hardware NVRAM.
+
+### 11.12 Measuring a PC's space by neighbours (2026-11-26)
+
+**The bug.** On the DS920+ (J4125, HDD RAID, 3.6 GB RAM) "Measure space" for pc-work failed after
+exactly 3600 s: `btrfs filesystem du -s --raw /volume1/pc-backups/pc-work: timed out after 3600 s`.
+The folder held 21 snapshots (7 runs of `@`, `@home` and a tiny `@_var_lib_abb-agent_cbt`;
+`@home` 3.3 M files, 2.5 M extent references; `@` 0.7 M). The error was only shown inline in the
+drawer, so after it was closed the list kept saying "measured 11 d ago"; the per-snapshot sizes
+were a second task the page started only after the first succeeded.
+
+**Options considered** (official documentation first):
+
+- *`btrfs filesystem du`* ([btrfs-filesystem](https://btrfs.readthedocs.io/en/latest/btrfs-filesystem.html)):
+  opens every file of every snapshot and asks `FIEMAP` per extent whether it is shared, a
+  back-reference walk each. Measured here: more than 10 minutes for one `@home` snapshot; the
+  folder did not finish in an hour. Dropped.
+- *Full quota groups* ([Qgroups](https://btrfs.readthedocs.io/en/latest/Qgroups.html)): give
+  referenced/exclusive per subvolume, and a level-1 group of all of a PC's snapshots gives the
+  total, read live from sysfs. But accounting is global and "can slow down transaction commits
+  and lead to unacceptable latencies" as snapshots grow, enabling needs a full rescan, and rynas
+  never turns quotas on (§ D-SPACE). Kept only as what it was: when an administrator has them on,
+  full and consistent, the per-snapshot sizes are read live (`quota_sizes`).
+- *Simple quotas* (squota, kernel 6.7+, same page): no back-reference work, but they "account all
+  extents to the subvolume that first allocated it": a received snapshot's unchanged data stays
+  charged to the oldest snapshot, even after that one is deleted, so neither "what deleting this
+  frees" nor a per-PC total comes out of it; and they count only data written after enabling.
+  Dropped.
+- *Full tree searches* (`BTRFS_IOC_TREE_SEARCH_V2` over each snapshot's tree, what
+  `rynas_btrfs::extents::measure_tree` and compression-size tools do): no files opened, no
+  back references, but one pass over the metadata per snapshot: 89 s for `@`, 341–466 s for
+  `@home` on the DS920+ (D-SPACE §5.2.1; no cache benefit between neighbours at 3.6 GB RAM). For
+  21 snapshots that is about 30 minutes per measure, and the Space scan doing exactly this
+  stopped at its 45-minute budget. Used once, as the anchor (below).
+- *Comparing neighbours* (what D-SPACE's deletion preview does, `rynas_btrfs::freed`): the
+  extents at places that changed between two neighbouring snapshots, found from tree blocks
+  written since the newer one was made from the older (the kernel skips older subtrees, as
+  [`btrfs subvolume find-new`](https://btrfs.readthedocs.io/en/latest/btrfs-subvolume.html) does)
+  or a [no-data send](https://btrfs.readthedocs.io/en/latest/btrfs-send.html), then
+  `LOGICAL_INO_V2` ([logical-resolve](https://btrfs.readthedocs.io/en/latest/btrfs-inspect-internal.html))
+  for which subvolumes reference each candidate. Measured on the same NAS and folder: a preview
+  of 3 snapshots, 25 030 candidates, 38 s in all. **Chosen.**
+
+**How** (`rynas_btrfs::pcspace`, module text has the argument): the snapshots of each subvolume
+form a line, oldest first. For each pair of neighbours `A`, `B` the measure keeps `born(B)` (what
+`B` references and `A` does not), `died(A)` (the reverse) and `exclusive` (referenced by one
+snapshot alone, from the candidates; exact across the whole filesystem). With `distinct(S)`, the
+bytes of the distinct extents a snapshot references: `distinct(B) = distinct(A) + born(B) −
+died(A)`, and a line takes `distinct(newest) + Σ died`. One full tree search of the newest
+snapshot of a line gives the first `distinct` (the anchor); everything is kept per subvolume UUID
+in the record (`Stored.space`; read-only snapshots never change) and a later measure compares
+only pairs whose neighbours changed: after a new backup the new pair and the one before it (two
+per line), after a retention pass the pairs around what went. The unit is the whole extent at its
+on-disk size (compressed data counts what it takes); metadata is not counted, data shared between
+two lines would count in both, a lone snapshot's own data is its whole size (shown as such in the
+note). A comparison that cannot be made (a writable snapshot, a send that fails) falls back to the
+difference of the two full extent lists.
+
+**Expected cost on the DS920+** (from the figures above, not yet measured with this code): the
+first measure of pc-work ≈ one full search of `@` and `@home` (≈ 7–9 min) plus 18 pair
+comparisons (≈ 3–6 min); every later one, a few pairs: about a minute.
+
+**Running it.** One task `pcbackup.usage` per device (`…/sizes` starts the same), single-flight:
+a second request answers the running task. It runs on its own thread at I/O class idle and nice
+19, has no time limit, logs "comparing pair i of n" and its progress, and the task panel's Cancel
+stops it between searches. The figures, the per-snapshot sizes and what the comparisons found are
+written at the end; a failure is kept with the PC (`PcTarget.measure.error`) until a measure
+succeeds, and the task watcher's `task.failed` notification reaches the bell and the channels as
+for every task. A PC measured before is measured again right after each agent backup lands (user
+`rynas`), only where it changed and never with a full search; while one runs, it goes once more at
+its end. Nothing measures periodically.
+
+**The page.** The list names the running task (`PcTarget.measure.task`): its row says
+"measuring…" (also after the page was closed and opened again), and when the task's end reaches
+the task store through the event stream the list and an open drawer read the PC again; a failure
+is a toast and stays on the row ("measuring failed", the reason in the drawer). Nothing polls. The
+On disk column sits under its head (`td.num > .cell-main` right-aligned; the cell wraps instead of
+widening the table).
 
 ## 12. Implemented: the file method, phase 1 (2026-11-11)
 

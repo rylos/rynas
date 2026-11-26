@@ -285,7 +285,7 @@ async fn quiet_notice_opens_once_and_closes() {
 #[tokio::test]
 async fn browse_copy_out_usage_and_setup() {
     let e = env();
-    let s1 = snap("home", 1);
+    let s1 = snap_u("home", 1);
     e.host.folders.lock().unwrap().insert("/volume1/backup/pc".into(), (true, vec![s1.clone()]));
     task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": "/volume1/backup/pc", "adopt": true}))).await;
     let (s, b) = call(&e, "GET", &format!("/v1/pc-backups/targets/pc/browse?snapshot={}&path=", s1.name), None).await;
@@ -507,12 +507,16 @@ async fn sizes_bare_metal_and_the_new_alerts() {
     let codes: Vec<PcIssueCode> = d.target.issues.iter().map(|i| i.code).collect();
     assert_eq!(codes, [PcIssueCode::SubvolumeLate, PcIssueCode::ReceiveFailed, PcIssueCode::LowSpace]);
     assert!(d.list.iter().all(|s| s.size.is_none()) && !d.sizes_from_quota);
-    // measure: every complete snapshot once; the second run has nothing to do
+    // measure: per subvolume one full search and each pair of neighbours (@ and @home: 1 +
+    // 2 each, @games: 1); the second run has nothing to do
     let t = task(&e, "POST", "/v1/pc-backups/targets/pc/sizes", None).await;
     assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
     assert_eq!(e.host.measured.lock().unwrap().len(), 7);
-    task(&e, "POST", "/v1/pc-backups/targets/pc/sizes", None).await;
+    task(&e, "POST", "/v1/pc-backups/targets/pc/usage", None).await;
     assert_eq!(e.host.measured.lock().unwrap().len(), 7);
+    let p = list(&e).await.into_iter().find(|t| t.device == "pc").unwrap();
+    assert_eq!(p.measure, PcMeasure::default());
+    assert!(p.usage.is_some_and(|u| u.on_disk_bytes() > 0 && u.on_disk_bytes() < u.total_bytes) && !p.usage_stale);
     let d = detail(&e, "pc").await;
     assert!(d.list.iter().filter(|s| !s.incomplete).all(|s| s.size.is_some_and(|z| !z.from_quota)));
     assert!(d.runs[1].referenced_bytes.is_some());
@@ -535,6 +539,31 @@ async fn sizes_bare_metal_and_the_new_alerts() {
     *e.host.quota.lock().unwrap() = Some(d.list.iter().map(|s| (s.name.clone(), (5, 1))).collect());
     let d = detail(&e, "pc").await;
     assert!(d.sizes_from_quota && d.list.iter().all(|s| s.size.is_some_and(|z| z.from_quota && z.referenced_bytes == 5)));
+}
+
+#[tokio::test]
+async fn the_space_follows_new_backups_where_they_changed() {
+    let e = env();
+    let path = "/volume1/backup/pc";
+    folder(&e, path, (2..=4).map(|d| snap_u("home", d)).collect());
+    task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": path, "adopt": true}))).await;
+    let pc = |l: Vec<PcTarget>| l.into_iter().find(|t| t.device == "pc").unwrap();
+    assert!(pc(list(&e).await).usage.is_none());
+    // one full search and two pairs
+    let t = task(&e, "POST", "/v1/pc-backups/targets/pc/usage", None).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    assert_eq!(e.host.measured.lock().unwrap().len(), 3);
+    let first = pc(list(&e).await).usage.unwrap();
+    // a new backup: stale until measured; then only the new pair and the one before it
+    let mut entries = e.host.folders.lock().unwrap().get(std::path::Path::new(path)).unwrap().1.clone();
+    entries.push(snap_u("home", 1));
+    folder(&e, path, entries);
+    assert!(pc(list(&e).await).usage_stale);
+    task(&e, "POST", "/v1/pc-backups/targets/pc/usage", None).await;
+    assert_eq!(e.host.measured.lock().unwrap().len(), 5);
+    let p = pc(list(&e).await);
+    assert!(!p.usage_stale && p.usage.unwrap().total_bytes > first.total_bytes);
+    assert_eq!((p.measure.task, p.measure.error), (None, None));
 }
 
 #[tokio::test]

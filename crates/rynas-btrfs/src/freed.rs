@@ -124,12 +124,12 @@ pub enum Diff {
     Send { member: usize, parent: usize },
 }
 
-fn send_diff(line: &[Member], m: usize, p: usize) -> Option<Diff> {
+pub(crate) fn send_diff(line: &[Member], m: usize, p: usize) -> Option<Diff> {
     (line[m].readonly && line[p].readonly).then_some(Diff::Send { member: m, parent: p })
 }
 
 /// The comparison of member `m` with its older neighbour `m - 1`.
-fn older_diff(line: &[Member], m: usize) -> Option<Diff> {
+pub(crate) fn older_diff(line: &[Member], m: usize) -> Option<Diff> {
     let (s, o) = (&line[m], &line[m - 1]);
     if s.parent_uuid.is_some() {
         // a snapshot of the older one (incremental receive), which has not changed since
@@ -271,7 +271,7 @@ pub fn parse_refs(buf: &[u8]) -> Option<Refs> {
 }
 
 /// The roots referencing the extent at `bytenr`; `None`: the list does not fit 16 MiB.
-fn extent_roots(fd: &File, bytenr: u64) -> Result<Option<BTreeSet<u64>>, WalkError> {
+pub(crate) fn extent_roots(fd: &File, bytenr: u64) -> Result<Option<BTreeSet<u64>>, WalkError> {
     let mut size = REFS_FIRST;
     loop {
         let mut buf = vec![0u64; size / 8];
@@ -385,14 +385,14 @@ fn meets(ranges: &[(u64, u64)], off: u64, len: u64) -> bool {
 }
 
 /// One opened snapshot of a line.
-struct Opened {
-    path: PathBuf,
-    file: File,
-    root: u64,
-    facts: Member,
+pub(crate) struct Opened {
+    pub(crate) path: PathBuf,
+    pub(crate) file: File,
+    pub(crate) root: u64,
+    pub(crate) facts: Member,
 }
 
-fn open(path: &Path, in_set: bool) -> Result<Opened, WalkError> {
+pub(crate) fn open(path: &Path, in_set: bool) -> Result<Opened, WalkError> {
     let unsupported = |e: String| WalkError::Unsupported(format!("{}: {e}", path.display()));
     let file = crate::ioctl::open_dir(path).map_err(|e| unsupported(e.to_string()))?;
     if !crate::ioctl::is_subvolume(&file) {
@@ -404,7 +404,7 @@ fn open(path: &Path, in_set: bool) -> Result<Opened, WalkError> {
 }
 
 /// Candidate extents (start → on-disk size) of one comparison.
-fn diff_extents(line: &[Opened], d: Diff, lim: &Limits, cands: &mut BTreeMap<u64, u64>) -> Result<(), WalkError> {
+pub(crate) fn diff_extents(line: &[Opened], d: Diff, lim: &Limits, cands: &mut BTreeMap<u64, u64>) -> Result<(), WalkError> {
     let push = |r: DataRef, cands: &mut BTreeMap<u64, u64>| {
         cands.insert(r.bytenr, r.len);
         if cands.len() > lim.max_extents { Err(WalkError::TooLarge) } else { Ok(()) }

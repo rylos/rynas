@@ -11,7 +11,11 @@
 //! - `GET|PUT|DELETE /v1/pc-backups/targets/{device}`: detail with every snapshot; settings
 //!   (key, alert, delete rules: task `pcbackup.update`); remove (task `pcbackup.remove`: the
 //!   key goes, the folder and its snapshots stay).
-//! - `POST /v1/pc-backups/targets/{device}/usage` (task `pcbackup.usage`, `btrfs filesystem du`).
+//! - `POST /v1/pc-backups/targets/{device}/usage` (task `pcbackup.usage`; `…/sizes` the
+//!   same): the space of the folder and of every snapshot by [`rynas_btrfs::pcspace`], one
+//!   task per device at idle priority, cancellable, with a line per pair of snapshots
+//!   compared. A device measured before is measured again after each new agent backup, only
+//!   where it changed. The running task and the last failure are in `PcTarget::measure`.
 //! - `GET /v1/pc-backups/targets/{device}/browse?snapshot=&path=`: a folder inside a received
 //!   snapshot (descriptor walk, symlinks shown never followed);
 //!   `POST …/copy-out` (task `pcbackup.copy_out`): a file or folder copied into a NAS folder.
@@ -55,6 +59,23 @@ const DAY_MS: u64 = 86_400_000;
 const SUDOERS: &str = "/etc/sudoers.d/rynas-pcbackup";
 /// The account's home: root-owned, so the account cannot change its own keys.
 const HOME: &str = "/var/lib/rynas-pcbackup";
+/// Who starts the measure that follows a new backup (task list, notifications).
+const MEASURE_USER: &str = "rynas";
+/// Most distinct extents one comparison of two snapshots holds (8 bytes each in a full
+/// walk, about 64 in the candidate map): past it the measure says so instead of guessing.
+const SPACE_MAX_EXTENTS: usize = 1 << 23;
+
+/// The calling thread reads the disk only when nobody else does (I/O class idle) and gets
+/// the CPU last (nice 19): measuring a PC's space never slows the shares down.
+fn background_priority() {
+    // SAFETY: plain syscalls on the calling thread, no memory passed
+    unsafe {
+        // ioprio_set(IOPRIO_WHO_PROCESS, 0 = this thread, IOPRIO_CLASS_IDLE << 13)
+        libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13);
+        // per thread on Linux: the thread id as the "process"
+        libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, 19);
+    }
+}
 
 // ------------------------------------------------------------------ the system side
 
@@ -119,7 +140,6 @@ pub trait ReceiveHost: Send + Sync {
     fn clear_staging(&self, lock: &FolderLock) -> Result<(), String>;
     /// (is a subvolume, snapshot entries, other entries).
     fn scan(&self, path: &Path) -> Result<Scan, String>;
-    fn usage(&self, path: &Path) -> Result<(u64, u64, u64), String>;
     fn browse(&self, snapshot: &Path, rel: &str) -> Result<(Vec<SnapshotEntry>, bool), Error>;
     fn copy_out(
         &self,
@@ -133,9 +153,17 @@ pub trait ReceiveHost: Send + Sync {
     /// (referenced, exclusive) bytes of each snapshot by name, live from the volume's quota
     /// groups; `None` when quotas are off, simple quotas, or marked inconsistent.
     fn quota_sizes(&self, root: &Path, entries: &[Entry]) -> Option<BTreeMap<String, (u64, u64)>>;
-    /// (referenced, exclusive) bytes of one snapshot, measured at idle priority (slow: it
-    /// reads every file's extents).
-    fn measure(&self, snapshot: &Path) -> Result<(u64, u64), String>;
+    /// The space of each line of snapshots ([`rynas_btrfs::pcspace`]), at idle priority:
+    /// only the pairs of neighbours not measured before; `walk` false refuses full tree
+    /// searches. `step` before each pair compared. Blocking; `stop` cancels.
+    fn measure_space(
+        &self,
+        lines: &[Vec<rynas_btrfs::pcspace::Snap>],
+        walk: bool,
+        stop: &(dyn Fn() -> bool + Sync),
+        progress: &(dyn Fn(&str) + Sync),
+        step: &(dyn Fn() + Sync),
+    ) -> Result<Vec<rynas_btrfs::pcspace::LineSpace>, String>;
     /// `/.rynas/manifest.json` inside snapshot `name` of `root`: `Ok(None)` when it is not
     /// there; refused when bigger than [`MANIFEST_MAX`] or not a regular file.
     fn read_manifest(&self, root: &Path, name: &str) -> Result<Option<Vec<u8>>, String>;
@@ -776,16 +804,6 @@ impl ReceiveHost for HostReceive {
         Ok(Some((sub, entries, other)))
     }
 
-    fn usage(&self, path: &Path) -> Result<(u64, u64, u64), String> {
-        let out = cmd_ok(
-            Cmd::new("btrfs")
-                .args(["filesystem", "du", "-s", "--raw"])
-                .arg(path)
-                .timeout(Duration::from_secs(3600)),
-        )?;
-        receive::parse_du(&out).ok_or_else(|| "btrfs filesystem du: unexpected output".into())
-    }
-
     fn browse(&self, snapshot: &Path, rel: &str) -> Result<(Vec<SnapshotEntry>, bool), Error> {
         let item = rynas_btrfs::browse::resolve(snapshot, rel)?;
         Ok(rynas_btrfs::browse::list(&item)?)
@@ -848,17 +866,28 @@ impl ReceiveHost for HostReceive {
         Some(out)
     }
 
-    fn measure(&self, snapshot: &Path) -> Result<(u64, u64), String> {
-        let btrfs = rynas_btrfs::receive_filter::locate("btrfs").ok_or("btrfs-progs is not installed")?;
-        // idle I/O class and lowest CPU priority: a measure never slows the shares down
-        let du = |c: Cmd| c.args(["filesystem", "du", "-s", "--raw"]).arg(snapshot).timeout(Duration::from_secs(3600));
-        let out = match rynas_btrfs::receive_filter::locate("ionice") {
-            Some(ionice) => cmd_ok(du(Cmd::new(ionice).args(["-c", "3", "nice", "-n", "19"]).arg(&btrfs)))?,
-            None => cmd_ok(du(Cmd::new(&btrfs)))?,
-        };
-        receive::parse_du(&out)
-            .map(|(total, excl, _)| (total, excl))
-            .ok_or_else(|| "btrfs filesystem du: unexpected output".into())
+    fn measure_space(
+        &self,
+        lines: &[Vec<rynas_btrfs::pcspace::Snap>],
+        walk: bool,
+        stop: &(dyn Fn() -> bool + Sync),
+        progress: &(dyn Fn(&str) + Sync),
+        step: &(dyn Fn() + Sync),
+    ) -> Result<Vec<rynas_btrfs::pcspace::LineSpace>, String> {
+        // a thread of its own: the idle I/O class and the lowest CPU priority stay on it (a
+        // blocking pool thread would keep them for the next job)
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                background_priority();
+                let lim = rynas_btrfs::extents::Limits { max_ranges: 0, max_extents: SPACE_MAX_EXTENTS, stop, progress };
+                lines
+                    .iter()
+                    .map(|l| rynas_btrfs::pcspace::measure_line(l, &lim, walk, &mut |_, _| step()).map_err(|e| e.to_string()))
+                    .collect()
+            })
+            .join()
+            .map_err(|_| "the measure stopped unexpectedly".to_string())?
+        })
     }
 
     fn read_manifest(&self, root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
@@ -1403,12 +1432,6 @@ impl ReceiveHost for MemoryReceive {
             .get(path)
             .map(|(s, e)| (*s, e.clone(), 0)))
     }
-    fn usage(&self, path: &Path) -> Result<(u64, u64, u64), String> {
-        let n = self.folders.lock().unwrap().get(path).map(|f| f.1.len()).unwrap_or(0) as u64;
-        // snapshots of one PC share most of their data: about one copy on disk plus changes
-        let (total, excl) = ((n * 12) << 30, (n * 300) << 20);
-        Ok((total, excl, (12 << 30) + n * (500 << 20)))
-    }
     fn browse(&self, _: &Path, rel: &str) -> Result<(Vec<SnapshotEntry>, bool), Error> {
         rynas_btrfs::browse::components(rel)?;
         let e = |name: &str, kind, size| SnapshotEntry {
@@ -1447,11 +1470,42 @@ impl ReceiveHost for MemoryReceive {
         let q = q.as_ref()?;
         Some(entries.iter().filter_map(|e| q.get(&e.name).map(|v| (e.name.clone(), *v))).collect())
     }
-    fn measure(&self, snapshot: &Path) -> Result<(u64, u64), String> {
-        self.measured.lock().unwrap().push(snapshot.to_path_buf());
-        // a stable made-up size per snapshot: about 12 GiB, a few hundred MiB its own
-        let n = snapshot.to_string_lossy().bytes().fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(u64::from(b)));
-        Ok(((12 << 30) + ((n % 512) << 20), (n % 700 + 20) << 20))
+    fn measure_space(
+        &self,
+        lines: &[Vec<rynas_btrfs::pcspace::Snap>],
+        walk: bool,
+        stop: &(dyn Fn() -> bool + Sync),
+        _: &(dyn Fn(&str) + Sync),
+        step: &(dyn Fn() + Sync),
+    ) -> Result<Vec<rynas_btrfs::pcspace::LineSpace>, String> {
+        use rynas_btrfs::extents::WalkError;
+        use rynas_btrfs::pcspace::{PairFacts, Snap, Source, measure_with};
+        // made-up stable sizes: about 12 GiB per snapshot, a few hundred MiB changing between
+        // neighbours; every pair compared and every full search is recorded
+        struct Fake<'a> {
+            line: &'a [Snap],
+            seen: &'a Mutex<Vec<PathBuf>>,
+            stop: &'a (dyn Fn() -> bool + Sync),
+        }
+        impl Source for Fake<'_> {
+            fn pair(&mut self, a: usize, b: usize) -> Result<PairFacts, WalkError> {
+                if (self.stop)() {
+                    return Err(WalkError::Stopped);
+                }
+                let (pa, pb) = (&self.line[a].path, &self.line[b].path);
+                self.seen.lock().unwrap().push(pb.clone());
+                let m = |p: &Path| (p.to_string_lossy().bytes().fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(u64::from(b))) % 700 + 20) << 20;
+                Ok(PairFacts { born: m(pb), died: m(pa), excl_newer: m(pb) / 2, excl_older: m(pa) / 2, distinct: None })
+            }
+            fn distinct(&mut self, i: usize) -> Result<u64, WalkError> {
+                self.seen.lock().unwrap().push(self.line[i].path.clone());
+                Ok(12 << 30)
+            }
+        }
+        lines
+            .iter()
+            .map(|l| measure_with(l, &mut Fake { line: l, seen: &self.measured, stop }, walk, &mut |_, _| step()).map_err(|e| e.to_string()))
+            .collect()
     }
     fn read_manifest(&self, root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
         let m = self.manifests.lock().unwrap().get(&root.join(name)).cloned();
@@ -1735,6 +1789,26 @@ fn expected_of(manifest: Option<&ManifestRead>, complete: &BTreeSet<String>, ign
         Some(Ok(m)) => m.subvolumes.iter().filter(sent).cloned().collect(),
         _ => complete.iter().filter(sent).cloned().collect(),
     }
+}
+
+/// The complete snapshots of a folder as lines for [`rynas_btrfs::pcspace`]: one per
+/// subvolume (the name before the time), oldest first by the time in the name (the PC's
+/// history, also for a snapshot received again later), with what earlier measures found out
+/// about each.
+fn space_lines(root: &Path, entries: &[Entry], known: &BTreeMap<String, rynas_btrfs::pcspace::Known>) -> Vec<Vec<rynas_btrfs::pcspace::Snap>> {
+    let mut by: BTreeMap<&str, Vec<(&str, rynas_btrfs::pcspace::Snap)>> = BTreeMap::new();
+    for e in entries.iter().filter(|e| !e.incomplete()) {
+        let Some(i) = e.info.as_ref() else { continue };
+        let (Some(uuid), Some((line, _))) = (i.uuid.clone(), rynas_btrfs::name::split_snapshot_name(&e.name)) else { continue };
+        let known = known.get(&uuid).cloned().unwrap_or_default();
+        by.entry(line).or_default().push((e.name.as_str(), rynas_btrfs::pcspace::Snap { path: root.join(&e.name), uuid, known }));
+    }
+    by.into_values()
+        .map(|mut v| {
+            v.sort_by(|a, b| rynas_btrfs::name::compare_names(a.0, b.0));
+            v.into_iter().map(|x| x.1).collect()
+        })
+        .collect()
 }
 
 /// A fingerprint of the complete snapshots in a folder (their subvolume UUIDs, else names;
@@ -2149,6 +2223,13 @@ struct Stored {
     /// size never changes; the exclusive one grows as neighbours go).
     #[serde(default)]
     sizes: BTreeMap<String, SnapshotSize>,
+    /// What the space measures found out per snapshot UUID (kept so that the next measure
+    /// only compares the neighbours that changed).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    space: BTreeMap<String, rynas_btrfs::pcspace::Known>,
+    /// The last space measure that failed: (when, why); cleared by one that succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    measure_error: Option<(u64, String)>,
     /// The other open notifications: key → event code.
     #[serde(default)]
     open_alerts: BTreeMap<String, String>,
@@ -2242,6 +2323,9 @@ pub struct PcBackup {
     pub agent_running: std::sync::OnceLock<AgentRunning>,
     /// [`Self::agent_facts`]' last scan per device: (folder mtime, when, runs, readiness).
     facts: Mutex<BTreeMap<String, FolderFacts>>,
+    /// Space measures running, by device: the task, and whether it was asked again meanwhile
+    /// (it then measures once more at its end; `true`: someone asked, full searches allowed).
+    measuring: Mutex<BTreeMap<String, (String, Option<bool>)>>,
 }
 
 /// Most manifests remembered (a few per device).
@@ -2294,6 +2378,7 @@ impl PcBackup {
             agent_missed: std::sync::OnceLock::new(),
             agent_running: std::sync::OnceLock::new(),
             facts: Mutex::new(BTreeMap::new()),
+            measuring: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -2538,8 +2623,140 @@ impl PcBackup {
             prune_postponed_ms: t.prune_postponed_ms.or_else(|| t.last_prune.as_ref().filter(|r| old_postponed(r)).map(|r| r.at_ms)),
             agent: t.agent,
             runs: runs.len() as u32,
+            measure: PcMeasure {
+                task: self.measuring_task(device),
+                error: t.measure_error.as_ref().map(|e| e.1.clone()),
+                error_at_ms: t.measure_error.as_ref().map(|e| e.0),
+            },
         };
         View { target, list: s.list, runs, quota: quota.is_some() }
+    }
+
+    /// The space measure of `device` running now.
+    fn measuring_task(&self, device: &str) -> Option<String> {
+        let m = self.measuring.lock().unwrap();
+        let id = &m.get(device)?.0;
+        self.ops.tasks.get(id).filter(|i| !i.status.is_finished()).map(|_| id.clone())
+    }
+
+    /// Starts the space measure of `device` (one task, `pcbackup.usage`), or answers the one
+    /// running. `auto` (a new backup landed): only where it changed, never a full tree
+    /// search, and nothing when the device was never measured; while one runs, it measures
+    /// once more at its end.
+    fn start_measure(self: &Arc<Self>, device: &str, who: &str, auto: bool) -> Res<Option<String>> {
+        let t = self.stored(device)?;
+        if auto && t.space.is_empty() {
+            return Ok(None);
+        }
+        let mut m = self.measuring.lock().unwrap();
+        if let Some(x) = m.get_mut(device)
+            && self.ops.tasks.get(&x.0).is_some_and(|i| !i.status.is_finished())
+        {
+            // once more at its end; a full one when someone asked (the running one may be
+            // the backup's, which never searches a whole snapshot)
+            x.1 = Some(x.1.unwrap_or(false) || !auto);
+            return Ok(Some(x.0.clone()));
+        }
+        let (s, dev) = (self.clone(), device.to_string());
+        // the entry is written before the task can look at it: the lock is held until then
+        let id = self.ops.tasks.spawn("pcbackup.usage", who, move |ctx| async move {
+            let mut auto = auto;
+            loop {
+                let (s2, ctx2, d) = (s.clone(), ctx.clone(), dev.clone());
+                let r = tokio::task::spawn_blocking(move || s2.measure(&d, auto, &ctx2)).await.map_err(|e| e.to_string()).and_then(|r| r);
+                let again = {
+                    let mut m = s.measuring.lock().unwrap();
+                    match m.get_mut(&dev) {
+                        Some(x) if x.0 == ctx.id() && x.1.is_some() && r.is_ok() && !ctx.is_cancelled() => {
+                            auto = !x.1.take().unwrap_or(false);
+                            true
+                        }
+                        Some(x) if x.0 == ctx.id() => {
+                            m.remove(&dev);
+                            false
+                        }
+                        _ => false,
+                    }
+                };
+                if again {
+                    ctx.log("asked again meanwhile (a new backup, or Measure): once more");
+                    continue;
+                }
+                // the outcome stays with the PC (list and drawer) until the next measure
+                if !ctx.is_cancelled() {
+                    let err = r.as_ref().err().map(|e| (rynas_tasks::now_ms(), e.clone()));
+                    let _ = s.edit(|reg| {
+                        if let Some(x) = reg.targets.get_mut(&dev) {
+                            x.measure_error = err;
+                        }
+                    });
+                }
+                return r;
+            }
+        })?;
+        m.insert(device.to_string(), (id.clone(), None));
+        Ok(Some(id))
+    }
+
+    /// One space measure of `device` (blocking): the lines of snapshots, the pairs of
+    /// neighbours not compared before, then the figures of the list and of every snapshot.
+    fn measure(&self, device: &str, auto: bool, ctx: &rynas_tasks::TaskCtx) -> Result<(), String> {
+        use rynas_btrfs::pcspace::{needs_walk, pairs_needed};
+        let t = self.stored(device).map_err(|e| e.2)?;
+        let root = Path::new(&t.path);
+        let Some((_, entries, _)) = self.host.scan(root)? else {
+            return Err(format!("{}: no such folder", t.path));
+        };
+        let lines = space_lines(root, &entries, &t.space);
+        let pairs: usize = lines.iter().map(|l| pairs_needed(l).len()).sum();
+        let walks = lines.iter().filter(|l| needs_walk(l)).count();
+        let snaps: usize = lines.iter().map(Vec::len).sum();
+        if auto && walks > 0 {
+            ctx.log(&format!("{device}: a subvolume was never measured; Measure space measures it (a full tree search)"));
+            return Ok(());
+        }
+        ctx.log(&format!("{device}: {snaps} snapshots in {} subvolumes; {pairs} pairs of neighbours to compare, {walks} full tree searches", lines.len()));
+        let incomplete = entries.iter().filter(|e| e.incomplete()).count();
+        if incomplete > 0 {
+            ctx.log(&format!("{incomplete} interrupted receives are not counted"));
+        }
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        let steps = (pairs + walks).max(1);
+        let step = || {
+            let i = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            ctx.log(&format!("comparing pair {i} of {pairs}"));
+            ctx.progress((i * 100 / steps).min(99) as u8);
+        };
+        let res = self.host.measure_space(&lines, !auto, &|| ctx.is_cancelled(), &|l| ctx.log(l), &step).map_err(|e| if ctx.is_cancelled() { "cancelled".to_string() } else { e })?;
+        let now = rynas_tasks::now_ms();
+        let (mut space, mut sizes) = (BTreeMap::new(), BTreeMap::new());
+        let (mut union, mut held, mut own) = (0u64, 0u64, 0u64);
+        for (line, r) in lines.iter().zip(&res) {
+            union = union.saturating_add(r.union);
+            for (snap, k) in line.iter().zip(&r.known) {
+                let (d, x) = (k.distinct.unwrap_or(0), k.exclusive.as_ref().map_or(0, |e| e.bytes));
+                held = held.saturating_add(d);
+                own = own.saturating_add(x);
+                sizes.insert(snap.uuid.clone(), SnapshotSize { referenced_bytes: d, exclusive_bytes: x, read_at_ms: now, from_quota: false });
+                space.insert(snap.uuid.clone(), k.clone());
+            }
+        }
+        let u = ReceiveUsage { total_bytes: held, exclusive_bytes: own, shared_bytes: union.saturating_sub(own), read_at_ms: now };
+        let set = snapshot_set(&entries);
+        self.edit(|reg| {
+            if let Some(x) = reg.targets.get_mut(device) {
+                x.usage = Some(u);
+                x.usage_set = Some(set);
+                x.sizes = sizes;
+                x.space = space;
+            }
+        })?;
+        ctx.progress(100);
+        ctx.log(&format!(
+            "{device}: {union} bytes on disk ({own} held by one snapshot alone, {} shared), {held} bytes of data in the snapshots",
+            union.saturating_sub(own)
+        ));
+        Ok(())
     }
 
     fn list(&self) -> Vec<PcTarget> {
@@ -3610,7 +3827,14 @@ impl PcBackup {
         pump.abort();
         let out = out?;
         match &out {
-            Ok(r) => tracing::info!(target: "rynas::audit", "pc backup: {device}: received {} ({} bytes)", r.name, r.bytes),
+            Ok(r) => {
+                tracing::info!(target: "rynas::audit", "pc backup: {device}: received {} ({} bytes)", r.name, r.bytes);
+                // a PC measured before: its space follows the new snapshot (only the pairs of
+                // neighbours it changed, at idle priority)
+                if let Err(e) = self.start_measure(device, MEASURE_USER, true) {
+                    tracing::warn!("pc backup: {device}: measuring the new backup: {}", e.2);
+                }
+            }
             Err(e) => tracing::warn!("pc backup: {device}: receive refused or failed: {}", e.2),
         }
         out
@@ -4336,42 +4560,14 @@ async fn remove_delete(
     Ok(started(id))
 }
 
+/// The space measure (one task for the folder and every snapshot), or the one running.
 async fn usage_post(
     State(st): State<PbState>,
     hd: HeaderMap,
     UrlPath(device): UrlPath<String>,
 ) -> Res<Response> {
     let (s, who) = (pb(&st)?, user(&hd)?);
-    let t = s.stored(&device)?;
-    let s2 = s.clone();
-    let id = s.ops.tasks.spawn("pcbackup.usage", &who, move |ctx| async move {
-        let s = s2;
-        let s3 = s.clone();
-        let path = t.path.clone();
-        // the set measured: read after `du`, so a snapshot that came meanwhile marks it stale
-        let ((total, excl, shared), set) = tokio::task::spawn_blocking(move || {
-            let root = Path::new(&path);
-            let u = s3.host.usage(root)?;
-            let set = s3.host.scan(root).ok().flatten().map(|(_, e, _)| snapshot_set(&e));
-            Ok::<_, String>((u, set))
-        })
-        .await
-        .map_err(|e| e.to_string())??;
-        let u = ReceiveUsage {
-            total_bytes: total,
-            exclusive_bytes: excl,
-            shared_bytes: shared,
-            read_at_ms: rynas_tasks::now_ms(),
-        };
-        s.edit(|r| {
-            if let Some(x) = r.targets.get_mut(&device) {
-                x.usage = Some(u);
-                x.usage_set = set;
-            }
-        })?;
-        ctx.log(&format!("{device}: {} bytes on disk ({excl} only in these snapshots, {shared} shared), {total} bytes of data", u.on_disk_bytes()));
-        Ok(())
-    })?;
+    let id = s.start_measure(&device, &who, false)?.ok_or_else(|| Error::internal("the measure did not start"))?;
     Ok(started(id))
 }
 
@@ -4519,74 +4715,10 @@ async fn prune_post(State(st): State<PbState>, hd: HeaderMap, UrlPath(device): U
     Ok(started(id))
 }
 
-#[derive(Deserialize, Default)]
-struct SizesQuery {
-    /// Measure snapshots measured before too (their exclusive size grows as others go).
-    #[serde(default)]
-    again: bool,
-}
-
-/// Measures the snapshots without a known size, one at a time at idle priority.
-async fn sizes_post(
-    State(st): State<PbState>,
-    hd: HeaderMap,
-    UrlPath(device): UrlPath<String>,
-    q: Result<Query<SizesQuery>, axum::extract::rejection::QueryRejection>,
-) -> Res<Response> {
-    let (s, who) = (pb(&st)?, user(&hd)?);
-    let Query(q) = q.map_err(|e| Error::bad_request(e.body_text()))?;
-    let t = s.stored(&device)?;
-    let s2 = s.clone();
-    let id = s.ops.tasks.spawn("pcbackup.sizes", &who, move |ctx| async move {
-        let s = s2;
-        let ctx2 = ctx.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let root = Path::new(&t.path);
-            let Some((_, entries, _)) = s.host.scan(root)? else {
-                return Err(format!("{}: no such folder", t.path));
-            };
-            if s.host.quota_sizes(root, &entries).is_some() {
-                ctx2.log("quota groups are on for this volume: the sizes are read live, nothing to measure");
-                return Ok(());
-            }
-            let present: BTreeSet<String> = entries.iter().filter_map(|e| e.info.as_ref()?.uuid.clone()).collect();
-            let todo: Vec<(&Entry, String)> = entries
-                .iter()
-                .filter(|e| !e.incomplete())
-                .filter_map(|e| Some((e, e.info.as_ref()?.uuid.clone()?)))
-                .filter(|(_, u)| q.again || !t.sizes.contains_key(u))
-                .collect();
-            let n = todo.len().max(1);
-            for (i, (e, uuid)) in todo.iter().enumerate() {
-                if ctx2.is_cancelled() {
-                    return Err("cancelled".into());
-                }
-                let (r, x) = s.host.measure(&root.join(&e.name))?;
-                let size = SnapshotSize { referenced_bytes: r, exclusive_bytes: x, read_at_ms: rynas_tasks::now_ms(), from_quota: false };
-                s.edit(|reg| {
-                    if let Some(d) = reg.targets.get_mut(&device) {
-                        d.sizes.insert(uuid.clone(), size);
-                    }
-                })?;
-                ctx2.log(&format!("{}: {r} bytes referenced, {x} only in it", e.name));
-                ctx2.progress(((i + 1) * 100 / n) as u8);
-            }
-            // sizes of snapshots that are gone
-            s.edit(|reg| {
-                if let Some(d) = reg.targets.get_mut(&device) {
-                    d.sizes.retain(|u, _| present.contains(u));
-                }
-            })?;
-            if todo.is_empty() {
-                ctx2.log("every snapshot already has a size");
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| e.to_string())??;
-        Ok(())
-    })?;
-    Ok(started(id))
+/// The sizes of the snapshots come with the space measure: the same task (kept for older
+/// pages).
+async fn sizes_post(State(st): State<PbState>, hd: HeaderMap, UrlPath(device): UrlPath<String>) -> Res<Response> {
+    usage_post(State(st), hd, UrlPath(device)).await
 }
 
 /// Why an administrator may not delete snapshot `name` now.

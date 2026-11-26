@@ -713,6 +713,23 @@ pub fn measure_tree(set: &[PathBuf], keep: &[PathBuf], lim: &Limits) -> Result<S
     Ok(m)
 }
 
+/// The distinct data extents subvolume `tree_id` references (one full tree search), sorted,
+/// each as `(disk_bytenr, disk_num_bytes)` packed into one number ([`unpack`] reads it back).
+pub fn distinct_extents(fd: &std::fs::File, tree_id: u64, lim: &Limits) -> Result<Vec<u64>, WalkError> {
+    let mut ext = ExtentSet::default();
+    subvolume_extents(fd, tree_id, lim.stop, &mut |b, l| match pack(b, l) {
+        Some(k) => ext.push(k, lim.max_extents),
+        None => Err(WalkError::Io(format!("unexpected extent {b}+{l}"))),
+    })?;
+    ext.finish(lim.max_extents)?;
+    Ok(ext.v)
+}
+
+/// `(disk_bytenr, disk_num_bytes)` of a packed extent of [`distinct_extents`].
+pub fn unpack(k: u64) -> (u64, u64) {
+    ((k >> 16) << 12, packed_len(k))
+}
+
 /// What removing `set` frees: the tree search ([`measure_tree`]), or the file walk
 /// ([`measure_set`]) when the tree search cannot be used at all.
 pub fn measure(set: &[PathBuf], keep: &[PathBuf], lim: &Limits) -> Result<SetMeasure, WalkError> {

@@ -34,7 +34,7 @@ use rynas_api_types::snapshots::{Retention, RetentionPreset};
 use rynas_api_types::TaskStatus;
 
 use crate::api;
-use crate::form::{In, SaveBar, area_field, form_error, number_field, save_bar_with, segmented, spinner, switch, text_field};
+use crate::form::{In, SaveBar, area_field, form_error, number_field, save_bar_with, segmented, spinner, spinner_when, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use rynas_api_types::pcagent::{PcDevice, PcMethod};
@@ -62,6 +62,20 @@ struct Pcs {
     ask_revoke: RwSignal<bool>,
     /// Bumped when Settings saved: the open drawer reads its PC again.
     saved: RwSignal<u32>,
+}
+
+/// Who starts the measure that follows a new backup on the NAS (`rynasd::pc_backup`).
+const AUTO_MEASURE_USER: &str = "rynas";
+
+/// Task `id` has not finished yet as the task panel's store knows it (its events keep it
+/// current; a task the store does not hold is taken as running: the server named it so).
+fn task_running(id: &str) -> bool {
+    tasks::tasks().list.with(|l| l.iter().find(|t| t.id == id).is_none_or(|t| !t.status.is_finished()))
+}
+
+/// A space measure of the PC runs now.
+fn measure_running(m: &PcMeasure) -> bool {
+    m.task.as_deref().is_some_and(task_running)
 }
 
 /// "measured 2 d ago": when a space figure was read (shown while backups came or went since).
@@ -539,6 +553,33 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
             agents.reload();
         },
     );
+    // the space measures the list names as running: when the task's end reaches the task
+    // store (pushed by the event stream, nothing polled), the list and an open drawer read
+    // the PC again and a toast says how it went (a failure always; a success only of a
+    // measure someone started, not of the one that follows a backup)
+    let told = StoredValue::new(std::collections::BTreeSet::<String>::new());
+    Effect::new(move |_| {
+        let running: Vec<String> = pcs.list.data.with(|l| l.iter().flatten().filter_map(|p| p.measure.task.clone()).collect());
+        if running.is_empty() {
+            return;
+        }
+        let ended: Vec<rynas_api_types::TaskInfo> = tasks::tasks().list.with(|l| l.iter().filter(|x| x.status.is_finished() && running.contains(&x.id)).cloned().collect());
+        for task in ended {
+            let mut new = false;
+            told.update_value(|s| new = s.insert(task.id.clone()));
+            if !new {
+                continue;
+            }
+            match task.status {
+                TaskStatus::Ok if task.user == AUTO_MEASURE_USER => {}
+                TaskStatus::Ok => toast(Tone::Ok, t("bk.measured").to_string()),
+                TaskStatus::Cancelled => toast(Tone::Warn, tasks::task_error(&task)),
+                _ => toast(Tone::Err, tasks::task_error(&task)),
+            }
+            pcs.list.reload();
+            pcs.saved.update(|n| *n += 1);
+        }
+    });
     let content = move || {
         let Some(list) = pcs.list.data.get() else { return ().into_any() };
         // the paired PC of a folder fed by rynas-agent (its status and progress)
@@ -604,8 +645,22 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                     }),
                     // the backups (runs), as the drawer counts them, and the subvolumes they hold
                     ui::cell("pcb.backups", "wrap", ui::two_lines(view! { <span class="tnum">{i18n::count(u64::from(p.runs))}</span> }.into_any(), (!groups.is_empty()).then_some(groups), "cell-sub small mono")),
-                    // on disk (measured), what the last backup sent below it
-                    ui::cell("pcb.col.on_disk", "num", ui::two_lines(view! { <span class="tnum">{space}</span> }.into_any(), space_sub, "cell-sub small")),
+                    // on disk (measured), below it a measure running now, how the last one
+                    // failed, or what the last backup sent (the line follows the task live)
+                    ui::cell("pcb.col.on_disk", "num wrap", {
+                        let task = p.measure.task.clone();
+                        let failed = p.measure.error.clone();
+                        let sub = move || {
+                            if task.as_deref().is_some_and(task_running) {
+                                Some(view! { <span class="cell-sub small">{tr("bkpc.measuring")}</span> }.into_any())
+                            } else if let Some(e) = failed.clone() {
+                                Some(view! { <span class="cell-sub small bk-err" title=e>{tr("bkpc.measure_failed_short")}</span> }.into_any())
+                            } else {
+                                space_sub.clone().map(|s| view! { <span class="cell-sub small">{s}</span> }.into_any())
+                            }
+                        };
+                        view! { <div class="cell-main"><span class="tnum">{space}</span>{sub}</div> }.into_any()
+                    }),
                 ];
                 cells.push(ui::cell("bkpc.col.restore", "", bm_status(&p.bare_metal)));
                 cells.push(ui::actions(view! { <button class="btn ghost sm" aria-label=label on:click=move |_| pcs.open.set(Some(dev.clone()))><Icon icon=icons::EYE size=14 />{tr("bk.open")}</button> }.into_any()));
@@ -1343,29 +1398,28 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
     let ask = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
-    // one Measure: the folder's space, then the sizes of the snapshots (unless the quota
-    // groups give them live)
-    let measuring = RwSignal::new(false);
+    // one Measure: a task on the NAS for the folder and every snapshot; it goes on when the
+    // drawer closes, the list shows it running and says how it ended (Pcs' watcher)
+    let starting = RwSignal::new(false);
+    let started = RwSignal::new(None::<String>);
     let measure_err = RwSignal::new(None::<String>);
+    let measuring = Signal::derive(move || {
+        starting.get()
+            || started.with(|id| id.as_deref().is_some_and(task_running))
+            || detail.data.with(|d| d.as_ref().is_some_and(|d| measure_running(&d.target.measure)))
+    });
     let measure = move |_| {
-        let sizes_too = detail.data.with_untracked(|d| d.as_ref().is_some_and(|d| !d.sizes_from_quota && !d.list.is_empty()));
         let base = target_url(&dev.get_value());
-        measuring.set(true);
+        starting.set(true);
         measure_err.set(None);
         spawn_local(async move {
-            let mut r = tasks::run_task(&format!("{base}/usage"), None).await;
-            if sizes_too && matches!(&r, Ok(task) if task.status == TaskStatus::Ok) {
-                r = tasks::run_task(&format!("{base}/sizes"), None).await;
-            }
-            let _ = measuring.try_set(false);
+            let r = api::start_task(&format!("{base}/usage"), None).await;
+            let _ = starting.try_set(false);
             match r {
-                Ok(task) if task.status == TaskStatus::Ok => {
-                    toast(Tone::Ok, t("bk.measured").to_string());
+                Ok(id) => {
+                    let _ = started.try_set(Some(id));
+                    // the list names the running task: its watcher follows it from there
                     pcs.list.reload();
-                    detail.reload();
-                }
-                Ok(task) => {
-                    let _ = measure_err.try_set(Some(tasks::task_error(&task)));
                 }
                 Err(e) => {
                     let _ = measure_err.try_set(Some(e.text()));
@@ -1820,6 +1874,18 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             }
             None => ui::text(t("bk.usage_none").to_string()),
         };
+        // a measure running on the NAS (also one started elsewhere or after a backup), else
+        // how the last one failed
+        let failed = p.measure.error.clone().map(|e| tf("bkpc.measure_failed", &[("when", &i18n::datetime(p.measure.error_at_ms.unwrap_or(0))), ("error", &e)]));
+        let usage_view = view! {
+            {usage_view}
+            {move || if measuring.get() {
+                Some(view! { <div class="small muted">{tr("bkpc.measuring_note")}</div> }.into_any())
+            } else {
+                failed.clone().map(|f| view! { <div class="small bk-err">{f}</div> }.into_any())
+            }}
+        }
+        .into_any();
         let free = p.free_bytes.zip(p.volume_bytes).map(|(f, v)| tf("bkpc.free_text", &[("free", &i18n::bytes(f)), ("total", &i18n::bytes(v))]));
         let alert = match p.alert_after_hours() {
             0 => t("bk.alert_off").to_string(),
@@ -1842,7 +1908,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         let rules = rules_text(&p);
         // a section like Restore and Backups: the measure and the prune buttons right on their
         // row, the long texts below over the whole width
-        let measure_btn = view! { <button class="btn ghost sm" disabled=move || measuring.get() on:click=measure>{spinner(measuring)}<Icon icon=icons::DATABASE size=14 />{tr("bk.measure")}</button> }.into_any();
+        let measure_btn = view! { <button class="btn ghost sm" disabled=move || measuring.get() on:click=measure>{spinner_when(measuring)}<Icon icon=icons::DATABASE size=14 />{tr("bk.measure")}</button> }.into_any();
         let prune_btn = (nas && has_snaps).then(|| view! { <button class="btn ghost sm" disabled=move || pruning.get() on:click=prune>{spinner(pruning)}<Icon icon=icons::TRASH_2 size=14 />{tr("bkpc.prune")}</button> }.into_any());
         let folder = view! {
             <div class="sec-head"><h3 class="mini-title">{tr("pcb.folder_rules")}</h3></div>

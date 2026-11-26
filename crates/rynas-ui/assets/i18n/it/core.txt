@@ -5308,7 +5308,7 @@ bk.measure	Misura lo spazio
 bk.measured	Spazio misurato
 bk.usage_text	{disk} su disco · {data} di dati in {backups} · misurato {ago}
 bk.on_disk	{size} su disco
-bk.usage_title	{excl} solo in questi snapshot, {shared} in comune contati una volta (misurato il {when})
+bk.usage_title	{excl} tenuti da un solo snapshot, {shared} in comune fra più snapshot e contati una volta (misurato il {when})
 bk.usage_stale	Misurato {ago}: da allora sono arrivati o spariti dei backup
 bk.usage_measured	misurato {ago}
 bk.usage_none	Non ancora misurato
@@ -5520,7 +5520,11 @@ bkpc.view	Raggruppa per
 bkpc.view.run	Esecuzione del backup
 bkpc.size_text	{ref} · {excl} propri
 bkpc.sizes_quota	Le dimensioni arrivano in tempo reale dai gruppi di quota del volume.
-bkpc.sizes_note	Dimensione: quanto lo snapshot referenzia (circa quanto trasferisce un ripristino) · quanto contiene solo lui (circa quanto libera eliminarlo da solo). La misura legge gli extent di ogni file a bassa priorità e può richiedere tempo; ogni snapshot viene misurato una volta sola.
+bkpc.sizes_note	Dimensione: i dati su disco a cui lo snapshot fa riferimento · quanto contiene solo lui (circa quanto libera eliminarlo da solo). La misura confronta ogni snapshot con i vicini a bassa priorità; la prima volta richiede tempo, poi si confrontano solo i backup nuovi, e un PC misurato una volta si aggiorna da solo a ogni nuovo backup.
+bkpc.measuring	misura in corso…
+bkpc.measuring_note	Misura in corso sul NAS a bassa priorità: puoi chiudere questa pagina, l'elenco si aggiorna quando finisce (avanzamento e log nel pannello delle attività).
+bkpc.measure_failed_short	misura non riuscita
+bkpc.measure_failed	L'ultima misura non è riuscita ({when}): {error}
 bkpc.run.lacks	Manca {names}
 bkpc.run.partial	Parziale
 bkpc.run.running	In corso

@@ -1,5 +1,5 @@
-//! PC backup on a real btrfs folder ([`HostReceive`]): quota sizes from sysfs, measured
-//! sizes, the manifest read through descriptors, the folder lock shared with the filter and
+//! PC backup on a real btrfs folder ([`HostReceive`]): quota sizes from sysfs, the space by
+//! neighbours against full walks, the manifest read through descriptors, the folder lock shared with the filter and
 //! the NAS-side delete. Needs root and a throwaway btrfs folder holding received snapshots,
 //! so it is `#[ignore]`d (it never passes in silence):
 //!
@@ -15,6 +15,8 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::Instant;
 
+use rynas_btrfs::extents::{self, Limits};
+use rynas_btrfs::pcspace::Snap;
 use rynasd::pc_backup::{HostReceive, ReceiveHost};
 
 #[test]
@@ -34,13 +36,53 @@ fn host_receive() {
     if let Some(q) = &q {
         assert!(complete.iter().all(|e| q.get(&e.name).is_some_and(|&(r, _)| r > 0)), "{q:?}");
     }
-    // measured sizes, timed
+    // the space by neighbours, timed, checked against full walks of every snapshot; a second
+    // measure with what the first found out has nothing to compare
+    let mut by: std::collections::BTreeMap<&str, Vec<&rynas_btrfs::receive::Entry>> = Default::default();
     for e in &complete {
-        let t = Instant::now();
-        let (r, x) = h.measure(&root.join(&e.name)).unwrap();
-        println!("measure {}: referenced {r}, exclusive {x} in {:?}", e.name, t.elapsed());
-        assert!(r > 0 && x <= r);
+        let (line, _) = rynas_btrfs::name::split_snapshot_name(&e.name).unwrap();
+        by.entry(line).or_default().push(e);
     }
+    let mut lines: Vec<Vec<Snap>> = by
+        .into_values()
+        .map(|mut v| {
+            v.sort_by(|a, b| rynas_btrfs::name::compare_names(&a.name, &b.name));
+            v.into_iter().map(|e| Snap { path: root.join(&e.name), uuid: e.info.as_ref().unwrap().uuid.clone().unwrap(), known: Default::default() }).collect()
+        })
+        .collect();
+    let t = Instant::now();
+    let r = h.measure_space(&lines, true, &|| false, &|l| println!("{l}"), &|| {}).unwrap();
+    println!("space measured in {:?}", t.elapsed());
+    let stop = || false;
+    let lim = Limits { max_ranges: 0, max_extents: 1 << 23, stop: &stop, progress: &|_| {} };
+    for (line, m) in lines.iter_mut().zip(&r) {
+        let sets: Vec<Vec<u64>> = line
+            .iter()
+            .map(|s| {
+                let f = rynas_btrfs::ioctl::open_dir(&s.path).unwrap();
+                let id = rynas_btrfs::ioctl::subvol_info(&f).unwrap().root_id;
+                extents::distinct_extents(&f, id, &lim).unwrap()
+            })
+            .collect();
+        let bytes = |v: &mut dyn Iterator<Item = &u64>| v.map(|&k| extents::unpack(k).1).sum::<u64>();
+        let mut count: std::collections::BTreeMap<u64, usize> = Default::default();
+        for s in &sets {
+            for &k in s {
+                *count.entry(k).or_default() += 1;
+            }
+        }
+        assert_eq!(m.union, bytes(&mut count.keys()), "{}", line[0].path.display());
+        for (i, s) in sets.iter().enumerate() {
+            let alone = bytes(&mut s.iter().filter(|k| count[k] == 1));
+            assert_eq!(m.known[i].distinct, Some(bytes(&mut s.iter())), "{}", line[i].path.display());
+            assert_eq!(m.known[i].exclusive.as_ref().map(|x| x.bytes), Some(alone), "{}", line[i].path.display());
+        }
+        for (s, k) in line.iter_mut().zip(&m.known) {
+            s.known = k.clone();
+        }
+    }
+    let again = h.measure_space(&lines, false, &|| false, &|_| {}, &|| {}).unwrap();
+    assert!(again.iter().zip(&r).all(|(a, b)| a.pairs == 0 && a.walks == 0 && a.union == b.union));
 
     // the manifest of the newest snapshot; a symlink in an older one is refused, never followed
     let newest = &complete[0].name;
