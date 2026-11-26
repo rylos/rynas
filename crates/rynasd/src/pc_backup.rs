@@ -2444,6 +2444,8 @@ pub type AgentRemoved = Box<dyn Fn(&str, u64) + Send + Sync>;
 pub type AgentMissed = Box<dyn Fn(&str) -> Option<bool> + Send + Sync>;
 /// See [`PcBackup::agent_running`].
 pub type AgentRunning = Box<dyn Fn(&str) -> Option<u64> + Send + Sync>;
+/// See [`PcBackup::agent_link`].
+pub type AgentLink = Box<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
 /// A cached scan of [`PcBackup::agent_facts`]: folder mtime, when, runs, readiness.
 type FolderFacts = (Option<std::time::SystemTime>, std::time::Instant, u32, BareMetal);
@@ -2491,6 +2493,10 @@ pub struct PcBackup {
     /// When the run the live agent of a device is sending now started (`None`: no run going),
     /// set once at start ([`crate::pc_agent::PcAgent::bind_btrfs`]).
     pub agent_running: std::sync::OnceLock<AgentRunning>,
+    /// Moves the PC paired under a device name to its new agent folder (btrfs method), for
+    /// `pcbackup.create` with `link_device`; set once at start
+    /// ([`crate::pc_agent::PcAgent::bind_btrfs`]).
+    pub agent_link: std::sync::OnceLock<AgentLink>,
     /// [`Self::agent_facts`]' last scan per device: (folder mtime, when, runs, readiness).
     facts: Mutex<BTreeMap<String, FolderFacts>>,
     /// Space measures running, by device: the task, and whether it was asked again meanwhile
@@ -2569,6 +2575,7 @@ impl PcBackup {
             on_agent_removed: std::sync::OnceLock::new(),
             agent_missed: std::sync::OnceLock::new(),
             agent_running: std::sync::OnceLock::new(),
+            agent_link: std::sync::OnceLock::new(),
             facts: Mutex::new(BTreeMap::new()),
             measuring: Mutex::new(BTreeMap::new()),
             last_views: Mutex::new(BTreeMap::new()),
@@ -4693,6 +4700,8 @@ async fn create_post(
         }
         // the agent never deletes on the NAS: retention is the NAS's
         req.retention.owner = RetentionOwner::Nas;
+    } else if req.link_device {
+        return Err(Error::invalid("device", "only a folder for rynas-agent takes a paired PC"));
     }
     check_policy(req.alert_days, &req.delete)?;
     check_more(req.alert_hours, Some(&req.retention), None)?;
@@ -4790,6 +4799,21 @@ async fn create_post(
             ctx.log(&l);
         }
         audit(&who, if req.adopt { "adopt" } else { "create" }, &req.device);
+        // the PC paired under this name moves here in the same task: a closed page does not
+        // leave the folder without its PC
+        if req.link_device {
+            let (s3, dev) = (s.clone(), req.device.clone());
+            let moved = tokio::task::spawn_blocking(move || match s3.agent_link.get() {
+                Some(link) => link(&dev),
+                None => Err("rynas-agent's side is not running".into()),
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            match moved {
+                Ok(()) => ctx.log(&format!("the paired PC {} now sends into this folder", req.device)),
+                Err(e) => ctx.partial(format!("the folder exists, but the paired PC {} was not moved to it: {e}", req.device)),
+            }
+        }
         Ok(())
     })?;
     Ok(started(id))

@@ -682,6 +682,11 @@ pub struct PcTargetCreate {
     /// empty), retention on the NAS, no SSH account needed.
     #[serde(default)]
     pub agent: bool,
+    /// With `agent`: the PC already paired under `device` (files method) moves to this folder
+    /// (btrfs method) inside the same task once the folder exists. A move that fails ends the
+    /// task partial (the folder stays).
+    #[serde(default)]
+    pub link_device: bool,
 }
 
 pub fn default_alert() -> u32 {

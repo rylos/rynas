@@ -642,7 +642,38 @@ impl PcAgent {
             let (p, _) = progress.get(device).filter(|(p, _)| now_ms().saturating_sub(p.updated_ms) < 120_000)?;
             p.run_id.strip_prefix("run-")?.parse().ok()
         }));
+        // a new agent folder takes the PC paired under its name (`pcbackup.create`)
+        let me = Arc::downgrade(self);
+        let _ = side.agent_link.set(Box::new(move |device| {
+            let a = me.upgrade().ok_or("rynas-agent's side stopped")?;
+            a.link_btrfs(device).map_err(|e| e.2)
+        }));
         let _ = self.btrfs.set(side);
+    }
+
+    /// Moves the paired PC `device` to the btrfs method, bound to its agent folder (made just
+    /// before by `pcbackup.create`): what "Save" with the btrfs method does in the PC's
+    /// settings, the other settings kept.
+    pub fn link_btrfs(&self, device: &str) -> Res<()> {
+        let folder = self.btrfs_side()?.agent_folder_id(device);
+        if folder.is_none() {
+            return Err(Error::invalid("method", "the PC's folder for rynas-agent is missing"));
+        }
+        self.edit(|r| {
+            let d = r.devices.get_mut(device).ok_or_else(|| not_found(device))?;
+            if d.revoked {
+                return Err(Error::invalid("device", "this PC's pairing was revoked"));
+            }
+            if d.settings.method != PcMethod::Btrfs {
+                d.rev += 1;
+            }
+            d.settings.method = PcMethod::Btrfs;
+            d.btrfs_folder = folder;
+            Ok(())
+        })?;
+        self.changed.notify_waiters();
+        tracing::info!(target: "rynas::audit", "PC {device} moved to its btrfs folder");
+        Ok(())
     }
 
     /// The btrfs method's side, or 409 when it is not running.

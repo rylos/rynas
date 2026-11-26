@@ -991,7 +991,10 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
         if is_agent {
             retention.owner = RetentionOwner::Nas;
         }
+        // an already paired PC moves to this folder in the same task, once the folder exists
+        let link_device = is_agent && !linked.get_untracked().is_empty();
         let body = PcTargetCreate {
+            link_device,
             device: dev.clone(),
             description: f.description.get_untracked().trim().to_string(),
             path: path.get_untracked().trim().to_string(),
@@ -1003,8 +1006,6 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
             retention,
             agent: is_agent,
         };
-        // an already paired PC moves to this folder once it exists
-        let link = if is_agent { paired.data.with_untracked(|o| o.as_ref().and_then(|o| o.devices.iter().find(|d| d.device == linked.get_untracked()).cloned())) } else { None };
         let ok = tf("bk.added", &[("device", &dev)]);
         let url = if adopt && preview.with_untracked(|p| p.as_ref().is_some_and(|p| p.permission_change.is_some())) { format!("{URL}?confirm_permission_change=true") } else { URL.to_string() };
         busy.set(true);
@@ -1020,18 +1021,14 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
                 }
             };
             match r {
+                // the folder exists but the paired PC was not moved to it (partial)
+                Ok(task) if task.status == TaskStatus::Ok && task.partial.is_some() => {
+                    let _ = busy.try_set(false);
+                    let why = task.partial.clone().unwrap_or_default();
+                    let _ = error.try_set(Some(tf("pcb.link_failed", &[("error", &why)])));
+                    pcs.list.reload();
+                }
                 Ok(task) if task.status == TaskStatus::Ok => {
-                    if let Some(d) = link {
-                        let mut s = d.settings.clone();
-                        s.method = PcMethod::Btrfs;
-                        let u = format!("/api/v1/pcbackup/devices/{}", api::encode(&d.device));
-                        if let Err(e) = api::put::<_, serde_json::Value>(&u, &s).await {
-                            let _ = busy.try_set(false);
-                            let _ = error.try_set(Some(tf("pcb.link_failed", &[("error", &e.text())])));
-                            pcs.list.reload();
-                            return;
-                        }
-                    }
                     let _ = busy.try_set(false);
                     toast(Tone::Ok, ok);
                     pcs.list.reload();
