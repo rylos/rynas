@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rynas_api_types::storage::{DiskKind, PowerState, StorageTuning};
+use rynas_api_types::storage::{DiskKind, PowerState, StandbyStats, StorageTuning};
 use rynas_hw::under;
 use rynas_module::Modules;
 use rynas_storage::domain::{TUNING_KEY, effective, parse_tuning};
@@ -92,6 +92,156 @@ pub async fn when_awake(mount: &str, deadline: tokio::time::Instant) -> Woke {
             _ = rx.changed() => {}
             _ = tokio::time::sleep_until(deadline) => return Woke::Deadline,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// spin-downs and wake-ups, from the watcher's own turns (shown in the disk details)
+// ---------------------------------------------------------------------------------------------
+
+const DAY_MS: u64 = 86_400_000;
+
+/// What the watcher saw of one disk (kernel name) in the last 24 hours.
+#[derive(Debug, Default)]
+struct Seen {
+    /// Spun down (by rynas, or found in standby when due) and no block I/O since.
+    asleep: bool,
+    downs: std::collections::VecDeque<u64>,
+    wakes: std::collections::VecDeque<u64>,
+    wake_tasks: Vec<String>,
+}
+
+impl Seen {
+    fn prune(&mut self, now_ms: u64) {
+        let old = now_ms.saturating_sub(DAY_MS);
+        for q in [&mut self.downs, &mut self.wakes] {
+            while q.front().is_some_and(|t| *t < old) {
+                q.pop_front();
+            }
+        }
+    }
+
+    /// Block I/O on the disk: a wake-up when it slept.
+    fn io(&mut self, now_ms: u64, tasks: impl FnOnce() -> Vec<String>) {
+        if std::mem::take(&mut self.asleep) {
+            self.prune(now_ms);
+            self.wakes.push_back(now_ms);
+            self.wake_tasks = tasks();
+        }
+    }
+
+    /// The disk went to standby (spun down now, or found asleep when due).
+    fn down(&mut self, now_ms: u64) {
+        if !std::mem::replace(&mut self.asleep, true) {
+            self.prune(now_ms);
+            self.downs.push_back(now_ms);
+        }
+    }
+
+    fn stats(&mut self, now_ms: u64) -> StandbyStats {
+        self.prune(now_ms);
+        StandbyStats {
+            spin_downs: self.downs.len() as u32,
+            wake_ups: self.wakes.len() as u32,
+            last_wake_ms: self.wakes.back().copied(),
+            last_wake_tasks: if self.wakes.is_empty() { Vec::new() } else { self.wake_tasks.clone() },
+        }
+    }
+}
+
+static SEEN: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Seen>>> = std::sync::LazyLock::new(Default::default);
+
+/// Spin-downs and wake-ups of `dev` (kernel name) in the last 24 hours; `None`: the watcher
+/// never spun it down nor found it asleep since rynasd started.
+pub fn stats(dev: &str) -> Option<StandbyStats> {
+    let now = rynas_tasks::now_ms();
+    SEEN.lock().ok()?.get_mut(dev).map(|s| s.stats(now))
+}
+
+/// Kinds of the rynas tasks that ran between `from_ms` and `to_ms` (a wake-up's likely cause).
+fn tasks_between(ops: &Ops, from_ms: u64, to_ms: u64) -> Vec<String> {
+    let mut v: Vec<String> = ops
+        .tasks
+        .list(200)
+        .into_iter()
+        .filter(|t| t.start_ms <= to_ms && t.end_ms.is_none_or(|e| e >= from_ms))
+        .map(|t| t.kind)
+        .collect();
+    v.sort();
+    v.dedup();
+    v.truncate(5);
+    v
+}
+
+// ---------------------------------------------------------------------------------------------
+// what keeps a volume awake (asked by the settings views, never on a timer)
+// ---------------------------------------------------------------------------------------------
+
+/// The stack of a container (compose project), else its name.
+fn app_name(c: &serde_json::Value) -> Option<String> {
+    c.pointer("/Config/Labels/com.docker.compose.project")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| crate::services::container_name(c))
+}
+
+/// `(apps writing, apps reading media)` among running containers (`docker inspect`): a
+/// writable mount on the volume outside the shared folders is the app's own data (settings,
+/// databases, caches, sync state), written all the time; a shared folder, or anything mounted
+/// read-only, is read when the app is used.
+fn classify(containers: &[serde_json::Value], on_volume: &dyn Fn(&str) -> bool, shares: &[String]) -> (Vec<String>, Vec<String>) {
+    let (mut writes, mut media) = (Vec::new(), Vec::new());
+    for c in containers {
+        let Some(name) = app_name(c) else { continue };
+        for m in c.get("Mounts").and_then(serde_json::Value::as_array).into_iter().flatten() {
+            let Some(src) = m.get("Source").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()) else { continue };
+            if !on_volume(src) {
+                continue;
+            }
+            let rw = m.get("RW").and_then(serde_json::Value::as_bool).unwrap_or(true);
+            let shared = shares.iter().any(|p| rynas_services::folders::is_within(src, p));
+            if rw && !shared { &mut writes } else { &mut media }.push(name.clone());
+        }
+    }
+    for v in [&mut writes, &mut media] {
+        v.sort();
+        v.dedup();
+    }
+    media.retain(|n| !writes.contains(n));
+    (writes, media)
+}
+
+/// What keeps the hard disks under the filesystem mounted at `mount` awake, as rynas knows
+/// it: Docker's data root, apps' own data, apps reading media; where Docker could go instead.
+/// Blocking (docker inspect, the configuration, sysfs): asked by a settings view.
+pub fn blockers(ops: &Ops, mount: &str) -> rynas_api_types::storage::StandbyBlockers {
+    let docker = Path::new("/usr/bin/docker").exists();
+    let here = |p: &str| mount_of(p).as_deref() == Some(mount);
+    let daemon = fs::read_to_string(rynas_docker::engine::DAEMON_JSON).ok();
+    let data_root = rynas_docker::engine::data_root_of(daemon.as_deref()).unwrap_or_else(|| rynas_docker::engine::DEFAULT_DATA_ROOT.into());
+    let docker_root = docker && here(&data_root);
+    let shares: Vec<String> = crate::services::from_value::<rynas_api_types::SharesConfig>(ops.config.applied(rynas_services::SHARES_KEY).ok().flatten())
+        .map(|d| d.shares.into_iter().map(|s| s.path).filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+    let list = if docker { crate::services::inspect_containers(true).unwrap_or_default() } else { Vec::new() };
+    let (apps, media_apps) = classify(&list, &here, &shares);
+    let settings: rynas_api_types::docker::DockerSettings =
+        ops.config.applied(crate::docker::DOCKER_KEY).ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let mut ssd: Vec<_> = crate::places::host_described()
+        .into_iter()
+        .filter(|p| !p.hdd && p.unavailable.is_none() && !here(if p.system { "/" } else { &p.path }))
+        .collect();
+    // a data volume first, the system volume last (as listed)
+    ssd.sort_by_key(|p| p.system);
+    let writes = docker_root || !apps.is_empty();
+    rynas_api_types::storage::StandbyBlockers {
+        docker_root,
+        apps,
+        media_apps,
+        ssd_volume: writes.then(|| ssd.first().map(|p| p.label.clone())).flatten(),
+        logs_here: docker_root
+            && settings.volume.is_some()
+            && matches!(rynas_docker::engine::log_driver_of(daemon.as_deref()).as_deref(), None | Some("local" | "json-file")),
     }
 }
 
@@ -191,9 +341,21 @@ struct Tracker {
     disks: HashMap<String, (u64, u64, Instant)>,
     /// Reads and writes of every disk at the last turn.
     io_total: Option<u64>,
+    /// Wall clock of the last turn (ms).
+    last_ms: u64,
 }
 
 impl Tracker {
+    /// The disks with block I/O since the last turn (before [`Tracker::due`] takes the new
+    /// counters in).
+    fn busy(&self, samples: &BTreeMap<String, DiskSample>) -> Vec<String> {
+        samples
+            .iter()
+            .filter(|(dev, s)| self.disks.get(*dev).is_some_and(|e| e.0 != s.reads || e.1 != s.writes))
+            .map(|(dev, _)| dev.clone())
+            .collect()
+    }
+
     /// Updates counters and returns `(dev, idle_duration)` for disks whose idle time has
     /// reached their configured timeout.
     fn due<F>(&mut self, samples: &BTreeMap<String, DiskSample>, now: Instant, mut timeout_for: F) -> Vec<(String, Duration)>
@@ -267,19 +429,28 @@ fn drive_self_test(ops: &Ops, path: &str) -> Option<bool> {
     }
 }
 
-/// Spins `dev` down when it is awake and runs no SMART self-test.
-fn spin_down(ops: &Ops, held: &[String], dev: &str, idle: Duration) {
+/// Spins `dev` down when it is awake and runs no SMART self-test. `true`: it sleeps now
+/// (spun down, or already in standby).
+fn spin_down(ops: &Ops, held: &[String], dev: &str, idle: Duration) -> bool {
     let path = format!("/dev/{dev}");
-    if !matches!(ata_check_power_mode(&path), Some(PowerState::Active | PowerState::Idle)) {
-        return;
+    match ata_check_power_mode(&path) {
+        Some(PowerState::Active | PowerState::Idle) => {}
+        Some(PowerState::Standby | PowerState::Sleep) => return true,
+        _ => return false,
     }
     if self_test_running(dev, held, || drive_self_test(ops, &path)) {
         tracing::debug!("disk standby: {path}: a SMART self-test runs, left spinning");
-        return;
+        return false;
     }
     match ata_standby_now(&path) {
-        Ok(()) => tracing::info!("disk standby: spun down {path} after {}s idle", idle.as_secs()),
-        Err(e) => tracing::debug!("disk standby: {path}: {e}"),
+        Ok(()) => {
+            tracing::info!("disk standby: spun down {path} after {}s idle", idle.as_secs());
+            true
+        }
+        Err(e) => {
+            tracing::debug!("disk standby: {path}: {e}");
+            false
+        }
     }
 }
 
@@ -310,6 +481,20 @@ fn tick(ops: &Ops, modules: &Modules, hw_root: &Path, tracker: &mut Tracker, now
         .flatten()
         .and_then(|v| parse_tuning(Some(&v)).ok())
         .unwrap_or_default();
+    // wake-ups of the disks seen asleep (the counters already read, nothing more is asked)
+    let now_ms = rynas_tasks::now_ms();
+    let busy = tracker.busy(&samples);
+    if !busy.is_empty()
+        && let Ok(mut seen) = SEEN.lock()
+    {
+        let from = tracker.last_ms;
+        for dev in busy {
+            if let Some(s) = seen.get_mut(&dev) {
+                s.io(now_ms, || tasks_between(ops, from, now_ms));
+            }
+        }
+    }
+    tracker.last_ms = now_ms;
     let module_s = modules.disk_standby_s(&ops.config);
     let due = due_disks(hw_root, tracker, &samples, now, &tuning, module_s);
     if due.is_empty() {
@@ -317,7 +502,11 @@ fn tick(ops: &Ops, modules: &Modules, hw_root: &Path, tracker: &mut Tracker, now
     }
     let held = held_disks();
     for (dev, idle) in due {
-        spin_down(ops, &held, &dev, idle);
+        if spin_down(ops, &held, &dev, idle)
+            && let Ok(mut seen) = SEEN.lock()
+        {
+            seen.entry(dev).or_default().down(now_ms);
+        }
     }
 }
 
@@ -410,6 +599,57 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].0, "sda");
         assert!(t.due(&s, t0 + Duration::from_secs(630), |_, _| Some(Duration::from_secs(300))).is_empty());
+    }
+
+    #[test]
+    fn apps_that_write_are_told_from_apps_that_read_media() {
+        let list: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[
+            {"Name":"/jellyfin-jellyfin-1","Config":{"Labels":{"com.docker.compose.project":"jellyfin"}},
+             "Mounts":[{"Source":"/ssd/docker/stacks/jellyfin/config","RW":true},
+                       {"Source":"/vol1/Movies","RW":false}]},
+            {"Name":"/syncthing","Config":{"Labels":{}},
+             "Mounts":[{"Source":"/vol1/docker/stacks/syncthing/state","RW":true},
+                       {"Source":"/vol1/Photos","RW":true}]},
+            {"Name":"/browser","Mounts":[{"Source":"/vol1","RW":false}]},
+            {"Name":"/beets","Mounts":[{"Source":"/vol1/Music","RW":true}]}
+            ]"#,
+        )
+        .unwrap();
+        let on = |p: &str| p.starts_with("/vol1");
+        let shares = vec!["/vol1/Movies".to_string(), "/vol1/Photos".into(), "/vol1/Music".into()];
+        let (writes, media) = classify(&list, &on, &shares);
+        // the sync state is written all the time; its synced share alone would not be
+        assert_eq!(writes, ["syncthing"]);
+        assert_eq!(media, ["beets", "browser", "jellyfin"]);
+    }
+
+    #[test]
+    fn wake_ups_are_counted_for_24_hours() {
+        let mut s = Seen::default();
+        let h = 3_600_000;
+        // I/O on a disk that never slept is no wake-up
+        s.io(h, || panic!("tasks asked"));
+        s.down(2 * h);
+        s.down(2 * h + 1);
+        s.io(3 * h, || vec!["backup.run".into()]);
+        s.io(3 * h + 1, || panic!("awake already"));
+        let st = s.stats(4 * h);
+        assert_eq!((st.spin_downs, st.wake_ups, st.last_wake_ms), (1, 1, Some(3 * h)));
+        assert_eq!(st.last_wake_tasks, ["backup.run"]);
+        // a day later both are gone
+        let st = s.stats(3 * h + DAY_MS + 1);
+        assert_eq!((st.spin_downs, st.wake_ups, st.last_wake_ms), (0, 0, None));
+        assert!(st.last_wake_tasks.is_empty());
+        // the counters seen since the last turn
+        let mut t = Tracker::default();
+        let mut m = BTreeMap::new();
+        m.insert("sda".to_string(), DiskSample { major: 8, minor: 0, reads: 1, writes: 1 });
+        assert!(t.busy(&m).is_empty(), "first turn: nothing to compare");
+        t.due(&m, Instant::now(), |_, _| None);
+        assert!(t.busy(&m).is_empty());
+        m.get_mut("sda").unwrap().writes = 2;
+        assert_eq!(t.busy(&m), ["sda"]);
     }
 
     #[test]

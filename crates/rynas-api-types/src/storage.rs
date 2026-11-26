@@ -243,6 +243,57 @@ pub struct DiskDetail {
     /// Recommended (per disk type) vs current settings, read-only.
     pub settings: Vec<SettingCheck>,
     pub partitions: Vec<Partition>,
+    /// Spin-downs and wake-ups of a hard disk rynas spins down, from the standby watcher
+    /// (since rynasd started, last 24 hours). `None`: not a disk rynas spins down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standby: Option<StandbyStats>,
+}
+
+/// What the standby watcher saw of one hard disk in the last 24 hours (nothing is polled for
+/// it: the watcher's own turns).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StandbyStats {
+    pub spin_downs: u32,
+    pub wake_ups: u32,
+    pub last_wake_ms: Option<u64>,
+    /// rynas task kinds that ran when the disk last woke up (`backup.run`, `docker.update`...):
+    /// a hint at the cause. Empty: none of rynas's own work.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub last_wake_tasks: Vec<String>,
+}
+
+/// More wake-ups than this in 24 hours: the disk details say what usually causes them.
+pub const FREQUENT_WAKE_UPS: u32 = 12;
+
+/// What keeps the hard disks of a volume from spinning down, as rynas knows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StandbyBlockers {
+    /// Docker's data root is on the volume: container logs and writable layers are written
+    /// all the time.
+    #[serde(default)]
+    pub docker_root: bool,
+    /// Running containers with their own data here (configuration, databases, caches, sync
+    /// state: binds outside the shared folders): they write all the time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
+    /// Running containers that mount shared folders of the volume (media): they wake the disks
+    /// when used, which is expected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_apps: Vec<String>,
+    /// A volume without hard disks that Docker can move to (the existing migration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssd_volume: Option<String>,
+    /// Container logs are kept in the data root here (log driver `local` or `json-file`) and
+    /// rynas manages the engine: sending them to the system journal is offered.
+    #[serde(default)]
+    pub logs_here: bool,
+}
+
+impl StandbyBlockers {
+    /// Something writes to the volume all the time.
+    pub fn writes(&self) -> bool {
+        self.docker_root || !self.apps.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1224,6 +1275,10 @@ pub struct VolumePlace {
     /// not offered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
+    /// On hard disks (rotational devices under it): Docker and app data placed here keep
+    /// them from spinning down.
+    #[serde(default)]
+    pub hdd: bool,
 }
 
 impl VolumePlace {
@@ -2001,6 +2056,9 @@ pub struct DiskSettingsState {
     pub effective: DiskSettings,
     pub current_scheduler: Option<String>,
     pub current_read_ahead_kb: Option<u32>,
+    /// A hard disk of a mounted volume: what keeps that volume awake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blockers: Option<StandbyBlockers>,
 }
 
 /// `PUT /api/v1/storage/volumes/{name}/settings`.
@@ -2010,6 +2068,18 @@ pub struct VolumeSettings {
     /// default (256). RAID5/6 only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stripe_cache_size: Option<u32>,
+    /// Spin-down of every hard disk of the volume (all tiers of a flexible RAID): `Some` sets
+    /// it as each disk's own value, `None` leaves the disks as they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standby: Option<VolumeStandby>,
+}
+
+/// The spin-down delay given to every hard disk of a volume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct VolumeStandby {
+    /// As [`DiskSettings::standby_s`]: seconds, 0 never, `None` removes the disks' own value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standby_s: Option<u32>,
 }
 
 /// `GET /api/v1/storage/volumes/{name}/settings`.
@@ -2024,6 +2094,19 @@ pub struct VolumeSettingsState {
     pub proposed_memory_bytes: Option<u64>,
     /// What the kernel uses now.
     pub current_stripe_cache_size: Option<u32>,
+    /// The hard disks of the volume (kernel names; spares and every tier included). Empty:
+    /// no spin-down choice (no hard disk, or the volume is not mounted).
+    #[serde(default)]
+    pub hdds: Vec<String>,
+    /// Their spin-down delay as the user sees it (staged, else applied) when they all agree.
+    #[serde(default)]
+    pub standby_s: Option<u32>,
+    /// The disks have different delays (set one by one in their own settings).
+    #[serde(default)]
+    pub standby_mixed: bool,
+    /// What keeps the volume awake (`None`: no hard disk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blockers: Option<StandbyBlockers>,
 }
 
 /// An entry of `GET /api/v1/storage/volumes/{name}/subvolumes`: the subvolumes directly

@@ -69,11 +69,10 @@ pub fn describe(places: &[(String, String)], mountinfo: &str, root: &Path) -> Ve
         .map(|(label, path)| {
             let system = label == SYSTEM_VOLUME;
             let mp = if system { "/" } else { path.as_str() };
-            let fs_type = mounts
-                .iter()
-                .rfind(|m| m.mountpoint == mp)
-                .map(|m| m.fstype.clone())
-                .unwrap_or_default();
+            let mount = mounts.iter().rfind(|m| m.mountpoint == mp);
+            let fs_type = mount.map(|m| m.fstype.clone()).unwrap_or_default();
+            // only the real machine's devices (a dry or test root has none)
+            let hdd = root == Path::new("/") && mount.is_some_and(|m| rotational(&m.source, Path::new("/sys")));
             let probe = if root == Path::new("/") {
                 PathBuf::from(mp)
             } else {
@@ -97,9 +96,45 @@ pub fn describe(places: &[(String, String)], mountinfo: &str, root: &Path) -> Ve
                 } else {
                     None
                 },
+                hdd,
             }
         })
         .collect()
+}
+
+/// The block device `source` of a mount (`/dev/md127`, `/dev/mapper/x`) sits on a rotational
+/// disk: its `slaves/` are followed down (md, dm, LVM, LUKS) to the devices at the bottom, a
+/// partition reads its disk's `queue/rotational`. Only sysfs below `sys`: no disk is touched.
+pub fn rotational(source: &str, sys: &Path) -> bool {
+    let Some(name) = std::fs::canonicalize(source).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())) else {
+        return false;
+    };
+    let class = sys.join("class/block");
+    let mut stack = vec![name];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(k) = stack.pop() {
+        if !seen.insert(k.clone()) || seen.len() > 64 {
+            continue;
+        }
+        let dev = class.join(&k);
+        let slaves: Vec<String> = std::fs::read_dir(dev.join("slaves"))
+            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        if !slaves.is_empty() {
+            stack.extend(slaves);
+            continue;
+        }
+        // a partition has no queue of its own: its disk is the folder above it
+        let queue = if dev.join("partition").exists() {
+            std::fs::canonicalize(&dev).ok().and_then(|p| p.parent().map(|p| p.join("queue/rotational")))
+        } else {
+            Some(dev.join("queue/rotational"))
+        };
+        if queue.and_then(|q| std::fs::read_to_string(q).ok()).is_some_and(|s| s.trim() == "1") {
+            return true;
+        }
+    }
+    false
 }
 
 /// [`describe`] of the running system's places.
@@ -177,6 +212,44 @@ mod tests {
         assert!(places_in(overlay).is_empty());
         assert!(!root_is_disk(overlay));
         assert_eq!(root_fstype("1 0 0:1 / / rw - ext4 /dev/sda2 rw\n").as_deref(), Some("ext4"));
+    }
+
+    #[test]
+    fn rotational_follows_the_stack_down_to_the_disks() {
+        let t = tempfile::tempdir().unwrap();
+        let r = t.path();
+        let sys = r.join("sys");
+        // md0 on sda1 (a hard disk) and nvme0n1p1 (an SSD); md1 on SSD partitions only
+        let disk = |name: &str, rota: &str| {
+            let d = sys.join("devices").join(name);
+            std::fs::create_dir_all(d.join("queue")).unwrap();
+            std::fs::write(d.join("queue/rotational"), rota).unwrap();
+            d
+        };
+        let part = |disk: &Path, name: &str| {
+            let p = disk.join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("partition"), "1").unwrap();
+            std::os::unix::fs::symlink(&p, sys.join("class/block").join(name)).unwrap();
+        };
+        std::fs::create_dir_all(sys.join("class/block")).unwrap();
+        let (sda, nvme) = (disk("sda", "1\n"), disk("nvme0n1", "0\n"));
+        part(&sda, "sda1");
+        part(&nvme, "nvme0n1p1");
+        part(&nvme, "nvme0n1p2");
+        let md = |name: &str, members: &[&str]| {
+            let d = sys.join("class/block").join(name);
+            std::fs::create_dir_all(d.join("slaves")).unwrap();
+            for m in members {
+                std::fs::write(d.join("slaves").join(m), "").unwrap();
+            }
+            let dev = r.join(name);
+            std::fs::write(&dev, "").unwrap();
+            dev.to_string_lossy().into_owned()
+        };
+        assert!(rotational(&md("md0", &["sda1", "nvme0n1p1"]), &sys));
+        assert!(!rotational(&md("md1", &["nvme0n1p2"]), &sys));
+        assert!(!rotational("/nonexistent/dev", &sys));
     }
 
     #[test]

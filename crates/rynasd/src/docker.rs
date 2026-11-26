@@ -200,7 +200,7 @@ impl Applier for DockerDomain {
         let s = settings_of(value).map_err(|e| e.message)?;
         let read = |p: &str| ctx.read(Path::new(p));
         // the pool rynas wrote last may be replaced; any other one is the administrator's
-        let previous = self.tx.borrow().address_pool.clone();
+        let previous = self.tx.borrow().clone();
         Ok(eng::engine_files(&s, Some(&previous), &read)?
             .into_iter()
             .map(|(path, content)| {
@@ -254,6 +254,13 @@ impl Applier for DockerDomain {
                 ctx.system.restart_unit("containerd.service")?;
                 ctx.system.restart_unit("docker.service")?;
             }
+        } else if old.logs_to_journal != new.logs_to_journal
+            && new.volume.is_some()
+            && ctx.system.unit_active("docker.service").unwrap_or(false)
+        {
+            // a new log driver needs the daemon restarted (live-restore keeps containers up)
+            (ctx.log)("restarting Docker for the new log driver");
+            ctx.system.restart_unit("docker.service")?;
         }
         (ctx.log)("docker: settings handed to the module");
         self.tx.send_replace(new);
@@ -1185,7 +1192,7 @@ async fn plan_engine(
     let old = s.settings();
     let plan = tokio::task::spawn_blocking(move || -> Result<EnginePlan, String> {
         let read = |p: &str| std::fs::read_to_string(rynas_docker::under(&root, p)).ok();
-        let files = eng::engine_files(&v, Some(&old.address_pool), &read)?
+        let files = eng::engine_files(&v, Some(&old), &read)?
             .into_iter()
             .map(|(p, after)| PlannedFile {
                 path: p.into(),
@@ -1205,13 +1212,17 @@ async fn plan_engine(
                     .collect()
             })
             .unwrap_or_default();
-        let restart = old.volume != v.volume && v.volume.is_some();
-        let commands = if restart {
+        let moved = old.volume != v.volume && v.volume.is_some();
+        let logs = !moved && old.logs_to_journal != v.logs_to_journal && v.volume.is_some();
+        let restart = moved || logs;
+        let commands = if moved {
             vec![
                 "systemctl daemon-reload".into(),
                 "systemctl restart containerd.service".into(),
                 "systemctl restart docker.service".into(),
             ]
+        } else if logs {
+            vec!["systemctl restart docker.service".into()]
         } else {
             Vec::new()
         };

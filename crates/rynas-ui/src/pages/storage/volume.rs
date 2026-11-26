@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_params_map;
 use rynas_api_types::storage::{
-    DiskContent, DiskSummary, FlexBlocker, FlexLayout, FlexPending, MdArray, ScrubState, ScrubStatus, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings,
+    DiskContent, DiskSummary, FlexBlocker, FlexLayout, FlexPending, MdArray, ScrubState, ScrubStatus, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings, VolumeStandby,
     VolumeSettingsState,
 };
 use rynas_api_types::{TaskInfo, TaskStarted, TaskStatus};
@@ -332,6 +332,9 @@ struct Stable {
     encrypted: bool,
     subvolumes: bool,
     raid56: bool,
+    /// Settings may be changed (managed, unlocked): the spin-down of its hard disks.
+    settings: bool,
+    tiered: bool,
     /// A btrfs data volume of several devices: the UUID its degraded-mount setting is for.
     btrfs_boot: Option<String>,
 }
@@ -360,6 +363,8 @@ pub fn VolumePage() -> impl IntoView {
                     && !v.locked
                     && !v.tiered
                     && v.md.as_ref().and_then(md_level).is_some_and(|l| matches!(l, RaidLevel::Raid5 | RaidLevel::Raid6)),
+                settings: v.managed && !v.locked,
+                tiered: v.tiered,
                 // the root filesystem is mounted by the boot loader's command line, not by rynas
                 btrfs_boot: v
                     .fs
@@ -421,7 +426,7 @@ pub fn VolumePage() -> impl IntoView {
                 {move || stable.get().map(|st| view! {
                     <div class="grid vol-detail">
                         {st.encrypted.then(|| crypt_card(&st.id, st.locked, st.managed, modal))}
-                        {st.raid56.then(|| view! { <StripeCache id=st.id.clone() /> })}
+                        {st.settings.then(|| view! { <VolSettings id=st.id.clone() raid56=st.raid56 tiered=st.tiered /> })}
                         {st.subvolumes.then(|| view! { <Subvolumes id=st.id.clone() /> })}
                         {st.btrfs_boot.clone().map(|uuid| view! { <super::btrfs::DegradedSetting uuid=uuid /> })}
                     </div>
@@ -1653,16 +1658,24 @@ fn SubvolDelete(base: String, sub: SubvolumeInfo, on_close: Callback<()>) -> imp
 
 // ------------------------------------------------------------------ md tuning
 
+/// The volume's settings: the spin-down of its hard disks (all tiers of a flexible RAID) and
+/// the md stripe cache of a RAID5/6. Nothing when neither applies.
 #[component]
-fn StripeCache(id: String) -> impl IntoView {
+fn VolSettings(id: String, raid56: bool, tiered: bool) -> impl IntoView {
     let url = StoredValue::new(vol_url(&id, "settings"));
     let state = RwSignal::new(None::<Result<VolumeSettingsState, String>>);
     let choice = RwSignal::new(String::new());
+    // "" not set, "mixed" the disks differ, else seconds
+    let standby = RwSignal::new(String::new());
+    let loaded = StoredValue::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let fill = move |st: &VolumeSettingsState| {
         let v = st.pending.clone().unwrap_or_else(|| st.applied.clone());
         choice.set(v.stripe_cache_size.map(|n| n.to_string()).unwrap_or_default());
+        let s = if st.standby_mixed { "mixed".to_string() } else { st.standby_s.map(|n| n.to_string()).unwrap_or_default() };
+        loaded.set_value(s.clone());
+        standby.set(s);
     };
     let load = move || {
         // also called after a save: the page may be gone by then
@@ -1679,7 +1692,12 @@ fn StripeCache(id: String) -> impl IntoView {
     let save = move |_| {
         busy.set(true);
         error.set(None);
-        let body = VolumeSettings { stripe_cache_size: choice.get_untracked().parse().ok() };
+        let sb = standby.get_untracked();
+        // the disks are touched only when the choice changed
+        let body = VolumeSettings {
+            stripe_cache_size: if raid56 { choice.get_untracked().parse().ok() } else { None },
+            standby: (sb != loaded.get_value() && sb != "mixed").then(|| VolumeStandby { standby_s: sb.parse().ok() }),
+        };
         spawn_local(async move {
             let r = api::put::<_, VolumeSettingsState>(&url.get_value(), &body).await;
             match r {
@@ -1697,39 +1715,52 @@ fn StripeCache(id: String) -> impl IntoView {
             let _ = busy.try_set(false);
         });
     };
-    view! {
-        <section class="card widget w-6">
-            <WidgetHead icon=icons::SETTINGS title="sto.tuning" />
-            {move || match state.get() {
-                None => view! { <Skeleton lines=3 /> }.into_any(),
-                Some(Err(code)) => view! { <ErrorBox code=code on_retry=Callback::new(move |_| load()) /> }.into_any(),
-                Some(Ok(st)) => {
-                    let prop = st.proposed_stripe_cache_size;
-                    let mem = st.proposed_memory_bytes;
-                    view! {
-                        <p class="muted small">{tr("sto.stripe_text")}</p>
-                        <dl class="kvs">
-                            {kv_row("sto.current", sig(st.current_stripe_cache_size.map(|n| n.to_string()).unwrap_or_else(|| ui::DASH.into())), "tnum")}
-                            {prop.map(|p| kv_row("sto.proposal", sig(format!("{p} · {}", mem.map(i18n::bytes).unwrap_or_default())), "tnum"))}
-                        </dl>
-                        {st.pending.is_some().then(|| view! { {ui::note(Tone::Info, icons::HISTORY, view! { {tr("sto.pending_note")} }.into_any())} })}
-                        <label class="field">
-                            <span class="field-label">{tr("sto.stripe")}</span>
-                            <select class="input" prop:value=move || choice.get() on:change=move |ev| choice.set(event_target_value(&ev))>
-                                <option value="">{tr("sto.kernel_default")}</option>
-                                // a value set elsewhere, not in the list: shown as itself
-                                {choice.get_untracked().parse::<u32>().ok().filter(|n| Some(*n) != prop && ![512u32, 1024, 2048, 4096, 8192].contains(n)).map(|n| view! { <option value=n.to_string() selected=true>{n.to_string()}</option> })}
-                                // `selected` too: the select's value is set before its options exist
-                                {prop.map(|p| view! { <option value=p.to_string() selected=choice.with_untracked(|c| *c == p.to_string())>{tf("sto.use_proposal", &[("n", &p.to_string())])}</option> })}
-                                {[512u32, 1024, 2048, 4096, 8192].into_iter().filter(|n| Some(*n) != prop).map(|n| view! { <option value=n.to_string() selected=choice.with_untracked(|c| *c == n.to_string())>{n.to_string()}</option> }).collect_view()}
-                            </select>
-                        </label>
-                        {form_error(error)}
-                        <div class="card-actions"><button class="btn primary sm" type="button" disabled=move || busy.get() on:click=save>{spinner(busy)}{tr("save")}</button></div>
-                    }
-                    .into_any()
-                }
-            }}
-        </section>
+    let card = |body: AnyView| view! { <section class="card widget w-6"><WidgetHead icon=icons::SETTINGS title="sto.vol_settings" />{body}</section> }.into_any();
+    move || match state.get() {
+        None => card(view! { <Skeleton lines=3 /> }.into_any()),
+        Some(Err(code)) => card(view! { <ErrorBox code=code on_retry=Callback::new(move |_| load()) /> }.into_any()),
+        Some(Ok(st)) if !raid56 && st.hdds.is_empty() => ().into_any(),
+        Some(Ok(st)) => {
+            let prop = st.proposed_stripe_cache_size;
+            let mem = st.proposed_memory_bytes;
+            let hdds = (!st.hdds.is_empty()).then(|| st.hdds.join(", "));
+            let blockers = st.blockers.clone();
+            card(view! {
+                {st.pending.is_some().then(|| view! { {ui::note(Tone::Info, icons::HISTORY, view! { {tr("sto.pending_note")} }.into_any())} })}
+                {hdds.map(|disks| view! {
+                    <label class="field">
+                        <span class="field-label">{tr("sto.vol_standby")}</span>
+                        <select class="input" prop:value=move || standby.get() on:change=move |ev| standby.set(event_target_value(&ev))>
+                            {st.standby_mixed.then(|| view! { <option value="mixed" selected=true>{tr("sto.standby_mixed")}</option> })}
+                            <option value="">{tr("sto.not_set")}</option>
+                            {super::disks::standby_options(standby)}
+                        </select>
+                        <span class="muted small">{tf("sto.vol_standby_hint", &[("disks", &disks)])}{tiered.then(|| view! { " "{tr("sto.flex_standby")} })}</span>
+                    </label>
+                    {blockers.map(|b| move || standby.with(|v| !v.is_empty() && v != "0").then(|| super::disks::awake_notes(b.clone())))}
+                })}
+                {raid56.then(|| view! {
+                    <p class="muted small">{tr("sto.stripe_text")}</p>
+                    <dl class="kvs">
+                        {kv_row("sto.current", sig(st.current_stripe_cache_size.map(|n| n.to_string()).unwrap_or_else(|| ui::DASH.into())), "tnum")}
+                        {prop.map(|p| kv_row("sto.proposal", sig(format!("{p} · {}", mem.map(i18n::bytes).unwrap_or_default())), "tnum"))}
+                    </dl>
+                    <label class="field">
+                        <span class="field-label">{tr("sto.stripe")}</span>
+                        <select class="input" prop:value=move || choice.get() on:change=move |ev| choice.set(event_target_value(&ev))>
+                            <option value="">{tr("sto.kernel_default")}</option>
+                            // a value set elsewhere, not in the list: shown as itself
+                            {choice.get_untracked().parse::<u32>().ok().filter(|n| Some(*n) != prop && ![512u32, 1024, 2048, 4096, 8192].contains(n)).map(|n| view! { <option value=n.to_string() selected=true>{n.to_string()}</option> })}
+                            // `selected` too: the select's value is set before its options exist
+                            {prop.map(|p| view! { <option value=p.to_string() selected=choice.with_untracked(|c| *c == p.to_string())>{tf("sto.use_proposal", &[("n", &p.to_string())])}</option> })}
+                            {[512u32, 1024, 2048, 4096, 8192].into_iter().filter(|n| Some(*n) != prop).map(|n| view! { <option value=n.to_string() selected=choice.with_untracked(|c| *c == n.to_string())>{n.to_string()}</option> }).collect_view()}
+                        </select>
+                    </label>
+                })}
+                {form_error(error)}
+                <div class="card-actions"><button class="btn primary sm" type="button" disabled=move || busy.get() on:click=save>{spinner(busy)}{tr("save")}</button></div>
+            }
+            .into_any())
+        }
     }
 }

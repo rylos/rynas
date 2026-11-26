@@ -1,6 +1,7 @@
 # Upstream: https://www.navidrome.org/docs/installation/docker/
 # Differences: image pinned, runs as PUID:PGID (the image ignores PUID/PGID variables),
-# anonymous usage statistics off (ND_ENABLEINSIGHTSCOLLECTOR defaults to true), hourly scan,
+# anonymous usage statistics off (ND_ENABLEINSIGHTSCOLLECTOR defaults to true), no periodic
+# scan (the default file watcher picks up new files, so hard disks can spin down),
 # healthcheck on /ping as the TrueNAS app does. The image has no HEALTHCHECK of its own.
 services:
   navidrome:
@@ -12,7 +13,6 @@ services:
     environment:
       TZ: "${TZ}"
       ND_ENABLEINSIGHTSCOLLECTOR: "false"
-      ND_SCANNER_SCHEDULE: "1h"
       ND_LOGLEVEL: info
     volumes:
       - ${DATA_FOLDER}:/data

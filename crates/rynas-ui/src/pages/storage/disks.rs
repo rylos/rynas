@@ -9,7 +9,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::storage::{
     CheckStatus, CheckValue, DiskDetail, DiskKind, DiskSettings, DiskSettingsState, DiskSummary, HealthAckCode, HealthAckRequest, HealthAckResult, HealthReason, IoScheduler,
-    Severity, SmartInfo,
+    Severity, SmartInfo, StandbyBlockers, StandbyStats, FREQUENT_WAKE_UPS,
 };
 
 use super::{SubNav, asleep, disk_health, kind_key, loading, power, stale_notice, use_refresh};
@@ -362,6 +362,7 @@ fn overview_tab(
                 {kv_row("sto.poh", opt(d.power_on_hours.map(|h| i18n::duration(h * 3600))), "tnum")}
                 {kv_row("sto.smart_age", opt(d.smart_age_s.map(|a| tf("sto.ago", &[("t", &i18n::duration(a))]))), "")}
                 {kv_row("sto.used_by", Signal::derive(move || used.clone()), "")}
+                {move || detail.get().and_then(Result::ok).and_then(|d| d.standby).map(standby_stats)}
             </dl>
             {move || detail.get().and_then(Result::ok).filter(|d| !d.partitions.is_empty()).map(|dd| view! {
                 <h3 class="mini-title">{tr("sto.partitions")}</h3>
@@ -500,6 +501,61 @@ fn check_label(key: &str) -> Option<&'static str> {
     }))
 }
 
+/// The spin-down choices of a select; an older, shorter delay already set stays selectable.
+pub(super) fn standby_options(cur: RwSignal<String>) -> AnyView {
+    let custom = cur.get_untracked().parse::<u32>().ok().filter(|s| !STANDBY.contains(s));
+    STANDBY
+        .iter()
+        .copied()
+        .chain(custom)
+        .map(|s| {
+            view! {
+                <option value=s.to_string() selected=cur.with_untracked(|v| *v == s.to_string())>{if s == 0 { t("sto.never").to_string() } else { i18n::duration(s as u64) }}</option>
+            }
+        })
+        .collect_view()
+        .into_any()
+}
+
+/// What keeps the disks of a volume awake (where a spin-down is set): apps writing all the
+/// time get a warning with the one action that helps; apps reading media a neutral line.
+pub(super) fn awake_notes(b: StandbyBlockers) -> AnyView {
+    let action = match (&b.ssd_volume, b.logs_here) {
+        (Some(v), _) => Some((format!("/docker?migrate={}", api::encode(v)), tf("sto.move_docker", &[("vol", &crate::places::name(v))]))),
+        (None, true) => Some(("/docker".to_string(), t("sto.logs_journal").to_string())),
+        _ => None,
+    };
+    view! {
+        {b.writes().then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
+            <span class="grow">
+                {tr("sto.awake_writes")}
+                {(!b.apps.is_empty()).then(|| view! { " "{tf("sto.awake_apps", &[("apps", &b.apps.join(", "))])} })}
+            </span>
+            {action.map(|(href, text)| view! { <a class="btn ghost sm" href=href>{text}</a> })}
+        }.into_any()))}
+        {(!b.media_apps.is_empty()).then(|| view! { <p class="muted small">{tf("sto.awake_media", &[("apps", &b.media_apps.join(", "))])}</p> })}
+    }
+    .into_any()
+}
+
+/// Spin-downs and wake-ups of the last 24 hours, with a hint when the disk wakes up often.
+fn standby_stats(s: StandbyStats) -> AnyView {
+    let mut line = tf("sto.wakes", &[("d", &s.spin_downs.to_string()), ("w", &s.wake_ups.to_string())]);
+    if let Some(ms) = s.last_wake_ms {
+        line.push_str(" · ");
+        line.push_str(&tf("sto.last_wake", &[("t", &i18n::time_hm(ms as f64))]));
+        if !s.last_wake_tasks.is_empty() {
+            let kinds: Vec<String> = s.last_wake_tasks.iter().map(|k| i18n::try_t(&format!("task.{k}")).map_or_else(|| k.clone(), str::to_string)).collect();
+            line.push_str(&format!(" ({})", kinds.join(", ")));
+        }
+    }
+    let below = view! {
+        <span class="tnum">{line}</span>
+        {(s.wake_ups > FREQUENT_WAKE_UPS).then(|| view! { <br /><span class="muted small">{tr("sto.wakes_often")}</span> })}
+    };
+    ui::kv_act("sto.standby_24h", None, None, Some(below.into_any()))
+}
+
 fn sched_of(s: &str) -> Option<IoScheduler> {
     SCHEDULERS.into_iter().find(|x| x.as_str() == s)
 }
@@ -634,7 +690,6 @@ fn SettingsTab(
                     let def_sched = def.scheduler.map(|s| s.as_str().to_string()).unwrap_or_else(|| ui::DASH.into());
                     // no read-ahead default: the kernel's own value
                     let def_ra = def.read_ahead_kb.map(|v| v.to_string()).unwrap_or_else(|| t("sto.kernel_default").to_string());
-                    let cur_standby = standby.get_untracked().parse::<u32>().ok().filter(|s| !STANDBY.contains(s));
                     view! {
                         <form class="form" on:submit=save>
                             {st.pending.is_some().then(|| view! {
@@ -664,13 +719,11 @@ fn SettingsTab(
                                 <span class="field-label">{tr("sto.standby")}</span>
                                 <select class="input" disabled=!hdd prop:value=move || standby.get() on:change=move |ev| standby.set(event_target_value(&ev))>
                                     <option value="">{tr("sto.not_set")}</option>
-                                    // an older, shorter delay already set stays selectable
-                                    {STANDBY.iter().copied().chain(cur_standby).map(|s| view! {
-                                        <option value=s.to_string() selected=standby.with_untracked(|v| *v == s.to_string())>{if s == 0 { t("sto.never").to_string() } else { i18n::duration(s as u64) }}</option>
-                                    }).collect_view()}
+                                    {standby_options(standby)}
                                 </select>
                                 <span class="muted small">{if hdd { t("sto.standby_hint") } else { t("sto.hdd_only") }}</span>
                             </label>
+                            {st.blockers.clone().map(|b| move || standby.with(|v| !v.is_empty() && v != "0").then(|| awake_notes(b.clone())))}
                             <label class="field">
                                 <span class="field-label">{tr("sto.apm")}</span>
                                 <select class="input" disabled=!hdd prop:value=move || apm.get() on:change=move |ev| apm.set(event_target_value(&ev))>

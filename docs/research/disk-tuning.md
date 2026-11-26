@@ -273,3 +273,69 @@ Concrete differences from the current rules (and the per-type udev defaults in `
     redundant arrays; create arrays with `--bitmap=internal`.
 14. Unchanged and confirmed: NVMe `none`; HDD `mq-deadline`; write cache on; ALPM
     `med_power_with_dipm` for SATA SSD; APST enabled; stripe cache proposal.
+
+## 5. Spinning down hard disks
+
+Spin-down is off by default. It is chosen per volume (Storage, the volume, Volume settings:
+"Spin down hard disks after…", applied to every hard disk of the volume, spares and every tier
+of a flexible RAID included) or per disk (the disk's Settings tab, for disks that should
+differ). rynasd's standby watcher (`rynasd::disk_standby`) counts block I/O in
+`/proc/diskstats` every 30 s and sends ATA STANDBY IMMEDIATE once a disk had none for its
+delay, also to drives that ignore their own `hdparm -S` timer.
+
+### Recommended layout
+
+- **An SSD volume** (or the system volume on SSD/NVMe) for the system, Docker (data root,
+  stacks) and the apps' own data: configuration, databases, caches, thumbnails, sync state.
+- **A hard disk volume** for the media and archives (films, music, photos, backups), mounted
+  read-only into the apps that play or index them. Nothing writes there at rest, so it spins
+  down and wakes only when someone uses it.
+
+### What keeps hard disks awake
+
+- **Docker on the volume.** The `local` and `json-file` log drivers keep each container's log
+  in the data root (`<data-root>/containers/<id>/local-logs/container.log`, seen on a test NAS),
+  so every log line is a write; writable container layers and named volumes live there too.
+  Moving Docker to an SSD volume (Docker page, Move data) is the fix. Without an SSD,
+  "Container logs to the system journal" (Docker settings) sets `log-driver: journald`: the
+  journal is on the system disk, and `docker logs` still works (journald, json-file and local
+  are the drivers that read back without the dual-logging cache:
+  https://docs.docker.com/engine/logging/dual-logging/). It applies to containers created
+  after the change.
+- **Apps' own data on the volume**: a database or a sync tool's state written every few
+  seconds (a Syncthing stack kept there woke a test NAS every few minutes).
+- **Periodic scans** of media apps: they read the whole library on a timer. Watching for
+  changes (inotify) costs no disk access; scanning does. Navidrome's catalogue entry relies on
+  its file watcher (no `ND_SCANNER_SCHEDULE`); Jellyfin scans every 12 hours by default: turn
+  on real-time monitoring and move the Scan Media Library task to a fixed daily hour; Immich
+  scans external libraries once a day; Syncthing rescans each folder hourly next to its
+  watcher.
+- **Computers browsing the shares** (SMB clients list folders and read thumbnails),
+  indexing, and backups to the volume: expected, they wake the disks when they run.
+- `smartd` without `-n standby` (Debian's default configuration has it), and mounts with
+  `atime` (rynas mounts its volumes `noatime`, so reads write nothing).
+
+What rynas itself does at rest is listed in `docs/phase1/tasks.md`, "A NAS at rest": its
+periodic jobs skip volumes whose disks sleep.
+
+The volume and disk settings show, where a spin-down is chosen, what rynas sees writing to the
+volume (Docker's data root, running containers with writable folders outside the shared
+folders) with the one action that helps, and the apps that only read media there (neutral).
+The disk details count spin-downs and wake-ups of the last 24 hours with the time of the last
+wake-up and the rynas tasks that ran then (from the watcher's own turns: nothing extra is
+polled); above 12 wake-ups a day they name the usual causes, since each spin-up is a
+start/stop cycle.
+
+### Flexible RAID
+
+A flexible RAID volume is md arrays (tiers) joined by one LVM logical volume (`lvcreate -l
+100%FREE`: linear, tier 1 first) with btrfs on top. At rest it writes nothing: btrfs commits a
+transaction only when something is dirty, the md write-intent bitmap is updated only around
+writes, and linear LVM has no background work. So the volume spins down like any other.
+
+On access, a read wakes the disks that hold the data: btrfs allocates new chunks from the
+start of its device, so data fills tier 1 first, and tier 1 spans every disk of the volume
+(it is cut at the size of the smallest disk). btrfs metadata is allocated early, hence on
+tier 1 too. In practice any access spins up every disk; a file stored on a higher tier,
+read while the metadata is still in memory, wakes only the disks of that tier. Writes always
+wake every member of the tier they land on (mirror or parity).

@@ -282,6 +282,11 @@ pub struct DockerSettings {
     /// may change them, the owners kept as the apps expect; default off.
     #[serde(default)]
     pub files_app_data: bool,
+    /// Container logs go to the system journal (`log-driver: journald` in `daemon.json`)
+    /// instead of the data root, so a data root on hard disks is not written for every log
+    /// line; default off. Containers use it once they are created again.
+    #[serde(default)]
+    pub logs_to_journal: bool,
 }
 
 fn default_keep() -> u32 {
@@ -400,6 +405,7 @@ impl Default for DockerSettings {
             apps_online_catalog: true,
             apps_catalog_url: None,
             files_app_data: false,
+            logs_to_journal: false,
         }
     }
 }

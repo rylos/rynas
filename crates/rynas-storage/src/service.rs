@@ -598,6 +598,34 @@ impl Storage {
             .any(|d| asleep(self.power_of(d)))
     }
 
+    /// The rotational disks under the filesystem mounted at `mountpoint` (every member of a
+    /// multi-device btrfs, every tier of a flexible RAID, hot spares included), kernel names.
+    /// Reads lsblk (sysfs) and mountinfo only. Empty when the mount is unknown.
+    pub fn mount_hdds(&self, mountpoint: &str) -> Vec<String> {
+        let mounts = self.mounts();
+        let Some(m) = mounts.iter().rev().find(|m| m.mountpoint == mountpoint) else {
+            return Vec::new();
+        };
+        let Ok(g) = self.graph() else { return Vec::new() };
+        let Some(src) = g.find(&m.source) else {
+            return Vec::new();
+        };
+        let mut devs = vec![src.kname.clone()];
+        if src.fstype.as_deref() == Some("btrfs")
+            && let Some(u) = &src.uuid
+        {
+            devs.extend(g.with_fs_uuid(u).into_iter().map(|d| d.kname.clone()));
+        }
+        let mut out: Vec<String> = devs
+            .iter()
+            .flat_map(|d| g.disks_under(d))
+            .filter(|k| g.get(k).is_some_and(|d| d.rotational))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// The disks holding the data of `kname`: [`BlockGraph::disks_under`] without the hot
     /// spares and failed members of the md arrays on the way (sysfs member state): they hold
     /// nothing anyone reads and may sleep for good, which would keep the volume "asleep".
@@ -707,6 +735,7 @@ impl Storage {
             partitions: inventory::partitions(&g, name),
             smart: smart.map(|e| e.data.info),
             summary,
+            standby: None,
         })
     }
 
@@ -1389,6 +1418,9 @@ mod tests {
     fn a_mount_sleeps_when_a_disk_under_it_does() {
         // /vol1: btrfs on LUKS on md2 (sda1, sdb1, sdc1)
         let s = Storage::new(Arc::new(host()));
+        assert_eq!(s.mount_hdds("/vol1"), ["sda", "sdb", "sdc"]);
+        assert!(s.mount_hdds("/").is_empty(), "NVMe only");
+        assert!(s.mount_hdds("/nowhere").is_empty());
         assert!(!s.mount_asleep("/vol1"));
         assert!(!s.mount_asleep("/"), "NVMe never sleeps");
         assert!(!s.mount_asleep("/nowhere"));

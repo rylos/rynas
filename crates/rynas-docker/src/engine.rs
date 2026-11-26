@@ -138,6 +138,39 @@ pub fn merge_daemon_json(
     Ok(out)
 }
 
+/// `log-opts` the journald driver accepts: dockerd refuses to start with any other one (a
+/// `max-size` of the `local` or `json-file` driver).
+const JOURNALD_OPTS: &[&str] = &["tag", "labels", "labels-regex", "env", "env-regex", "mode", "max-buffer-size"];
+
+/// A merged `daemon.json` with the container logs in the system journal (`journal`), so the
+/// data root is not written for every log line; back to `local` only when rynas had set the
+/// journal (`was_journal`) and the file still says so, else the file's own choice stays.
+pub fn log_driver(daemon_json: &str, journal: bool, was_journal: bool) -> String {
+    let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(daemon_json) else {
+        return daemon_json.to_string();
+    };
+    let is_journal = map.get("log-driver").and_then(Value::as_str) == Some("journald");
+    if journal {
+        map.insert("log-driver".into(), Value::String("journald".into()));
+        if let Some(Value::Object(o)) = map.get_mut("log-opts") {
+            o.retain(|k, _| JOURNALD_OPTS.contains(&k.as_str()));
+        }
+    } else if was_journal && is_journal {
+        map.insert("log-driver".into(), Value::String("local".into()));
+    } else {
+        return daemon_json.to_string();
+    }
+    let mut out = serde_json::to_string_pretty(&Value::Object(map)).unwrap_or_else(|_| daemon_json.to_string());
+    out.push('\n');
+    out
+}
+
+/// The log driver a `daemon.json` text sets (`None`: Docker's default, `json-file`).
+pub fn log_driver_of(daemon_json: Option<&str>) -> Option<String> {
+    let v: Value = serde_json::from_str(daemon_json?.trim()).ok()?;
+    v.get("log-driver")?.as_str().map(str::to_string)
+}
+
 /// The data-root a `daemon.json` text sets (`None`: the default).
 pub fn data_root_of(daemon_json: Option<&str>) -> Option<String> {
     let v: Value = serde_json::from_str(daemon_json?.trim()).ok()?;
@@ -223,18 +256,22 @@ pub fn dropin(paths: &[String]) -> String {
 /// volume is chosen. `read` gives the current content of a system file.
 pub fn engine_files(
     settings: &DockerSettings,
-    previous: Option<&AddressPool>,
+    previous: Option<&DockerSettings>,
     read: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<(&'static str, String)>, String> {
     let Some(label) = settings.volume.as_deref() else {
         return Ok(Vec::new());
     };
     let l = Layout::of_label(label);
+    let daemon = merge_daemon_json(
+        read(DAEMON_JSON).as_deref(),
+        &l,
+        &settings.address_pool,
+        previous.map(|p| &p.address_pool),
+    )?;
+    let was_journal = previous.is_some_and(|p| p.logs_to_journal);
     Ok(vec![
-        (
-            DAEMON_JSON,
-            merge_daemon_json(read(DAEMON_JSON).as_deref(), &l, &settings.address_pool, previous)?,
-        ),
+        (DAEMON_JSON, log_driver(&daemon, settings.logs_to_journal, was_journal)),
         (
             CONTAINERD_TOML,
             merge_containerd_toml(read(CONTAINERD_TOML).as_deref(), &l.containerd()),
@@ -426,6 +463,33 @@ mod tests {
                 .contains("RequiresMountsFor=/vol1/docker/containerd\n")
         );
         assert!(engine_files(&s, None, &|p| (p == DAEMON_JSON).then(|| "nope".to_string())).is_err());
+    }
+
+    #[test]
+    fn container_logs_go_to_the_journal_and_back() {
+        let mut s = DockerSettings { volume: Some("vol1".into()), ..Default::default() };
+        let admin = r#"{"log-driver":"local","log-opts":{"max-size":"10m","tag":"{{.Name}}"}}"#;
+        let read = |p: &str| (p == DAEMON_JSON).then(|| admin.to_string());
+        // off: the file's own driver stays
+        let v: Value = serde_json::from_str(&engine_files(&s, None, &read).unwrap()[0].1).unwrap();
+        assert_eq!(v["log-driver"], "local");
+        s.logs_to_journal = true;
+        let on = engine_files(&s, None, &read).unwrap()[0].1.clone();
+        let v: Value = serde_json::from_str(&on).unwrap();
+        assert_eq!(v["log-driver"], "journald");
+        // options of other drivers stop dockerd: dropped, journald's own kept
+        assert_eq!(v["log-opts"], serde_json::json!({"tag": "{{.Name}}"}));
+        // turned off again: back to `local`, only because rynas had set the journal
+        let prev = s.clone();
+        s.logs_to_journal = false;
+        let back = engine_files(&s, Some(&prev), &|p| (p == DAEMON_JSON).then(|| on.clone())).unwrap();
+        let v: Value = serde_json::from_str(&back[0].1).unwrap();
+        assert_eq!(v["log-driver"], "local");
+        // an administrator's own journald stays
+        let v: Value = serde_json::from_str(&engine_files(&s, None, &|p| (p == DAEMON_JSON).then(|| on.clone())).unwrap()[0].1).unwrap();
+        assert_eq!(v["log-driver"], "journald");
+        assert_eq!(log_driver_of(Some(&on)).as_deref(), Some("journald"));
+        assert_eq!(log_driver_of(Some("{}")), None);
     }
 
     #[test]

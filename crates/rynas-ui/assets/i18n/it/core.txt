@@ -1431,7 +1431,6 @@ sto.sub_compress	Compressione (zstd)
 sto.sub_compress_hint	Disattivala per dati già compressi: video, foto, backup, immagini di VM.
 sto.sub_delete	Elimina {name}
 sto.sub_delete_text	Il sottovolume e tutti i file che contiene vengono eliminati. L'operazione non può essere annullata.
-sto.tuning	Ottimizzazione RAID
 sto.stripe_text	Una stripe cache più grande accelera scritture e ricostruzioni RAID 5/6 a spese della memoria.
 sto.bt.title	Dispositivi
 sto.bt.profiles	Profili
@@ -6790,3 +6789,22 @@ sp.rev.received_unknown_owner	Ricevuti, proprietario sconosciuto
 sp.journal_admin	Limite del registro impostato dall'amministratore: {size} (rynas non ne imposta).
 sp.journal_in_force	Limite del registro in vigore: {size}.
 sp.journal_default	Limite del registro: il predefinito del sistema (10 % del suo filesystem, al massimo 4 GiB) finché queste impostazioni non vengono salvate.
+sto.vol_settings	Impostazioni del volume
+sto.vol_standby	Ferma i dischi rigidi dopo
+sto.vol_standby_hint	Vale per ogni disco rigido di questo volume: {disks}.
+sto.flex_standby	Il volume si ferma quando nessuno lo legge o lo scrive; ogni accesso di solito risveglia tutti i suoi dischi, perché la prima fascia li comprende tutti e contiene i metadati del file system.
+sto.standby_mixed	Diverso per ogni disco
+sto.awake_writes	Docker scrive qui di continuo (log dei container, dati delle app): questi dischi non si fermeranno.
+sto.awake_apps	App che scrivono qui: {apps}.
+sto.move_docker	Sposta Docker su {vol}
+sto.logs_journal	Manda i log dei container al journal di sistema
+sto.awake_media	{apps} leggono file multimediali qui quando le usi: i dischi si risvegliano per questo, poi si fermano di nuovo.
+sto.standby_24h	Arresti (24 h)
+sto.wakes	Fermato: {d} · risvegliato: {w}
+sto.last_wake	ultimo alle {t}
+sto.wakes_often	Si risveglia spesso, e ogni avvio consuma il disco: di solito per Docker o dati delle app sul suo volume, scansioni pianificate delle librerie o computer che sfogliano le sue cartelle condivise.
+dk.set.journal	Log dei container nel journal di sistema
+dk.set.journal_help	I log non scrivono più nella cartella di Docker, così i suoi dischi possono riposare. I container passano al journal quando vengono ricreati (prossimo aggiornamento o redeploy).
+dk.ssd_hint	Consigliato: un volume su SSD, così i dischi rigidi possono fermarsi.
+dk.plan.logs_title	Cambiare dove vanno i log dei container?
+dk.plan.logs_text	Applicando si modifica questo file e Docker riparte. Ogni container usa la nuova impostazione quando viene ricreato.

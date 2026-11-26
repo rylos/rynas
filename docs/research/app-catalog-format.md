@@ -277,7 +277,9 @@ Full digests are in each `apps/<id>/compose.yaml`.
   https://adguard-dns.io/kb/adguard-home/configuration/ ·
   https://github.com/AdguardTeam/AdGuardHome/blob/master/docker/build.Dockerfile
 - **Navidrome.** `user:` (the image ignores PUID/PGID, which Umbrel sets to no effect); `/data`,
-  `/music:ro`; **`ND_ENABLEINSIGHTSCOLLECTOR` defaults to true** → off; hourly scan (Runtipi
+  `/music:ro`; **`ND_ENABLEINSIGHTSCOLLECTOR` defaults to true** → off; no periodic scan since
+  2026-11-26 (`Scanner.Schedule` defaults to 0, the file watcher picks up new files and lets hard
+  disks spin down; an hourly scan woke them every hour; Runtipi
   still uses the old `ND_SCANSCHEDULE` name); healthcheck `/ping` (TrueNAS). Subsonic clients
   (`/rest`) and shares (`/share`) bypass SSO; external auth (`ND_EXTAUTH_TRUSTEDSOURCES`, the
   new name of `ReverseProxyWhitelist`) left off. Sources:

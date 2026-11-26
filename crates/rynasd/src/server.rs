@@ -473,9 +473,15 @@ async fn storage_disk(
     if !valid_disk_name(&name) {
         return Err(Error::bad_request("invalid disk name"));
     }
-    blocking_storage(&st, move |s| s.disk(&name))
-        .await
-        .map(Json)
+    blocking_storage(&st, move |s| {
+        s.disk(&name).map(|mut d| {
+            // what the standby watcher saw of it (nothing is read for this)
+            d.standby = crate::disk_standby::stats(&name);
+            d
+        })
+    })
+    .await
+    .map(Json)
 }
 
 async fn storage_arrays(

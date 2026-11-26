@@ -1568,7 +1568,6 @@ sto.sub_compress	压缩（zstd）
 sto.sub_compress_hint	视频、照片、备份和虚拟机镜像等已压缩的数据可关闭此设置。
 sto.sub_delete	删除 {name}
 sto.sub_delete_text	将删除子卷及其中的全部文件。此操作无法撤销。
-sto.tuning	RAID 性能设置
 sto.stripe_text	增大条带缓存可提高 RAID 5/6 的写入和重建速度，但会占用更多内存。
 sto.bt.title	设备
 sto.bt.profiles	冗余模式
@@ -6746,3 +6745,22 @@ apps.ph.left_out	不在应用中
 apps.ph.include	在应用中显示
 apps.ph.leave_out	排除
 apps.ph.confirm	确认此账户
+sto.vol_settings	存储卷设置
+sto.vol_standby	硬盘空闲后停转
+sto.vol_standby_hint	适用于此存储卷的每块硬盘：{disks}。
+sto.flex_standby	没有任何读写时，存储卷会停转；任何访问通常都会唤醒其所有硬盘，因为第一层覆盖每块硬盘，并保存文件系统的元数据。
+sto.standby_mixed	各硬盘设置不同
+sto.awake_writes	Docker 一直在这里写入（容器日志、应用数据）：这些硬盘不会停转。
+sto.awake_apps	在这里写入的应用：{apps}。
+sto.move_docker	将 Docker 移到 {vol}
+sto.logs_journal	将容器日志发送到系统日志
+sto.awake_media	{apps} 在使用时会读取这里的媒体文件：硬盘会为此唤醒，之后再次停转。
+sto.standby_24h	停转（24 小时）
+sto.wakes	停转：{d} · 唤醒：{w}
+sto.last_wake	最近一次 {t}
+sto.wakes_often	唤醒频繁，每次启动都会磨损硬盘：通常是因为其存储卷上的 Docker 或应用数据、定时的媒体库扫描，或电脑在浏览其共享文件夹。
+dk.set.journal	容器日志写入系统日志
+dk.set.journal_help	日志不再写入 Docker 的文件夹，其硬盘可以休息。容器重新创建时（下次更新或重新部署）才会切换。
+dk.ssd_hint	建议：使用 SSD 上的存储卷，这样硬盘可以停转。
+dk.plan.logs_title	更改容器日志的去向？
+dk.plan.logs_text	应用后会修改此文件并重启 Docker。每个容器在重新创建后使用新设置。

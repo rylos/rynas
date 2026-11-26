@@ -243,6 +243,12 @@ Drift detection covers the four files. A key never applied imports `volume` from
 `files_app_data` (default false) shows the apps' data folders to administrators in the file
 manager (§5.9); it changes nothing on the system and needs no restart.
 
+`logs_to_journal` (default false) sets `log-driver: journald` in `daemon.json` (log options
+journald refuses, such as `max-size`, are dropped) and restarts Docker; turned off again it
+puts back `local` only when the file still says `journald`. The `local` and `json-file`
+drivers write every log line into the data root, which keeps hard disks under it awake
+(`docs/research/disk-tuning.md` §5). Containers use the new driver once they are created again.
+
 Ranges (400 `invalid_value` with the field):
 - `keep_snapshots` 1-50, `data_root_full_pct` 50-99, `crash_restarts` 2-100,
   `crash_window_min` 1-120;

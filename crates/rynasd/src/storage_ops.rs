@@ -26,7 +26,7 @@ use rynas_api_types::storage::{
     GrowPlanRequest, HealthAckRequest, HealthAckResult, MdArray, RecoveryKey, ReplacePlanRequest, ScrubAction, ScrubPlanRequest,
     StoragePlan, StorageTuning, StorageVolumes, SubvolumeCreateRequest, SubvolumeInfo,
     SubvolumeSettings, UnlockRequest, VolumeCompleteRequest, VolumeCreateRequest, VolumeGrowRequest, VolumeRecord,
-    VolumeReplaceRequest, VolumeScrubRequest, VolumeSettings, VolumeSettingsState,
+    VolumeReplaceRequest, VolumeScrubRequest, VolumeSettings, VolumeSettingsState, DiskKind, StandbyBlockers,
 };
 use rynas_api_types::{SharesConfig, TaskStarted, error_codes};
 use rynas_config::Config;
@@ -1513,10 +1513,36 @@ fn mem_total() -> u64 {
         .unwrap_or(0)
 }
 
+/// The hard disks of a volume and what keeps it awake (`hdds`: kernel name and serial).
+struct VolumeHdds {
+    hdds: Vec<(String, String)>,
+    blockers: Option<StandbyBlockers>,
+}
+
+/// [`VolumeHdds`] of a mounted volume (blocking: lsblk, docker inspect, sysfs). Nothing when
+/// it is not mounted; no blockers in a dry run (they read the machine).
+fn volume_hdds(s: &StorageOps, inv: &Inventory, v: &VolumeRef) -> VolumeHdds {
+    let Some(mnt) = v.mounted().and_then(|f| f.mountpoint.clone()) else {
+        return VolumeHdds { hdds: Vec::new(), blockers: None };
+    };
+    let hdds: Vec<(String, String)> = s
+        .storage
+        .mount_hdds(&mnt)
+        .into_iter()
+        .map(|k| {
+            let serial = inv.disks.iter().find(|d| d.name == k).map(|d| d.serial.clone()).unwrap_or_default();
+            (k, serial)
+        })
+        .collect();
+    let blockers = (!hdds.is_empty() && !s.dry).then(|| crate::disk_standby::blockers(&s.ops, &mnt));
+    VolumeHdds { hdds, blockers }
+}
+
 fn volume_settings_state(
     c: &Config,
     user: &str,
     v: &VolumeRef,
+    h: &VolumeHdds,
 ) -> Result<VolumeSettingsState, String> {
     let md = v.md.as_ref();
     let uuid = md.and_then(|a| a.uuid.clone());
@@ -1528,11 +1554,23 @@ fn volume_settings_state(
                 .find(|a| &a.md_uuid == u)
                 .map(|a| a.stripe_cache_size)
         }),
+        standby: None,
     };
     let applied = pick(&cur);
     let pending = (staged && pick(&eff) != applied).then(|| pick(&eff));
     let proposal = md.and_then(|a| propose_stripe_cache(&a.level, a.raid_disks, mem_total()));
+    // each disk's delay as its own settings show it (staged, else applied)
+    let delays: Vec<Option<u32>> = h
+        .hdds
+        .iter()
+        .map(|(_, serial)| effective(DiskKind::Hdd, eff.disks.iter().find(|o| &o.serial == serial).map(|o| &o.settings)).standby_s)
+        .collect();
+    let standby_mixed = delays.windows(2).any(|w| w[0] != w[1]);
     Ok(VolumeSettingsState {
+        hdds: h.hdds.iter().map(|(k, _)| k.clone()).collect(),
+        standby_s: if standby_mixed { None } else { delays.first().copied().flatten() },
+        standby_mixed,
+        blockers: h.blockers.clone(),
         volume: v.label.clone(),
         applied,
         pending,
@@ -1552,13 +1590,16 @@ async fn volume_settings_get(
     UrlPath(name): UrlPath<String>,
 ) -> Res<Json<VolumeSettingsState>> {
     let (s, user) = (sto(&st)?, user(&h)?);
-    let (_, v) = volume(&s, &name, false).await?;
+    let (inv, v) = volume(&s, &name, false).await?;
     let c = s.config().clone();
-    tokio::task::spawn_blocking(move || volume_settings_state(&c, &user, &v))
-        .await
-        .map_err(Error::internal)?
-        .map(Json)
-        .map_err(Error::internal)
+    tokio::task::spawn_blocking(move || {
+        let h = volume_hdds(&s, &inv, &v);
+        volume_settings_state(&c, &user, &v, &h)
+    })
+    .await
+    .map_err(Error::internal)?
+    .map(Json)
+    .map_err(Error::internal)
 }
 
 async fn volume_settings_put(
@@ -1569,44 +1610,88 @@ async fn volume_settings_put(
 ) -> Res<Json<VolumeSettingsState>> {
     let (s, user) = (sto(&st)?, user(&h)?);
     let req = json_body(body)?;
-    let (_, v) = volume(&s, &name, false).await?;
-    let md =
-        v.md.clone()
-            .ok_or_else(|| conflict(format!("volume {name} has no md array")))?;
-    if req.stripe_cache_size.is_some() && !matches!(md.level.as_str(), "raid4" | "raid5" | "raid6")
+    let (inv, v) = volume(&s, &name, false).await?;
+    // the md tuning of one array (a flexible RAID has none): stripe_cache_size for RAID4/5/6
+    let md = v.md.clone();
+    if req.stripe_cache_size.is_some() && !md.as_ref().is_some_and(|m| matches!(m.level.as_str(), "raid4" | "raid5" | "raid6"))
     {
         return Err(Error::invalid(
             "stripe_cache_size",
             "stripe_cache_size exists for RAID4/5/6 only",
         ));
     }
-    let uuid = md
-        .uuid
-        .clone()
-        .ok_or_else(|| Error::internal("the array has no UUID"))?;
+    let uuid = match &md {
+        Some(m) => Some(m.uuid.clone().ok_or_else(|| Error::internal("the array has no UUID"))?),
+        None => None,
+    };
     let c = s.config().clone();
     tokio::task::spawn_blocking(move || -> Res<VolumeSettingsState> {
+        let h = volume_hdds(&s, &inv, &v);
         let (mut doc, _, _) = tuning_for(&c, &user).map_err(Error::internal)?;
-        doc.arrays.retain(|a| a.md_uuid != uuid);
-        if let Some(n) = req.stripe_cache_size {
-            doc.arrays.push(ArrayTuning {
-                md_uuid: uuid,
-                stripe_cache_size: n,
-            });
+        if let Some(uuid) = uuid {
+            doc.arrays.retain(|a| a.md_uuid != uuid);
+            if let Some(n) = req.stripe_cache_size {
+                doc.arrays.push(ArrayTuning {
+                    md_uuid: uuid,
+                    stripe_cache_size: n,
+                });
+            }
+        }
+        if let Some(sb) = req.standby {
+            if h.hdds.is_empty() {
+                return Err(conflict(format!("volume {name} has no hard disk to spin down (or it is not mounted)")));
+            }
+            if let Some((k, _)) = h.hdds.iter().find(|(_, serial)| !valid_serial(serial)) {
+                return Err(bad(
+                    error_codes::INVALID_VALUE,
+                    format!("{k} has no serial number usable in a udev rule: its spin-down cannot be set"),
+                ));
+            }
+            set_standby(&mut doc, h.hdds.iter().map(|(_, s)| s.as_str()), sb.standby_s);
         }
         let value = serde_json::to_value(doc).map_err(Error::internal)?;
         c.stage(&user, TUNING_KEY, Some(value))?;
-        volume_settings_state(&c, &user, &v).map_err(Error::internal)
+        volume_settings_state(&c, &user, &v, &h).map_err(Error::internal)
     })
     .await
     .map_err(Error::internal)?
     .map(Json)
 }
 
+/// Sets the spin-down delay of the disks `serials` as their own value (their other settings
+/// stay; an override left empty goes).
+fn set_standby<'a>(doc: &mut StorageTuning, serials: impl IntoIterator<Item = &'a str>, standby_s: Option<u32>) {
+    for serial in serials {
+        match doc.disks.iter_mut().find(|o| o.serial == serial) {
+            Some(o) => o.settings.standby_s = standby_s,
+            None if standby_s.is_some() => doc.disks.push(DiskOverride {
+                serial: serial.to_string(),
+                settings: DiskSettings { standby_s, ..Default::default() },
+            }),
+            None => {}
+        }
+    }
+    doc.disks.retain(|o| !o.settings.is_empty());
+}
+
+/// What keeps the volume holding the hard disk `d` awake (`None`: no hard disk of a mounted
+/// volume, or a dry run). Blocking.
+fn disk_blockers(s: &StorageOps, d: &DiskSummary) -> Option<StandbyBlockers> {
+    if s.dry || d.kind != DiskKind::Hdd {
+        return None;
+    }
+    crate::places::host_places()
+        .into_iter()
+        .map(|(label, path)| if label == rynas_api_types::storage::SYSTEM_VOLUME { "/".to_string() } else { path })
+        .find(|m| s.storage.mount_hdds(m).contains(&d.name))
+        .map(|m| crate::disk_standby::blockers(&s.ops, &m))
+}
+
 fn disk_settings_state(
     c: &Config,
     user: &str,
     d: &DiskSummary,
+    blockers: Option<StandbyBlockers>,
 ) -> Result<DiskSettingsState, String> {
     let (eff, cur, staged) = tuning_for(c, user)?;
     let find = |t: &StorageTuning| {
@@ -1636,6 +1721,7 @@ fn disk_settings_state(
         current_read_ahead_kb: std::fs::read_to_string(format!("{q}/read_ahead_kb"))
             .ok()
             .and_then(|s| s.trim().parse().ok()),
+        blockers,
     })
 }
 
@@ -1657,11 +1743,14 @@ async fn disk_settings_get(
     let (s, user) = (sto(&st)?, user(&h)?);
     let d = disk_of(&s, &name).await?;
     let c = s.config().clone();
-    tokio::task::spawn_blocking(move || disk_settings_state(&c, &user, &d))
-        .await
-        .map_err(Error::internal)?
-        .map(Json)
-        .map_err(Error::internal)
+    tokio::task::spawn_blocking(move || {
+        let b = disk_blockers(&s, &d);
+        disk_settings_state(&c, &user, &d, b)
+    })
+    .await
+    .map_err(Error::internal)?
+    .map(Json)
+    .map_err(Error::internal)
 }
 
 async fn disk_settings_put(
@@ -1705,7 +1794,8 @@ async fn disk_settings_put(
         }
         let value = serde_json::to_value(doc).map_err(Error::internal)?;
         c.stage(&user, TUNING_KEY, Some(value))?;
-        disk_settings_state(&c, &user, &d).map_err(Error::internal)
+        let b = disk_blockers(&s, &d);
+        disk_settings_state(&c, &user, &d, b).map_err(Error::internal)
     })
     .await
     .map_err(Error::internal)?

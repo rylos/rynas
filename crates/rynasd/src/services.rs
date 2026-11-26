@@ -1287,7 +1287,7 @@ fn all_shares(s: &Services, owner: &str) -> Res<Vec<Share>> {
 /// `docker inspect` objects of the containers (`running`: only the running ones); empty when
 /// Docker is not installed. One batch, else one by one: a container that went away between
 /// the listing and the inspection is skipped, never the whole answer.
-fn inspect_containers(running: bool) -> Result<Vec<Value>, String> {
+pub(crate) fn inspect_containers(running: bool) -> Result<Vec<Value>, String> {
     if !std::path::Path::new("/usr/bin/docker").exists() {
         return Ok(Vec::new());
     }
@@ -1337,7 +1337,7 @@ fn containers_using(path: &str, running: bool) -> Vec<String> {
     users_in_inspect(&list, path)
 }
 
-fn container_name(c: &Value) -> Option<String> {
+pub(crate) fn container_name(c: &Value) -> Option<String> {
     Some(c.get("Name")?.as_str()?.trim_start_matches('/').to_string())
 }
 

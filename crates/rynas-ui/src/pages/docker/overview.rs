@@ -228,6 +228,12 @@ pub(super) fn volume_select(label: &'static str, help: Option<&'static str>, set
                 let cur = value.get();
                 settings.data.with(|s| crate::places::note(s.as_ref().and_then(|s| s.volumes.iter().find(|x| x.label == cur)), false))
             }}
+            // hard disks chosen while a volume on SSD exists: Docker would keep them spinning
+            {move || {
+                let cur = value.get();
+                settings.data.with(|s| s.as_ref().is_some_and(|s| s.volumes.iter().any(|x| x.label == cur && x.hdd) && s.volumes.iter().any(|x| !x.hdd && x.unavailable.is_none())))
+                    .then(|| view! { <span class="field-help">{tr("dk.ssd_hint")}</span> })
+            }}
         </div>
     }
     .into_any()
@@ -240,9 +246,13 @@ pub fn install_card() -> AnyView {
     let d = docker();
     let settings = Remote::<DockerSettingsState>::new(SETTINGS);
     let vol = RwSignal::new(String::new());
-    // the first volume is the default choice
+    // the first volume on SSD is the default choice (hard disks can then spin down), else the first
     Effect::new(move || {
-        if let Some(first) = settings.data.with(|s| s.as_ref().and_then(|s| s.applied.volume.clone().or_else(|| s.volumes.first().map(|v| v.label.clone()))))
+        if let Some(first) = settings.data.with(|s| {
+            s.as_ref().and_then(|s| {
+                s.applied.volume.clone().or_else(|| s.volumes.iter().find(|v| !v.hdd && v.unavailable.is_none()).or(s.volumes.first()).map(|v| v.label.clone()))
+            })
+        })
             && vol.with_untracked(String::is_empty)
         {
             vol.set(first);
@@ -368,6 +378,7 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
     let (stop, set_stop) = lens_bool(d, |s| s.stop_for_snapshot, |s, v| s.stop_for_snapshot = v);
     let (online_cat, set_online_cat) = lens_bool(d, |s| s.apps_online_catalog, |s, v| s.apps_online_catalog = v);
     let (app_files, set_app_files) = lens_bool(d, |s| s.files_app_data, |s, v| s.files_app_data = v);
+    let (journal, set_journal) = lens_bool(d, |s| s.logs_to_journal, |s, v| s.logs_to_journal = v);
     let (keep, set_keep) = num_lens(d, |s| s.keep_snapshots.to_string(), |s, v| s.keep_snapshots = v);
     let (full, set_full) = num_lens(d, |s| s.data_root_full_pct.to_string(), |s, v| s.data_root_full_pct = v.min(255) as u8);
     let (restarts, set_restarts) = num_lens(d, |s| s.crash_restarts.to_string(), |s, v| s.crash_restarts = v);
@@ -393,7 +404,8 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
         d.with_untracked(|s| win.set(s.auto_update.hour, s.auto_update.minute, s.auto_update.window_min));
         error.set(None);
     });
-    let applied_vol = move || settings.data.with_untracked(|s| s.as_ref().and_then(|s| s.applied.volume.clone()));
+    // (volume, logs to the journal) applied: a change of either restarts the engine
+    let applied_eng = move || settings.data.with_untracked(|s| s.as_ref().map(|s| (s.applied.volume.clone(), s.applied.logs_to_journal)));
     // stage, then apply only `docker` (A19b; its scheduler tasks are staged with it)
     let save = Callback::new(move |_: ()| {
         let body: DockerSettings = d.get_untracked();
@@ -426,7 +438,7 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
             return;
         }
         let body = d.get_untracked();
-        if body.volume == applied_vol() {
+        if Some((body.volume.clone(), body.logs_to_journal)) == applied_eng() {
             save.run(());
             return;
         }
@@ -456,6 +468,7 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
             </div>
             {switch("dk.set.online_catalog", Some("dk.set.online_catalog_help"), online_cat, set_online_cat)}
             {switch("dk.set.files_app_data", Some("dk.set.files_app_data_help"), app_files, set_app_files)}
+            {switch("dk.set.journal", Some("dk.set.journal_help"), journal, set_journal)}
             <div class="form-row">
                 {number_field("dk.set.full", Some("dk.set.full_help"), full, set_full, 50, 99)}
                 {number_field("dk.set.restarts", Some("dk.set.restarts_help"), restarts, set_restarts, 2, 100)}
@@ -471,26 +484,30 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
                 <button type="button" class="btn ghost" disabled=move || !dirty.get() on:click=move |_| reset.run(())>{tr("reset")}</button>
             </div>
         </form>
-        {move || plan.get().map(|p| plan_dialog(p, busy, error, save, Callback::new(move |_| plan.set(None))))}
+        {move || plan.get().map(|p| {
+            // the same volume: only the log driver changes
+            let logs = d.with_untracked(|b| applied_eng().is_some_and(|a| a.0 == b.volume));
+            plan_dialog(p, logs, busy, error, save, Callback::new(move |_| plan.set(None)))
+        })}
     }
     .into_any()
 }
 
 /// What applying a new engine volume writes, creates and runs; Save and apply to go on.
-fn plan_dialog(p: EnginePlan, busy: RwSignal<bool>, error: RwSignal<Option<String>>, save: Callback<()>, close: Callback<()>) -> AnyView {
+fn plan_dialog(p: EnginePlan, logs: bool, busy: RwSignal<bool>, error: RwSignal<Option<String>>, save: Callback<()>, close: Callback<()>) -> AnyView {
     let files = p.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
     let extra = view! {
         <div class="dk-plan">
             {(!files.is_empty()).then(|| view! { <div class="mini-title">{tr("dk.plan.files")}</div><ul class="mono small">{files.into_iter().map(|f| view! { <li>{f}</li> }).collect_view()}</ul> })}
             {(!p.create.is_empty()).then(|| view! { <div class="mini-title">{tr("dk.plan.create")}</div><ul class="mono small">{p.create.iter().map(|f| view! { <li>{f.clone()}</li> }).collect_view()}</ul> })}
             {(!p.commands.is_empty()).then(|| view! { <div class="mini-title">{tr("dk.plan.commands")}</div><ul class="mono small">{p.commands.iter().map(|f| view! { <li>{f.clone()}</li> }).collect_view()}</ul> })}
-            {p.restart.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("dk.plan.restart").to_string())))}
+            {(p.restart && !logs).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("dk.plan.restart").to_string())))}
         </div>
     }
     .into_any();
     ui::confirm(Confirm {
-        title: t("dk.plan.title").to_string(),
-        text: t("dk.plan.text").to_string(),
+        title: t(if logs { "dk.plan.logs_title" } else { "dk.plan.title" }).to_string(),
+        text: t(if logs { "dk.plan.logs_text" } else { "dk.plan.text" }).to_string(),
         action: "dk.plan.go",
         danger: false,
         extra: Some(extra),
@@ -506,7 +523,9 @@ fn plan_dialog(p: EnginePlan, busy: RwSignal<bool>, error: RwSignal<Option<Strin
 
 fn migrate_card(settings: Remote<DockerSettingsState>) -> AnyView {
     let d = docker();
-    let vol = RwSignal::new(String::new());
+    // `?migrate=<volume>`: the volume a spin-down warning suggested
+    let asked = leptos_router::hooks::use_query_map().with_untracked(|q| q.get("migrate"));
+    let vol = RwSignal::new(asked.unwrap_or_default());
     Effect::new(move || {
         if let Some(v) = settings.data.with(|s| s.as_ref().and_then(|s| s.applied.volume.clone().or_else(|| s.volumes.first().map(|v| v.label.clone()))))
             && vol.with_untracked(String::is_empty)
