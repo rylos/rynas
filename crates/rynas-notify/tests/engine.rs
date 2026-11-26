@@ -1132,20 +1132,25 @@ async fn direct_pushes_carry_the_action_to_allowed_accounts_only() {
         );
     }
     e.engine.set_push_directory(dir.clone());
-    e.engine.create_target(&device_target("d_0a")).unwrap();
+    let ta = e.engine.create_target(&device_target("d_0a")).unwrap();
     e.engine.create_target(&TargetRequest { name: "Bob".into(), ..device_target("d_0b") }).unwrap();
     e.engine.create_target(&TargetRequest { name: "Off".into(), enabled: false, ..device_target("d_0c") }).unwrap();
-    // no rule at all: a direct push does not need one
+    // a catch-all rule: the quiet event is stored but goes to no target by it
+    e.engine.create_rule(&rule(vec![ta.id])).unwrap();
     let mut ev = event::firing(NotifyCategory::Backup, NotifySeverity::Info, "pcbackup", "pcbackup:restore-request:00ff", "Restore of casa waits for approval");
     ev.code = "pcbackup.restore_request".into();
+    ev.quiet = true;
     let n = e.engine.ingest(ev, false).unwrap().unwrap();
+    assert_eq!(e.engine.deliver_due().await.unwrap(), 0, "quiet: no copy by the rules");
+    assert!(push.reqs.lock().unwrap().is_empty());
     let action = PushAction {
         kind: "pc_restore".into(),
         request: "00000000000000ff".into(),
         pc: "casa".into(),
         device: None,
-        code: "042913".into(),
         from_ip: "192.0.2.10".into(),
+        tls: true,
+        same_pc: 0,
         expires_ms: 1,
     };
     let sent = e.engine.push_direct(&n, "pcbackup.restore_request", Some(action.clone()), &|owner| owner == "alice").await;

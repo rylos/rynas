@@ -331,6 +331,86 @@ pub struct PcAgentSettings {
     /// Average chunk of new groups' repositories; a repository keeps its own for good.
     #[serde(default)]
     pub chunking: PcChunking,
+    /// Where restore requests (a restore TUI asking for an approval from a phone) may come
+    /// from: IP addresses or CIDR ranges (`203.0.113.0/24`, `2001:db8::/32`; `0.0.0.0/0` and
+    /// `::/0` for anywhere). Empty: private and LAN ranges, Tailscale, loopback
+    /// ([`RESTORE_DEFAULT_SOURCES`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restore_request_sources: Vec<String>,
+    /// Restore requests over plain HTTP are accepted (no certificate binds their compare
+    /// code; approvers see a red warning). Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restore_requests_over_http: bool,
+}
+
+/// Where restore requests may come from when [`PcAgentSettings::restore_request_sources`] is
+/// empty: private IPv4 (RFC 1918), Tailscale and carrier-grade NAT (100.64.0.0/10),
+/// link-local, loopback, IPv6 unique-local (Tailscale's too) and link-local.
+pub const RESTORE_DEFAULT_SOURCES: &[&str] = &[
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+    "169.254.0.0/16",
+    "127.0.0.0/8",
+    "fc00::/7",
+    "fe80::/10",
+    "::1/128",
+];
+
+/// One IP range (`a.b.c.d/n`, `x::/n`, or a single address).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpRange {
+    pub addr: std::net::IpAddr,
+    pub prefix: u8,
+}
+
+impl IpRange {
+    pub fn parse(s: &str) -> Option<IpRange> {
+        let s = s.trim();
+        let (a, p) = match s.split_once('/') {
+            Some((a, p)) => (a, Some(p)),
+            None => (s, None),
+        };
+        let addr: std::net::IpAddr = a.parse().ok()?;
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        let prefix = match p {
+            Some(p) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => p.parse::<u8>().ok().filter(|n| *n <= max)?,
+            Some(_) => return None,
+            None => max,
+        };
+        Some(IpRange { addr, prefix })
+    }
+
+    /// `ip` is inside (an IPv4-mapped IPv6 address counts as its IPv4 one).
+    pub fn contains(&self, ip: std::net::IpAddr) -> bool {
+        use std::net::IpAddr;
+        let ip = match ip {
+            IpAddr::V6(v) => v.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+            v4 => v4,
+        };
+        match (self.addr, ip) {
+            (IpAddr::V4(a), IpAddr::V4(b)) => {
+                let m = if self.prefix == 0 { 0 } else { u32::MAX << (32 - self.prefix) };
+                u32::from(a) & m == u32::from(b) & m
+            }
+            (IpAddr::V6(a), IpAddr::V6(b)) => {
+                let m = if self.prefix == 0 { 0 } else { u128::MAX << (128 - self.prefix) };
+                u128::from(a) & m == u128::from(b) & m
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Whether a restore request from `ip` is accepted with these `sources` (empty: the
+/// defaults).
+pub fn restore_source_allowed(sources: &[String], ip: std::net::IpAddr) -> bool {
+    if sources.is_empty() {
+        RESTORE_DEFAULT_SOURCES.iter().filter_map(|s| IpRange::parse(s)).any(|r| r.contains(ip))
+    } else {
+        sources.iter().filter_map(|s| IpRange::parse(s)).any(|r| r.contains(ip))
+    }
 }
 
 /// The same defaults as a document without the fields (a derived default gave 0 for the
@@ -343,6 +423,8 @@ impl Default for PcAgentSettings {
             maintenance_hour: default_hour(),
             maintenance_memory_pct: default_memory_pct(),
             chunking: PcChunking::default(),
+            restore_request_sources: Vec::new(),
+            restore_requests_over_http: false,
         }
     }
 }
@@ -1254,18 +1336,26 @@ pub const RESTORE_REQUEST_MAX_PC: usize = 64;
 /// `kind` of the push action and of the QR scheme of a restore request.
 pub const PUSH_ACTION_PC_RESTORE: &str = "pc_restore";
 
-/// The body of a new restore request: only what the person at the dead PC says. Nothing the
-/// NAS knows comes back before an administrator approved (no PC list, no names).
+/// A request not revealed ([`RestoreRequestReveal`]) within this long is dropped.
+pub const RESTORE_REVEAL_WITHIN_MS: u64 = 60 * 1000;
+/// Wrong codes typed by approvers before a request is denied by itself.
+pub const RESTORE_MAX_WRONG_CODES: u8 = 3;
+
+/// The body of a new restore request: only what the person at the dead PC says, and the
+/// commitment to its secret. Nothing the NAS knows comes back before an administrator
+/// approved (no PC list, no names, no code).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RestoreRequestCreate {
     /// The PC as the person at it calls it (its host name, or the PC's name on the NAS);
-    /// shown to the approver, matched against the NAS' PCs only on the NAS.
+    /// shown to the approver as a claim, matched against the NAS' PCs only on the NAS.
     pub pc: String,
-    /// SHA-256 of the certificate the TUI sees (`AA:BB:…`; empty over plain HTTP). It must
-    /// be the NAS' own (or empty), else 409 `certificate_mismatch`: the compare code is made
-    /// from it on both sides.
+    /// SHA-256 of the certificate the TUI sees (`AA:BB:…`). Over TLS it must be the NAS' own
+    /// (else 409 `certificate_mismatch`); empty only over plain HTTP.
     #[serde(default)]
     pub fingerprint: String,
+    /// `hex(SHA-256(restore_commit_input(secret)))`: the TUI's 256-bit secret committed
+    /// before it learns the NAS' nonce ([`restore_commit_input`]).
+    pub commit: String,
 }
 
 /// 201 of a new restore request.
@@ -1274,16 +1364,23 @@ pub struct RestoreRequestCreated {
     /// 64 random bits (16 hex digits): names the request in the QR code and to the approver.
     /// Not a secret (the poll token is); short so that the QR code fits a text console.
     pub id: String,
-    /// The TUI's secret (256 bits, hex): needed to poll and to receive the approval. Never
-    /// in the QR code, never shown.
+    /// The TUI's secret (256 bits, hex): needed to reveal, poll, withdraw and receive the
+    /// approval. Never in the QR code, never shown.
     pub poll_token: String,
-    /// Random (hex): the TUI makes the compare code from it and the certificate it saw
-    /// ([`restore_compare_input`]); the NAS sends no code, so a party in the middle cannot
-    /// hand the TUI a matching one.
+    /// Random (hex), made after the commitment arrived: with the TUI's secret and the
+    /// certificate it gives the compare code ([`restore_compare_input`]).
     pub nonce: String,
     /// This NAS' identity for the app (`GET /api/v1/ping` `sid`): the QR code names it.
     pub sid: String,
     pub expires_ms: u64,
+}
+
+/// `POST /api/v1/pcbackup/agent/restore-requests/{id}/reveal` (poll token as bearer): the
+/// secret behind the commitment. Only then do administrators see the request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreRequestReveal {
+    /// 64 hex digits.
+    pub secret: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1331,22 +1428,27 @@ pub struct RestoreRequestPoll {
 }
 
 /// A pending restore request as administrators see it (`GET /api/v1/pcbackup/restore-requests`,
-/// the event `pcbackup.restore_request`, the push action).
+/// the event `pcbackup.restore_request`). The compare code is never in it: the approver types
+/// the digits the PC's screen shows ([`RestoreRequestApprove::code`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RestoreRequestView {
     pub id: String,
     /// The PC as the requester claimed it (not checked: show it as a claim).
     pub pc: String,
-    /// The backup PC the claim matches when exactly one does (device name or host name,
-    /// case-insensitive); `null`: the approver picks one.
+    /// The backup PC whose name or host name the claim matches when exactly one does
+    /// (case-insensitive); `null`: the approver picks one. A suggestion from the claim, never
+    /// a check: show it as such.
     pub device: Option<String>,
-    /// Six digits; the TUI shows the same ones (`482 913`).
-    pub code: String,
     /// The address the request came from, as the NAS saw it.
     pub from_ip: String,
-    /// SHA-256 of the NAS certificate the TUI saw (`AA:BB:…`; empty over plain HTTP).
+    /// The request came over TLS (its compare code binds the NAS' certificate). `false`:
+    /// plain HTTP, allowed only by [`PcAgentSettings::restore_requests_over_http`]; show a
+    /// red warning.
+    pub tls: bool,
+    /// Other waiting requests for the same PC (the same match, or the same claim): warn
+    /// clearly when above 0, only one of them can be the person you know.
     #[serde(default)]
-    pub fingerprint: String,
+    pub same_pc: u32,
     pub created_ms: u64,
     pub expires_ms: u64,
 }
@@ -1354,10 +1456,23 @@ pub struct RestoreRequestView {
 /// `POST /api/v1/pcbackup/restore-requests/{id}/approve`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RestoreRequestApprove {
+    /// The six digits the PC's screen shows, typed by the approver (or read from the QR code
+    /// on that screen); spaces ignored. A wrong code is 400 `code_mismatch`; after
+    /// [`RESTORE_MAX_WRONG_CODES`] the request is denied. Missing: 400 with `field` `code`.
+    #[serde(default)]
+    pub code: String,
     /// The PC whose backups the restore may read; may be left out only when the request
     /// matched one ([`RestoreRequestView::device`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+}
+
+/// `POST /api/v1/pcbackup/restore-requests/{id}/deny` (body optional).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreRequestDeny {
+    /// Also refuse new requests from that address (its IPv6 /64) for an hour.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub block: bool,
 }
 
 /// The event `pcbackup.restore_resolved`.
@@ -1383,17 +1498,25 @@ pub struct RestorablePc {
     pub btrfs: bool,
 }
 
-/// The text whose SHA-256 gives a restore request's compare code: the NAS' nonce and the
-/// certificate the TUI saw, as upper-case hex without separators (empty over plain HTTP).
-/// The NAS uses the fingerprint the TUI claimed, which must be its own certificate; the TUI
-/// the one it really saw. A party in the middle (its own certificate) gets different digits.
-pub fn restore_compare_input(nonce: &str, fingerprint: &str) -> String {
+/// The text whose SHA-256 (hex) is the TUI's commitment to `secret`.
+pub fn restore_commit_input(secret: &str) -> String {
+    format!("rynas-restore-commit-v1\n{secret}")
+}
+
+/// The text whose SHA-256 gives a restore request's compare code (ZRTP-style short
+/// authentication string): the TUI's secret (committed before the nonce existed), the NAS'
+/// nonce and the certificate, as upper-case hex without separators (empty over plain HTTP).
+/// The NAS uses its own certificate, the TUI the one it really saw: a party in the middle
+/// has its own certificate, cannot change the secret after the commitment nor know it before
+/// it chose the nonce it shows the TUI, so the two sets of digits differ but by chance
+/// (1 in a million per request that reaches an approver).
+pub fn restore_compare_input(secret: &str, nonce: &str, fingerprint: &str) -> String {
     let fp: String = fingerprint
         .chars()
         .filter(char::is_ascii_hexdigit)
         .map(|c| c.to_ascii_uppercase())
         .collect();
-    format!("rynas-restore-v1\n{nonce}\n{fp}")
+    format!("rynas-restore-v2\n{secret}\n{nonce}\n{fp}")
 }
 
 /// The six digits of a compare code from the SHA-256 of [`restore_compare_input`]: its first
@@ -2400,10 +2523,33 @@ mod tests {
     }
 
     #[test]
+    fn restore_sources() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        // the defaults: LAN, Tailscale, loopback, unique-local; not the Internet
+        for ok in ["192.168.1.5", "10.1.2.3", "172.31.0.1", "100.101.102.103", "127.0.0.1", "fd7a:115c:a1e0::1", "fe80::1", "::ffff:192.168.0.9"] {
+            assert!(restore_source_allowed(&[], ip(ok)), "{ok}");
+        }
+        for no in ["203.0.113.7", "8.8.8.8", "172.32.0.1", "2001:db8::1"] {
+            assert!(!restore_source_allowed(&[], ip(no)), "{no}");
+        }
+        // an own list replaces the defaults
+        let own = vec!["203.0.113.0/24".to_string(), "2001:db8::/32".into()];
+        assert!(restore_source_allowed(&own, ip("203.0.113.7")));
+        assert!(restore_source_allowed(&own, ip("2001:db8:1::5")));
+        assert!(!restore_source_allowed(&own, ip("192.168.1.5")));
+        assert!(restore_source_allowed(&["0.0.0.0/0".into()], ip("8.8.8.8")));
+        for bad in ["10.0.0.0/33", "x", "10.0.0.0/", "::/129", "1.2.3.4/a"] {
+            assert_eq!(IpRange::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn restore_compare_codes() {
-        // the input names the version, the nonce and the certificate as bare upper-case hex
-        assert_eq!(restore_compare_input("ab12", "aa:bb:0c"), "rynas-restore-v1\nab12\nAABB0C");
-        assert_eq!(restore_compare_input("ab12", ""), "rynas-restore-v1\nab12\n");
+        // the input names the version, the TUI's secret, the nonce and the certificate as
+        // bare upper-case hex
+        assert_eq!(restore_compare_input("5e", "ab12", "aa:bb:0c"), "rynas-restore-v2\n5e\nab12\nAABB0C");
+        assert_eq!(restore_compare_input("5e", "ab12", ""), "rynas-restore-v2\n5e\nab12\n");
+        assert_eq!(restore_commit_input("5e"), "rynas-restore-commit-v1\n5e");
         // first four bytes, big-endian, modulo a million, six digits
         assert_eq!(restore_compare_code(&[0, 0, 0, 7, 9, 9]), "000007");
         assert_eq!(restore_compare_code(&[0xff, 0xff, 0xff, 0xff]), "967295");

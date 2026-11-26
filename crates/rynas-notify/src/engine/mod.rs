@@ -603,7 +603,9 @@ impl Engine {
                            event_id = excluded.event_id, since_ms = excluded.since_ms, reminders = '{}'",
                         params![key, ev.severity.as_str(), id as i64, now as i64],
                     )?;
-                    if !silenced {
+                    // `quiet`: stored and shown, sent to no target (its sender delivers it
+                    // itself, as a restore request's push)
+                    if !silenced && !ev.quiet {
                         deliver.push(id);
                     }
                     changes.push((NotificationChangeKind::Created, id));

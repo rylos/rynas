@@ -1,14 +1,15 @@
 //! Restores waiting for an administrator's approval (`docs/phase2/pc-restore-approval.md`):
 //! a restore TUI on a dead PC's live system asked the NAS instead of typing a restore code.
-//! Each card shows what the requester claims (the PC), where it came from, the compare code
-//! the PC's screen shows too and the certificate it saw; Approve (choosing the PC when the
-//! claim matched none or several) or Deny. Shown on top of the Backup page and in the
+//! Each card shows what the requester claims (the PC), where it came from, red warnings
+//! (plain HTTP, other requests for the same PC), the PC whose backups it may read (a match
+//! from the claim preselected and said to be one); the approver types the six digits the PC's
+//! screen shows and approves, or denies (also blocking the address for an hour). Shown on top of the Backup page and in the
 //! request's notification; it reads the list again on the events `pcbackup.restore_request`
 //! and `pcbackup.restore_resolved` (nothing polled).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::pcagent::{RestorablePc, RestoreRequestApprove, RestoreRequestView, restore_code_text};
+use rynas_api_types::pcagent::{RestorablePc, RestoreRequestApprove, RestoreRequestDeny, RestoreRequestView};
 
 use crate::api;
 use crate::form::{form_error, spinner};
@@ -47,31 +48,53 @@ pub fn restore_requests(only: Option<String>, class: &'static str) -> AnyView {
     view! { {cards} }.into_any()
 }
 
+/// What a card's button does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    Approve,
+    Deny,
+    DenyAndBlock,
+}
+
 fn card(r: RestoreRequestView, pcs: Remote<Vec<RestorablePc>>, list: Remote<Vec<RestoreRequestView>>, class: &'static str) -> AnyView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
-    let matched = r.device.clone();
-    let chosen = RwSignal::new(matched.clone().unwrap_or_default());
+    let suggested = r.device.clone();
+    let chosen = RwSignal::new(suggested.clone().unwrap_or_default());
+    // the approver types what the PC's screen shows: the NAS never tells the code
+    let typed = RwSignal::new(String::new());
     let id = StoredValue::new(r.id.clone());
-    let decide = move |approve: bool| {
+    let decide = move |d: Decision| {
         let device = chosen.get_untracked();
-        if approve && device.is_empty() {
-            error.set(Some(t("rr.choose_pc").to_string()));
-            return;
+        let code: String = typed.get_untracked().chars().filter(char::is_ascii_digit).collect();
+        if d == Decision::Approve {
+            if code.len() != 6 {
+                error.set(Some(t("rr.type_code").to_string()));
+                return;
+            }
+            if device.is_empty() {
+                error.set(Some(t("rr.choose_pc").to_string()));
+                return;
+            }
         }
         busy.set(true);
         error.set(None);
         let base = format!("{LIST}/{}", api::encode(&id.get_value()));
         spawn_local(async move {
-            let res = if approve {
-                api::post_empty(&format!("{base}/approve"), Some(&RestoreRequestApprove { device: Some(device) })).await
-            } else {
-                api::post_empty::<()>(&format!("{base}/deny"), None).await
+            let res = match d {
+                Decision::Approve => api::post_empty(&format!("{base}/approve"), Some(&RestoreRequestApprove { code, device: Some(device) })).await,
+                Decision::Deny => api::post_empty::<()>(&format!("{base}/deny"), None).await,
+                Decision::DenyAndBlock => api::post_empty(&format!("{base}/deny"), Some(&RestoreRequestDeny { block: true })).await,
             };
             let _ = busy.try_set(false);
             match res {
                 Ok(()) => {
-                    crate::toast::toast(Tone::Ok, t(if approve { "rr.approved" } else { "rr.denied" }).to_string());
+                    let key = match d {
+                        Decision::Approve => "rr.approved",
+                        Decision::Deny => "rr.denied",
+                        Decision::DenyAndBlock => "rr.denied_blocked",
+                    };
+                    crate::toast::toast(Tone::Ok, t(key).to_string());
                     list.reload();
                 }
                 Err(e) => {
@@ -81,41 +104,46 @@ fn card(r: RestoreRequestView, pcs: Remote<Vec<RestorablePc>>, list: Remote<Vec<
             }
         });
     };
-    let pc_field = match matched {
-        Some(d) => ui::kv_text("rr.pc_matched", d, "mono"),
-        None => view! {
-            <div class="kv">
-                <dt>{tr("rr.pc_matched")}</dt>
-                <dd>
-                    <select class="input" aria-label=tr("rr.pc_matched") on:change=move |ev| chosen.set(event_target_value(&ev))>
-                        <option value="" selected=true>{tr("rr.pc_none")}</option>
-                        {move || pcs.data.get().unwrap_or_default().into_iter().map(|p| {
-                            let label = if p.hostname.is_empty() { p.device.clone() } else { format!("{} ({})", p.device, p.hostname) };
-                            view! { <option value=p.device.clone()>{label}</option> }
-                        }).collect_view()}
-                    </select>
-                </dd>
-            </div>
-        }
-        .into_any(),
+    // always a choice; a match from the claimed name is preselected and said to be one
+    let pc_field = view! {
+        <div class="kv">
+            <dt>{tr("rr.pc_matched")}</dt>
+            <dd>
+                <select class="input" aria-label=tr("rr.pc_matched") prop:value=move || chosen.get() on:change=move |ev| chosen.set(event_target_value(&ev))>
+                    <option value="">{tr("rr.pc_none")}</option>
+                    {move || pcs.data.get().unwrap_or_default().into_iter().map(|p| {
+                        let label = if p.hostname.is_empty() { p.device.clone() } else { format!("{} ({})", p.device, p.hostname) };
+                        view! { <option value=p.device.clone()>{label}</option> }
+                    }).collect_view()}
+                </select>
+                {suggested.as_ref().map(|_| view! { <p class="muted small">{tr("rr.suggested")}</p> })}
+            </dd>
+        </div>
     };
-    let code = restore_code_text(&r.code);
     view! {
         <section class=class>
             {ui::note(Tone::Warn, icons::LIFE_BUOY, ui::text(tf("rr.title", &[("pc", &r.pc)])))}
+            {(!r.tls).then(|| ui::note(Tone::Err, icons::SHIELD_ALERT, ui::text(t("rr.http").to_string())))}
+            {(r.same_pc > 0).then(|| ui::note(Tone::Err, icons::TRIANGLE_ALERT, ui::text(tf("rr.same_pc", &[("n", &r.same_pc.to_string())]))))}
             <p class="muted small">{tr("rr.intro")}</p>
-            <code class="secret mono" aria-label=tr("rr.code")>{code}</code>
             <dl class="kvs">
                 {ui::kv_text("rr.pc_claimed", r.pc.clone(), "")}
                 {pc_field}
                 {ui::kv_text("rr.from", r.from_ip.clone(), "mono")}
-                {(!r.fingerprint.is_empty()).then(|| ui::kv("pca.fingerprint", ui::breakable(&r.fingerprint, "mono small")))}
                 {ui::kv_text("rr.until", i18n::datetime(r.expires_ms), "tnum")}
+                <div class="kv">
+                    <dt>{tr("rr.code")}</dt>
+                    <dd>
+                        <input class="input mono" inputmode="numeric" autocomplete="off" maxlength="7" placeholder="000 000" aria-label=tr("rr.code")
+                            prop:value=move || typed.get() on:input=move |ev| typed.set(event_target_value(&ev)) />
+                    </dd>
+                </div>
             </dl>
             {form_error(error)}
             <div class="sec-actions">
-                <button class="btn ghost" disabled=move || busy.get() on:click=move |_| decide(false)><Icon icon=icons::X size=14 />{tr("rr.deny")}</button>
-                <button class="btn primary" disabled=move || busy.get() on:click=move |_| decide(true)>{spinner(busy)}<Icon icon=icons::CHECK size=14 />{tr("rr.approve")}</button>
+                <button class="btn ghost" disabled=move || busy.get() on:click=move |_| decide(Decision::DenyAndBlock)><Icon icon=icons::SHIELD_ALERT size=14 />{tr("rr.deny_block")}</button>
+                <button class="btn ghost" disabled=move || busy.get() on:click=move |_| decide(Decision::Deny)><Icon icon=icons::X size=14 />{tr("rr.deny")}</button>
+                <button class="btn primary" disabled=move || busy.get() on:click=move |_| decide(Decision::Approve)>{spinner(busy)}<Icon icon=icons::CHECK size=14 />{tr("rr.approve")}</button>
             </div>
         </section>
     }

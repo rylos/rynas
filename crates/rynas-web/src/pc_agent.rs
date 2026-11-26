@@ -16,7 +16,7 @@ use axum::{Extension, Router};
 use http_body_util::{BodyExt, Limited};
 use rynas_api_types::pcagent::{RestoreAdminLogin, RestoreChoice};
 use rynas_api_types::{LoginRequest, error_codes};
-use rynas_auth::ipc::CLIENT_ADDR_HEADER;
+use rynas_auth::ipc::{CLIENT_ADDR_HEADER, CLIENT_TLS_HEADER};
 
 use crate::app::AppState;
 use crate::conn::Client;
@@ -44,6 +44,7 @@ pub fn routes() -> Router<AppState> {
         // withdrawal) with the poll token as bearer
         .route("/pcbackup/agent/restore-requests", post(forward))
         .route("/pcbackup/agent/restore-requests/{id}", get(forward).delete(forward))
+        .route("/pcbackup/agent/restore-requests/{id}/reveal", post(forward))
         .route("/pcbackup/agent/restore/admin-login", post(restore_admin_login))
         .route("/pcbackup/agent/restore/report", post(forward))
         // a bare-metal restore from btrfs snapshots: listing, manifest, legacy files, and the
@@ -146,6 +147,10 @@ async fn forward(State(st): State<AppState>, client: Option<Extension<Client>>, 
         && let Ok(v) = HeaderValue::from_str(&c.ip.to_string())
     {
         headers.push((HeaderName::from_static(CLIENT_ADDR_HEADER), v));
+    }
+    // the connection's scheme (a restore request over plain HTTP is refused unless allowed)
+    if parts.extensions.get::<crate::tls::Https>().is_some() {
+        headers.push((HeaderName::from_static(CLIENT_TLS_HEADER), HeaderValue::from_static("1")));
     }
     let body = Body::new(Limited::new(body, max).map_err(axum::Error::new));
     let resp = match st

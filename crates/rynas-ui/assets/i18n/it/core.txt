@@ -6819,8 +6819,8 @@ dk.plan.logs_text	Applicando si modifica questo file e Docker riparte. Ogni cont
 err.request_expired	La richiesta è scaduta prima che qualcuno decidesse.
 err.certificate_mismatch	Il NAS non usa il certificato che vede il client: qualcosa in mezzo risponde al suo posto.
 rr.title	Un ripristino di {pc} attende la tua approvazione
-rr.intro	Un PC avviato da un sistema live chiede di leggere i suoi backup per un ripristino bare metal. Approva solo se l'hai avviato tu e lo schermo del PC mostra questo codice.
-rr.code	Codice mostrato sul PC
+rr.intro	Un PC avviato da un sistema live chiede di leggere i suoi backup per un ripristino bare metal. Approva solo se l'hai avviato tu: digita le sei cifre mostrate sul suo schermo.
+rr.code	Codice sullo schermo del PC
 rr.pc_claimed	PC, come lo chiama chi chiede
 rr.pc_matched	Backup che può leggere
 rr.pc_none	Scegli un PC…
@@ -6832,6 +6832,19 @@ rr.deny	Rifiuta
 rr.approved	Ripristino approvato: il PC può proseguire.
 rr.denied	Richiesta di ripristino rifiutata.
 nev.pcbackup.restore_request.title	Il ripristino di {pc} attende l'approvazione
-nev.pcbackup.restore_request.body	Un ripristino bare metal da {from_ip} chiede di leggere i backup di {pc} (codice {code}). Approva solo se l'hai avviato tu e lo schermo del PC mostra lo stesso codice.
+nev.pcbackup.restore_request.body	Un ripristino bare metal da {from_ip} chiede di leggere i backup di {pc}. Approva solo se l'hai avviato tu, digitando il codice mostrato sullo schermo del PC.
 nev.pcbackup.restore_approved.title	Ripristino di {device} approvato da {user}
 nev.pcbackup.restore_approved.body	Un ripristino bare metal da {from_ip} (richiesto come {pc}) può leggere i backup di {device}, in sola lettura, per un'ora.
+rr.type_code	Digita le sei cifre mostrate sullo schermo del PC.
+rr.suggested	Suggerito dal nome digitato da chi chiede: una dichiarazione, non una verifica.
+rr.same_pc	Attendono anche altre {n} richieste per questo PC: solo una può essere la persona che conosci. Rifiuta quelle che non hai avviato tu.
+rr.http	Questa richiesta è arrivata in HTTP semplice: nessun certificato lega il suo codice, qualcuno in rete potrebbe stare in mezzo.
+rr.deny_block	Rifiuta e blocca l'indirizzo
+rr.denied_blocked	Richiesta di ripristino rifiutata; il suo indirizzo non può farne di nuove per un'ora.
+err.code_mismatch	Non è il codice mostrato dall'altra parte.
+nev.pcbackup.restore_request_http.title	Il ripristino di {pc} attende l'approvazione (HTTP semplice)
+nev.pcbackup.restore_request_http.body	Un ripristino bare metal da {from_ip} chiede di leggere i backup di {pc} in HTTP semplice: nessun certificato lega il suo codice. Approva solo se l'hai avviato tu, digitando il codice mostrato sullo schermo del PC.
+pca.f.restore_sources	Richieste di ripristino accettate da
+pca.f.restore_sources_help	Indirizzi o intervalli (uno per riga, come 203.0.113.0/24) da cui una TUI di ripristino può chiedere un'approvazione. Vuoto: solo rete locale, Tailscale e questo NAS.
+pca.f.restore_http	Accetta richieste di ripristino in HTTP semplice
+pca.f.restore_http_help	Senza HTTPS nessun certificato lega il codice che digita chi approva: qualcuno in rete potrebbe stare in mezzo. Lascialo spento se il collegamento non è fidato.

@@ -476,6 +476,9 @@ pub mod error_codes {
     /// answers for the NAS, or the client came through another proxy (409, `field`
     /// `fingerprint`).
     pub const CERTIFICATE_MISMATCH: &str = "certificate_mismatch";
+    /// The code typed does not match the one the other side shows (400, `field` `code`; a
+    /// restore request approved from a phone).
+    pub const CODE_MISMATCH: &str = "code_mismatch";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -565,6 +568,7 @@ pub mod error_codes {
         KEY_INVALID,
         REQUEST_EXPIRED,
         CERTIFICATE_MISMATCH,
+        CODE_MISMATCH,
     ];
 }
 

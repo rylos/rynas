@@ -641,6 +641,9 @@ fn settings_dialog(tab: Tab) -> AnyView {
         }
         .to_string(),
     );
+    // restore requests approved from a phone: where they may come from, plain HTTP
+    let sources = RwSignal::new(cur.restore_request_sources.join("\n"));
+    let over_http = RwSignal::new(cur.restore_requests_over_http);
     let folder_err = RwSignal::new(None::<String>);
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
@@ -656,6 +659,8 @@ fn settings_dialog(tab: Tab) -> AnyView {
                 "large" => PcChunking::Large,
                 _ => PcChunking::Auto,
             },
+            restore_request_sources: sources.get_untracked().split(['\n', ',']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            restore_requests_over_http: over_http.get_untracked(),
         };
         busy.set(true);
         error.set(None);
@@ -682,6 +687,8 @@ fn settings_dialog(tab: Tab) -> AnyView {
         </div>
         {next.view(|| 0)}
         {select_field("pca.f.chunking", Some("pca.f.chunking_help"), CHUNKING, chunking.into(), Callback::new(move |v| chunking.set(v)))}
+        {area_field("pca.f.restore_sources", sources.into(), Callback::new(move |v| sources.set(v)), Some("pca.f.restore_sources_help"), "192.168.1.0/24")}
+        {crate::form::switch("pca.f.restore_http", Some("pca.f.restore_http_help"), over_http.into(), Callback::new(move |v| over_http.set(v)))}
         {form_error(error)}
     }
     .into_any();

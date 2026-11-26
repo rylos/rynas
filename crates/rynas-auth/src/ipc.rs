@@ -62,6 +62,11 @@ pub const HOST_HEADER: &str = "x-rynas-host";
 /// request to rynasd itself.
 pub const AUTH_FRESH_HEADER: &str = "x-rynas-auth-fresh";
 
+/// Header `1` added by `rynas-web` to the PC agents' routes when the client's connection
+/// is TLS (rynas-web's own HTTPS listener); absent over plain HTTP, also behind the local
+/// reverse proxy. Never taken from a client.
+pub const CLIENT_TLS_HEADER: &str = "x-rynas-client-tls";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticateRequest {
     pub username: String,

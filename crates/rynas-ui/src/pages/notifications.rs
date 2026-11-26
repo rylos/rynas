@@ -363,7 +363,7 @@ fn detail_drawer(n: Notification, close: Callback<()>, silence: RwSignal<Option<
         })
         .collect();
     // a restore waiting for an approval: Approve / Deny right here while it waits
-    let restore = (n.code == "pcbackup.restore_request" && n.resolved_ms.is_none())
+    let restore = (n.code.starts_with("pcbackup.restore_request") && n.resolved_ms.is_none())
         .then(|| n.fields.get("request").cloned())
         .flatten()
         .map(|id| crate::pages::backup::restore_requests::restore_requests(Some(id), "status-card"));

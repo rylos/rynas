@@ -1,9 +1,10 @@
 //! "Ask for approval": the restore TUI's login without a code typed in
-//! (`docs/phase2/pc-restore-approval.md`). The TUI asks the NAS for an approval with the PC
-//! as the person names it, shows a compare code (made here from the NAS' nonce and the
-//! certificate this TUI really sees) and a QR code for the app, and waits; an administrator
-//! approves on a phone or in the web interface, and the answer carries a restore code used
-//! exactly like a typed one.
+//! (`docs/phase2/pc-restore-approval.md`). The TUI commits to a fresh secret, asks the NAS
+//! for an approval with the PC as the person names it, reveals the secret once it has the
+//! NAS' nonce, and shows the compare code (made here from secret, nonce and the certificate
+//! this TUI really sees) and a QR code for the app. The administrator types that code on the
+//! phone or in the web interface to approve; the answer carries a restore code used exactly
+//! like a typed one.
 //!
 //! The QR code is drawn with half blocks (`▀ ▄ █`, in the CP437 range of the Linux console's
 //! own font and of Terminus, the fonts of live systems such as the Arch ISO) in white on
@@ -19,7 +20,7 @@ use std::time::Duration;
 use qrcodegen::{QrCode, QrCodeEcc, QrSegment, Version};
 use rynas_api_types::pcagent::{
     AGENT_RESTORE_REQUESTS, RestoreApproval, RestoreQr, RestoreRequestCreate, RestoreRequestCreated, RestoreRequestPoll,
-    RestoreRequestState, restore_compare_code, restore_compare_input,
+    RestoreRequestReveal, RestoreRequestState, restore_commit_input, restore_compare_code, restore_compare_input,
 };
 use sha2::{Digest, Sha256};
 
@@ -42,22 +43,47 @@ pub struct Asked {
     pub link: String,
 }
 
-/// The compare code of the NAS' `nonce` and the certificate this TUI saw (`fp`, empty over
-/// plain HTTP).
-pub fn compare_code(nonce: &str, fp: &str) -> String {
-    restore_compare_code(&Sha256::digest(restore_compare_input(nonce, fp).as_bytes()))
+/// The compare code of this TUI's `secret`, the NAS' `nonce` and the certificate this TUI
+/// saw (`fp`, empty over plain HTTP).
+pub fn compare_code(secret: &str, nonce: &str, fp: &str) -> String {
+    restore_compare_code(&Sha256::digest(restore_compare_input(secret, nonce, fp).as_bytes()))
 }
 
-/// Asks the NAS at `client` (pinned to `fp`) for an approval of the restore of `pc`.
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// The commitment to `secret` sent before the NAS' nonce is known.
+pub fn commitment(secret: &str) -> String {
+    hex(&Sha256::digest(restore_commit_input(secret).as_bytes()))
+}
+
+/// 256 random bits, hex (the kernel's generator).
+fn new_secret() -> Result<String, String> {
+    use std::io::Read;
+    let mut b = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .map_err(|e| format!("random numbers: {e}"))?;
+    Ok(hex(&b))
+}
+
+/// Asks the NAS at `client` (pinned to `fp`) for an approval of the restore of `pc`: the
+/// commitment to a fresh secret first, the NAS' nonce back, then the secret revealed (only
+/// then do administrators see the request). The code is made here from what this TUI saw.
 pub fn ask(client: &Client, pc: &str, fp: &str) -> Result<Asked, String> {
+    let secret = new_secret()?;
     let created: RestoreRequestCreated = client.post_json(
         AGENT_RESTORE_REQUESTS,
         &RestoreRequestCreate {
             pc: pc.trim().to_string(),
             fingerprint: fp.to_string(),
+            commit: commitment(&secret),
         },
     )?;
-    let code = compare_code(&created.nonce, fp);
+    let token_client = Client::new(client.ep(), fp).with_token(&created.poll_token);
+    let () = token_client.post_json(&format!("{}/reveal", path_of(&created.id)), &RestoreRequestReveal { secret: secret.clone() })?;
+    let code = compare_code(&secret, &created.nonce, fp);
     let link = RestoreQr {
         nas: created.sid.clone(),
         req: created.id.clone(),
@@ -243,10 +269,14 @@ mod tests {
     #[test]
     fn the_compare_code_matches_the_nas_rule() {
         let fp = "AA:BB:CC";
-        let c = compare_code("00ff", fp);
-        assert_eq!(c, restore_compare_code(&Sha256::digest(b"rynas-restore-v1\n00ff\nAABBCC")));
-        assert_eq!(compare_code("00ff", "aabbcc"), c);
+        let c = compare_code("5e", "00ff", fp);
+        assert_eq!(c, restore_compare_code(&Sha256::digest(b"rynas-restore-v2\n5e\n00ff\nAABBCC")));
+        assert_eq!(compare_code("5e", "00ff", "aabbcc"), c);
         assert_eq!(c.len(), 6);
+        assert_eq!(commitment("5e"), hex(&Sha256::digest(b"rynas-restore-commit-v1\n5e")));
+        let s = new_secret().unwrap();
+        assert_eq!(s.len(), 64);
+        assert_ne!(s, new_secret().unwrap());
     }
 
     #[test]

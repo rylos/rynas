@@ -167,8 +167,8 @@ fn wait_approval(term: &mut DefaultTerminal, ep: &Endpoint, fp: &str, a: &approv
             Line::from(format!("Code: {code}")).bold(),
             Line::from(""),
             Line::from(format!("PC: {pc}")),
-            Line::from("On the phone: the rynas app's notification, or scan the QR code. In the web interface: Backup → PCs."),
-            Line::from("Approve only where the same code shows."),
+            Line::from("The administrator types this code to approve: in the rynas app (its notification, or scan the QR code) or in the web interface (Backup)."),
+            Line::from("Tell the code only to the administrator you asked."),
             Line::from(""),
         ];
         if !fp.is_empty() {

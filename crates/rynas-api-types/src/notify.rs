@@ -205,8 +205,9 @@ pub struct NewEvent {
     pub code: String,
     #[serde(default)]
     pub body_format: BodyFormat,
-    /// A resolution stored without a message to any target: the condition ended by the
-    /// administrator's own choice (automatic time sync turned off), nothing to tell.
+    /// Stored without a message to any target: a resolution of a condition the administrator
+    /// ended by choice (automatic time sync turned off), nothing to tell; or a new firing
+    /// event its sender delivers itself (a restore request pushed to the phones).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub quiet: bool,
 }

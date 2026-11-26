@@ -1391,6 +1391,7 @@ pub fn router(st: PaState) -> Router {
             "/v1/pcbackup/agent/restore-requests/{id}",
             get(approval::poll_get).delete(approval::cancel_delete),
         )
+        .route("/v1/pcbackup/agent/restore-requests/{id}/reveal", post(approval::reveal_post))
         .route("/v1/pcbackup/agent/restore/report", post(restore_report))
         .route("/v1/pcbackup/agent/restore/btrfs/{device}/snapshots", get(restore_btrfs_snapshots))
         .route("/v1/pcbackup/agent/restore/btrfs/{device}/manifest", get(restore_btrfs_manifest))
@@ -1474,6 +1475,14 @@ async fn settings_put(
     s.maintenance_memory_pct = s.effective_memory_pct();
     if !(10..=80).contains(&s.maintenance_memory_pct) {
         return Err(Error::invalid("maintenance_memory_pct", "10–80 %"));
+    }
+    // where restore requests may come from: addresses or CIDR ranges
+    s.restore_request_sources = s.restore_request_sources.iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+    if s.restore_request_sources.len() > 64 {
+        return Err(Error::invalid("restore_request_sources", "at most 64 ranges"));
+    }
+    if let Some(bad) = s.restore_request_sources.iter().find(|x| IpRange::parse(x).is_none()) {
+        return Err(Error::invalid("restore_request_sources", format!("{bad}: not an address or a CIDR range")));
     }
     let folder = s.folder.trim().to_string();
     if svc.dry {

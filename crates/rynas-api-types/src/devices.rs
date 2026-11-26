@@ -312,8 +312,10 @@ pub struct PushPayload {
 
 /// [`PushPayload::action`]. `kind` `pc_restore` (the only one so far): a restore TUI waits for
 /// an administrator's approval (`docs/phase2/pc-restore-approval.md`); the app shows the
-/// claimed PC, the address and the code, checks the user locally (biometrics), then calls
-/// `POST /api/v1/pcbackup/restore-requests/{request}/approve` or `…/deny`.
+/// claimed PC and the address, asks the approver to type the six digits the PC's screen shows
+/// (or reads them from that screen's QR code), checks the user locally (biometrics), then
+/// calls `POST /api/v1/pcbackup/restore-requests/{request}/approve` or `…/deny`. The code is
+/// never in the push.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PushAction {
     pub kind: String,
@@ -321,12 +323,15 @@ pub struct PushAction {
     pub request: String,
     /// The PC as the requester claimed it.
     pub pc: String,
-    /// The backup PC the claim matches, `null` when none or several do.
+    /// The backup PC the claim matches, `null` when none or several do (a suggestion from
+    /// the claim, not a check).
     pub device: Option<String>,
-    /// Six digits, the same as on the PC's screen.
-    pub code: String,
     /// Where the request came from.
     pub from_ip: String,
+    /// Over TLS; `false`: plain HTTP (red warning).
+    pub tls: bool,
+    /// Other waiting requests for the same PC.
+    pub same_pc: u32,
     pub expires_ms: u64,
 }
 
