@@ -32,7 +32,7 @@ use rynas_api_types::devices::internal::{
     GUESS_DEVICE_ID, GUESS_SIGNATURE, Live, RefreshCheck, RefreshOk, Register, Sid, Trust,
 };
 use rynas_api_types::devices::{
-    ACCESS_TTL_S, ClaimRequest, Device, DeviceRename, DeviceSelf, NasRef, PROTOCOL_VERSION,
+    ACCESS_TTL_S, AndroidApp, ClaimRequest, Device, DeviceRename, DeviceSelf, NasRef, PROTOCOL_VERSION,
     PairingApprove, PairingCreated, PairingState, PairingStatus, Ping, PollApproved, PollPending,
     PollRequest, REAUTH_WINDOW_S, REVOKED_KEPT_DAYS, RefreshRequest, RefreshResponse, clean_name,
     clock_skew_reason, revoke_reason,
@@ -272,6 +272,7 @@ pub fn routes() -> Router<AppState> {
         .route("/devices/pairing/{id}/approve", post(pairing_approve))
         .route("/devices/pairing/{id}/reject", post(pairing_reject))
         .route("/devices", get(list))
+        .route("/devices/android-app", get(android_app))
         .route("/devices/self", get(self_get).patch(self_patch).delete(self_delete))
         .route("/devices/self/push", axum::routing::put(push_put).delete(push_delete))
         .route("/devices/{id}", axum::routing::patch(rename).delete(revoke))
@@ -659,6 +660,17 @@ async fn list(
         d.current = current_device(&s) == Some(d.id.as_str());
     }
     Ok(Json(v))
+}
+
+/// The Android app published on GitHub, as rynasd last read it (`rynasd::android_app`); an
+/// unreachable rynasd is "unavailable" too: the page links the APK anyway.
+async fn android_app(State(st): State<AppState>) -> Json<AndroidApp> {
+    Json(
+        st.rynasd
+            .call(Method::GET, "/v1/devices/android-app", None, None::<&()>)
+            .await
+            .unwrap_or_default(),
+    )
 }
 
 async fn rename_device(st: &AppState, s: &SessionData, id: &str, body: DeviceRename) -> Result<Json<Device>, Error> {

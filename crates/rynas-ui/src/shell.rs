@@ -410,6 +410,7 @@ fn UserMenu() -> impl IntoView {
     let ui = use_ui();
     let a = auth();
     let open = ui.user_menu_open;
+    let app_open = RwSignal::new(false);
     let demo = move || a.phase.get() == Phase::Demo;
     let name = move || {
         if demo() {
@@ -457,6 +458,9 @@ fn UserMenu() -> impl IntoView {
                     <a class="menu-item" role="menuitem" href="/security/devices" on:click=move |_| open.set(false)>
                         <Icon icon=icons::SMARTPHONE size=16 />{tr("nav.devices")}
                     </a>
+                    <button class="menu-item" role="menuitem" on:click=move |_| { open.set(false); app_open.set(true); }>
+                        <Icon icon=icons::DOWNLOAD size=16 />{tr("dev.app")}
+                    </button>
                     <a class="menu-item" role="menuitem" href="/system" on:click=move |_| open.set(false)>
                         <Icon icon=icons::SETTINGS size=16 />{tr("bar.prefs")}
                     </a>
@@ -475,6 +479,9 @@ fn UserMenu() -> impl IntoView {
                         <Icon icon=icons::LOG_OUT size=16 />{tr("bar.logout")}
                     </button>
                 </div>
+            </Show>
+            <Show when=move || app_open.get()>
+                <crate::android_app::AndroidAppDialog on_close=Callback::new(move |_| app_open.set(false)) />
             </Show>
         </div>
     }

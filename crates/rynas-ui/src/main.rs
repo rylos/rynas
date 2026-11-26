@@ -2,6 +2,7 @@
 
 mod about;
 mod alerts;
+mod android_app;
 mod api;
 mod auth;
 mod chart;

@@ -316,6 +316,41 @@ pub struct PushRegistration {
 /// The languages a device may ask for its notifications.
 pub const PUSH_LANGUAGES: [&str; 3] = ["en", "it", "ru"];
 
+/// Where every release asset of the project lives; an Android app URL must start with it.
+pub const ANDROID_RELEASE_PREFIX: &str = "https://github.com/rylos/rynas/releases/download/";
+/// The newest Android app, always at this address (release tag `android`, never "Latest"):
+/// the web interface links it directly, so the download works without the metadata.
+pub const ANDROID_APK_URL: &str = "https://github.com/rylos/rynas/releases/download/android/rynas-android.apk";
+/// The metadata of [`ANDROID_APK_URL`] (`android.json`), read by the NAS, not the browser
+/// (GitHub's downloads have no CORS headers).
+pub const ANDROID_METADATA_URL: &str = "https://github.com/rylos/rynas/releases/download/android/android.json";
+
+/// `GET /api/v1/devices/android-app` (any signed-in user): the Android app published on
+/// GitHub, `{"state":"available", ...}` or `{"state":"unavailable"}` when the NAS could not
+/// read or trust the metadata (offline, GitHub down, a malformed file). Never an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum AndroidApp {
+    Available(AndroidRelease),
+    #[default]
+    Unavailable,
+}
+
+/// The published Android app, as checked by the NAS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AndroidRelease {
+    /// The app's version name (`0.2.0`).
+    pub version: String,
+    /// The size of the APK in bytes.
+    pub size: u64,
+    /// SHA-256 of the APK, lowercase hex.
+    pub sha256: String,
+    /// SHA-256 of the signing certificate, lowercase hex.
+    pub signer_sha256: String,
+    /// The APK's address, under [`ANDROID_RELEASE_PREFIX`].
+    pub url: String,
+}
+
 /// The language code of a `lang` sent with a push registration: one of [`PUSH_LANGUAGES`],
 /// English for anything else.
 pub fn push_language(lang: &str) -> &'static str {

@@ -2438,6 +2438,12 @@ dev.rejected	已拒绝配对，并通知手机端。
 dev.failed	无法启动配对。
 dev.again	重新开始
 dev.sec_text	通过应用配对的手机使用各自的密钥登录。如果手机丢失，可在此撤销其授权。
+dev.app	Android 应用
+dev.app_scan	用手机扫描
+dev.app_download	下载 APK
+dev.app_signer	签名证书 SHA-256
+dev.app_qr	Android 应用下载链接二维码
+dev.app_first	还没有应用？请先下载
 sec.manual	不能扫描吗？请输入此密钥：
 sec.copy_secret	复制密钥
 sec.step_code	输入应用程序显示的代码
