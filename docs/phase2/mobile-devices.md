@@ -47,6 +47,9 @@ Session (cookie + CSRF for writes):
   session).
 - `GET /api/v1/devices` (own; administrators everyone's, with `user`), `PATCH /api/v1/devices/{id}`
   `{name}` (1-64 characters, trimmed), `DELETE /api/v1/devices/{id}`.
+- `GET /api/v1/devices/android-app` (any signed-in user) → `AndroidApp`:
+  `{"state":"available", version, size, sha256, signer_sha256, url}` or `{"state":"unavailable"}`,
+  never an error (§6 "Android app").
 
 Bearer (device):
 
@@ -249,6 +252,22 @@ Revoke with a confirmation, "Pair a device": QR with a countdown, then the claim
 name, model, address and compare code with Approve / Reject and an editable name. Administrators
 see every user's devices. When the last sign-in is older than 10 minutes the pairing dialog
 asks for the password (and TOTP code) first.
+
+**Android app.** The app is published on GitHub at a fixed release, tag `android` (never
+"Latest"): the APK at `https://github.com/rylos/rynas/releases/download/android/rynas-android.apk`
+and its metadata `android.json` next to it (`version`, `version_code`, `size`, `sha256`,
+`signer_sha256`, `url`, `published_ms`). A box "Android app" sits above the device list, at the
+top of the pairing dialog ("No app yet? Get it first", folded) and in a dialog from the user
+menu, one component everywhere (`crates/rynas-ui/src/android_app.rs`): a QR code of the APK's
+fixed address, a plain "Download APK" link to it (it works even when the metadata cannot be
+read), and, when it can, the version, the size and the signing certificate's SHA-256 (folded,
+wrapped). The browser cannot read `android.json` (GitHub's downloads send no CORS headers), so
+rynasd reads it (`rynasd::android_app`, internal route `GET /v1/devices/android-app`, forwarded
+by rynas-web): HTTPS only, 8 s timeout, at most 16 KiB, checked (version of letters, digits and
+`.-+_`, size 64 KiB-512 MiB, hex SHA-256 hashes, `url` under
+`https://github.com/rylos/rynas/releases/download/` without empty, `.` or `..` segments), kept
+in memory 6 hours, a failure 10 minutes, one fetch at a time. A failure, or rynasd not
+answering, is `{"state":"unavailable"}`.
 
 ## 7. Phases
 

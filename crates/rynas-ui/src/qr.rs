@@ -1,4 +1,5 @@
-//! QR code drawn as SVG (qrcodegen, no image or canvas): used for the TOTP enrollment URI.
+//! QR code drawn as SVG (qrcodegen, no image or canvas): used for the TOTP enrollment URI, the pairing codes
+//! of mobile devices and the Android app's address.
 
 use leptos::prelude::*;
 use qrcodegen::{QrCode, QrCodeEcc};
@@ -24,13 +25,14 @@ fn path(qr: &QrCode) -> String {
     d
 }
 
-/// Always dark on white (scanners need it, in the dark theme too).
+/// Always dark on white (scanners need it, in the dark theme too). `label`: the i18n key of
+/// what the code carries (default: the TOTP secret).
 #[component]
-pub fn QrSvg(#[prop(into)] text: String) -> impl IntoView {
+pub fn QrSvg(#[prop(into)] text: String, #[prop(optional)] label: Option<&'static str>) -> impl IntoView {
     QrCode::encode_text(&text, QrCodeEcc::Medium).ok().map(|qr| {
         let size = qr.size() + 8;
         view! {
-            <svg class="qr" viewBox=format!("0 0 {size} {size}") role="img" aria-label=crate::i18n::tr("sec.qr_label") shape-rendering="crispEdges">
+            <svg class="qr" viewBox=format!("0 0 {size} {size}") role="img" aria-label=crate::i18n::tr(label.unwrap_or("sec.qr_label")) shape-rendering="crispEdges">
                 <rect width=size height=size class="qr-bg" />
                 <path d=path(&qr) class="qr-fg" />
             </svg>

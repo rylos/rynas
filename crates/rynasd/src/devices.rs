@@ -28,6 +28,7 @@
 //! | GET | `/v1/devices/{id}/self` | | `DeviceSelf` (the owner: `devices/self` of the app) |
 //! | PUT | `/v1/devices/{id}/push` | `PushSubscription` | `Device` (the owner); creates the `device` notification target and its rule (warning and above) |
 //! | DELETE | `/v1/devices/{id}/push` | | 204 (the owner); removes the target |
+//! | GET | `/v1/devices/android-app` | | `AndroidApp` (no user needed; [`crate::android_app`]) |
 //!
 //! Push: the subscription is kept with the device; the notification engine's `device` target
 //! names the device and finds the subscription through [`PushDirectory`]; a 404/410 of the

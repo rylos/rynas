@@ -2069,6 +2069,7 @@ Unix seconds.
 | POST | `/api/v1/devices/pairing/{id}/approve` | session (owner) | `PairingApprove` {name?} | `Device`; 409 `conflict` unless claimed |
 | POST | `/api/v1/devices/pairing/{id}/reject` | session (owner) | — | 204 |
 | GET | `/api/v1/devices` | session | — | `Vec<Device>` (own; administrators everyone's) |
+| GET | `/api/v1/devices/android-app` | session | — | `AndroidApp`: `{state: "available", version, size, sha256, signer_sha256, url}` or `{state: "unavailable"}` (never an error; read by rynasd from the `android` release's `android.json`, kept 6 h, a failure 10 min) |
 | PATCH / DELETE | `/api/v1/devices/{id}` | session (owner or administrator) | `DeviceRename` {name} | `Device` / 204 (revoked at once) |
 | GET / PATCH / DELETE | `/api/v1/devices/self` | bearer | `DeviceRename` | `DeviceSelf` (device + `tls_pins` + `endpoints`) / `Device` / 204 |
 | PUT / DELETE | `/api/v1/devices/self/push` | bearer | `PushRegistration` {endpoint, p256dh, auth, lang?} | `Device` (`push: true`) / 204; makes / removes the device's `device` notification target and its rules (warning and above; the owner's file transfers); `lang` `en`/`it`/`ru` (else `en`) sets the target's language on creation and changes it later, without `lang` an existing target keeps its language |
