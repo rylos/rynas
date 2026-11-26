@@ -125,6 +125,19 @@ Budgets come from `docs/phase1/plan.md`; design tokens from `docs/phase0/02-ui.m
   sleeping disk), so a client that reloads on the task's end sees the new values.
 - A20 MUST: long work is a `rynas-tasks` task with a UPID, progress, log and cancel. Clients follow it
   through `/tasks/stream`; polling `/tasks/{id}` is a fallback only.
+- A20b MUST (2026-11-26, [tasks.md](../phase1/tasks.md)): long work survives closing the page and
+  reports its result. All the steps of one action run in **one server task** (a loop over items,
+  a check then a change, a result kept for the client): **no client-side chaining of task steps
+  in `spawn_local`** (start one task, wait, start the next; or follow a task and then post its
+  result somewhere). A view finds the task running for what it shows with `tasks::use_task(kind,
+  subject)` (`TaskInfo::subject`, set with `TaskManager::spawn_on`), never with a page-local
+  "busy" flag only; a task that stops at its time budget or skips items calls
+  `TaskCtx::partial` and never ends as a plain success. Reviewers reject a `for … run_task`
+  loop in the UI.
+- A20c MUST: heavy commands (tree walks, measures, copies nobody waits for) are built with
+  `rynasd::heavy::heavy_cmd` (nice 19, idle I/O class) and run with `TaskCtx::run` or
+  `TaskCtx::run_blocking` (killed on cancel); a command whose progress shows gets a stall
+  watchdog (`heavy::stalled_after`) instead of a guessed fixed timeout.
 - A21 MUST: SSE event names are `snake_case` verbs or nouns (`sample`, `started`, `updated`,
   `finished`), data is one JSON object of a type in `rynas-api-types`, serialized **once** per event
   (not once per subscriber). A lagged subscriber gets an explicit `resync` event (the client then
@@ -452,8 +465,15 @@ interface shows in English and switches when the file arrives.
 ### 3.2 Rules
 - S1 MUST: live data through SSE; polling only for data without an event source, ≥ 5 s, paused when
   `document.hidden`, and stopped when no visible component needs it. Hardware status comes from
-  `hardware.status` on `/events` (no `/hardware` polling); `/config/pending` is polled compact
-  (`?detail=1` only for the review dialog).
+  `hardware.status` on `/events` (no `/hardware` polling); `/config/pending` is read compact on
+  `config.pending` events (`?detail=1` only for the review dialog); the storage overview on
+  `storage.changed` (its fill levels every 5 minutes while visible).
+- S1b MUST (2026-11-26): no periodic loop that wakes the NAS for nothing, in rynasd and rynas-web
+  too. Kernel changes come from the one system watcher `rynasd::sysevents` (udev netlink, mount
+  table, mdstat: subscribe, then `next_burst`), files from inotify, configuration from the
+  pending-change events. A timer is allowed only as a slow safety net (≥ 60 s) next to an event
+  source, or while someone watches (the metrics collector samples every second only while a
+  client listens). New loops state their wake-ups per minute in the review.
 - S2 MUST: charts on `<canvas>`; series data and sizes read once per sample (or layout change),
   theme colors once per theme (`getComputedStyle` forces a style recalculation of the page), and
   nothing read from the DOM inside the animation loop: `clientWidth` in a frame forces a layout.
