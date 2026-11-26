@@ -152,6 +152,8 @@ pub fn routes() -> Router<AppState> {
         .route("/crypt/folders", post(forward))
         .route("/crypt/folders/{volume}/{name}/reveal-recovery-key", post(forward))
         .route("/crypt/folders/{volume}/{name}/recovery-key", post(forward))
+        .route("/crypt/folders/{volume}/{name}/recovery-key-saved", post(forward))
+        .route("/crypt/recovery-pending", get(forward))
         .route("/shares/plan/delete", post(forward))
         // each share's own size (answered at once from rynasd's cache)
         .route("/share-sizes", get(forward))

@@ -2850,6 +2850,7 @@ dict! { BLOB, LENS;
     "crypt.auto_off" => "Automatic unlock turned off: the new password could not be sealed";
     "crypt.reveal_text" => "The recovery key is read from the folder with its password. Keep it outside the NAS.";
     "crypt.rk_keep" => "Store it somewhere safe outside the NAS: with it anyone can set a new password for this folder.";
+    "crypt.rk_pending" => "The recovery key of the encrypted folder {name} has not been stored yet. The NAS keeps it for you until you confirm (at most 7 days).";
     "shares.w.pc_backup_folder" => "{path} holds, is or lies inside the backup folder of the PC {key}: it stays read-only in File until the PC's backups move to a folder of their own.";
     "shares.w.crypt_locked" => "{path} is encrypted and locked: SMB and NFS clients cannot connect; apps and containers started while it is locked see an empty folder and must be restarted after it is unlocked.";
     "err.crypt_wrong_password" => "Wrong password or recovery key";
@@ -8224,7 +8225,7 @@ mod tests {
                 || s.contains("example")
                 || matches!(s, "a.b" | "metrics.sample" | "hardware.status" | "task.started" | "task.updated" | "task.finished" | "removable.state" | "docker.stats" | "docker.changed" | "storage.changed" | "config.pending")
                 // task types named to the task store (`tasks::use_task`, `tasks::reports`)
-                || matches!(s, "space.preview" | "space.scan" | "pcbackup.usage")
+                || matches!(s, "space.preview" | "space.scan" | "pcbackup.usage" | "crypt.create" | "replication.run" | "updates.status")
         };
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for e in std::fs::read_dir(dir).expect("src dir").flatten() {

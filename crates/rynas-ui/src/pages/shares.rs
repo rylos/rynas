@@ -287,6 +287,7 @@ pub fn Shares() -> impl IntoView {
     view! {
         <div class="page">
             <PageHeader icon=icons::SHARE_2 title="nav.shares" subtitle="shares.subtitle" />
+            <share_crypt::PendingKeys />
             <section class="card widget w-12">
                 <div class="toolbar">
                     {search_box("shares.search", q)}
@@ -494,7 +495,7 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
     let error = RwSignal::new(None::<String>);
     // a new encrypted folder: its form, and its recovery key once it exists
     let cf = share_crypt::CryptForm::new();
-    let key = RwSignal::new(None::<(String, String)>);
+    let key = RwSignal::new(None::<(String, String, String)>);
     on_cleanup(move || {
         let _ = key.try_set(None);
     });
@@ -545,7 +546,7 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
             if crypt_new {
                 let volume = body.subvolume.as_ref().map(|v| v.volume.clone()).unwrap_or_default();
                 match share_crypt::create_folder(&volume, &body.name, cf).await {
-                    Ok(Ok(k)) => new_key = Some((body.name.clone(), k)),
+                    Ok(Ok(k)) => new_key = Some((volume.clone(), body.name.clone(), k)),
                     // the folder exists: the share goes on, the key is shown later
                     Ok(Err(e)) => toast(Tone::Warn, format!("{}{}{e}", t("crypt.rk_later"), api::DETAIL_SEP)),
                     Err(e) => {
@@ -636,7 +637,7 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
     .into_any();
     let foot = save_bar(busy, Signal::derive(|| true), if is_new { "create" } else { "save" }, close, save, error);
     let reveal = move || {
-        key.get().map(|(n, k)| view! { <share_crypt::RecoveryDialog name=n key=k on_done=Callback::new(move |_| {
+        key.get().map(|(v, n, k)| view! { <share_crypt::RecoveryDialog volume=v name=n key=k on_done=Callback::new(move |_| {
             key.set(None);
             // a failed share or apply stays on screen with its error
             if error.with_untracked(Option::is_none) {

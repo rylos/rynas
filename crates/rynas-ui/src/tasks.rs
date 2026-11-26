@@ -372,6 +372,12 @@ pub fn use_task_by(kind: &'static str, keep: impl Fn(&TaskInfo) -> bool + Send +
     find_task(kind, keep)
 }
 
+/// [`use_task_by`] that does not report: the global toast still says how the task ended (a
+/// view that only reloads something when it ends).
+pub fn watch_task_by(kind: &'static str, keep: impl Fn(&TaskInfo) -> bool + Send + Sync + 'static) -> UseTask {
+    find_task(kind, keep)
+}
+
 fn find_task(kind: &'static str, keep: impl Fn(&TaskInfo) -> bool + Send + Sync + 'static) -> UseTask {
     let s = tasks();
     let mounted = js_sys::Date::now() as u64;

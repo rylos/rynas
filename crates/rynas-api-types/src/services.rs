@@ -934,6 +934,24 @@ pub struct CryptRecoveryKeyRequest {
     pub password: String,
 }
 
+/// `GET /api/v1/crypt/recovery-pending`: the recovery key of a new encrypted folder that its
+/// creator has not confirmed saving yet. Only the caller's own folders; the key itself is not
+/// in it: it is read with `POST .../reveal-recovery-key` (until confirmed) and wiped with
+/// `POST /api/v1/crypt/folders/{volume}/{name}/recovery-key-saved`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CryptPendingKey {
+    pub volume: String,
+    pub name: String,
+    pub path: String,
+    /// When the folder was made (ms since the epoch).
+    #[serde(default)]
+    pub created_ms: u64,
+    /// When the server wipes the key unconfirmed (ms since the epoch); afterwards it is shown
+    /// again only with the folder's password.
+    #[serde(default)]
+    pub expires_ms: u64,
+}
+
 /// `POST /api/v1/crypt/folders`: a new encrypted folder `<place>/<name>` (task
 /// `crypt.create`); its recovery key is revealed once afterwards.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

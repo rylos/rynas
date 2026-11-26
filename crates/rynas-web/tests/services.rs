@@ -178,13 +178,22 @@ async fn encrypted_folder_lifecycle() {
         .await;
     assert_eq!((r.status, r.code()), (StatusCode::CONFLICT, error_codes::ALREADY_EXISTS.into()));
 
-    // the recovery key, once
+    // the recovery key, kept until its creator says it is saved (a closed browser loses nothing)
+    let pending: Vec<rynas_api_types::CryptPendingKey> = app.get("/api/v1/crypt/recovery-pending", &c).await.json();
+    assert_eq!(pending.iter().map(|p| (p.volume.as_str(), p.name.as_str())).collect::<Vec<_>>(), [("vol1", "secret")]);
+    assert!(!serde_json::to_string(&pending).unwrap().contains('-'), "no key in the list");
     let url = "/api/v1/crypt/folders/vol1/secret/reveal-recovery-key";
     let r = app.send(Method::POST, url, &c, None).await;
     assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
     let key: RecoveryKey = r.json();
     assert_eq!(key.key.len(), 64 + 7);
+    let again: RecoveryKey = app.send(Method::POST, url, &c, None).await.json();
+    assert_eq!(again.key, key.key);
+    let saved = "/api/v1/crypt/folders/vol1/secret/recovery-key-saved";
+    assert_eq!(app.send(Method::POST, saved, &c, None).await.status, StatusCode::NO_CONTENT);
     assert_eq!(app.send(Method::POST, url, &c, None).await.status, StatusCode::NOT_FOUND);
+    let pending: Vec<rynas_api_types::CryptPendingKey> = app.get("/api/v1/crypt/recovery-pending", &c).await.json();
+    assert!(pending.is_empty());
 
     // the share on it, marked encrypted by the validation
     let r = app

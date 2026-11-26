@@ -181,19 +181,77 @@ pub async fn create_folder(volume: &str, name: &str, f: CryptForm) -> Result<Res
     Ok(key)
 }
 
-/// The recovery key of a new encrypted folder, shown once.
+/// The recovery key of a new encrypted folder. rynasd keeps it for its creator until Done
+/// ("I stored it") tells it the key is saved: the kept copy is wiped then
+/// (`recovery-key-saved`); a dialog closed another way leaves it on the Shares page
+/// ([`PendingKeys`]).
 #[component]
-pub fn RecoveryDialog(name: String, key: String, on_done: Callback<()>) -> impl IntoView {
+pub fn RecoveryDialog(volume: String, name: String, key: String, on_done: Callback<()>) -> impl IntoView {
     let key = StoredValue::new(key);
     // the key must not linger in memory after the dialog
     on_cleanup(move || key.set_value(String::new()));
     let file = format!("recovery-key-{name}.txt");
     let stored = RwSignal::new(false);
+    let saved_url = format!("/api/v1/crypt/folders/{}/{}/recovery-key-saved", api::encode(&volume), api::encode(&name));
+    let done = Callback::new(move |_| {
+        let u = saved_url.clone();
+        // a failed confirmation leaves the key listed as "to save": nothing is lost
+        spawn_local(async move {
+            let _ = api::post_empty::<()>(&u, None).await;
+            on_done.run(());
+        });
+    });
     view! {
-        <Modal title=tf("sto.rk_title", &[("name", &name)]) on_close=Callback::new(|_| ()) foot=move || key_once_foot(stored, on_done)>
+        <Modal title=tf("sto.rk_title", &[("name", &name)]) on_close=Callback::new(|_| ()) foot=move || key_once_foot(stored, done)>
             <p class="muted small">{tr("crypt.rk_text")}</p>
             {key_once(key.get_value(), file, "crypt.rk_keep", stored)}
         </Modal>
+    }
+}
+
+/// The signed-in administrator's new encrypted folders whose recovery key was not confirmed
+/// saved yet (rynasd keeps it until then, also when the browser closed during the creation):
+/// a note each with "Show", which opens [`RecoveryDialog`].
+#[component]
+pub fn PendingKeys() -> impl IntoView {
+    let list = Remote::<Vec<rynas_api_types::CryptPendingKey>>::new("/api/v1/crypt/recovery-pending");
+    // a creation that ends while the page is open (also one started in another tab); the
+    // global toast still reports it
+    crate::tasks::watch_task_by("crypt.create", |_| true).on_end(move |_| list.reload());
+    let open = RwSignal::new(None::<(rynas_api_types::CryptPendingKey, String)>);
+    let error = RwSignal::new(None::<String>);
+    let show = move |p: rynas_api_types::CryptPendingKey| {
+        error.set(None);
+        spawn_local(async move {
+            let url = format!("/api/v1/crypt/folders/{}/{}/reveal-recovery-key", api::encode(&p.volume), api::encode(&p.name));
+            match api::post::<(), RecoveryKey>(&url, None).await {
+                Ok(k) => {
+                    let _ = open.try_set(Some((p, k.key)));
+                }
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
+                    list.reload();
+                }
+            }
+        });
+    };
+    view! {
+        {move || list.data.get().unwrap_or_default().into_iter().map(|p| {
+            let text = tf("crypt.rk_pending", &[("name", &p.name)]);
+            ui::note(Tone::Warn, icons::KEY, view! {
+                <div>
+                    <p>{text}</p>
+                    <button type="button" class="btn ghost sm" on:click=move |_| show(p.clone())>{tr("sto.rk_reveal")}</button>
+                </div>
+            }.into_any())
+        }).collect_view()}
+        {form_error(error)}
+        {move || open.get().map(|(p, k)| view! {
+            <RecoveryDialog volume=p.volume name=p.name key=k on_done=Callback::new(move |_| {
+                let _ = open.try_set(None);
+                list.reload();
+            }) />
+        })}
     }
 }
 

@@ -983,6 +983,8 @@ fn main() -> std::io::Result<()> {
         rynasd::services::crypt::set_notifier(notifier.clone());
         // containers a lock stopped while rynasd ended are started again
         rynasd::services::crypt::start_left_stopped(&args.state_dir);
+        // recovery keys of new encrypted folders not confirmed saved yet
+        rynasd::services::crypt::load_recovery_keys(&args.state_dir);
         if let Some(s) = &state.services {
             rynasd::services::crypt::auto_unlock_at_start(s);
         }

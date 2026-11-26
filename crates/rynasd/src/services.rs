@@ -152,6 +152,11 @@ pub fn router(st: SvcState) -> Router {
             "/v1/crypt/folders/{volume}/{name}/recovery-key",
             post(crypt::recovery_key),
         )
+        .route("/v1/crypt/recovery-pending", get(crypt::recovery_pending))
+        .route(
+            "/v1/crypt/folders/{volume}/{name}/recovery-key-saved",
+            post(crypt::recovery_saved),
+        )
         .merge(
             Router::new()
                 .route("/v1/crypt/auto-unlock", post(crypt::auto_unlock_now))

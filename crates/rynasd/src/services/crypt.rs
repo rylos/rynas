@@ -2,8 +2,11 @@
 //!
 //! - `GET /v1/crypt`, `POST /v1/crypt/install` (task `crypt.install`, administrators);
 //! - `POST /v1/crypt/folders` (task `crypt.create`: ciphertext, init, mount),
-//!   `POST /v1/crypt/folders/{volume}/{name}/reveal-recovery-key` (once, within the hour, to
-//!   the administrator who created it) and `.../recovery-key` (again, with the password);
+//!   `POST /v1/crypt/folders/{volume}/{name}/reveal-recovery-key` (to the administrator who
+//!   created it, until they confirm with `.../recovery-key-saved`, at most 7 days; kept in a
+//!   root-only file meanwhile, so a closed browser does not lose it; `GET
+//!   /v1/crypt/recovery-pending` lists the caller's waiting keys) and `.../recovery-key`
+//!   (again, with the password);
 //! - on an applied encrypted share: `POST /v1/shares/{share}/unlock`, `.../lock`,
 //!   `.../crypt/password`, `PUT .../crypt/auto-unlock`;
 //! - `POST /v1/crypt/auto-unlock` (root peers: the boot unit, before Docker).
@@ -42,17 +45,38 @@ use rynas_services::shares::{NFS_SERVER, SMBD};
 use super::{Services, SvcState, bad, blocking, conflict, docs, internal, json_body, not_found, share_view, svc, unit_running};
 use crate::ops::{Error, Res, user};
 
-/// How long the recovery key of a new folder waits to be revealed.
-const RECOVERY_TTL_MS: u64 = 3600 * 1000;
+/// How long the recovery key of a new folder waits for its creator to confirm it is saved
+/// (afterwards it is shown again only with the folder's password).
+const RECOVERY_TTL_MS: u64 = 7 * 24 * 3600 * 1000;
 /// Recovery keys kept at once.
 const MAX_RECOVERY_KEYS: usize = 16;
 /// Pause before answering a wrong password.
 const WRONG_PASSWORD_PAUSE: Duration = Duration::from_secs(1);
 
-/// path → (expiry ms, creating user, recovery key): in memory only, handed out once, and only
-/// to the administrator who created the folder.
-type Kept = (u64, String, Secret);
+/// The recovery key of a new folder until its creator confirms it is saved: handed out only
+/// to the administrator who created the folder, never logged nor in a task log.
+#[derive(serde::Serialize)]
+struct Kept {
+    path: String,
+    volume: String,
+    name: String,
+    owner: String,
+    created_ms: u64,
+    expires_ms: u64,
+    #[serde(serialize_with = "secret_str")]
+    key: Secret,
+}
+
+fn secret_str<S: serde::Serializer>(k: &Secret, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(k.expose())
+}
+
+/// path → kept key. Also in `<state>/crypt/recovery-pending.json` (root, 0600, in a 0700
+/// folder) once rynasd set [`RECOVERY_FILE_AT`], so a key whose browser closed during the
+/// creation, or a rynasd restart, is not lost; the entry and the file go at the confirmation.
 static RECOVERY: Mutex<Option<HashMap<String, Kept>>> = Mutex::new(None);
+static RECOVERY_FILE_AT: OnceLock<std::path::PathBuf> = OnceLock::new();
+const RECOVERY_FILE: &str = "crypt/recovery-pending.json";
 
 /// Where failed automatic unlocks are reported (set once the engine runs).
 static NOTIFIER: OnceLock<Arc<dyn Notifier>> = OnceLock::new();
@@ -62,29 +86,158 @@ pub fn set_notifier(n: Arc<dyn Notifier>) {
     let _ = NOTIFIER.set(n);
 }
 
-fn keep_recovery_key(path: &str, who: &str, key: Secret) {
+/// Reads the kept keys at rynasd's start (expired ones dropped, the file rewritten).
+pub fn load_recovery_keys(state_dir: &std::path::Path) {
+    let f = state_dir.join(RECOVERY_FILE);
+    let _ = RECOVERY_FILE_AT.set(f.clone());
+    let Ok(bytes) = std::fs::read(&f).map(zeroize::Zeroizing::new) else {
+        return;
+    };
+    let kept: Vec<KeptIn> = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            // never the content: it holds keys
+            tracing::warn!("encrypted folders: {} unreadable ({:?}), removed", f.display(), e.classify());
+            let _ = std::fs::remove_file(&f);
+            return;
+        }
+    };
     let now = rynas_tasks::now_ms();
     let mut g = RECOVERY.lock().unwrap_or_else(|e| e.into_inner());
     let m = g.get_or_insert_with(HashMap::new);
-    m.retain(|_, (exp, _, _)| *exp > now);
+    for k in kept.into_iter().filter(|k| k.expires_ms > now) {
+        let k = k.into_kept();
+        m.insert(k.path.clone(), k);
+    }
+    save_recovery(m);
+}
+
+/// A kept key as read from the file (the key moved into a [`Secret`] at once).
+#[derive(serde::Deserialize)]
+struct KeptIn {
+    path: String,
+    volume: String,
+    name: String,
+    owner: String,
+    created_ms: u64,
+    expires_ms: u64,
+    key: String,
+}
+
+impl KeptIn {
+    fn into_kept(self) -> Kept {
+        let key = Secret::new(self.key);
+        Kept {
+            path: self.path,
+            volume: self.volume,
+            name: self.name,
+            owner: self.owner,
+            created_ms: self.created_ms,
+            expires_ms: self.expires_ms,
+            key,
+        }
+    }
+}
+
+/// Writes the kept keys to their file (none: the file goes). Without a state folder (tests)
+/// they stay in memory only.
+fn save_recovery(m: &HashMap<String, Kept>) {
+    let Some(f) = RECOVERY_FILE_AT.get() else {
+        return;
+    };
+    let r = if m.is_empty() {
+        match std::fs::remove_file(f) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    } else {
+        let list: Vec<&Kept> = m.values().collect();
+        serde_json::to_vec(&list).map(zeroize::Zeroizing::new).map_err(std::io::Error::other).and_then(|data| {
+            let dir = f.parent().ok_or_else(|| std::io::Error::other("no folder"))?;
+            std::fs::create_dir_all(dir)?;
+            std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+            crate::tls::write_atomic(f, &data, 0o600, None)
+        })
+    };
+    if let Err(e) = r {
+        tracing::warn!("encrypted folders: {} not written: {e}", f.display());
+    }
+}
+
+fn keep_recovery_key(path: &str, volume: &str, name: &str, who: &str, key: Secret) {
+    let now = rynas_tasks::now_ms();
+    let mut g = RECOVERY.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(HashMap::new);
+    m.retain(|_, k| k.expires_ms > now);
     if m.len() >= MAX_RECOVERY_KEYS
-        && let Some(oldest) = m.iter().min_by_key(|(_, (e, _, _))| *e).map(|(k, _)| k.clone())
+        && let Some(oldest) = m.values().min_by_key(|k| k.expires_ms).map(|k| k.path.clone())
     {
         m.remove(&oldest);
     }
-    m.insert(path.to_string(), (now + RECOVERY_TTL_MS, who.to_string(), key));
+    let k = Kept {
+        path: path.to_string(),
+        volume: volume.to_string(),
+        name: name.to_string(),
+        owner: who.to_string(),
+        created_ms: now,
+        expires_ms: now + RECOVERY_TTL_MS,
+        key,
+    };
+    m.insert(path.to_string(), k);
+    save_recovery(m);
 }
 
-/// The kept key of `path`, once, for the user who created the folder.
-fn take_recovery_key(path: &str, who: &str) -> Option<Secret> {
+/// The kept key of `path`, for the user who created the folder; it stays until
+/// [`forget_recovery_key`].
+fn peek_recovery_key(path: &str, who: &str) -> Option<Secret> {
+    let now = rynas_tasks::now_ms();
+    let g = RECOVERY.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref()?.get(path).filter(|k| k.expires_ms > now && k.owner == who).map(|k| k.key.clone())
+}
+
+/// Wipes the kept key of `path` (its creator saved it, or the folder is gone): whether there
+/// was one for `who` (`None`: any user's).
+fn forget_recovery_key(path: &str, who: Option<&str>) -> bool {
+    let mut g = RECOVERY.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(m) = g.as_mut() else {
+        return false;
+    };
+    if who.is_some_and(|w| m.get(path).is_some_and(|k| k.owner != w)) {
+        return false;
+    }
+    let gone = m.remove(path).is_some();
+    if gone {
+        save_recovery(m);
+    }
+    gone
+}
+
+/// The keys `who` has not confirmed yet (without the keys), oldest first; entries whose
+/// folder is gone (`exists` false) or that expired are wiped.
+fn pending_recovery_keys(who: &str, exists: impl Fn(&str) -> bool) -> Vec<rynas_api_types::CryptPendingKey> {
     let now = rynas_tasks::now_ms();
     let mut g = RECOVERY.lock().unwrap_or_else(|e| e.into_inner());
-    let m = g.as_mut()?;
-    m.retain(|_, (exp, _, _)| *exp > now);
-    if m.get(path).is_some_and(|(_, owner, _)| owner != who) {
-        return None;
+    let Some(m) = g.as_mut() else {
+        return Vec::new();
+    };
+    let before = m.len();
+    m.retain(|_, k| k.expires_ms > now && (k.owner != who || exists(&k.path)));
+    if m.len() != before {
+        save_recovery(m);
     }
-    m.remove(path).map(|(_, _, k)| k)
+    let mut v: Vec<_> = m
+        .values()
+        .filter(|k| k.owner == who)
+        .map(|k| rynas_api_types::CryptPendingKey {
+            volume: k.volume.clone(),
+            name: k.name.clone(),
+            path: k.path.clone(),
+            created_ms: k.created_ms,
+            expires_ms: k.expires_ms,
+        })
+        .collect();
+    v.sort_by_key(|k| k.created_ms);
+    v
 }
 
 /// A secret field of a request: moved out (no copy left in the request) and checked
@@ -225,6 +378,7 @@ pub(super) async fn create(
     let pw = password("password", &mut req.password)?;
     let auto = req.auto_unlock;
     let r = CryptCreateRequest { volume: req.volume.clone(), name: req.name.clone(), ..Default::default() };
+    let (r_volume, r_name) = (req.volume.clone(), req.name.clone());
     drop(req);
     let path = blocking(&s, move |s| {
         let path = new_folder_path(s, &r)?;
@@ -252,14 +406,15 @@ pub(super) async fn create(
     audit(&who, "create", &path);
     let svc = s.clone();
     let owner = who.clone();
-    let id = s.ops.tasks.spawn("crypt.create", &who, move |ctx| async move {
+    let (volume, name) = (r_volume, r_name);
+    let id = s.ops.tasks.spawn_on("crypt.create", Some(&path.clone()), &who, move |ctx| async move {
         let c = ctx.clone();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             let log = |l: &str| c.log(l);
             let crypt = svc.shares.crypt();
             let made = crypt.create(&path, &pw, &log).map_err(|e| e.to_string())?;
-            keep_recovery_key(&path, &owner, made.key);
-            log("the recovery key can be revealed once within the hour (reveal-recovery-key), or again later with the password");
+            keep_recovery_key(&path, &volume, &name, &owner, made.key);
+            log("the recovery key is kept for the administrator who created the folder until they confirm it is saved (at most 7 days), or shown again later with the password");
             svc.shares.sizes().clear();
             if made.unlock_error.is_some() {
                 // kept, locked: the share can still be made; the user unlocks it later
@@ -288,14 +443,43 @@ pub(super) async fn reveal(
     let (s, who) = (svc(&st)?, user(&h)?);
     s.ops.admins.require_admin(&who, "encrypted folders")?;
     let r = CryptCreateRequest { volume, name, ..Default::default() };
-    let path = blocking(&s, move |s| new_folder_path(s, &r)).await?;
-    let key = take_recovery_key(&path, &who).ok_or_else(|| {
+    let (path, exists) =
+        blocking(&s, move |s| new_folder_path(s, &r).map(|p| { let e = s.shares.crypt().state(&p) != CryptState::Missing; (p, e) })).await?;
+    if !exists {
+        forget_recovery_key(&path, None);
+    }
+    let key = peek_recovery_key(&path, &who).filter(|_| exists).ok_or_else(|| {
         not_found(format!(
-            "recovery key of {path} (shown once to the administrator who created the folder, kept one hour; it can be shown again with the password)"
+            "recovery key of {path} (kept for the administrator who created the folder until they confirm it is saved, at most 7 days; it can be shown again with the password)"
         ))
     })?;
     audit(&who, "recovery key revealed", &path);
     key_answer(key)
+}
+
+/// `GET /v1/crypt/recovery-pending`: the caller's new folders whose recovery key waits for
+/// "saved" (no key in the answer).
+pub(super) async fn recovery_pending(State(st): State<SvcState>, h: HeaderMap) -> Res<Json<Vec<rynas_api_types::CryptPendingKey>>> {
+    let (s, who) = (svc(&st)?, user(&h)?);
+    s.ops.admins.require_admin(&who, "encrypted folders")?;
+    blocking(&s, move |s| Ok(pending_recovery_keys(&who, |p| s.shares.crypt().state(p) != CryptState::Missing))).await.map(Json)
+}
+
+/// `POST /v1/crypt/folders/{volume}/{name}/recovery-key-saved`: the creator saved the key; the
+/// kept copy is wiped (memory and file). 204 also when nothing was kept.
+pub(super) async fn recovery_saved(
+    State(st): State<SvcState>,
+    h: HeaderMap,
+    Path((volume, name)): Path<(String, String)>,
+) -> Res<StatusCode> {
+    let (s, who) = (svc(&st)?, user(&h)?);
+    s.ops.admins.require_admin(&who, "encrypted folders")?;
+    let r = CryptCreateRequest { volume, name, ..Default::default() };
+    let path = blocking(&s, move |s| new_folder_path(s, &r)).await?;
+    if forget_recovery_key(&path, Some(&who)) {
+        audit(&who, "recovery key saved, kept copy wiped", &path);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /v1/crypt/folders/{volume}/{name}/recovery-key`: the recovery key again, read from

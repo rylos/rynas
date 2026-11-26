@@ -2106,6 +2106,7 @@ crypt.restarted	Container riavviati
 crypt.auto_off	Sblocco automatico disattivato: non è stato possibile sigillare la nuova password
 crypt.reveal_text	La chiave di ripristino viene letta dalla cartella con la sua password. Conservala fuori dal NAS.
 crypt.rk_keep	Conservala in un posto sicuro fuori dal NAS: con essa chiunque può impostare una nuova password per questa cartella.
+crypt.rk_pending	La chiave di ripristino della cartella crittografata {name} non è ancora stata conservata. Il NAS la tiene per te finché non confermi (al massimo 7 giorni).
 shares.w.pc_backup_folder	{path} contiene, è o sta dentro la cartella di backup del PC {key}: resta in sola lettura in File finché i backup del PC non passano a una cartella tutta loro.
 shares.w.crypt_locked	{path} è cifrata e bloccata: i client SMB e NFS non possono connettersi; app e container avviati mentre è bloccata vedono una cartella vuota e vanno riavviati dopo lo sblocco.
 err.crypt_wrong_password	Password o chiave di ripristino sbagliata
