@@ -10,3 +10,4 @@
 en	English	en-US	one other	English
 it	Italiano	it-IT	one other	Italian
 ru	Русский	ru-RU	one few many other	Russian
+zh-CN	简体中文	zh-CN	other	Chinese (Simplified)

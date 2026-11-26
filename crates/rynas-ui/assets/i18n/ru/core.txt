@@ -6614,6 +6614,12 @@ dev.rejected	Сопряжение отклонено: телефон получ�
 dev.failed	Не удалось начать сопряжение.
 dev.again	Начать заново
 dev.sec_text	Телефоны, сопряжённые с приложением, входят со своим ключом; отзовите здесь потерянный.
+dev.app	Приложение для Android
+dev.app_scan	Отсканируйте телефоном
+dev.app_download	Скачать APK
+dev.app_signer	SHA-256 сертификата подписи
+dev.app_qr	QR-код со ссылкой на приложение для Android
+dev.app_first	Ещё нет приложения? Сначала установите его
 nev.device.paired.title	Устройство {device} сопряжено для {user}
 nev.device.paired.body	Мобильное устройство {device} сопряжено для {user} с адреса {ip}.
 nev.device.renamed.title	Устройство {old} пользователя {user} переименовано в {new}

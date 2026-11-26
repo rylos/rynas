@@ -3036,6 +3036,12 @@ dict! { BLOB, LENS;
     "dev.failed" => "The pairing could not start.";
     "dev.again" => "Start again";
     "dev.sec_text" => "Phones paired with the app sign in with a key of their own; revoke one here if it is lost.";
+    "dev.app" => "Android app";
+    "dev.app_scan" => "Scan with your phone";
+    "dev.app_download" => "Download APK";
+    "dev.app_signer" => "Signing certificate SHA-256";
+    "dev.app_qr" => "QR code with the download link of the Android app";
+    "dev.app_first" => "No app yet? Get it first";
     "sec.manual" => "Can't scan it? Enter this key:";
     "sec.copy_secret" => "Copy key";
     "sec.step_code" => "Enter the code the app shows";
@@ -8307,12 +8313,11 @@ mod tests {
         }
         for l in Lang::all().skip(1).filter(|l| languages().iter().any(|x| x.code == l.code())) {
             let bundle: &'static str = Box::leak(PARTS.iter().filter_map(|p| test_file(l.code(), p)).collect::<String>().into_boxed_str());
-            // plural forms that English has no key for (Russian `few`/`many`, …) are taken too
-            let extra = translation_lines(bundle)
-                .filter(|(k, _)| matches!(k.rsplit_once('.').map(|(_, c)| c), Some("zero" | "two" | "few" | "many")))
-                .count();
+            // Completeness is checked per language. Here every line of the bundle must be
+            // installed, including any plural forms that English does not use.
+            let expected = translation_lines(bundle).count();
             let n = INDEX.with(|idx| idx.install(l, bundle));
-            assert_eq!(n, entries().len() + extra, "{}: texts taken from the bundle", l.code());
+            assert_eq!(n, expected, "{}: texts taken from the bundle", l.code());
         }
         assert_eq!(lookup("nav.files", it()), Some("File"));
     }

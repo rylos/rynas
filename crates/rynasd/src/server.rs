@@ -261,6 +261,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::processes::router(state.processes))
         .merge(crate::ui_prefs::router(state.ui_prefs))
         .merge(crate::devices::router(state.devices))
+        .merge(crate::android_app::router())
         .merge(crate::space::router(state.space))
         .fallback(|| async { Error::not_found("no such endpoint") })
         // 405, query string and path rejections: ApiError bodies too

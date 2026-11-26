@@ -12,6 +12,7 @@
 //! `/run/rynas/notify.sock` (root only). Network changes are transactions with a timed
 //! confirmation ([`network`], [`rynas_net`]).
 
+pub mod android_app;
 pub mod apps;
 pub mod backports;
 pub mod repositories;

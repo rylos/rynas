@@ -2,7 +2,8 @@
 //! revoke with a confirmation; administrators see every user's) and "Pair a device": a QR
 //! code with a countdown, then the claiming phone and its compare code, approved or rejected
 //! with an editable name. A pairing needs a password check in the last 10 minutes: the dialog
-//! asks for it when the server says so.
+//! asks for it when the server says so. Above the list and at the top of the pairing dialog,
+//! where to get the Android app ([`crate::android_app`]).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -181,7 +182,8 @@ pub fn Devices() -> impl IntoView {
                     <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("dev.pair")}</span>
                 </button>
             </PageHeader>
-            <section class="card widget w-12" style="--i:0">
+            <crate::android_app::AndroidAppCard />
+            <section class="card widget w-12" style="--i:1">
                 <WidgetHead icon=icons::SMARTPHONE title="dev.list" />
                 {table}
             </section>
@@ -433,6 +435,12 @@ fn PairDialog(on_close: Callback<()>) -> impl IntoView {
 
     view! {
         <Modal title=Signal::derive(|| t("dev.pair").to_string()) on_close=close foot=ViewFn::from(foot)>
+            <Show when=move || matches!(stage.get(), Stage::Starting | Stage::Qr(_))>
+                <details class="fold sub">
+                    <summary><Icon icon=icons::CHEVRON_RIGHT size=14 />{tr("dev.app_first")}</summary>
+                    <crate::android_app::AndroidAppBox />
+                </details>
+            </Show>
             {body}
             {form_error(error)}
         </Modal>

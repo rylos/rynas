@@ -6546,6 +6546,12 @@ dev.rejected	L'abbinamento è stato rifiutato: il telefono lo sa.
 dev.failed	Non è stato possibile avviare l'abbinamento.
 dev.again	Ricomincia
 dev.sec_text	I telefoni abbinati all'app accedono con una chiave propria; revocane uno qui se lo perdi.
+dev.app	App Android
+dev.app_scan	Inquadra con il telefono
+dev.app_download	Scarica l'APK
+dev.app_signer	SHA-256 del certificato di firma
+dev.app_qr	Codice QR con il link per scaricare l'app Android
+dev.app_first	Non hai ancora l'app? Prima scaricala
 nev.device.paired.title	Dispositivo {device} abbinato per {user}
 nev.device.paired.body	Il dispositivo mobile {device} è stato abbinato per {user} da {ip}.
 nev.device.renamed.title	Dispositivo {old} di {user} rinominato in {new}
