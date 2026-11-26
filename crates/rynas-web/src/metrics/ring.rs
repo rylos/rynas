@@ -253,9 +253,9 @@ mod tests {
     #[test]
     fn packed_size() {
         let p = Packed::pack(&nas_sample(1), None);
-        // 104 inline + 20 f32 + 25 u64 = 384 B, + 2 malloc headers ≈ 400 B
-        assert_eq!(std::mem::size_of::<Packed>(), 104);
-        assert_eq!(p.bytes(), 104 + 20 * 4 + 25 * 8);
+        // 120 inline (with the monotonic time) + 20 f32 + 25 u64 = 400 B, + 2 malloc headers
+        assert_eq!(std::mem::size_of::<Packed>(), 120);
+        assert_eq!(p.bytes(), 120 + 20 * 4 + 25 * 8);
         // the full hour stays under 2 MB (with allocator overhead)
         assert!((p.bytes() + 32) * crate::metrics::RING_CAPACITY < 2 << 20);
     }
