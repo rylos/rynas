@@ -157,12 +157,22 @@ pub enum Step {
 /// Measures one line with `src`; `walk` false refuses full tree searches
 /// ([`WalkError::Unsupported`]); `step` before each pair and before the full search.
 pub fn measure_with(line: &[Snap], src: &mut dyn Source, walk: bool, step: &mut dyn FnMut(Step)) -> Result<LineSpace, WalkError> {
+    measure_with_opts(line, src, walk, true, step)
+}
+
+/// [`measure_with`]; `anchor` false never makes the full tree search of the anchor: the pairs
+/// alone (their `born`, `died` and `exclusive`), for a line whose newest snapshot is followed
+/// by a live subvolume that keeps sharing its data (what removing the line frees is then the
+/// `died` of every snapshot but the newest plus the newest's `exclusive`, no `distinct`
+/// needed). Without any `distinct` known, `distinct` stays unknown and `union` is the sum of
+/// the `died` of every snapshot but the newest.
+pub fn measure_with_opts(line: &[Snap], src: &mut dyn Source, walk: bool, anchor: bool, step: &mut dyn FnMut(Step)) -> Result<LineSpace, WalkError> {
     let n = line.len();
     let mut out = LineSpace { known: line.iter().map(|s| s.known.clone()).collect(), ..LineSpace::default() };
     if n == 0 {
         return Ok(out);
     }
-    if !walk && needs_walk(line) {
+    if anchor && !walk && needs_walk(line) {
         return Err(WalkError::Unsupported("nothing measured yet: a full measure is needed".into()));
     }
     let id = |i: usize| line[i].uuid.clone();
@@ -185,7 +195,12 @@ pub fn measure_with(line: &[Snap], src: &mut dyn Source, walk: bool, step: &mut 
             out.walks += 2;
         }
     }
+    let bytes = |e: &Option<Edge>| e.as_ref().map_or(0, |e| e.bytes);
     if out.known.iter().all(|k| k.distinct.is_none()) {
+        if !anchor {
+            out.union = out.known[..n - 1].iter().map(|x| bytes(&x.died)).sum();
+            return Ok(out);
+        }
         // the newest stays longest: the anchor of the next measures
         step(Step::Walk { index: n - 1 });
         out.known[n - 1].distinct = Some(src.distinct(n - 1)?);
@@ -195,7 +210,6 @@ pub fn measure_with(line: &[Snap], src: &mut dyn Source, walk: bool, step: &mut 
     if n == 1 && !k[0].exclusive_for(None, None) {
         k[0].exclusive = Some(Excl { bytes: k[0].distinct.unwrap_or(0), older: None, newer: None });
     }
-    let bytes = |e: &Option<Edge>| e.as_ref().map_or(0, |e| e.bytes);
     let first = k.iter().position(|x| x.distinct.is_some()).unwrap_or(0);
     for i in first + 1..n {
         if k[i].distinct.is_none() {
@@ -324,10 +338,21 @@ impl Source for Tree<'_> {
 
 /// Measures one line of snapshots on the volume (root privileges; blocking).
 pub fn measure_line(line: &[Snap], lim: &Limits, walk: bool, step: &mut dyn FnMut(Step)) -> Result<LineSpace, WalkError> {
+    measure_line_opts(line, lim, walk, true, step)
+}
+
+/// [`measure_line`] with [`measure_with_opts`]'s `anchor`.
+pub fn measure_line_opts(line: &[Snap], lim: &Limits, walk: bool, anchor: bool, step: &mut dyn FnMut(Step)) -> Result<LineSpace, WalkError> {
     let opened: Vec<Opened> = line.iter().map(|s| freed::open(&s.path, false)).collect::<Result<_, _>>()?;
     let facts = opened.iter().map(|o| o.facts.clone()).collect();
     let mut src = Tree { line: opened, facts, lim, walk };
-    measure_with(line, &mut src, walk, step)
+    measure_with_opts(line, &mut src, walk, anchor, step)
+}
+
+/// Whether two neighbours can be compared without full walks: both read-only (the no-data
+/// send of the older side needs it; the newer side's comparison falls back to the same send).
+pub fn pair_cheap(older_readonly: bool, newer_readonly: bool) -> bool {
+    older_readonly && newer_readonly
 }
 
 #[cfg(test)]
@@ -481,6 +506,21 @@ mod tests {
         let r = run(&mut src, &["only"], &mut known, false).unwrap();
         assert_eq!((r.union, r.walks), (12288, 0));
         assert_eq!(src.walks, [0]);
+    }
+
+    #[test]
+    fn without_an_anchor_only_the_pairs_are_compared() {
+        let mut src = Sets { sets: history(4), outside: BTreeSet::new(), pairs: vec![], walks: vec![] };
+        let l = line(&["a", "b", "c", "d"], &BTreeMap::new());
+        let r = measure_with_opts(&l, &mut src, false, false, &mut |_| {}).unwrap();
+        assert!(src.walks.is_empty() && r.walks == 0);
+        assert_eq!(r.pairs, 3);
+        assert!(r.known.iter().all(|k| k.distinct.is_none()));
+        // the died of all but the newest: what the older ones hold that the next one dropped
+        let died: u64 = (0..3).map(|i| sum(src.sets[i].difference(&src.sets[i + 1]))).sum();
+        assert_eq!(r.union, died);
+        let (_, _, excl) = truth(&src);
+        assert_eq!(r.known[3].exclusive.as_ref().unwrap().bytes, excl[3]);
     }
 
     #[test]
