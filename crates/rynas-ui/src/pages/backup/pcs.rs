@@ -507,14 +507,18 @@ fn run(pcs: Pcs, (method, url, body): (&'static str, String, Option<String>), ok
         };
         let _ = busy.try_set(false);
         match r {
-            Ok(task) if task.status == TaskStatus::Ok => {
+            Ok(task) if task.is_full_success() => {
                 toast(Tone::Ok, ok);
                 pcs.list.reload();
                 // the page may have been left while the task ran
                 done.try_run(());
             }
+            // as run_and_report: the outcome in a toast (also when the dialog was closed
+            // meanwhile), the dialog closed
             Ok(task) => {
-                let _ = error.try_set(Some(tasks::task_error(&task)));
+                toast(tasks::task_tone(&task), tasks::task_error(&task));
+                pcs.list.reload();
+                done.try_run(());
             }
             Err(e) => match (fields, e.field()) {
                 (Some(f), Some("description")) => {

@@ -408,7 +408,14 @@ fn root_rollback_dialog(s: SnapshotInfo, pv: RollbackPreview, root: RwSignal<Opt
                         close.try_run(());
                         reload.try_run(());
                     }
-                    Ok(task) => error.set(Some(tasks::task_error(&task))),
+                    // as run_and_report: the outcome in a toast (also when the dialog was
+                    // closed meanwhile), the dialog closed
+                    Ok(task) => {
+                        toast(tasks::task_tone(&task), tasks::task_error(&task));
+                        close.try_run(());
+                        reload.try_run(());
+                    }
+                    // not started: said in the dialog, which stays open
                     Err(e) => error.set(Some(e.text())),
                 }
             });
