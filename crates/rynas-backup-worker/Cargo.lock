@@ -3851,7 +3851,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rynas-api-types"
-version = "0.9.19"
+version = "0.9.20"
 dependencies = [
  "rynas-schedule",
  "serde",
@@ -3875,7 +3875,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-schedule"
-version = "0.9.19"
+version = "0.9.20"
 dependencies = [
  "serde",
 ]
