@@ -631,7 +631,8 @@ pub async fn run_window(s: &Arc<DockerSvc>, ctx: &TaskCtx, end_ms: u64) {
         return;
     }
     prune_gone(s);
-    let report = enrich(s, s.report.lock().unwrap().clone());
+    let last = s.report.lock().unwrap().clone();
+    let report = enrich(s, last);
     let todo: Vec<StackUpdate> = report
         .stacks
         .into_iter()
@@ -949,21 +950,15 @@ pub async fn app_update(s: &Arc<DockerSvc>, ctx: &TaskCtx, u: &StackUpdate) -> (
             Ok(x) => x,
             Err(e) => return (AutoOutcome::Failed, Some(e.2)),
         };
-    // the plan may have moved since the check: judge it again
-    let cand = AppCandidate {
-        stack: u.stack.clone(),
-        policy: s.auto.lock().unwrap().apps.iter().find(|a| a.stack == u.stack).and_then(|a| a.policy),
-        main_service: s
-            .auto
-            .lock()
-            .unwrap()
-            .apps
-            .iter()
-            .find(|a| a.stack == u.stack)
-            .map(|a| a.main_service.clone())
-            .unwrap_or_default(),
-        plan,
+    // the plan may have moved since the check: judge it again. One lock, dropped before the
+    // candidate is built (a second `lock()` in the same statement would wait for the first
+    // guard forever and stop the daemon's only runtime thread).
+    let (policy, main_service) = {
+        let auto = s.auto.lock().unwrap();
+        let entry = auto.apps.iter().find(|a| a.stack == u.stack);
+        (entry.and_then(|a| a.policy), entry.map(|a| a.main_service.clone()).unwrap_or_default())
     };
+    let cand = AppCandidate { stack: u.stack.clone(), policy, main_service, plan };
     let (v, _) = judge_app(&cand, s.settings().auto_update.of(&u.stack).policy);
     if let Verdict::Hold(r) = v {
         return (AutoOutcome::Held, Some(format!("the catalog update is outside the policy ({r:?})")));
