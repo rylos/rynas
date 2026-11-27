@@ -1296,6 +1296,12 @@ fn main() -> std::io::Result<()> {
                 running_hostname(),
             );
             agent.set_web_port(args.web_tls_port);
+            // the certificates clients see (the interface's, and rynas-caddy's with the
+            // built-in proxy): what a restore pins
+            {
+                let w = opened.web_access.clone();
+                let _ = agent.served_certs.set(Arc::new(move || w.served_certificates()));
+            }
             // the btrfs method's folders: agent PCs with that method send into them
             if let Some(pb) = state.pc_backup.clone() {
                 agent.bind_btrfs(pb);

@@ -400,3 +400,46 @@ async fn auto_keeps_the_network_without_https() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(wildcard_taken(port));
 }
+
+/// A restore request reaches rynasd marked TLS (`x-rynas-client-tls`) over the HTTPS port and
+/// through rynas-caddy forwarding an HTTPS client (with the client's address), never for a
+/// header from elsewhere; a client cannot send the mark itself.
+#[tokio::test]
+async fn restore_requests_carry_the_client_scheme() {
+    use std::sync::Mutex;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("rynasd.sock");
+    /// The TLS mark and the client address rynasd received.
+    type Seen = (Option<String>, Option<String>);
+    let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
+    let rec = seen.clone();
+    let fake = axum::Router::new().fallback(move |req: axum::extract::Request| {
+        let rec = rec.clone();
+        async move {
+            let h = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
+            rec.lock().unwrap().push((h(rynas_auth::ipc::CLIENT_TLS_HEADER), h(rynas_auth::ipc::CLIENT_ADDR_HEADER)));
+            (StatusCode::CREATED, axum::Json(json!({})))
+        }
+    });
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+    let app = common::build_with_rynasd(Arc::new(NoProvider), Arc::new(common::FakeAuth), socket);
+    let body = Some(json!({"pc": "pc", "commit": "ab"}));
+    let uri = "/api/v1/pcbackup/agent/restore-requests";
+    /// How it arrives, its headers, the mark and the address rynasd must get.
+    type Case<'a> = (Via, Vec<(&'a str, &'a str)>, Option<&'a str>, &'a str);
+    let cases: [Case; 5] = [
+        (Via::HttpsLoopback, vec![], Some("1"), "127.0.0.1"),
+        (Via::Proxy, vec![("x-forwarded-for", "192.168.1.37"), ("x-forwarded-proto", "https")], Some("1"), "192.168.1.37"),
+        (Via::Proxy, vec![("x-forwarded-for", "192.168.1.37")], None, "192.168.1.37"),
+        (Via::Lan, vec![("x-forwarded-proto", "https")], None, "192.0.2.50"),
+        (Via::Lan, vec![("x-rynas-client-tls", "1")], None, "192.0.2.50"),
+    ];
+    for (via, headers, tls, ip) in cases {
+        seen.lock().unwrap().clear();
+        let r = send(&app, via, "POST", uri, &headers, body.clone()).await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&r.body));
+        let got = seen.lock().unwrap().remove(0);
+        assert_eq!((got.0.as_deref(), got.1.as_deref()), (tls, Some(ip)), "{headers:?}");
+    }
+}

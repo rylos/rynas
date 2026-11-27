@@ -863,8 +863,40 @@ pub struct PcBackupOverview {
     /// SHA-256 of the certificate the web interface serves (hex, `:` separated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// Every certificate this NAS presents to clients (the interface's own, and through the
+    /// built-in proxy its `.local` leaf, imported pairs, ACME certificates), with the names
+    /// they cover: the restore TUI pins the one served for the address it uses, and a
+    /// restore request is accepted with any of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served_certificates: Vec<ServedCertificate>,
     #[serde(default)]
     pub dry: bool,
+}
+
+/// [`PcBackupOverview::served_certificates`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ServedCertificate {
+    /// SHA-256 of the DER (`AA:BB:…`).
+    pub fingerprint: String,
+    /// DNS names and IP addresses of its SAN (`*.example.org` wildcards as written).
+    #[serde(default)]
+    pub names: Vec<String>,
+}
+
+impl ServedCertificate {
+    /// Whether it covers `host` (a DNS name, case-insensitive, one-label wildcards; or an
+    /// IP address).
+    pub fn covers(&self, host: &str) -> bool {
+        let h = host.trim().trim_start_matches('[').trim_end_matches(']').trim_end_matches('.').to_ascii_lowercase();
+        self.names.iter().any(|n| {
+            let n = n.to_ascii_lowercase();
+            if let Some(rest) = n.strip_prefix("*.") {
+                h.split_once('.').is_some_and(|(first, tail)| !first.is_empty() && tail == rest)
+            } else {
+                n == h
+            }
+        })
+    }
 }
 
 /// `POST /api/v1/pcbackup/pairings`.
@@ -2519,6 +2551,17 @@ mod tests {
             "rynas-restore:v1?req=0123456789abcdef&code=042913",
         ] {
             assert_eq!(RestoreQr::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn served_certificates_cover_their_names() {
+        let c = ServedCertificate { fingerprint: "AA".into(), names: vec!["*.nas.example.org".into(), "nas.local".into(), "192.168.1.5".into()] };
+        for ok in ["files.nas.example.org", "NAS.local", "nas.local.", "192.168.1.5", "[192.168.1.5]"] {
+            assert!(c.covers(ok), "{ok}");
+        }
+        for no in ["nas.example.org", "a.b.nas.example.org", "other.local", "192.168.1.6"] {
+            assert!(!c.covers(no), "{no}");
         }
     }
 

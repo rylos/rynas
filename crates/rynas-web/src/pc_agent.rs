@@ -148,8 +148,12 @@ async fn forward(State(st): State<AppState>, client: Option<Extension<Client>>, 
     {
         headers.push((HeaderName::from_static(CLIENT_ADDR_HEADER), v));
     }
-    // the connection's scheme (a restore request over plain HTTP is refused unless allowed)
-    if parts.extensions.get::<crate::tls::Https>().is_some() {
+    // the connection's scheme (a restore request over plain HTTP is refused unless allowed):
+    // the HTTPS port, or rynas-caddy on loopback forwarding an HTTPS client
+    let remote = parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0);
+    let local = parts.extensions.get::<crate::conn::LocalAddr>().map(|l| l.0);
+    let https = parts.extensions.get::<crate::tls::Https>().is_some();
+    if crate::conn::client_tls(remote, local, https, &parts.headers) {
         headers.push((HeaderName::from_static(CLIENT_TLS_HEADER), HeaderValue::from_static("1")));
     }
     let body = Body::new(Limited::new(body, max).map_err(axum::Error::new));

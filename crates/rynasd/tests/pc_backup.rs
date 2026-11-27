@@ -1443,6 +1443,48 @@ async fn a_party_in_the_middle_cannot_match_the_code() {
     assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, "certificate_mismatch"));
 }
 
+/// N1: the certificate a TUI pins is the one served for the address it used: the interface's
+/// own over its HTTPS port, rynas-caddy's (the `.local` leaf, an ACME or imported one) through
+/// the proxy. A request over TLS is accepted with any certificate this NAS presents, the code
+/// is made from that one, the overview lists them all; another certificate is refused.
+#[tokio::test]
+async fn a_request_pins_the_certificate_served_on_its_path() {
+    use rynas_api_types::pcagent::*;
+    use rynasd::pc_agent::approval;
+    let (e, agent) = env_agent();
+    casa(&e).await;
+    let interface = format!("{}AA", "AA:".repeat(31));
+    let caddy = format!("{}CC", "CC:".repeat(31));
+    let served = vec![
+        ServedCertificate { fingerprint: interface.clone(), names: vec!["192.168.1.5".into()] },
+        ServedCertificate { fingerprint: caddy.clone(), names: vec!["nas.local".into(), "*.nas.example.org".into()] },
+    ];
+    let s2 = served.clone();
+    assert!(agent.served_certs.set(Arc::new(move || s2.clone())).is_ok());
+    // what the web interface shows for the restore code's command comes from the same list
+    let (_, b) = call(&e, "GET", "/v1/pcbackup", None).await;
+    let o: PcBackupOverview = serde_json::from_slice(&b).unwrap();
+    assert_eq!(o.served_certificates, served);
+    // plain HTTP stays off: these requests are TLS (directly, or rynas-caddy saying so)
+    for (ip, fp) in [("192.168.1.20", &interface), ("192.168.1.21", &caddy)] {
+        let secret = "4".repeat(64);
+        let (s, b) = tui_req(&e, ip, true, None, "POST", REQS, Some(json!({"pc": "casa", "fingerprint": fp.to_lowercase(), "commit": approval::commitment(&secret)}))).await;
+        assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+        let c: RestoreRequestCreated = serde_json::from_slice(&b).unwrap();
+        let (s, _) = tui_req(&e, ip, true, Some(&c.poll_token), "POST", &format!("{REQS}/{}/reveal", c.id), Some(json!({"secret": secret}))).await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+        let v = pending(&e).await.into_iter().find(|v| v.id == c.id).unwrap();
+        assert!(v.tls);
+        // the code the TUI shows (from the certificate it saw) is the one the NAS checks
+        let code = approval::compare_code(&secret, &c.nonce, fp);
+        let (s, b) = call(&e, "POST", &format!("/v1/pcbackup/restore-requests/{}/approve", c.id), Some(json!({"code": code}))).await;
+        assert_eq!(s, StatusCode::NO_CONTENT, "{}", String::from_utf8_lossy(&b));
+    }
+    // a certificate this NAS does not present
+    let (s, b) = tui_req(&e, "192.168.1.22", true, None, "POST", REQS, Some(json!({"pc": "casa", "fingerprint": "EE:".repeat(31) + "EE", "commit": approval::commitment(&"4".repeat(64))}))).await;
+    assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, "certificate_mismatch"));
+}
+
 /// M4 and M2: plain HTTP needs the setting; only the allowed addresses may ask; "Deny and
 /// block".
 #[tokio::test]

@@ -496,9 +496,21 @@ fn restore_nas_url() -> (String, bool) {
     (url, local)
 }
 
+/// The certificate a TUI sees at the address this page was opened with: the one of
+/// `served_certificates` that covers this host (rynas-caddy's for a proxied name), else the
+/// interface's own.
+pub(super) fn pinned_fingerprint(o: &PcBackupOverview) -> Option<String> {
+    let host = window().location().hostname().unwrap_or_default();
+    o.served_certificates
+        .iter()
+        .find(|c| c.covers(&host))
+        .map(|c| c.fingerprint.clone())
+        .or_else(|| o.fingerprint.clone())
+}
+
 /// After "Restore code" (both restore panels): the code, the NAS certificate and address, a
 /// warning when that address only works on this machine, then the two commands to run on
-/// the PC, each with its own Copy. `fingerprint`: `PcBackupOverview::fingerprint`.
+/// the PC, each with its own Copy. `fingerprint`: [`pinned_fingerprint`].
 pub(super) fn restore_code_view(c: &RestoreCodeCreated, fingerprint: Option<String>) -> AnyView {
     let (nas, local) = restore_nas_url();
     let fingerprint = fingerprint.filter(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_hexdigit() || b == b':'));
@@ -860,7 +872,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                 let (shared, fingerprint) = tab.data.data.with(|d| {
                     (
                         d.as_ref().is_some_and(|d| d.groups.iter().any(|g| g.devices.len() > 1 && g.devices.contains(&c.device))),
-                        d.as_ref().and_then(|d| d.fingerprint.clone()),
+                        d.as_ref().and_then(pinned_fingerprint),
                     )
                 });
                 view! {

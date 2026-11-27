@@ -501,7 +501,13 @@ pub struct PcAgent {
     /// the devices and the notification engine run); without it the request is only a
     /// notification ([`approval::RestorePush`]).
     pub restore_push: std::sync::OnceLock<approval::RestorePush>,
+    /// The certificates this NAS presents to clients (set once by main from the web access
+    /// service; [`PcAgent::served_certificates`]).
+    pub served_certs: std::sync::OnceLock<ServedCerts>,
 }
+
+/// [`PcAgent::served_certs`].
+pub type ServedCerts = Arc<dyn Fn() -> Vec<ServedCertificate> + Send + Sync>;
 
 /// Contacts within this span after a taken sleep command do not count ([`PcAgent::last_contact`]):
 /// the agent waits 2 s before it suspends, and its next poll may start meanwhile.
@@ -586,6 +592,7 @@ impl PcAgent {
             slept: Mutex::new(HashMap::new()),
             approvals: approval::Approvals::default(),
             restore_push: std::sync::OnceLock::new(),
+            served_certs: std::sync::OnceLock::new(),
         })
     }
 
@@ -789,6 +796,26 @@ impl PcAgent {
     pub fn fingerprint(&self) -> Option<String> {
         let st = self.tls.as_ref()?.status().ok()?;
         Some(st.certificate.fingerprint_sha256)
+    }
+
+    /// Every certificate this NAS presents to clients ([`ServedCertificate`]): the web access
+    /// service's list when it runs (the interface's own, and through rynas-caddy its `.local`
+    /// leaf, imported pairs, ACME certificates), else the interface's own. The one source of
+    /// truth of both restore paths: the restore code's command pins one of these, a restore
+    /// request is accepted with any of them.
+    pub fn served_certificates(&self) -> Vec<ServedCertificate> {
+        if let Some(f) = self.served_certs.get() {
+            return f();
+        }
+        self.tls
+            .as_ref()
+            .and_then(|t| t.status().ok())
+            .map(|st| {
+                let mut names = st.certificate.dns_names;
+                names.extend(st.certificate.ip_addresses);
+                vec![ServedCertificate { fingerprint: st.certificate.fingerprint_sha256, names }]
+            })
+            .unwrap_or_default()
     }
 
     pub fn seal(&self, secret: &str) -> Res<String> {
@@ -1431,6 +1458,7 @@ async fn overview(State(st): State<PaState>) -> Res<Json<PcBackupOverview>> {
                 .collect(),
             memory_budget_bytes: maint::memory_budget(reg.settings.maintenance_memory_pct),
             fingerprint: s2.fingerprint(),
+            served_certificates: s2.served_certificates(),
             dry: s2.dry,
         }
     })

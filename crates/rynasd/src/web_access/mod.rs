@@ -2428,6 +2428,54 @@ impl WebAccessSvc {
         }
     }
 
+    /// Every certificate this NAS presents to clients, with the names and addresses it covers:
+    /// the interface's own (`:8443`), and with the built-in proxy its `.local` leaf, the
+    /// imported pairs and the ACME certificates in its storage. Read from the files alone (no
+    /// engine log, no notification state): the PC restore pins one of these
+    /// ([`crate::pc_agent`]).
+    pub fn served_certificates(&self) -> Vec<rynas_api_types::pcagent::ServedCertificate> {
+        use rynas_api_types::pcagent::ServedCertificate;
+        fn add(out: &mut Vec<ServedCertificate>, c: rynas_api_types::tls::TlsCertificate) {
+            if out.iter().all(|x| x.fingerprint != c.fingerprint_sha256) {
+                let mut names = c.dns_names;
+                names.extend(c.ip_addresses);
+                out.push(ServedCertificate { fingerprint: c.fingerprint_sha256, names });
+            }
+        }
+        let mut out: Vec<ServedCertificate> = Vec::new();
+        if let Some(tls) = self.tls.get()
+            && let Ok(st) = tls.status()
+        {
+            add(&mut out, st.certificate);
+        }
+        let cfg = self.applied();
+        if cfg.settings.mode != ProxyMode::Builtin {
+            return out;
+        }
+        if let Some(c) = std::fs::read_to_string(self.path(CERT))
+            .ok()
+            .and_then(|p| rynas_tls::inspect(&p).ok())
+            .and_then(|v| v.into_iter().next())
+        {
+            add(&mut out, c);
+        }
+        let now = rynas_tls::now();
+        for m in self.import_index() {
+            if let Some(c) = self.stored_leaf(&m.id).and_then(|v| v.into_iter().next()) {
+                add(&mut out, c);
+            }
+        }
+        let active = self.active_imports(now);
+        for d in domains::active(&cfg) {
+            for s in imported::acme_subjects(&cfg, d, &active) {
+                if let Some(c) = self.acme_cert(&cfg, &s) {
+                    add(&mut out, c);
+                }
+            }
+        }
+        out
+    }
+
     /// The certificate check of the periodic loop: notifications on changes (at most every
     /// [`CERT_CHECK_INTERVAL`] unless `force`).
     pub fn check_certificates(&self, force: bool) -> Vec<rynas_api_types::notify::NewEvent> {

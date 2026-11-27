@@ -165,7 +165,7 @@ for an hour. 204; 404, 409, 410 as above.
 { "code": "7K2M-Q9XD-4HTR", "expires_ms": 1795003600000, "device": "laptop" }
 ```
 
-The TUI pins the certificate shown as `fingerprint` in `GET /pcbackup` (`PcBackupOverview`).
+The TUI pins the certificate served for the address it uses: `GET /pcbackup` (`PcBackupOverview`) has `fingerprint` (the interface's own, port 8443) and `served_certificates` [{fingerprint, names}] (every certificate the NAS presents, also rynas-caddy's for proxied names); show the one whose `names` cover the NAS address the user will type, else `fingerprint`.
 
 ### Settings (web interface; the app may show them)
 
@@ -186,7 +186,7 @@ The TUI pins the certificate shown as `fingerprint` in `GET /pcbackup` (`PcBacku
 
 | Step | Method | Path | Auth | Body | Answer |
 |---|---|---|---|---|---|
-| 1 | POST | `/pcbackup/agent/restore-requests` | none (allowed addresses only; ≤ 4 KiB; 2 waiting per client, 16 in all, 6 new per client and 60 in all per 10 min) | `{pc, fingerprint, commit}` | 201 `{id, poll_token, nonce, sid, expires_ms}`; 403 address not allowed, blocked, or plain HTTP off; 400 `fingerprint` missing over TLS; 409 `certificate_mismatch`; 429 `rate_limited` |
+| 1 | POST | `/pcbackup/agent/restore-requests` | none (allowed addresses only; ≤ 4 KiB; 2 waiting per client, 16 in all, 6 new per client and 60 in all per 10 min) | `{pc, fingerprint, commit}` | 201 `{id, poll_token, nonce, sid, expires_ms}`; 403 address not allowed, blocked, or plain HTTP off; 400 `fingerprint` missing over TLS; 409 `certificate_mismatch` (not a certificate this NAS presents); 429 `rate_limited`. Works directly on the HTTPS port and through rynas-caddy (HTTPS there counts as TLS) |
 | 2 | POST | `/pcbackup/agent/restore-requests/{id}/reveal` | `Bearer <poll_token>` | `{secret}` | 204 (now shown to administrators); 400 secret does not match (request dropped); 409 already revealed |
 | 3 | GET | `/pcbackup/agent/restore-requests/{id}?wait=<≤25>` | `Bearer <poll_token>` | — | `{state: pending\|approved\|denied\|expired\|canceled, expires_ms, approval?: {code, device, expires_ms}}`; 404 unknown id or wrong token; 429 a third poll at once |
 | — | DELETE | `/pcbackup/agent/restore-requests/{id}` | `Bearer <poll_token>` | — | 204 (withdrawn; an issued code is revoked) |

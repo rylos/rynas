@@ -541,15 +541,18 @@ pub async fn create_post(
     // over TLS the TUI saw a certificate: it must say which, and it must be ours (a party in
     // the middle forwarding its own is refused; one rewriting it to ours gets other digits,
     // since the TUI makes its code from the certificate it really saw)
-    let own = fp_hex(&svc.fingerprint().unwrap_or_default());
+    // ours = any certificate this NAS presents (its interface's, or through rynas-caddy the
+    // `.local` leaf, an imported pair, an ACME certificate): the one served for the address
+    // the TUI used
+    let own = svc.served_certificates().iter().map(|c| fp_hex(&c.fingerprint)).find(|f| *f == seen);
     if tls && seen.is_empty() {
         return Err(Error::invalid("fingerprint", "the certificate the client sees is needed over TLS"));
     }
-    if !seen.is_empty() && seen != own {
+    if !seen.is_empty() && own.is_none() {
         return Err(Error::new(
             StatusCode::CONFLICT,
             error_codes::CERTIFICATE_MISMATCH,
-            "this NAS does not serve the certificate you see: something in between answers for it, or the address goes through another proxy (use the address of the NAS' web interface)".into(),
+            "this NAS does not present the certificate you see: something in between answers for it, or the address goes through a proxy this NAS does not run".into(),
         )
         .field("fingerprint"));
     }
@@ -598,7 +601,7 @@ pub async fn create_post(
             source,
             commit,
             nonce: nonce.clone(),
-            fp: if seen.is_empty() { String::new() } else { own },
+            fp: own.unwrap_or_default(),
             code: None,
             view,
             state: RestoreRequestState::Pending,

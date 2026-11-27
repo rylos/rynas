@@ -1391,7 +1391,7 @@ fn restore_part(device: String, ready: bool, code: RwSignal<Option<(rynas_api_ty
             let r = api::post::<(), RestoreCodeCreated>(&u, None).await;
             // the NAS certificate's fingerprint, for the command and to compare by eye
             let fingerprint = match r {
-                Ok(_) => api::get::<PcBackupOverview>("/api/v1/pcbackup").await.ok().and_then(|o| o.fingerprint),
+                Ok(_) => api::get::<PcBackupOverview>("/api/v1/pcbackup").await.ok().and_then(|o| super::agent::pinned_fingerprint(&o)),
                 Err(_) => None,
             };
             let _ = busy.try_set(false);

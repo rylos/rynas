@@ -70,6 +70,24 @@ pub fn trusted_proxy(remote: SocketAddr, local: Option<SocketAddr>, https: bool)
         && local.is_some_and(|l| canonical_ip(l.ip()).is_loopback())
 }
 
+/// The client reached this NAS over TLS: rynas-web's own HTTPS port (`https`), or the reverse
+/// proxy on this host (trusted as for `X-Forwarded-For`: [`trusted_proxy`]) says
+/// `X-Forwarded-Proto: https` (its last entry). A header from anyone else counts nothing.
+pub fn client_tls(remote: Option<SocketAddr>, local: Option<SocketAddr>, https: bool, headers: &HeaderMap) -> bool {
+    if https {
+        return true;
+    }
+    let Some(remote) = remote else { return false };
+    trusted_proxy(remote, local, false)
+        && headers
+            .get_all("x-forwarded-proto")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .last()
+            .is_some_and(|p| p.trim().eq_ignore_ascii_case("https"))
+}
+
 /// One `X-Forwarded-For` entry: an address, optionally with a port (`192.0.2.1:5000`,
 /// `[2001:db8::1]:5000`) or in brackets.
 fn parse_entry(e: &str) -> Option<IpAddr> {
@@ -151,6 +169,27 @@ mod tests {
 
     fn sa(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn tls_of_the_client_direct_or_through_the_local_proxy() {
+        let mut proto = HeaderMap::new();
+        proto.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        let none = HeaderMap::new();
+        let (lo, lo_local) = (Some(sa("127.0.0.1:51000")), Some(sa("127.0.0.1:8080")));
+        // the HTTPS port: TLS whatever the headers
+        assert!(client_tls(Some(sa("192.0.2.5:40000")), Some(sa("192.0.2.1:8443")), true, &none));
+        // rynas-caddy on loopback saying https
+        assert!(client_tls(lo, lo_local, false, &proto));
+        // the proxy without the header, or saying http
+        assert!(!client_tls(lo, lo_local, false, &none));
+        let mut http = HeaderMap::new();
+        http.insert("x-forwarded-proto", HeaderValue::from_static("https, http"));
+        assert!(!client_tls(lo, lo_local, false, &http));
+        // anyone else's header counts nothing
+        assert!(!client_tls(Some(sa("192.0.2.50:40000")), Some(sa("192.0.2.1:8080")), false, &proto));
+        assert!(!client_tls(lo, Some(sa("192.0.2.1:8080")), false, &proto));
+        assert!(!client_tls(None, None, false, &proto));
     }
 
     fn ip(s: &str) -> IpAddr {
