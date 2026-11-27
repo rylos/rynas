@@ -776,6 +776,10 @@ impl StorageWatch {
 
 // ---------------------------------------------------------------------------------- tasks
 
+/// Task types whose next run goes on from what the last one measured: a partial end of
+/// rynas's own background run is not news.
+const RESUMING_KINDS: &[&str] = &["space.scan"];
+
 /// The event of a finished task: a failure opens `task:<type>` (config applies:
 /// `config:apply`, category system), the next success of the same type closes it;
 /// cancellations say nothing.
@@ -808,6 +812,12 @@ pub fn task_event(t: &TaskInfo) -> Option<NewEvent> {
                     "task.failed"
                 },
             )
+        }
+        // rynas's own background pass of a task that goes on from where it stopped (the
+        // space measure after snapshots change): stopping at its time budget is normal, the
+        // next pass or the user's own Measure finishes it
+        TaskStatus::Ok if t.partial.is_some() && t.user == "rynas" && RESUMING_KINDS.contains(&t.kind.as_str()) => {
+            return None;
         }
         // stopped at its time budget or skipped items: a warning that stays until the next
         // full success of the same type
@@ -1348,6 +1358,12 @@ mod tests {
         let e = task_event(&t).unwrap();
         assert_eq!((e.state, e.severity, e.code.as_str()), (EventState::Firing, Sev::Warning, "task.partial"));
         assert_eq!(e.body, "time budget reached");
+        // rynas's own space measure after snapshots change goes on next time: no warning;
+        // the user's own measure still gets one
+        let mut scan = TaskInfo { kind: "space.scan".into(), user: "rynas".into(), ..t.clone() };
+        assert!(task_event(&scan).is_none());
+        scan.user = "alice".into();
+        assert_eq!(task_event(&scan).unwrap().code, "task.partial");
         t.partial = None;
         t.status = TaskStatus::Cancelled;
         assert!(task_event(&t).is_none());
