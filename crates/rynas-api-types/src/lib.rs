@@ -479,6 +479,14 @@ pub mod error_codes {
     /// The code typed does not match the one the other side shows (400, `field` `code`; a
     /// restore request approved from a phone).
     pub const CODE_MISMATCH: &str = "code_mismatch";
+    /// A snapshot job names a shared folder that does not exist (400, `field` `share`).
+    pub const SNAPSHOT_SHARE_MISSING: &str = "snapshot_share_missing";
+    /// A snapshot job's snapshot directory is not a clean absolute path below `/` (400,
+    /// `field` `snapshot_dir`).
+    pub const SNAPSHOT_DIRECTORY_INVALID: &str = "snapshot_directory_invalid";
+    /// A snapshot job's subvolume is not a clean absolute path below `/` (400, `field`
+    /// `subvolume`).
+    pub const SNAPSHOT_SOURCE_INVALID: &str = "snapshot_source_invalid";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -569,6 +577,9 @@ pub mod error_codes {
         REQUEST_EXPIRED,
         CERTIFICATE_MISMATCH,
         CODE_MISMATCH,
+        SNAPSHOT_SHARE_MISSING,
+        SNAPSHOT_DIRECTORY_INVALID,
+        SNAPSHOT_SOURCE_INVALID,
     ];
 }
 

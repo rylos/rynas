@@ -1699,7 +1699,7 @@ err.missing_field	Заполните обязательное поле.
 err.unknown_field	Запрос содержит неизвестное поле.
 err.invalid_type	В одном из полей указан неверный тип данных.
 err.decode	Не удалось прочитать ответ NAS.
-err.snapshot_share_missing	Общая папка {share} не найдена. Выберите другую папку для этого задания снимков.
+err.snapshot_share_missing	Общая папка не найдена. Выберите другую папку для этого задания снимков.
 err.snapshot_directory_invalid	Введите допустимый абсолютный путь к папке снимков.
 err.snapshot_source_invalid	Введите допустимый абсолютный путь к исходному подтому.
 pca.description_example	Рабочий ноутбук

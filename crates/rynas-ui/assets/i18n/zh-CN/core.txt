@@ -1803,7 +1803,7 @@ err.missing_field	请填写必填项。
 err.unknown_field	请求中包含无法识别的字段。
 err.invalid_type	字段的数据类型有误，请检查输入。
 err.decode	无法读取 NAS 返回的数据。
-err.snapshot_share_missing	找不到共享文件夹「{share}」，请为此快照任务选择其他共享文件夹。
+err.snapshot_share_missing	找不到该共享文件夹，请为此快照任务选择其他共享文件夹。
 err.snapshot_directory_invalid	请输入有效的快照目录绝对路径。
 err.snapshot_source_invalid	请输入有效的源子卷绝对路径。
 pca.description_example	办公笔记本

@@ -2436,7 +2436,7 @@ dict! { BLOB, LENS;
     "err.unknown_field" => "The request contains an unknown field.";
     "err.invalid_type" => "A field has the wrong data type.";
     "err.decode" => "The NAS response could not be read.";
-    "err.snapshot_share_missing" => "Shared folder {share} was not found. Choose another folder for this snapshot job.";
+    "err.snapshot_share_missing" => "The shared folder was not found. Choose another folder for this snapshot job.";
     "err.snapshot_directory_invalid" => "Enter a valid absolute path for the snapshot directory.";
     "err.snapshot_source_invalid" => "Enter a valid absolute path for the source subvolume.";
     "pca.description_example" => "Office laptop";

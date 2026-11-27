@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use rynas_api_types::error_codes;
 use rynas_api_types::snapshots::{SnapshotJob, SnapshotsConfig};
 use rynas_config::files::HEADER_PREFIX;
 use rynas_config::{Applier, ApplyCtx, Candidate, ManagedFile};
@@ -150,34 +151,90 @@ pub fn default_snapshot_dir(subvolume: &str, job: &str) -> String {
     }
 }
 
+/// A job refused by [`normalize_job`]: the API error code (`error_codes`), the job field it
+/// is about when one is to blame, and the English message (shown as written, never parsed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobInvalid {
+    pub code: &'static str,
+    pub field: Option<&'static str>,
+    pub message: String,
+}
+
+impl JobInvalid {
+    fn at(code: &'static str, field: &'static str, message: String) -> Self {
+        Self {
+            code,
+            field: Some(field),
+            message,
+        }
+    }
+}
+
+impl From<String> for JobInvalid {
+    fn from(message: String) -> Self {
+        Self {
+            code: error_codes::INVALID_VALUE,
+            field: None,
+            message,
+        }
+    }
+}
+
+impl From<JobInvalid> for String {
+    fn from(e: JobInvalid) -> Self {
+        e.message
+    }
+}
+
+impl From<JobInvalid> for rynas_config::Invalid {
+    fn from(e: JobInvalid) -> Self {
+        Self {
+            field: e.field.map(Into::into),
+            message: e.message,
+        }
+    }
+}
+
+impl std::fmt::Display for JobInvalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Validates and normalizes one job (defaults filled, preset applied).
-pub fn normalize_job(mut j: SnapshotJob) -> Result<SnapshotJob, String> {
+pub fn normalize_job(mut j: SnapshotJob) -> Result<SnapshotJob, JobInvalid> {
     j.name = j.name.trim().to_string();
     if !valid_job_name(&j.name) {
         return Err(format!(
             "invalid job name {:?}: 1-48 letters, digits, '_' and '-', starting with a letter or digit",
             j.name
-        ));
+        )
+        .into());
     }
     let n = &j.name;
     if let Some(s) = &j.share
         && (s.is_empty() || s.len() > 64 || s.chars().any(|c| c.is_control() || c == '/'))
     {
-        return Err(format!("job {n}: invalid share name {s:?}"));
+        return Err(format!("job {n}: invalid share name {s:?}").into());
     }
     if j.subvolume.is_empty() || j.subvolume == "/" || !clean_abs(&j.subvolume) {
-        return Err(format!(
-            "job {n}: the subvolume must be an absolute path below / (got {:?})",
-            j.subvolume
+        return Err(JobInvalid::at(
+            error_codes::SNAPSHOT_SOURCE_INVALID,
+            "subvolume",
+            format!(
+                "job {n}: the subvolume must be an absolute path below / (got {:?})",
+                j.subvolume
+            ),
         ));
     }
     if j.snapshot_dir.is_empty() {
         j.snapshot_dir = default_snapshot_dir(&j.subvolume, n);
     }
     if !clean_abs(&j.snapshot_dir) || j.snapshot_dir == "/" {
-        return Err(format!(
-            "job {n}: invalid snapshot directory {:?}",
-            j.snapshot_dir
+        return Err(JobInvalid::at(
+            error_codes::SNAPSHOT_DIRECTORY_INVALID,
+            "snapshot_dir",
+            format!("job {n}: invalid snapshot directory {:?}", j.snapshot_dir),
         ));
     }
     layout(&j).map_err(|e| format!("job {n}: {e}"))?;
@@ -187,13 +244,14 @@ pub fn normalize_job(mut j: SnapshotJob) -> Result<SnapshotJob, String> {
         .iter()
         .any(|&c| c > 10_000)
     {
-        return Err(format!("job {n}: retention counts are at most 10000"));
+        return Err(format!("job {n}: retention counts are at most 10000").into());
     }
     if !valid_min(&r.min) {
         return Err(format!(
             "job {n}: invalid minimum {:?} (all, latest, or a number followed by h, d, w, m or y)",
             r.min
-        ));
+        )
+        .into());
     }
     j.replicas = crate::replication::normalize_targets(&j)?;
     Ok(j)

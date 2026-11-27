@@ -1667,7 +1667,7 @@ err.missing_field	Compila il campo obbligatorio.
 err.unknown_field	La richiesta contiene un campo sconosciuto.
 err.invalid_type	Un campo contiene un tipo di dati errato.
 err.decode	Impossibile leggere la risposta del NAS.
-err.snapshot_share_missing	Cartella condivisa {share} non trovata. Scegli un’altra cartella per questa attività di snapshot.
+err.snapshot_share_missing	Cartella condivisa non trovata. Scegli un’altra cartella per questa attività di snapshot.
 err.snapshot_directory_invalid	Inserisci un percorso assoluto valido per la cartella degli snapshot.
 err.snapshot_source_invalid	Inserisci un percorso assoluto valido per il sottovolume di origine.
 pca.description_example	Portatile dell’ufficio
