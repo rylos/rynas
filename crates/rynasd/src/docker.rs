@@ -792,6 +792,9 @@ impl DockerSvc {
                 stderr: String::new(),
             });
         }
+        if rynas_docker::stacks::is_json_pull(&cmd.argv_lossy()) {
+            return pull_with_progress(ctx, cmd).await;
+        }
         match ctx.run(cmd).await {
             Ok(o) => Ok(o),
             Err(e) => {
@@ -2578,6 +2581,30 @@ pub(crate) async fn compose(
     a: ComposeAction,
 ) -> Result<(), String> {
     compose_for(s, ctx, name, l, a, &[]).await
+}
+
+/// A compose pull with JSON progress: its events become a few task log lines
+/// ([`rynas_docker::stacks::PullProgress`]) instead of hundreds of repeated layer states; a
+/// failure keeps compose's own message.
+async fn pull_with_progress(ctx: &TaskCtx, cmd: &Cmd) -> Result<CmdOutput, String> {
+    ctx.log(&format!("$ {}", cmd.display()));
+    let progress = std::sync::Mutex::new(rynas_docker::stacks::PullProgress::default());
+    let sink = |l: &str| {
+        let line = progress.lock().unwrap().feed(l);
+        if let Some(line) = line {
+            ctx.log(&line);
+        }
+    };
+    match cmd.run_checked(Some(ctx.token()), Some(&sink)).await {
+        Ok(o) => Ok(o),
+        Err(rynas_tasks::CmdError::Failed(o)) => Err(format!(
+            "{}: exit code {}: {}",
+            cmd.display(),
+            o.code.map_or_else(|| "?".to_string(), |c| c.to_string()),
+            rynas_docker::stacks::compose_error(&o.stderr)
+        )),
+        Err(e) => Err(format!("{}: {e}", cmd.display())),
+    }
 }
 
 /// The same for some services only (`pull <svc…>`, `up <svc…>`); empty: the whole stack.

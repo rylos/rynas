@@ -672,7 +672,7 @@ async fn install_update_convert_and_uninstall_as_dry_runs() {
     let (info, log) = wait_task(&e, &t.task_id).await;
     assert_eq!(info.status, TaskStatus::Ok, "{log}");
     assert!(
-        log.contains("no snapshot") && log.contains(" pull --quiet") && log.contains("up --detach"),
+        log.contains("no snapshot") && log.contains(" --progress json pull") && log.contains("up --detach"),
         "{log}"
     );
     let now = std::fs::read_to_string(dir.join("compose.yaml")).unwrap();

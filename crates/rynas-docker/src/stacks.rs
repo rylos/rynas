@@ -172,7 +172,9 @@ impl ComposeAction {
         match self {
             // images it downloads first: no line per layer and progress step in the task log
             ComposeAction::Up => &["up", "--detach", "--wait=false", "--quiet-pull"],
-            ComposeAction::Pull => &["pull", "--quiet"],
+            // progress events, read by [`PullProgress`] into a few task log lines (a big
+            // image on a slow NAS takes minutes and must show that it goes on)
+            ComposeAction::Pull => &["--progress", "json", "pull"],
             // never --volumes: named volumes hold data
             ComposeAction::Down => &["down"],
             ComposeAction::Restart => &["restart"],
@@ -388,13 +390,175 @@ pub fn validation(
 
 /// The last meaningful line of compose's error output.
 pub fn compose_error(stderr: &str) -> String {
-    stderr
+    let last = stderr
         .lines()
         .rev()
-        .map(str::trim)
+        .map(|l| l.trim().strip_prefix("stderr: ").unwrap_or(l.trim()))
         .find(|l| !l.is_empty())
-        .unwrap_or("docker compose config failed")
-        .to_string()
+        .unwrap_or("docker compose config failed");
+    // `--progress json` ends with `{"error":true,"message":"…"}`
+    match serde_json::from_str::<ProgressEvent>(last) {
+        Ok(e) if e.error && !e.message.trim().is_empty() => {
+            e.message.lines().next().unwrap_or_default().trim().to_string()
+        }
+        _ => last.to_string(),
+    }
+}
+
+/// Whether a command line is a compose pull with JSON progress ([`ComposeAction::Pull`]).
+pub fn is_json_pull(argv: &[String]) -> bool {
+    argv.windows(3).any(|w| w == ["--progress", "json", "pull"])
+}
+
+/// One line of `docker compose --progress json` (other fields are ignored).
+#[derive(serde::Deserialize)]
+struct ProgressEvent {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    parent_id: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    details: String,
+    current: Option<u64>,
+    total: Option<u64>,
+    #[serde(default)]
+    error: bool,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Default)]
+struct PullLayer {
+    /// Announced with "Pulling fs layer" or "Already exists": a layer of the image (compose
+    /// also reports blobs that are not, such as the config, which never get extracted).
+    layer: bool,
+    total: u64,
+    current: u64,
+    /// The last quarter of a big layer's download that got a line.
+    quarter: u8,
+    downloaded: bool,
+    extracting: bool,
+    extracted: bool,
+}
+
+/// Layers from this size on get lines of their own: their download and their extraction
+/// can each take minutes on a NAS.
+const BIG_LAYER: u64 = 100 * 1000 * 1000;
+
+/// The progress events of a compose pull, turned into a few task log lines: every tenth of
+/// the way (each layer counts once downloaded and once extracted; registries tell a layer's
+/// size only when its download starts), each quarter of a big layer's download, the start of
+/// a big layer's extraction, each image pulled or failed. Compose repeats states at each
+/// refresh, so most lines say nothing new and give no log line.
+#[derive(Default)]
+pub struct PullProgress {
+    layers: BTreeMap<String, PullLayer>,
+    step: u8,
+}
+
+impl PullProgress {
+    /// The task log line for one output line of the pull (`stderr: ` prefix allowed), if
+    /// any. A line that is not a progress event is given back as it is.
+    pub fn feed(&mut self, line: &str) -> Option<String> {
+        let raw = line.strip_prefix("stderr: ").unwrap_or(line).trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let Ok(e) = serde_json::from_str::<ProgressEvent>(raw) else {
+            return Some(line.to_string());
+        };
+        if e.error {
+            return Some(format!("error: {}", e.message.lines().next().unwrap_or_default()));
+        }
+        if e.parent_id.is_empty() {
+            // an image or a service: Pulling, Pulled, Skipped, Error
+            let name = e.id.strip_prefix("Image ").unwrap_or(&e.id);
+            return match e.status.as_str() {
+                "Done" => Some(format!("{name}: {}", e.text.to_lowercase())),
+                "Error" => Some(format!("{name}: {}", if e.details.is_empty() { &e.text } else { &e.details })),
+                _ => None,
+            };
+        }
+        let l = self.layers.entry(e.id).or_default();
+        let mut own = None;
+        match e.text.as_str() {
+            "Pulling fs layer" | "Waiting" => l.layer = true,
+            "Downloading" => {
+                if let Some(t) = e.total {
+                    l.total = t;
+                }
+                if let Some(c) = e.current {
+                    l.current = c;
+                }
+                if l.layer && !l.downloaded && l.total >= BIG_LAYER {
+                    let q = (u128::from(l.current.min(l.total)) * 4 / u128::from(l.total)) as u8;
+                    if q > l.quarter && q < 4 {
+                        l.quarter = q;
+                        own = Some(format!("downloading a layer of {}: {}%", human_bytes(l.total), q * 25));
+                    }
+                }
+            }
+            "Verifying Checksum" | "Download complete" => l.downloaded = true,
+            "Extracting" => {
+                l.downloaded = true;
+                if !l.extracting && l.layer && l.total >= BIG_LAYER {
+                    own = Some(format!("extracting a layer of {}", human_bytes(l.total)));
+                }
+                l.extracting = true;
+            }
+            "Already exists" => {
+                l.layer = true;
+                l.downloaded = true;
+                l.extracted = true;
+            }
+            "Pull complete" => {
+                l.downloaded = true;
+                l.extracted = true;
+            }
+            _ => {}
+        }
+        own.or_else(|| self.summary())
+    }
+
+    fn summary(&mut self) -> Option<String> {
+        let layers = || self.layers.values().filter(|l| l.layer);
+        let n = layers().count();
+        if n == 0 {
+            return None;
+        }
+        let downloaded = layers().filter(|l| l.downloaded).count();
+        let extracted = layers().filter(|l| l.extracted).count();
+        let bytes: u64 = layers().map(|l| if l.downloaded { l.total } else { l.current.min(l.total) }).sum();
+        let step = ((downloaded + extracted) * 100 / (2 * n) / 10 * 10) as u8;
+        // nothing at 0 %: the layers are still being announced
+        if step <= self.step {
+            return None;
+        }
+        self.step = step;
+        Some(format!(
+            "{step}%: {downloaded} of {n} layers downloaded ({}), {extracted} extracted",
+            human_bytes(bytes)
+        ))
+    }
+}
+
+/// `1.5 GB`, `620 MB`, `12 kB` (SI, as compose and the registries count).
+fn human_bytes(b: u64) -> String {
+    const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];
+    if b < 1000 {
+        return format!("{b} B");
+    }
+    let mut v = b as f64 / 1000.0;
+    let mut u = 0;
+    while v >= 1000.0 && u < UNITS.len() - 1 {
+        v /= 1000.0;
+        u += 1;
+    }
+    if v < 10.0 { format!("{v:.1} {}", UNITS[u]) } else { format!("{v:.0} {}", UNITS[u]) }
 }
 
 // ------------------------------------------------------------------ the folders
@@ -841,6 +1005,57 @@ mod tests {
         );
         assert_eq!(ComposeAction::parse("pull"), Some(ComposeAction::Pull));
         assert_eq!(ComposeAction::parse("exec"), None);
+    }
+
+    #[test]
+    fn a_pull_reports_its_progress_in_a_few_lines() {
+        let c = compose_cmd("web", "/s/web", "compose.yaml", None, ComposeAction::Pull);
+        assert!(is_json_pull(&c.argv_lossy()));
+        assert!(!is_json_pull(&compose_cmd("web", "/s/web", "compose.yaml", None, ComposeAction::Up).argv_lossy()));
+        let img = r#""parent_id":"Image ghcr.io/x/ha:1","status":"Working""#;
+        let ev = |id: &str, rest: &str| format!(r#"{{"id":"{id}",{img},{rest}}}"#);
+        let mut p = PullProgress::default();
+        assert_eq!(p.feed(r#"stderr: {"id":"Image ghcr.io/x/ha:1","status":"Working","text":"Pulling"}"#), None);
+        for id in ["a", "b", "c", "d"] {
+            assert_eq!(p.feed(&ev(id, r#""text":"Pulling fs layer","details":"0B""#)), None);
+        }
+        // a blob that is not a layer (the config) never counts
+        assert_eq!(p.feed(&ev("cfg", r#""text":"Download complete""#)), None);
+        assert_eq!(p.feed(&ev("b", r#""text":"Download complete""#)), Some("10%: 1 of 4 layers downloaded (0 B), 0 extracted".into()));
+        assert_eq!(p.feed(&ev("a", r#""text":"Downloading","current":0,"total":1200000000"#)), None);
+        assert_eq!(p.feed(&ev("a", r#""text":"Downloading","current":200000000,"total":1200000000"#)), None);
+        assert_eq!(
+            p.feed(&ev("a", r#""text":"Downloading","current":300000000,"total":1200000000"#)).as_deref(),
+            Some("downloading a layer of 1.2 GB: 25%")
+        );
+        // the same state again: nothing new
+        assert_eq!(p.feed(&ev("a", r#""text":"Downloading","current":300000000,"total":1200000000"#)), None);
+        assert_eq!(
+            p.feed(&ev("a", r#""text":"Downloading","current":1000000000,"total":1200000000"#)).as_deref(),
+            Some("downloading a layer of 1.2 GB: 75%")
+        );
+        assert_eq!(
+            p.feed(&ev("c", r#""text":"Already exists""#)).as_deref(),
+            Some("30%: 2 of 4 layers downloaded (1.0 GB), 1 extracted")
+        );
+        assert_eq!(p.feed(&ev("a", r#""text":"Download complete""#)).as_deref(), Some("50%: 3 of 4 layers downloaded (1.2 GB), 1 extracted"));
+        assert_eq!(p.feed(&ev("a", r#""text":"Extracting","details":"1s","current":1"#)).as_deref(), Some("extracting a layer of 1.2 GB"));
+        assert_eq!(p.feed(&ev("a", r#""text":"Extracting","details":"2s","current":2"#)), None);
+        assert_eq!(p.feed(&ev("a", r#""text":"Pull complete""#)).as_deref(), Some("60%: 3 of 4 layers downloaded (1.2 GB), 2 extracted"));
+        p.feed(&ev("d", r#""text":"Download complete""#));
+        p.feed(&ev("d", r#""text":"Pull complete""#));
+        assert_eq!(p.feed(&ev("b", r#""text":"Pull complete""#)).as_deref(), Some("100%: 4 of 4 layers downloaded (1.2 GB), 4 extracted"));
+        assert_eq!(
+            p.feed(r#"{"id":"Image ghcr.io/x/ha:1","status":"Done","text":"Pulled"}"#).as_deref(),
+            Some("ghcr.io/x/ha:1: pulled")
+        );
+        assert_eq!(p.feed("stderr: some plain line").as_deref(), Some("stderr: some plain line"));
+        let err = "stderr: {\"error\":true,\"message\":\"Error response from daemon: pull access denied\\nagain\"}";
+        assert_eq!(p.feed(err).as_deref(), Some("error: Error response from daemon: pull access denied"));
+        assert_eq!(compose_error(&format!("x\n{}\n", &err[8..])), "Error response from daemon: pull access denied");
+        assert_eq!(compose_error("a\nservice \"x\" has neither an image nor a build\n"), "service \"x\" has neither an image nor a build");
+        assert_eq!(human_bytes(999), "999 B");
+        assert_eq!(human_bytes(3_490_000_000), "3.5 GB");
     }
 
     const CONFIG: &str = r#"{
