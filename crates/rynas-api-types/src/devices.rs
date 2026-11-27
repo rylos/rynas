@@ -359,14 +359,16 @@ pub const ANDROID_APK_URL: &str = "https://github.com/rylos/rynas/releases/downl
 pub const ANDROID_METADATA_URL: &str = "https://github.com/rylos/rynas/releases/download/android/android.json";
 
 /// `GET /api/v1/devices/android-app` (any signed-in user): the Android app published on
-/// GitHub, `{"state":"available", ...}` or `{"state":"unavailable"}` when the NAS could not
-/// read or trust the metadata (offline, GitHub down, a malformed file). Never an error.
+/// GitHub, `{"state":"available", ...}`, `{"state":"unavailable"}` when the NAS could not
+/// read the metadata (offline, GitHub down) or `{"state":"invalid"}` when it read a file it
+/// cannot trust (a malformed or incomplete release). Never an error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum AndroidApp {
     Available(AndroidRelease),
     #[default]
     Unavailable,
+    Invalid,
 }
 
 /// The published Android app, as checked by the NAS.

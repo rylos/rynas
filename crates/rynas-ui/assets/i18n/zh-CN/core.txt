@@ -2452,6 +2452,8 @@ dev.app_download	下载 APK
 dev.app_signer	签名证书 SHA-256
 dev.app_qr	Android 应用下载链接二维码
 dev.app_first	还没有应用？请先下载
+dev.app_unreachable	NAS 无法连接 GitHub 检查已发布的版本；下载链接仍然可用。
+dev.app_invalid	已发布的应用信息无效，因此无法检查版本；NAS 将在几分钟后再次检查。下载链接仍然可用。
 sec.manual	不能扫描吗？请输入此密钥：
 sec.copy_secret	复制密钥
 sec.step_code	输入应用程序显示的代码

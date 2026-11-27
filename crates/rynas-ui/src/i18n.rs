@@ -3097,6 +3097,8 @@ dict! { BLOB, LENS;
     "dev.app_signer" => "Signing certificate SHA-256";
     "dev.app_qr" => "QR code with the download link of the Android app";
     "dev.app_first" => "No app yet? Get it first";
+    "dev.app_unreachable" => "The NAS cannot reach GitHub to check the published version; the download link still works.";
+    "dev.app_invalid" => "The published app information is not valid, so the version cannot be checked; the NAS checks again in a few minutes. The download link still works.";
     "sec.manual" => "Can't scan it? Enter this key:";
     "sec.copy_secret" => "Copy key";
     "sec.step_code" => "Enter the code the app shows";

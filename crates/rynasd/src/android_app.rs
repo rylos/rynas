@@ -3,10 +3,11 @@
 //! The app lives at a fixed release, tag `android` ([`ANDROID_APK_URL`]); next to it
 //! `android.json` says which version it is, its size and its hashes. The browser cannot read
 //! that file (GitHub's downloads send no CORS headers), so rynasd reads it, checks it and keeps
-//! the answer in memory: [`SUCCESS_TTL`] after a good answer, [`FAILURE_TTL`] after a failure,
-//! with a short timeout so an offline NAS answers quickly. One fetch at a time: the others wait
-//! for its answer. A failure is the typed [`AndroidApp::Unavailable`], never an error: the web
-//! interface links the APK anyway.
+//! the answer in memory: [`SUCCESS_TTL`] after a good answer, [`FAILURE_TTL`] when the file
+//! could not be read, [`INVALID_TTL`] when it was read and refused, with a short timeout so an
+//! offline NAS answers quickly. One fetch at a time: the others wait for its answer. A failure
+//! is the typed [`AndroidApp::Unavailable`] or [`AndroidApp::Invalid`], never an error: the
+//! web interface links the APK anyway.
 
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -19,8 +20,11 @@ use serde::Deserialize;
 
 /// How long a good answer is kept.
 pub const SUCCESS_TTL: Duration = Duration::from_secs(6 * 3600);
-/// How long a failure is kept before the next try.
+/// How long a failure to read the metadata is kept before the next try.
 pub const FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
+/// How long a metadata file that was read but refused is kept: a broken release is usually
+/// published again within minutes.
+pub const INVALID_TTL: Duration = Duration::from_secs(2 * 60);
 /// The whole request, redirects included.
 const TIMEOUT: Duration = Duration::from_secs(8);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -89,6 +93,7 @@ impl Cache {
         let ttl = match v {
             AndroidApp::Available(_) => SUCCESS_TTL,
             AndroidApp::Unavailable => FAILURE_TTL,
+            AndroidApp::Invalid => INVALID_TTL,
         };
         (now.saturating_duration_since(*at) < ttl).then(|| v.clone())
     }
@@ -100,7 +105,8 @@ impl Cache {
 
 static CACHE: LazyLock<tokio::sync::Mutex<Cache>> = LazyLock::new(Default::default);
 
-async fn fetch() -> Result<AndroidRelease, String> {
+/// The metadata file as downloaded, or why it could not be read.
+async fn download() -> Result<Vec<u8>, String> {
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(TIMEOUT)
@@ -122,7 +128,24 @@ async fn fetch() -> Result<AndroidRelease, String> {
         }
         body.extend_from_slice(&chunk);
     }
-    parse(&body)
+    Ok(body)
+}
+
+/// The answer for a download: unreadable → `Unavailable`, refused → `Invalid`.
+fn answer(body: Result<Vec<u8>, String>) -> AndroidApp {
+    match body {
+        Err(e) => {
+            tracing::warn!("android app: cannot read {ANDROID_METADATA_URL}: {e}");
+            AndroidApp::Unavailable
+        }
+        Ok(b) => match parse(&b) {
+            Ok(r) => AndroidApp::Available(r),
+            Err(e) => {
+                tracing::warn!("android app: {ANDROID_METADATA_URL} is not valid: {e}");
+                AndroidApp::Invalid
+            }
+        },
+    }
 }
 
 /// The app as last read, read again when the kept answer is stale.
@@ -131,13 +154,7 @@ pub async fn current() -> AndroidApp {
     if let Some(v) = cache.fresh(Instant::now()) {
         return v;
     }
-    let v = match fetch().await {
-        Ok(r) => AndroidApp::Available(r),
-        Err(e) => {
-            tracing::warn!("android app: cannot read {ANDROID_METADATA_URL}: {e}");
-            AndroidApp::Unavailable
-        }
-    };
+    let v = answer(download().await);
     cache.store(Instant::now(), v.clone());
     v
 }
@@ -228,11 +245,23 @@ mod tests {
         c.store(t0, AndroidApp::Unavailable);
         assert_eq!(c.fresh(t0 + FAILURE_TTL - Duration::from_secs(1)), Some(AndroidApp::Unavailable));
         assert_eq!(c.fresh(t0 + FAILURE_TTL), None);
+        c.store(t0, AndroidApp::Invalid);
+        assert_eq!(c.fresh(t0 + INVALID_TTL - Duration::from_secs(1)), Some(AndroidApp::Invalid));
+        assert_eq!(c.fresh(t0 + INVALID_TTL), None);
+    }
+
+    #[test]
+    fn unreadable_and_refused_files_are_told_apart() {
+        assert_eq!(answer(Err("HTTP 404".into())), AndroidApp::Unavailable);
+        assert_eq!(answer(Ok(json("0.3.0", 11_648_388, SHA, "", URL))), AndroidApp::Invalid);
+        assert_eq!(answer(Ok(b"<html>".to_vec())), AndroidApp::Invalid);
+        assert!(matches!(answer(Ok(json("0.3.0", 11_648_388, SHA, SHA, URL))), AndroidApp::Available(_)));
     }
 
     #[test]
     fn the_answer_is_tagged() {
         assert_eq!(serde_json::to_string(&AndroidApp::Unavailable).unwrap(), r#"{"state":"unavailable"}"#);
+        assert_eq!(serde_json::to_string(&AndroidApp::Invalid).unwrap(), r#"{"state":"invalid"}"#);
         let ok = AndroidApp::Available(parse(&json("0.2.0", 11_526_584, SHA, SHA, URL)).unwrap());
         let v: serde_json::Value = serde_json::to_value(&ok).unwrap();
         assert_eq!(v["state"], "available");

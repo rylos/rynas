@@ -6585,6 +6585,8 @@ dev.app_download	Scarica l'APK
 dev.app_signer	SHA-256 del certificato di firma
 dev.app_qr	Codice QR con il link per scaricare l'app Android
 dev.app_first	Non hai ancora l'app? Prima scaricala
+dev.app_unreachable	Il NAS non raggiunge GitHub per controllare la versione pubblicata; il link per scaricare funziona comunque.
+dev.app_invalid	Le informazioni dell'app pubblicata non sono valide, quindi la versione non si può controllare; il NAS riprova fra qualche minuto. Il link per scaricare funziona comunque.
 nev.device.paired.title	Dispositivo {device} abbinato per {user}
 nev.device.paired.body	Il dispositivo mobile {device} è stato abbinato per {user} da {ip}.
 nev.device.renamed.title	Dispositivo {old} di {user} rinominato in {new}

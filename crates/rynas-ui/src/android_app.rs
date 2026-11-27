@@ -1,7 +1,8 @@
 //! "Android app": where to get the phone app (`docs/phase2/mobile-devices.md` §6). One box,
 //! used on the Devices page, in "Pair a device" and in a dialog from the user menu: a QR code
 //! of the APK's fixed address, a plain link to it (works when the NAS cannot read the
-//! metadata), and, when it could, the version, the size and the signing certificate.
+//! metadata), and, when it could, the version, the size and the signing certificate; when it
+//! could not, a line saying whether GitHub was out of reach or the published file was refused.
 
 use leptos::prelude::*;
 use rynas_api_types::devices::{ANDROID_APK_URL, AndroidApp};
@@ -38,6 +39,14 @@ pub fn AndroidAppBox() -> impl IntoView {
                 {move || release().map(|r| view! {
                     <p class="muted small tnum">{tf("about.version", &[("version", &r.version)])}" · "{i18n::bytes_si(r.size)}</p>
                 })}
+                {move || {
+                    let key = match app.data.get() {
+                        Some(AndroidApp::Unavailable) => "dev.app_unreachable",
+                        Some(AndroidApp::Invalid) => "dev.app_invalid",
+                        _ => return None,
+                    };
+                    Some(view! { <p class="muted small">{tr(key)}</p> })
+                }}
                 <a class="btn" href=ANDROID_APK_URL rel="noopener noreferrer">
                     <Icon icon=icons::DOWNLOAD size=16 /><span class="btn-label">{tr("dev.app_download")}</span>
                 </a>
