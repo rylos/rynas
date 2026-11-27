@@ -17,8 +17,7 @@
 //! The form stays JSON ([`Form`], the wire shape of `rynas_api_types::apps::AppForm`) and is
 //! read where it is used: no typed copy of the schema in the wasm (size).
 //!
-//! Titles and descriptions come in English from the entry and are shown as they are
-//! (`lang="en"`); messages of the client checks are translated. Values are JSON values
+//! Titles and descriptions can be translated for bundled entries. Values are JSON values
 //! (string, integer, boolean) keyed by property name: [`defaults`] → edits → [`answers`].
 
 use std::collections::BTreeMap;
@@ -30,6 +29,7 @@ use serde_json::{Map, Value};
 use crate::form::fid;
 use crate::i18n::{t, tf, tr};
 use crate::icons::{self, Icon};
+use crate::pages::apps::texts::CatalogText;
 
 /// Answers by property name.
 pub type Values = BTreeMap<String, Value>;
@@ -385,6 +385,7 @@ fn text_of(v: Option<&Value>) -> String {
 /// What one field shows, read once from the schema.
 #[derive(Clone)]
 struct Def {
+    texts: CatalogText,
     ty: Ty,
     title: String,
     description: Option<String>,
@@ -399,8 +400,9 @@ struct Def {
 }
 
 impl Def {
-    fn of(f: Field) -> Def {
+    fn of(f: Field, texts: CatalogText) -> Def {
         Def {
+            texts,
             ty: f.ty(),
             title: f.title().to_string(),
             description: f.description().map(str::to_string),
@@ -420,6 +422,7 @@ impl Def {
 /// server's field errors and whether every client error shows (after a Next).
 #[derive(Clone)]
 pub struct SchemaForm {
+    pub texts: CatalogText,
     pub form: StoredValue<Form>,
     pub overlays: StoredValue<Vec<AppOverlay>>,
     pub values: RwSignal<Values>,
@@ -448,7 +451,7 @@ impl SchemaForm {
                 });
                 view! {
                     <fieldset class="sf-group">
-                        {(!title.is_empty()).then(|| view! { <legend class="mini-title" lang="en">{title}</legend> })}
+                        {(!title.is_empty()).then(|| view! { <legend class="mini-title">{self.texts.span(title)}</legend> })}
                         <div class="form">{main}{adv}</div>
                     </fieldset>
                 }
@@ -460,7 +463,7 @@ impl SchemaForm {
 
     /// One property: the widget its type and `x-ui` ask for, hidden while `visible_if` fails.
     fn field(self, name: String) -> AnyView {
-        let Some(f) = self.form.with_value(|fm| fm.field(&name).map(Def::of)) else { return ().into_any() };
+        let Some(f) = self.form.with_value(|fm| fm.field(&name).map(|field| Def::of(field, self.texts))) else { return ().into_any() };
         let (form, values) = (self.form, self.values);
         let key = StoredValue::new(name.clone());
         let shown = Memo::new(move |_| form.with_value(|fm| values.with(|v| fm.field(&key.get_value()).is_some_and(|f| visible(fm, v, f)))));
@@ -496,14 +499,19 @@ impl SchemaForm {
         let off_adds: Vec<String> = self.overlays.with_value(|o| o.iter().filter(|o| o.when.strip_prefix('!') == Some(name)).map(|o| o.description.clone()).collect());
         let checked = move || get.with(|v| matches!(v, Some(Value::Bool(true))));
         let hint = |key: &'static str, list: Vec<String>| {
-            (!list.is_empty()).then(|| view! { <span class="field-help">{tr(key)}" "<span lang="en">{list.join(" · ")}</span></span> })
+            (!list.is_empty()).then(|| {
+                let entries = list.into_iter().enumerate().map(|(i, text)| {
+                    view! { {if i > 0 { " · " } else { "" }}{f.texts.span(text)} }
+                }).collect_view();
+                view! { <span class="field-help">{tr(key)}" "{entries}</span> }
+            })
         };
         view! {
             <label class="switch-row">
                 <input type="checkbox" role="switch" class="switch" prop:checked=checked on:change=move |ev| set.run(Value::Bool(event_target_checked(&ev))) />
                 <span class="switch-text">
-                    <span class="switch-label" lang="en">{f.title.clone()}</span>
-                    {f.description.clone().map(|d| view! { <span class="field-help" lang="en">{d}</span> })}
+                    <span class="switch-label">{f.texts.span(f.title.clone())}</span>
+                    {f.description.clone().map(|d| view! { <span class="field-help">{f.texts.span(d)}</span> })}
                     {hint("sf.when_on", on_adds)}
                     {hint("sf.when_off", off_adds)}
                 </span>
@@ -517,7 +525,7 @@ impl SchemaForm {
 fn label(f: &Def, required: bool, id: String) -> AnyView {
     view! {
         <label class="field-label" for=id>
-            <span lang="en">{f.title.clone()}</span>
+            {f.texts.span(f.title.clone())}
             {(!required).then(|| view! { " "<span class="muted small">{tr("sf.optional")}</span> })}
         </label>
     }
@@ -526,7 +534,7 @@ fn label(f: &Def, required: bool, id: String) -> AnyView {
 
 fn help_err(f: &Def, hid: &str, eid: String, err: Signal<Option<String>>) -> AnyView {
     view! {
-        {f.description.clone().map(|d| view! { <span class="field-help" id=hid.to_string() lang="en">{d}</span> })}
+        {f.description.clone().map(|d| view! { <span class="field-help" id=hid.to_string()>{f.texts.span(d)}</span> })}
         <span class="field-error" id=eid aria-live="polite">
             {move || err.get().map(|e| view! { <Icon icon=icons::CIRCLE_X size=12 />{crate::ui::err_view(e)} })}
         </span>
@@ -618,9 +626,9 @@ fn select(f: &Def, required: bool, get: Signal<Option<Value>>, set: Callback<Val
         .enumerate()
         .map(|(i, v)| {
             let val = text_of(Some(v));
-            let text = labels.get(i).cloned().unwrap_or_else(|| val.clone());
+            let text = f.texts.signal(labels.get(i).cloned().unwrap_or_else(|| val.clone()));
             let v2 = val.clone();
-            view! { <option value=val selected=move || cur() == v2 lang="en">{text}</option> }
+            view! { <option value=val selected=move || cur() == v2 lang=move || text.with(|(_, lang)| *lang)>{move || text.with(|(s, _)| s.clone())}</option> }
         })
         .collect_view();
     view! {

@@ -366,7 +366,9 @@ class Editor {
     bar.querySelector('[data-act="copy"]').title = (sel ? t("files.common.copy") : t("files.editor.copy_line")) + " (Ctrl+C)";
     bar.querySelector('[data-act="prev"]').disabled = bar.querySelector('[data-act="next"]').disabled = !this.query;
     bar.querySelector('[data-act="wrap"]').classList.toggle("on", this.wrap);
-    this.status.querySelector(".r").textContent = `${line.number}:${col}  │  ${this.type?.ft || "unknown"}  │  utf-8${this.crlf ? " (dos)" : ""} `;
+    const fileType = this.type?.ft && this.type.ft !== "unknown" ? this.type.ft : t("files.editor.unknown_type");
+    const encoding = this.crlf ? t("files.editor.utf8_crlf") : "UTF-8";
+    this.status.querySelector(".r").textContent = line.number + ":" + col + "  │  " + fileType + "  │  " + encoding + " ";
   }
 
   /** micro's message line: a note, or nothing. */

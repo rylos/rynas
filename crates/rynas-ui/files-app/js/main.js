@@ -101,7 +101,8 @@ class App {
     this.translateChrome();
     this.renderTabs();
     this.renderSidebar();
-    for (const tab of this.tabs) for (const p of tab.panes) if (tab === this.current) p.render();
+    for (const pane of this.allPanes()) pane.translateToolbar();
+    for (const pane of this.current?.panes || []) pane.render();
     transfers.renderAll?.();
   }
 

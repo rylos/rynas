@@ -417,6 +417,7 @@ files.key.del	Del
 files.key.pgdn	PgDn
 files.key.pgup	PgUp
 files.key.letters	Буквы
+files.settings.delete_selection	Удалить (с учётом настроек корзины)
 files.settings.next_tab	Следующая вкладка
 files.settings.previous_tab	Предыдущая вкладка
 files.settings.go_tab	Перейти к вкладке
@@ -505,6 +506,100 @@ files.iconpick.search_icon	Поиск значка…
 files.sidebar.icon	Значок…
 files.iconpick.automatic_icon	Автоматический значок
 files.iconpick.no_icon_found	Значки не найдены
+files.iconpick.option.folder	cartella folder
+files.iconpick.option.favorite	stella preferiti star favourite
+files.iconpick.option.heart	cuore amore heart love
+files.iconpick.option.user	persona utente account person user
+files.iconpick.option.home	casa home
+files.iconpick.option.private	lucchetto privato lock private
+files.iconpick.option.key	chiave password key
+files.iconpick.option.photos	immagini foto image photo
+files.iconpick.option.album	album foto gallery photos
+files.iconpick.option.music	musica music
+files.iconpick.option.video	video film movie play
+files.iconpick.option.notes	testo note text notes
+files.iconpick.option.documents	documenti file documents
+files.iconpick.option.spreadsheet	tabelle excel table sheet
+files.iconpick.option.archive_zip	archivio zip archive
+files.iconpick.option.download	scaricati download
+files.iconpick.option.upload	caricati upload
+files.iconpick.option.sync	sincronizzati sync
+files.iconpick.option.network	rete condivisa network share
+files.iconpick.option.drive	drive cloud google
+files.iconpick.option.settings	impostazioni settings config
+files.iconpick.option.tools	strumenti attrezzi tools
+files.iconpick.option.history	storico vecchio history old
+files.iconpick.option.done	fatto completato done check
+files.iconpick.option.important	importante attenzione important alert
+files.iconpick.option.question	da vedere dubbio question
+files.iconpick.option.watch	visto watch eye
+files.iconpick.option.hidden	nascosta hidden
+files.iconpick.option.location	luogo posto place location
+files.iconpick.option.draft	in corso bozza draft edit
+files.iconpick.option.info	informazioni info
+files.iconpick.option.rejected	scartati annullati rejected cancel
+files.iconpick.option.search	ricerca search
+files.iconpick.option.transfer	scambio transfer swap
+files.iconpick.option.work	lavoro ufficio work office
+files.iconpick.option.team	clienti gruppo team clients group
+files.iconpick.option.suppliers	fornitori personale suppliers staff
+files.iconpick.option.invoices	fatture ricevute invoices receipts
+files.iconpick.option.payments	soldi pagamenti money payments
+files.iconpick.option.contracts	contratti firma contracts sign
+files.iconpick.option.company	azienda edificio company building
+files.iconpick.option.factory	produzione fabbrica production factory
+files.iconpick.option.car	auto macchina car
+files.iconpick.option.school	scuola school
+files.iconpick.option.health	salute medico health medical
+files.iconpick.option.bank	banca bank
+files.iconpick.option.shopping	acquisti spesa shopping
+files.iconpick.option.travel	viaggi vacanze travel holidays
+files.iconpick.option.games	giochi games
+files.iconpick.option.books	libri manuali books manuals
+files.iconpick.option.camera	fotocamera camera
+files.iconpick.option.cinema	film cinema movies
+files.iconpick.option.video_simple	video
+files.iconpick.option.image	immagine image
+files.iconpick.option.document	documento document
+files.iconpick.option.pdf	pdf
+files.iconpick.option.email	posta mail email
+files.iconpick.option.phone	telefono phone
+files.iconpick.option.map	mappa luogo map place
+files.iconpick.option.web	mondo web world
+files.iconpick.option.usb_stick	usb chiavetta pennetta flash drive stick
+files.iconpick.option.usb	usb
+files.iconpick.option.drive_external	disco hard disk drive esterno external
+files.iconpick.option.sd_card	sd scheda card memoria memory
+files.iconpick.option.server	server
+files.iconpick.option.database	database dati data
+files.iconpick.option.cloud	cloud nuvola
+files.iconpick.option.backup	sicurezza backup security
+files.iconpick.option.archive	archivio archive
+files.iconpick.option.calendar	calendario anno calendar year
+files.iconpick.option.star	stella star
+files.iconpick.option.heart_simple	cuore heart
+files.iconpick.option.lock	lucchetto lock
+files.iconpick.option.printer	stampa printer
+files.iconpick.option.toolbox	attrezzi tools
+files.iconpick.option.maintenance	manutenzione maintenance
+files.iconpick.option.wrench	chiave inglese wrench
+files.iconpick.option.cad	cad disegni progetti drawings projects
+files.iconpick.option.models	3d modelli models
+files.iconpick.option.packages	pacchetti software packages
+files.iconpick.option.lab	esperimenti test lab
+files.iconpick.option.graphics	grafica design art
+files.iconpick.option.ideas	idee ideas
+files.iconpick.option.projects	progetti lancio projects launch
+files.iconpick.option.reports	statistiche report charts
+files.iconpick.option.code	codice sviluppo code dev
+files.iconpick.option.git	git
+files.iconpick.option.linux	linux
+files.iconpick.option.windows	windows
+files.iconpick.option.mac	apple mac
+files.iconpick.option.android	android
+files.iconpick.option.pets	animali cane gatto pets
+files.iconpick.option.garden	natura giardino nature garden
+files.iconpick.option.kids	bambini figli kids baby
 files.iconpick.default	По умолчанию
 files.iconpick.folder_only	Только эта папка
 files.iconpick.every_n	Все «{n}»
@@ -526,6 +621,8 @@ files.editor.ctrl_g_editor_keys	Ctrl+G: клавиши редактора
 files.editor.e_overwrite_y_n	{e}. Перезаписать? (y, n)
 files.common.edit	Изменить
 files.editor.not_saved	Не сохранено
+files.editor.unknown_type	Неизвестный тип файла
+files.editor.utf8_crlf	UTF-8 · окончания строк Windows (CRLF)
 files.editor.q_not_found	«{q}» не найдено
 files.editor.save_changes_n_before_closing	Сохранить изменения в «{n}» перед закрытием? (y, n, esc)
 files.editor.saving	Сохранение…
@@ -583,6 +680,9 @@ files.err.session_changed_in_another_tab	Сеанс изменился в дру
 files.err.not_allowed	У вас нет прав на это действие
 files.transfers.permission_denied	Доступ запрещён
 files.transfers.check_shared_folder_permissions	проверьте права доступа к общей папке
+files.transfers.copy_verification_failed	Проверка не пройдена: копия отличается от оригинала.
+files.transfers.folder_into_itself	Невозможно скопировать или переместить «{path}» внутрь самой папки
+files.transfers.cannot_write_folder	У вас нет прав на запись в папку «{path}»
 files.err.not_found_may_been_moved	Не найдено: возможно, объект был перемещён или удалён
 files.err.file_changed_in_meantime	Файл тем временем изменился
 files.err.busy_try_again_shortly	Занято: повторите попытку чуть позже
@@ -610,7 +710,7 @@ files.sidebar.apps	Приложения
 files.common.app_data	Данные приложений
 files.sidebar.n_folders	Папок: {n}
 files.common.backups	Резервные копии ПК
-files.backups.root	корень
+files.backups.root	@ (корень)
 files.sidebar.overlaps_backup_folder_pc_pc	Пересекается с папкой резервных копий компьютера {pc}: только чтение, пока у резервных копий не будет своей папки
 files.backups.backups_read_only_change_file	Резервные копии доступны только для чтения: чтобы изменить файл, скопируйте его в общую папку
 files.appdata.s_may_need_restart_see	Чтобы изменение вступило в силу, может потребоваться перезапуск {s}

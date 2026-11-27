@@ -3,8 +3,9 @@
 
 use leptos::prelude::*;
 use rynas_api_types::TaskStatus;
-use rynas_api_types::apps::{AppCard, AppCatalog, CatalogSourceState, FolderIntent, FolderSsd, GpuNeed, NoteLevel, RamGate, ShareAccess, WebAuth, WebPublic};
+use rynas_api_types::apps::{AppCard, AppCatalog, CatalogIssueKind, CatalogSourceState, FolderIntent, FolderSsd, GpuNeed, NoteLevel, RamGate, ShareAccess, WebAuth, WebPublic};
 
+use super::texts::{CatalogText, lookup};
 use super::{AppDetail, CATEGORIES, antifeature_chips, antifeature_keys, app_icon, apps, category_key, install_block, ram_pill};
 use crate::form::search_box;
 use crate::i18n::{self, t, tf, tr};
@@ -80,7 +81,20 @@ fn empty_catalog(c: &AppCatalog) -> AnyView {
 /// Entries the catalogue refused to load (never installable).
 fn issues(c: &AppCatalog) -> Option<AnyView> {
     (!c.issues.is_empty()).then(|| {
-        let rows = c.issues.iter().map(|i| view! { <li><strong>{i.app.clone()}</strong>" · "<span class="mono">{i.file.clone()}</span>" — "<span lang="en">{i.message.clone()}</span></li> }).collect_view();
+        let rows = c.issues.iter().map(|i| {
+            let (key, app) = match i.kind {
+                CatalogIssueKind::DirectoryRead => ("apps.issues.directory_read", None),
+                CatalogIssueKind::EntryLoad => ("apps.issues.entry_load", Some(i.app.clone())),
+            };
+            view! {
+                <li>
+                    <strong>{tr(key)}</strong>" · "
+                    {app.map(|app| view! { <span>{app}" · "</span> })}
+                    <span class="mono">{i.file.clone()}</span>
+                    {ui::tech_detail(i.message.clone())}
+                </li>
+            }
+        }).collect_view();
         view! {
             {ui::fold_with(tf("apps.issues", &[("n", &c.issues.len().to_string())]).into_any(), false, view! { <ul class="small">{rows}</ul> }.into_any())}
         }
@@ -103,7 +117,13 @@ pub fn browse() -> AnyView {
         let shown: Vec<AppCard> = c
             .apps
             .iter()
-            .filter(|x| qv.is_empty() || x.name.to_lowercase().contains(&qv) || x.summary.to_lowercase().contains(&qv) || x.id.contains(&qv))
+            .filter(|x| {
+                qv.is_empty()
+                    || x.name.to_lowercase().contains(&qv)
+                    || x.summary.to_lowercase().contains(&qv)
+                    || lookup(&x.id, &x.summary).0.to_lowercase().contains(&qv)
+                    || x.id.contains(&qv)
+            })
             .filter(|x| cv.is_empty() || x.categories.iter().any(|k| category_key(*k) == cv))
             .cloned()
             .collect();
@@ -141,6 +161,7 @@ pub fn browse() -> AnyView {
 
 /// One catalogue card.
 fn card(c: AppCard) -> AnyView {
+    let texts = CatalogText::new(&c.id);
     let a = apps();
     let (id, id2) = (c.id.clone(), c.id.clone());
     let installed = c.installed.first().cloned();
@@ -167,7 +188,7 @@ fn card(c: AppCard) -> AnyView {
                     <span class="cell-sub">{tf("apps.version", &[("v", &c.app_version)])}" · "<span class="mono">{c.license.clone()}</span></span>
                 </div>
             </header>
-            <p class="app-sum" lang="en">{c.summary.clone()}</p>
+            <p class="app-sum">{texts.span(c.summary.clone())}</p>
             <div class="chips">
                 {(!c.installed.is_empty()).then(|| ui::status(Tone::Ok, t("apps.installed").to_string()))}
                 {c.update_available.then(|| view! { <span class="chip accent"><Icon icon=icons::DOWNLOAD size=12 />{tr("dk.upd.available")}</span> })}
@@ -229,19 +250,19 @@ fn yes_no(b: bool) -> String {
     t(if b { "yes" } else { "no" }).to_string()
 }
 
-pub(super) fn notes_view(notes: &[rynas_api_types::apps::AppNote]) -> AnyView {
+pub(super) fn notes_view(texts: CatalogText, notes: &[rynas_api_types::apps::AppNote]) -> AnyView {
     notes
         .iter()
         .map(|n| {
             let (tone, icon) = if n.level == NoteLevel::Warning { (Tone::Warn, icons::TRIANGLE_ALERT) } else { (Tone::Info, icons::INFO) };
-            ui::note(tone, icon, view! { <span lang="en">{n.text.clone()}</span> }.into_any())
+            ui::note(tone, icon, texts.span(n.text.clone()))
         })
         .collect_view()
         .into_any()
 }
 
 
-fn ports_table(c: &AppCard) -> Option<AnyView> {
+fn ports_table(texts: CatalogText, c: &AppCard) -> Option<AnyView> {
     let rows = c
         .ports
         .iter()
@@ -252,7 +273,7 @@ fn ports_table(c: &AppCard) -> Option<AnyView> {
                     Some(p.env.clone()),
                     "cell-sub mono",
                 )),
-                ui::cell("apps.col.purpose", "wrap", view! { <span lang="en">{p.purpose.clone()}</span> }.into_any()),
+                ui::cell("apps.col.purpose", "wrap", texts.span(p.purpose.clone())),
                 ui::cell("apps.col.reach", "", view! {
                     <div class="chips">
                         {p.proxied.then(|| view! { <span class="chip">{tr("apps.port.proxied")}</span> })}
@@ -265,13 +286,13 @@ fn ports_table(c: &AppCard) -> Option<AnyView> {
     (!rows.is_empty()).then(|| view! { <h4 class="mini-title">{tr("apps.d.ports")}</h4>{ui::table("", &["apps.col.port", "apps.col.purpose", "apps.col.reach"], rows)} }.into_any())
 }
 
-fn folders_table(d: &AppDetail) -> Option<AnyView> {
+fn folders_table(texts: CatalogText, d: &AppDetail) -> Option<AnyView> {
     let rows = d
         .folders
         .iter()
         .map(|f| {
             ui::row(vec![
-                ui::cell("apps.col.folder", "", view! { <div class="cell-main"><span class="mono">{format!("./{}", f.path)}</span><span class="cell-sub" lang="en">{f.description.clone()}</span></div> }.into_any()),
+                ui::cell("apps.col.folder", "", view! { <div class="cell-main"><span class="mono">{format!("./{}", f.path)}</span><span class="cell-sub">{texts.span(f.description.clone())}</span></div> }.into_any()),
                 ui::cell("apps.col.kind", "", view! {
                     <div class="chips">
                         <span class="chip">{intent_text(f.intent)}</span>
@@ -292,13 +313,13 @@ fn folders_table(d: &AppDetail) -> Option<AnyView> {
     })
 }
 
-fn shares_table(d: &AppDetail) -> Option<AnyView> {
+fn shares_table(texts: CatalogText, d: &AppDetail) -> Option<AnyView> {
     let rows = d
         .shares
         .iter()
         .map(|s| {
             ui::row(vec![
-                ui::cell("shares.folder", "", view! { <div class="cell-main"><span lang="en">{s.label.clone()}</span><span class="cell-sub" lang="en">{s.description.clone()}</span></div> }.into_any()),
+                ui::cell("shares.folder", "", view! { <div class="cell-main">{texts.span(s.label.clone())}<span class="cell-sub">{texts.span(s.description.clone())}</span></div> }.into_any()),
                 ui::cell("apps.col.access", "", view! {
                     <div class="chips">
                         <span class="chip">{tr(if s.access == ShareAccess::Rw { "rm.set.rw" } else { "perm.ro" })}</span>
@@ -340,12 +361,12 @@ fn web_view(d: &AppDetail) -> Option<AnyView> {
     )
 }
 
-/// A titled list of `name — description` lines (`lang="en"` descriptions from the entry).
-fn name_list(title: &'static str, items: Vec<(String, String, bool)>) -> Option<AnyView> {
+/// A titled list of names and descriptions from the entry.
+fn name_list(texts: CatalogText, title: &'static str, items: Vec<(String, String, bool)>) -> Option<AnyView> {
     (!items.is_empty()).then(|| {
         view! {
             <h4 class="mini-title">{tr(title)}</h4>
-            <ul class="small app-list">{items.into_iter().map(|(n, d, shown)| view! { <li><span class="mono">{n}</span>" — "<span lang="en">{d}</span>{shown.then(|| view! { " "<span class="chip">{tr("apps.secret.shown")}</span> })}</li> }).collect_view()}</ul>
+            <ul class="small app-list">{items.into_iter().map(|(n, d, shown)| view! { <li><span class="mono">{n}</span>" — "{texts.span(d)}{shown.then(|| view! { " "<span class="chip">{tr("apps.secret.shown")}</span> })}</li> }).collect_view()}</ul>
         }
         .into_any()
     })
@@ -411,24 +432,25 @@ fn detail_body(d: AppDetail) -> AnyView {
     let has_af = !c.antifeatures.is_empty();
     // only the catalogue's own files (served by the API): nothing loads from another site
     let shots: Vec<String> = d.screenshots.iter().filter(|s| s.starts_with("/api/")).cloned().collect();
+    let texts = CatalogText::new(&c.id);
     let secrets = d.secrets.iter().map(|s| (s.env.clone(), s.description.clone(), s.show)).collect();
     let volumes = d.named_volumes.iter().map(|v| (v.name.clone(), v.description.clone(), false)).collect();
     view! {
         <div class="app-detail">
             {detail_head(&d)}
-            {crate::markdown::render(&d.description, "en")}
+            {texts.markdown(d.description.clone())}
             {(!shots.is_empty()).then(|| view! {
                 <div class="app-shots">{shots.into_iter().map(|s| view! { <a href=s.clone() target="_blank" rel="noopener"><img src=s.clone() alt=tr("apps.screenshot") loading="lazy" /></a> }).collect_view()}</div>
             })}
-            {notes_view(&d.notes)}
+            {notes_view(texts, &d.notes)}
             {has_af.then(|| view! { <h4 class="mini-title">{tr("apps.d.antifeatures")}</h4><ul class="small app-list">{afs}</ul> })}
             {resources(&d)}
-            {ports_table(c)}
+            {ports_table(texts, c)}
             {web_view(&d)}
-            {folders_table(&d)}
-            {shares_table(&d)}
-            {name_list("apps.d.secrets", secrets)}
-            {name_list("apps.d.volumes", volumes)}
+            {folders_table(texts, &d)}
+            {shares_table(texts, &d)}
+            {name_list(texts, "apps.d.secrets", secrets)}
+            {name_list(texts, "apps.d.volumes", volumes)}
             {(!d.maintainers.is_empty()).then(|| view! { <dl class="kvs">{ui::kv_text("apps.maintainers", d.maintainers.join(", "), "")}{ui::kv_text("apps.d.manager", yes_no(c.manager), "")}</dl> })}
         </div>
     }
@@ -507,7 +529,7 @@ pub fn source_panel() -> AnyView {
             (Some("no_key"), ..) => Some(ui::note(Tone::Info, icons::INFO, ui::text(t("apps.src.no_key").to_string()))),
             (Some(_), ..) => Some(ui::note(Tone::Info, icons::INFO, ui::text(t("apps.src.off").to_string()))),
             (None, true, _) => Some(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("apps.src.expired").to_string()))),
-            (None, false, Some(e)) => Some(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("apps.src.error")}" "<span lang="en">{e.clone()}</span> }.into_any())),
+            (None, false, Some(e)) => Some(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("apps.src.error")}{ui::tech_detail(e.clone())} }.into_any())),
             _ => None,
         };
         view! {

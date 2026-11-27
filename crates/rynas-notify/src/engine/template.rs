@@ -9,9 +9,7 @@
 use std::collections::BTreeMap;
 
 use minijinja::{Environment, Value, context};
-use rynas_api_types::notify::{
-    BodyFormat, EventState, Notification, NotifyLanguage, NotifySeverity, event_text,
-};
+use rynas_api_types::notify::{EventState, Notification, NotifyLanguage, NotifySeverity, notification_text};
 use serde::Serialize;
 
 use super::LocalTime;
@@ -91,20 +89,15 @@ pub fn known_language(lang: NotifyLanguage) -> bool {
 }
 
 /// Title and body of an event in a target's language: from the event code and its fields (the
-/// web interface's rules, [`event_text`]) when the language has the texts, the English text
+/// web interface's rules, [`notification_text`]) when the language has the texts, the English text
 /// otherwise. Log bodies (command output) are sent as they are.
 fn texts(n: &Notification, lang: NotifyLanguage) -> (String, String) {
     if lang == NotifyLanguage::EN {
         return (n.title.clone(), n.body.clone());
     }
     let find = |k: &str| lookup(lang, k);
-    let title =
-        event_text(&n.code, "title", &n.fields, &find, true).unwrap_or_else(|| n.title.clone());
-    let body = match n.body_format {
-        BodyFormat::Log => None,
-        BodyFormat::Text => event_text(&n.code, "body", &n.fields, &find, true),
-    }
-    .unwrap_or_else(|| n.body.clone());
+    let title = notification_text(n, "title", &find, true).unwrap_or_else(|| n.title.clone());
+    let body = notification_text(n, "body", &find, true).unwrap_or_else(|| n.body.clone());
     (title, body)
 }
 
@@ -331,7 +324,7 @@ impl Templates {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rynas_api_types::notify::NotifyCategory;
+    use rynas_api_types::notify::{BodyFormat, NotifyCategory};
 
     fn utc(ms: u64) -> LocalTime {
         super::super::utc_time(ms)
@@ -397,6 +390,46 @@ mod tests {
             "{\"text\": \"[nas] RAID md2 degraded\", \"sev\": \"critical\", \"k\": \"s3cr3t\", \"n\": 1}"
         );
         assert!(t.check_user("{% if %}").is_err());
+    }
+
+    #[test]
+    fn simplified_chinese_backup_failure_for_delivery() {
+        let lang = NotifyLanguage::new("zh-CN").unwrap();
+        let t = Templates::new("nas");
+        let mut event = n(1, EventState::Firing);
+        event.source = "backup".into();
+        event.category = NotifyCategory::Backup;
+        event.key = "backup:job:office".into();
+        event.code = "backup.job_failed".into();
+        event.title = "Backup job office failed (exit code 1)".into();
+        event.body = "Result: exit-code (exit code 1). See the task history for the output.".into();
+        event.fields = [("name", "office"), ("result", "exit-code"), ("exit_code", "1")]
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+
+        let ctx = t.event_ctx(&event, false, lang, utc);
+        assert_eq!(ctx.body, "运行结果为失败（退出码 1）。可在任务历史中查看详细输出。");
+        assert_eq!(ctx.fields["result"], "exit-code");
+        let message = t.render(vec![ctx], lang);
+        assert_eq!(message.subject, "[nas] 备份任务「office」失败");
+        assert!(message.text.contains("运行结果为失败（退出码 1）。可在任务历史中查看详细输出。"));
+        assert!(t.render_user("{{ events[0].body }}", &message, lang, &BTreeMap::new()).unwrap().contains("退出码 1"));
+
+        event.fields.insert("result".into(), "timeout".into());
+        assert!(t.event_ctx(&event, false, lang, utc).body.contains("超时"));
+        event.fields.insert("result".into(), "signal".into());
+        event.fields.insert("signal".into(), "TERM".into());
+        assert!(t.event_ctx(&event, false, lang, utc).body.contains("因信号 TERM 终止"));
+
+        event.code.clear();
+        event.fields.clear();
+        assert_eq!(t.event_ctx(&event, false, lang, utc).title, "备份任务「office」失败");
+        assert!(t.event_ctx(&event, false, lang, utc).body.contains("退出码 1"));
+        event.body_format = BodyFormat::Log;
+        event.body = "rsync: write failed".into();
+        assert_eq!(t.event_ctx(&event, false, lang, utc).body, event.body);
+        assert_eq!(t.event_ctx(&event, false, NotifyLanguage::EN, utc).title, event.title);
     }
 
     #[test]

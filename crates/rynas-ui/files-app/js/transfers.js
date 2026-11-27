@@ -65,7 +65,15 @@ const PERM_HINT = "files.transfers.check_shared_folder_permissions";
 // and "invalid_value" cover reasons of their own (a verification that failed, a folder into
 // itself): there the message says more than the code.
 const OWN_MSG = new Set(["", "internal", "invalid_value"]);
-const codeText = (code, msg) => (!OWN_MSG.has(code || "") && errText(code)) || msg || "";
+function codeText(code, msg) {
+  // Older task records carry these specific reasons only in their message.
+  if (msg === "verification failed: the copy differs from the original") {
+    return t("files.transfers.copy_verification_failed");
+  }
+  const folder = code === "invalid_value" && msg?.match(/^“(.+)” cannot be copied or moved into itself$/s);
+  if (folder) return t("files.transfers.folder_into_itself", { path: folder[1] });
+  return (!OWN_MSG.has(code || "") && errText(code)) || msg || "";
+}
 // how a job ended, for the codes of the jobs themselves (not API error codes)
 const JOB_CODES = {
   // the state says it already
@@ -85,7 +93,11 @@ const firstError = (j) => errorLine(j.errors?.[0]);
 function jobMsg(j) {
   if (j.state === "done" && !j.code) return "";
   if (JOB_CODES[j.code]) return JOB_CODES[j.code]();
-  if (j.code === "permission_denied" && j.msg) return `${j.msg} · ${t(PERM_HINT)}`;
+  if (j.code === "permission_denied" && j.msg) {
+    const folder = j.msg.match(/^you are not allowed to write to the folder “(.+)”$/s);
+    const reason = folder ? t("files.transfers.cannot_write_folder", { path: folder[1] }) : j.msg;
+    return reason + " · " + t(PERM_HINT);
+  }
   return codeText(j.code, j.msg);
 }
 const active = (j) => !finished(j);

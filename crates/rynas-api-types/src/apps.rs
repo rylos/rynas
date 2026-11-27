@@ -169,6 +169,16 @@ pub struct CatalogIssue {
     pub app: String,
     pub file: String,
     pub message: String,
+    #[serde(default)]
+    pub kind: CatalogIssueKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogIssueKind {
+    #[default]
+    EntryLoad,
+    DirectoryRead,
 }
 
 /// `GET /api/v1/apps/catalog`.

@@ -610,7 +610,7 @@ fn pair_dialog(tab: Tab) -> AnyView {
     };
     let form = move || {
         view! {
-            {text_field("bk.f.description", description.into(), Callback::new(move |v| description.set(v)), Signal::stored(None), In { maxlength: 120, placeholder: "Office laptop", ..In::default() })}
+            {text_field("bk.f.description", description.into(), Callback::new(move |v| description.set(v)), Signal::stored(None), In { maxlength: 120, placeholder: t("pca.description_example"), ..In::default() })}
             {segmented("pca.col.group", MODES, mode.into(), Callback::new(move |v| mode.set(v)))}
             <p class="field-help">{move || if mode.get() == "join" { t("pca.join_help") } else { t("pca.own_help") }}</p>
             {join_view}

@@ -697,7 +697,7 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
             testing.set(false);
             match r {
                 Ok(r) => tested.set(Some(r)),
-                Err(e) => tested.set(Some(TestResult { outcome: TestOutcome::Failed, message: e.text(), snapshots: None })),
+                Err(e) => tested.set(Some(TestResult { outcome: TestOutcome::Failed, message: e.text(), snapshots: None, host_key_fingerprints: None })),
             }
         });
     };
@@ -709,15 +709,19 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
                 TestOutcome::Locked => (Tone::Warn, t("bk.test.locked").to_string()),
                 TestOutcome::Failed => (Tone::Err, t("bk.test.failed").to_string()),
             };
-            // a working test's message is for the user (the SFTP host key fingerprint, pinned
-            // when the job is saved); a failure's is the tool's words
             let failed = r.outcome == TestOutcome::Failed;
+            let guidance = match r.host_key_fingerprints.as_deref() {
+                Some("") => Some(t("bk.test.host_key_missing").to_string()),
+                Some(fingerprints) => Some(tf("bk.test.host_key", &[("fingerprints", fingerprints)])),
+                None if !failed && !r.message.is_empty() => Some(r.message.clone()), // older daemon
+                None => None,
+            };
             view! {
                 <div class="bk-test" aria-live="polite">
                     // a sentence: a note, not a status pill (pills stay on one line)
                     {ui::note(tone, tone.icon(), ui::text(text))}
                     {(!r.message.is_empty() && failed).then(|| ui::tech_detail(r.message.clone()))}
-                    {(!r.message.is_empty() && !failed).then(|| view! { <p class="small bk-wrap">{r.message.clone()}</p> })}
+                    {guidance.map(|guidance| view! { <p class="small bk-wrap">{guidance}</p> })}
                 </div>
             }
         })

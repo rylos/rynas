@@ -407,6 +407,9 @@ pub struct TestResult {
     pub message: String,
     #[serde(default)]
     pub snapshots: Option<u32>,
+    /// Fingerprints of the keys seen in an SFTP test. An empty string means fingerprinting failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key_fingerprints: Option<String>,
 }
 
 /// `POST /api/v1/backup/restic/ssh-key`: a new key pair for an SFTP destination.

@@ -116,7 +116,7 @@ fn row(id: String, cx: Ctx) -> AnyView {
     let running = Memo::new(move |_| c.with(|c| c.as_ref().is_some_and(|c| c.state == ContainerState::Running)));
     let hidden = Signal::derive(move || !cx.q.with(|q| cx.state.with(|s| c.with(|c| c.as_ref().is_some_and(|c| matches(c, q, s))))));
     let ports = Memo::new(move |_| c.with(|c| c.as_ref().map(|c| (c.state == ContainerState::Running, c.url.clone(), c.ports.clone()))));
-    let health = Memo::new(move |_| c.with(|c| c.as_ref().map(|c| (c.state, c.health, c.status.clone()))));
+    let health = Memo::new(move |_| c.with(|c| c.as_ref().map(|c| (c.state, c.health))));
     let has_update = Memo::new(move |_| c.with(|c| c.as_ref().is_some_and(|c| cx.upd.with(|u| u.contains(&c.image)))));
     let sub = first.stack.clone().map(|s| match first.service.clone() {
         Some(sv) => format!("{s} › {sv}"),
@@ -133,7 +133,7 @@ fn row(id: String, cx: Ctx) -> AnyView {
                     {move || has_update.get().then(update_chip)}
                 </div>
             }.into_any()),
-            ui::cell("col.status", "", (move || health.with(|h| h.as_ref().map(|(s, hl, text)| view! { <span title=text.clone() lang="en">{container_pill(*s, *hl)}</span> }.into_any()))).into_any()),
+            ui::cell("col.status", "", (move || health.get().map(|(state, health)| container_pill(state, health))).into_any()),
             ui::cell("dk.col.ports", "", (move || {
                 ports.track();
                 c.with(|c| c.as_ref().map(ports_cell))
@@ -348,6 +348,7 @@ fn logs_drawer(c: ContainerSummary, close: Callback<()>) -> AnyView {
                 <Icon icon=icons::REFRESH_CW size=14 />{tr("err.retry")}
             </button>
         </div>
+        {(!c.status.is_empty()).then(|| ui::fold(None, "tech_details", false, None, view! { <span lang="en">{c.status.clone()}</span> }.into_any()))}
         <pre class="log dk-log" node_ref=pre tabindex="0" aria-label=tr("dk.log.title") aria-live="off"></pre>
     }
     .into_any();

@@ -191,7 +191,12 @@ fn users_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>, hom
                 <Icon icon=icons::USER_PLUS size=16 /><span class="btn-label">{tr("users.create")}</span>
             </button>
         </div>
-        {move || adopt_banner(users.data.with(|d| d.iter().flatten().filter(|u| !u.status.managed && u.status.pending.is_none() && u.status.on_system).count()), "/api/v1/users/adopt")}
+        {move || adopt_banner(
+            users.data.with(|d| d.iter().flatten().filter(|u| !u.status.managed && u.status.pending.is_none() && u.status.on_system).count()),
+            "/api/v1/users/adopt",
+            "users.adopt_banner",
+            "users.adopted",
+        )}
         {table}
         {editor}
         {deleter}
@@ -260,9 +265,8 @@ fn user_row(v: UserView, edit: RwSignal<Option<UserEdit>>, del: RwSignal<Option<
 
 const SHELL_OPTS: &[(&str, &str)] = &[("none", "users.shell_none"), ("sftp", "users.shell_sftp"), ("shell", "users.shell_shell")];
 
-/// Accounts of the system that rynas does not manage yet: one click stages them all, as they
-/// are (`POST .../adopt`), then the change is applied.
-fn adopt_banner(n: usize, url: &'static str) -> Option<AnyView> {
+/// Users or groups that rynas does not yet manage. One click adopts them as they are.
+fn adopt_banner(n: usize, url: &'static str, banner_key: &'static str, adopted_key: &'static str) -> Option<AnyView> {
     (n > 0).then(|| {
         let busy = RwSignal::new(false);
         let error = RwSignal::new(None::<String>);
@@ -273,11 +277,11 @@ fn adopt_banner(n: usize, url: &'static str) -> Option<AnyView> {
                     // nothing staged: applied at once (rynas had never applied users)
                     Ok(st) if st.staged == 0 => {
                         crate::config::changed();
-                        toast(Tone::Ok, t("users.adopted").to_string());
+                        toast(Tone::Ok, t(adopted_key).to_string());
                     }
                     Ok(_) => {
                         if crate::config::apply_now(&[crate::config::keys::USERS], error).await {
-                            toast(Tone::Ok, t("users.adopted").to_string());
+                            toast(Tone::Ok, t(adopted_key).to_string());
                         }
                     }
                     Err(e) => {
@@ -288,7 +292,7 @@ fn adopt_banner(n: usize, url: &'static str) -> Option<AnyView> {
             });
         };
         ui::note(Tone::Info, icons::INFO, view! {
-            <span>{crate::i18n::tn("users.adopt_banner", n as u64, &[])}</span>
+            <span>{crate::i18n::tn(banner_key, n as u64, &[])}</span>
             <div class="sec-actions">
                 <button type="button" class="btn ghost" disabled=move || busy.get() on:click=go>{crate::form::spinner(busy)}{tr("users.adopt_all")}</button>
             </div>
@@ -810,7 +814,12 @@ fn groups_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>) ->
                 <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("groups.create")}</span>
             </button>
         </div>
-        {move || adopt_banner(groups.data.with(|d| d.iter().flatten().filter(|g| !g.managed && g.pending.is_none() && g.on_system).count()), "/api/v1/groups/adopt")}
+        {move || adopt_banner(
+            groups.data.with(|d| d.iter().flatten().filter(|g| !g.managed && g.pending.is_none() && g.on_system).count()),
+            "/api/v1/groups/adopt",
+            "groups.adopt_banner",
+            "groups.adopted",
+        )}
         {table}
         {editor}
         {deleter}

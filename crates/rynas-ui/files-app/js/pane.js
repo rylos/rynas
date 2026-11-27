@@ -3,7 +3,7 @@
 
 import { api } from "./api.js";
 import { prefs, save } from "./prefs.js";
-import { t, count, LOCALE, errText } from "./i18n.js";
+import { t, count, LOCALE, errText, keyText } from "./i18n.js";
 import { esc, size, sizeParts, ezaDate, relative, dateTime, duration, modeString, collator, joinPath, parentOf, baseName, int, isDirLike } from "./format.js";
 import { svg, iconHTML, glyph, colorClass, kindLabel, previewKind, shareGlyph, isProtectedFolder } from "./icons.js";
 import { pickIcon } from "./iconpick.js";
@@ -22,6 +22,23 @@ const COLS = {
   mtime: { label: "files.common.modified", width: "128px", cls: "mono dt" },
   kind: { label: "files.common.type", width: "130px", cls: "" },
 };
+
+const TOOLBAR_TITLES = [
+  [".b-back", "files.pane.back", "Alt+←"],
+  [".b-fwd", "files.pane.forward", "Alt+→"],
+  [".b-up", "files.common.parent_folder", "Backspace"],
+  [".b-refresh", "files.common.refresh", "F5"],
+  [".crumbs", "files.pane.click_empty_space_type_path", "Ctrl+L"],
+  [".filter-box .mode", "files.pane.search_every_subfolder_words_in", "Ctrl+F"],
+  [".views [data-v=list]", "files.common.list", "Ctrl+1"],
+  [".views [data-v=grid]", "files.pane.grid", "Ctrl+2"],
+  [".views [data-v=columns]", "files.common.columns", "Ctrl+3"],
+  [".b-hidden", "files.pane.hidden_files", "Ctrl+H"],
+  [".b-split", "files.common.dual_pane", "F3"],
+  [".b-info", "files.common.info_panel", "Ctrl+I"],
+  [".b-new", "files.pane.new"],
+  [".b-more", "files.pane.more"],
+];
 
 // the Modified column with "Always full dates" (the year and the time on every row): as wide
 // as such a date in the locale and the rows' font, measured once for each
@@ -150,24 +167,24 @@ export class Pane {
   build() {
     this.el = h(`<section class="pane">
       <div class="toolbar">
-        <button class="icon-btn b-back" title="${t("files.pane.back")} (Alt+←)">${svg("back")}</button>
-        <button class="icon-btn b-fwd" title="${t("files.pane.forward")} (Alt+→)">${svg("forward")}</button>
-        <button class="icon-btn b-up" title="${t("files.common.parent_folder")} (Backspace)">${svg("up")}</button>
-        <button class="icon-btn b-refresh" title="${t("files.common.refresh")} (F5)">${svg("refresh")}</button>
-        <div class="crumbs" title="${t("files.pane.click_empty_space_type_path")} (Ctrl+L)"></div>
-        <label class="filter-box">${svg("filter")}<input type="text" spellcheck="false" placeholder="${t("files.pane.filter")}"><span class="mode" title="${t("files.pane.search_every_subfolder_words_in")} (Ctrl+F)">${t("files.pane.subfolders")}</span></label>
+        <button class="icon-btn b-back">${svg("back")}</button>
+        <button class="icon-btn b-fwd">${svg("forward")}</button>
+        <button class="icon-btn b-up">${svg("up")}</button>
+        <button class="icon-btn b-refresh">${svg("refresh")}</button>
+        <div class="crumbs"></div>
+        <label class="filter-box">${svg("filter")}<input type="text" spellcheck="false"><span class="mode"></span></label>
         <div class="seg views">
-          <button data-v="list" title="${t("files.common.list")} (Ctrl+1)">${svg("list")}</button>
-          <button data-v="grid" title="${t("files.pane.grid")} (Ctrl+2)">${svg("grid")}</button>
-          <button data-v="columns" title="${t("files.common.columns")} (Ctrl+3)">${svg("columns")}</button>
-          <button class="b-flat" title="${t("files.menus.flat_view")} (Ctrl+Shift+F)" aria-label="${t("files.menus.flat_view")}">${svg("layers")}</button>
+          <button data-v="list">${svg("list")}</button>
+          <button data-v="grid">${svg("grid")}</button>
+          <button data-v="columns">${svg("columns")}</button>
+          <button class="b-flat">${svg("layers")}</button>
         </div>
-        <button class="icon-btn b-hidden" title="${t("files.pane.hidden_files")} (Ctrl+H)">${svg("eye")}</button>
-        <button class="icon-btn b-split" title="${t("files.common.dual_pane")} (F3)">${svg("split")}</button>
-        <button class="icon-btn b-info" title="${t("files.common.info_panel")} (Ctrl+I)">${svg("info")}</button>
+        <button class="icon-btn b-hidden">${svg("eye")}</button>
+        <button class="icon-btn b-split">${svg("split")}</button>
+        <button class="icon-btn b-info">${svg("info")}</button>
         <div class="sep"></div>
-        <button class="icon-btn b-new" title="${t("files.pane.new")}">${svg("plus")}</button>
-        <button class="icon-btn b-more" title="${t("files.pane.more")}">${svg("more")}</button>
+        <button class="icon-btn b-new">${svg("plus")}</button>
+        <button class="icon-btn b-more">${svg("more")}</button>
       </div>
       <div class="pane-main">
         <div class="view" tabindex="-1">
@@ -190,6 +207,7 @@ export class Pane {
     this.mcolsEl = $(".mcols", this.el);
     this.mnextEl = $(".mnext", this.el);
     this.statusEl = $(".statusbar", this.el);
+    this.translateToolbar();
 
     $(".b-back", this.el).onclick = () => this.goBack();
     $(".b-fwd", this.el).onclick = () => this.goForward();
@@ -645,8 +663,7 @@ export class Pane {
       this.app.rememberView("list", this);
     }
     this.searchMode = false;
-    $(".filter-box .mode", this.el).classList.remove("on");
-    this.filterInput.placeholder = t("files.pane.filter");
+    this.renderFilterMode();
     this.search?.controller?.abort();
     this.search = null;
     this.sel.clear();
@@ -696,8 +713,7 @@ export class Pane {
       on = false;
     }
     this.searchMode = on;
-    $(".filter-box .mode", this.el).classList.toggle("on", on);
-    this.filterInput.placeholder = on ? t("files.pane.search_in_p", { p: baseName(this.path) || t("files.pane.all_folders") }) : t("files.pane.filter");
+    this.renderFilterMode();
     if (!on) {
       this.search?.controller?.abort();
       this.search = null;
@@ -758,8 +774,7 @@ export class Pane {
     this.search = null;
     if (this.searchMode) {
       this.searchMode = false;
-      $(".filter-box .mode", this.el).classList.remove("on");
-      this.filterInput.placeholder = t("files.pane.filter");
+      this.renderFilterMode();
     }
     if (render) {
       this.refilter();
@@ -866,6 +881,32 @@ export class Pane {
   }
 
   // ---------- rendering ----------
+  translateToolbar() {
+    for (const [selector, key, shortcut] of TOOLBAR_TITLES) {
+      const label = t(key);
+      $(selector, this.el).title = shortcut ? label + " (" + keyText(shortcut) + ")" : label;
+    }
+    const flat = $(".b-flat", this.el);
+    flat.setAttribute("aria-label", t("files.menus.flat_view"));
+    this.renderFlatTitle(flat);
+    $(".filter-box .mode", this.el).textContent = t("files.pane.subfolders");
+    this.renderFilterMode();
+  }
+
+  renderFilterMode() {
+    $(".filter-box .mode", this.el).classList.toggle("on", this.searchMode);
+    this.filterInput.placeholder = this.searchMode
+      ? t("files.pane.search_in_p", { p: baseName(this.path) || t("files.pane.all_folders") })
+      : t("files.pane.filter");
+  }
+
+  renderFlatTitle(button) {
+    button.disabled = !this.flatAllowed();
+    button.title = button.disabled
+      ? t("files.pane.flat_view_nas_folders")
+      : t("files.menus.flat_view") + " (" + keyText("Ctrl+Shift+F") + ")";
+  }
+
   render() {
     this.renderChrome();
     this.renderHead();
@@ -884,9 +925,8 @@ export class Pane {
     const flatBtn = $(".b-flat", this.el);
     flatBtn.classList.toggle("on", this.flat);
     flatBtn.setAttribute("aria-pressed", String(this.flat));
-    flatBtn.disabled = !this.flatAllowed();
     // a button that cannot be pressed says why
-    flatBtn.title = flatBtn.disabled ? t("files.pane.flat_view_nas_folders") : `${t("files.menus.flat_view")} (Ctrl+Shift+F)`;
+    this.renderFlatTitle(flatBtn);
     const hb = $(".b-hidden", this.el);
     hb.classList.toggle("on", prefs.showHidden);
     hb.innerHTML = svg(prefs.showHidden ? "eye" : "eyeOff");

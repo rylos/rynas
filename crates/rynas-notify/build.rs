@@ -1,6 +1,7 @@
 //! Texts of the channel messages in every language of the interface's table
 //! (`crates/rynas-ui/assets/i18n/languages.txt`, docs/i18n.md): from each language's
-//! translation files, the `nev.*` (event codes) and `task.*` (task names) entries of the web
+//! translation files, the `nev.*` (event codes), `task.*` (task names) and `sch.run.*`
+//! (scheduled task outcomes) entries of the web
 //! interface's parts (`core.txt`, `module-<module>.txt`: the web interface and the channels
 //! share one translation) and every entry of `notify.txt` (the words of the message templates,
 //! English in `src/engine/template.rs`). Without the files (the crate built on its own) only
@@ -13,7 +14,7 @@ fn entries(text: &str, all: bool) -> Vec<(String, String)> {
     text.lines()
         .filter(|l| !l.starts_with('#'))
         .filter_map(|l| l.split_once('\t'))
-        .filter(|(k, _)| all || k.starts_with("nev.") || k.starts_with("task."))
+        .filter(|(k, _)| all || k.starts_with("nev.") || k.starts_with("task.") || k.starts_with("sch.run."))
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
 }

@@ -132,6 +132,12 @@ nev.task.succeeded.title	Задача выполнена: {type}
 nev.task.partial.title	Задача выполнена частично: {type}
 nev.config.apply_failed.title	Не удалось применить конфигурацию
 nev.config.apply_ok.title	Конфигурация применена
+nev.backup.job_failed.title	Ошибка задания резервного копирования «{name}»
+nev.backup.job_failed.body	Результат: {result}. Вывод можно посмотреть в журнале задач.
+nev.backup.job_ok.title	Задание резервного копирования «{name}» выполнено успешно
+nev.backup.job_ok.body	Результат: {result}. Вывод можно посмотреть в журнале задач.
+nev.backup.job_finished.title	Задание резервного копирования «{name}» завершено
+nev.backup.job_finished.body	Результат: {result}. Вывод можно посмотреть в журнале задач.
 nev.sched.task_failed.title	Ошибка задачи «{name}»
 nev.sched.task_failed.body	Результат: {result}. Вывод — в истории задачи.
 nev.sched.task_ok.title	Задача «{name}» выполнена
@@ -1511,6 +1517,48 @@ sto.bt.boot	После загрузки
 sto.bt.auto	Автоматически монтировать в деградированном режиме после загрузки
 sto.bt.auto_text	Если при загрузке отсутствует устройство, а у каждого чанка ещё есть копия, том монтируется в деградированном режиме, чтобы оставаться доступным, и администраторы получают уведомление. Если выключено, том ждёт администратора.
 sto.proposal	Предложение rynas
+sto.md.member_status	{device} ({role})
+sto.md.clean	Нет ожидающих операций записи
+sto.md.idle	Активен, простаивает
+sto.md.read_auto	Только чтение до первой записи
+sto.md.write_pending	Есть ожидающие операции записи
+sto.md.inactive	Неактивен
+sto.md.suspended	Приостановлен
+sto.md.clear	Не настроен
+sto.md.resyncing	Выполняется повторная синхронизация
+sto.quota.qgroups	Традиционные группы квот (qgroups)
+sto.quota.squota	Упрощённые квоты (squota)
+sto.usage.boot_flash	Загрузочный флеш-накопитель
+sto.usage.swap	Область подкачки
+sto.usage.luks_locked	LUKS (заблокирован)
+sto.usage.luks_unlocked	LUKS {name} (разблокирован)
+sto.usage.mount	Смонтировано в {path}
+sto.usage.filesystem	{fs} смонтирована в {path}
+sto.usage.md_member	Компонент {name} (RAID не собран)
+sto.usage.md_unknown	Компонент несобранного массива RAID
+sto.usage.partitions.one	{n} раздел
+sto.usage.partitions.other	{n} раздела
+sto.usage.partitions.few	{n} раздела
+sto.usage.partitions.many	{n} разделов
+sto.stlog.short_offline	Короткий автономный самотест
+sto.stlog.long_offline	Расширенный автономный самотест
+sto.stlog.conveyance	Автономный тест на повреждения при транспортировке
+sto.stlog.selective	Выборочный автономный самотест
+sto.stlog.passed	Завершён без ошибок
+sto.stlog.aborted	Прерван хостом
+sto.stlog.interrupted	Прерван сбросом хоста
+sto.stlog.read_failure	Завершён с ошибкой чтения
+sto.stlog.unknown_failure	Завершён с неизвестной ошибкой
+sto.stlog.electrical_failure	Завершён с электрической неисправностью
+sto.stlog.seek_failure	Завершён с ошибкой сервопривода или позиционирования
+sto.stlog.fatal	Критическая или неизвестная ошибка самотеста
+wol.progress.starting	Пробуждение {name} ({macs})
+wol.progress.sent	Пакеты пробуждения отправлены через {ifaces} (3×)
+wol.progress.wait_agent	Сеть ответила через {time}. Ожидание клиента резервного копирования.
+wol.progress.agent_timeout	Сеть ответила через {time}, но клиент резервного копирования не ответил.
+wol.progress.sent_again	Пакеты пробуждения повторно отправлены через {ifaces} через {time}
+wol.progress.not_sent	Не удалось отправить пакет через {iface}: {error}
+hw.system_temp	Температура системы
 sto.stripe	Кэш полос (записей)
 sto.kernel_default	Значение ядра по умолчанию (256)
 sto.use_proposal	{n} (предложение)
@@ -1646,6 +1694,15 @@ err.docker_unavailable	Docker установлен, но его служба н�
 err.containers_running	Сначала остановите запущенные контейнеры.
 err.stack_not_managed	Этот стек управляется вне rynas: изменить его файлы здесь нельзя.
 err.host_key_changed	Ключ сервера изменился с момента первого подключения.
+err.invalid_json	Данные запроса имеют неверный формат JSON.
+err.missing_field	Заполните обязательное поле.
+err.unknown_field	Запрос содержит неизвестное поле.
+err.invalid_type	В одном из полей указан неверный тип данных.
+err.decode	Не удалось прочитать ответ NAS.
+err.snapshot_share_missing	Общая папка {share} не найдена. Выберите другую папку для этого задания снимков.
+err.snapshot_directory_invalid	Введите допустимый абсолютный путь к папке снимков.
+err.snapshot_source_invalid	Введите допустимый абсолютный путь к исходному подтому.
+pca.description_example	Рабочий ноутбук
 err.generic	Что-то пошло не так. Повторите попытку.
 session.expires	Сеанс истечёт через {n} мин
 session.expires_1	Сеанс истечёт через 1 мин
@@ -1866,6 +1923,11 @@ ids.b_bad_request	Введите идентификатор.
 ids.b_other	Недоступно в этой системе.
 homes.b.other	другая причина
 groups.search	Поиск групп
+groups.adopt_banner.one	Групп, созданных в этой системе вне rynas: {n}. Возьмите их под управление, чтобы управлять этими группами и их участниками в rynas.
+groups.adopt_banner.few	Групп, созданных в этой системе вне rynas: {n}. Возьмите их под управление, чтобы управлять этими группами и их участниками в rynas.
+groups.adopt_banner.many	Групп, созданных в этой системе вне rynas: {n}. Возьмите их под управление, чтобы управлять этими группами и их участниками в rynas.
+groups.adopt_banner.other	Групп, созданных в этой системе вне rynas: {n}. Возьмите их под управление, чтобы управлять этими группами и их участниками в rynas.
+groups.adopted	Группы взяты под управление
 groups.create	Создать группу
 groups.edit_title	Изменить группу {name}
 groups.empty	Групп пока нет
@@ -3020,6 +3082,7 @@ dd.always_excluded	Никогда не дедуплицируется
 dd.reset	Сбросить индекс
 dd.reset_title	Сбросить индекс?
 dd.turn_off_title	Выключить дедупликацию для «{name}»?
+dd.turn_off	Выключить дедупликацию
 dd.reset_text	Индекс известных данных будет удалён: следующий запуск снова прочитает все данные. Сами данные не затрагиваются.
 dd.reset_done	Индекс сброшен
 dd.turn_off_text	Дедупликация для «{name}» прекращается. Уже освобождённое место остаётся свободным.
@@ -3099,7 +3162,7 @@ snap.restore_text	Версия из снимка {id} вернётся в общ
 snap.restore_mode	Куда
 snap.mode.copy	Рядом с текущей
 snap.mode.replace	На место текущей
-snap.mode.copy_help	Восстанавливается как «имя (restored дата)» рядом с текущей версией.
+snap.mode.copy_help	Восстанавливает в исходную папку. Если имя уже занято, к имени восстановленной копии добавляется дата восстановления.
 snap.mode.replace_help	Текущая версия сначала переименовывается в name.rynas-before-restore-<time>, затем на её место встаёт версия из снимка.
 snap.restored	Восстановлено: {path}
 snap.rollback	Откатить
@@ -3139,6 +3202,9 @@ snap.show_snapshots	Показать снимки этого задания
 snap.delete_job	Удалить задание снимков {name}?
 snap.delete_job_text	Вместе с ним удаляются его расписание и предыдущие версии SMB. Снимки, уже записанные на диск, остаются.
 snap.ret.none	Только последний
+snap.ret.all	Хранятся все снимки.
+snap.ret.latest_counts	Всегда хранится последний снимок, дополнительно по периодам: {counts}.
+snap.ret.age_only	Хранятся все снимки, сделанные менее {min} назад.
 snap.u.h	ежечасно
 snap.u.d	ежедневно
 snap.u.w	еженедельно
@@ -3220,7 +3286,7 @@ repl.no_replicas	Реплик пока нет: они появятся посл�
 repl.incomplete	Прерванная передача
 repl.back	Назад к репликам
 repl.restore_title	Восстановить {path} из реплики?
-repl.restore_text	Копия помещается рядом с оригиналом в общей папке, с датой восстановления в имени. Ничего не перезаписывается.
+repl.restore_text	Восстанавливает копию в исходную папку. Если имя уже занято, к имени восстановленной копии добавляется дата восстановления. Существующие файлы остаются на месте.
 repl.promote	Превратить в папку
 repl.promote_title	Превратить {name} в папку?
 repl.promote_text	Создаёт доступную для записи копию этой реплики в виде новой папки в корне целевого тома, готовой к общему доступу. Сама реплика остаётся только для чтения, поэтому дальнейшие передачи продолжаются.
@@ -3386,6 +3452,8 @@ bk.test.empty	Доступно: репозиторий будет создан �
 bk.test.opens	Доступно: существующий репозиторий открывается с этим паролем (версий: {n}).
 bk.test.locked	Здесь уже есть репозиторий: укажите его пароль, чтобы использовать его.
 bk.test.failed	Недоступно
+bk.test.host_key	Отпечатки ключей хоста SSH сервера: {fingerprints}. Сравните их с отпечатками на сервере. При сохранении задачи эти ключи будут закреплены.
+bk.test.host_key_missing	Не удалось прочитать отпечатки ключей хоста SSH. Проверьте ключи хоста сервера перед сохранением задачи.
 bk.f.pw_mode	Пароль репозитория
 bk.pw.generate	Сгенерировать надёжный
 bk.pw.own	Использовать свой
@@ -4515,6 +4583,8 @@ apps.browse_all	Все приложения
 apps.empty	Каталог пуст
 apps.empty_text	Не удалось загрузить ни одного приложения. Переустановите rynas или проверьте перечисленные ниже записи.
 apps.issues	Не загружено записей: {n}
+apps.issues.directory_read	Не удалось прочитать каталог приложений
+apps.issues.entry_load	Не удалось загрузить запись приложения
 apps.count	Показано: {n}
 apps.no_match	Нет подходящих приложений
 apps.no_match_text	Попробуйте другое слово или категорию.
@@ -5296,7 +5366,7 @@ apps.src.never	Никогда
 apps.src.no_key	Обновления онлайн-каталога в этой сборке пока недоступны: каталог поставляется с обновлениями rynas.
 apps.src.off	Обновления онлайн-каталога выключены в настройках Docker.
 apps.src.expired	Онлайн-каталог не был вовремя продлён: rynas продолжает его использовать, но более новый каталог не поступил.
-apps.src.error	Последняя проверка не удалась; используется прежний каталог:
+apps.src.error	Последняя проверка не удалась. Используется прежний каталог.
 apps.upd.pick	Выбрать
 apps.upd.selected	Обновить выбранные
 apps.upd.selected_title	Обновить выбранные приложения?
@@ -5553,7 +5623,7 @@ bkpc.alert_agent	Предупреждение, если ничего не пос
 bkpc.alert_agent_text	Только если ПК был включён, когда копия должна была начаться. Выключенный ПК показывается только как «Не на связи…».
 bkpc.f.ignored	Подтома, которые ПК больше не отправляет
 bkpc.f.ignored_help	Для них нет оповещений, и они не ожидаются в полном наборе. Их снимки сохраняются.
-bkpc.ret.nas	Управляет NAS: хранит {counts} и всё, что моложе {min}
+bkpc.ret.nas	Управляет NAS. {rule}
 bkpc.prune	Удалить старые сейчас
 bkpc.pruned	Старые снимки удалены
 bkpc.prune_title	Удалить старые снимки «{device}»?

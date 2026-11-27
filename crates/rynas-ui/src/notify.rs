@@ -14,13 +14,14 @@ use std::cell::Cell;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::notify::{AckAllResult, BodyFormat, EventState, Notification, NotificationChangeKind, NotificationEvent, NotifySeverity, event_text};
+use rynas_api_types::notify::{AckAllResult, BodyFormat, EventState, Notification, NotificationChangeKind, NotificationEvent, NotifySeverity, event_text, notification_text};
 
 use crate::alerts::{self, Alert};
 use crate::api;
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::live::Live;
+use crate::pages::storage::{level_key, volume::{level_of, md_members_text, md_state_text}};
 use crate::prefs::{storage_get, storage_set, use_ui};
 use crate::toast::toast;
 use crate::ui::{EmptyState, Tone, cpu_offset};
@@ -41,7 +42,7 @@ pub fn severity_tone(s: NotifySeverity) -> Tone {
 /// Tone of a notification in the bell: a resolved event (a task that succeeded again, a
 /// problem gone) keeps the severity of the problem for delivery rules, but reads as good news.
 pub fn notification_tone(n: &Notification) -> Tone {
-    if n.state == rynas_api_types::notify::EventState::Resolved { Tone::Ok } else { severity_tone(n.severity) }
+    if n.state == EventState::Resolved { Tone::Ok } else { severity_tone(n.severity) }
 }
 
 pub fn severity_key(s: NotifySeverity) -> &'static str {
@@ -56,7 +57,7 @@ pub fn severity_key(s: NotifySeverity) -> &'static str {
 
 // ------------------------------------------------------------------ event texts
 // `nev.<code>.title|body[_2|_3]` keys with `{field}` placeholders, filled by the shared
-// `rynas_api_types::notify::event_text` (the channel templates of rynasd use the same rules)
+// `rynas_api_types::notify::notification_text` (the channel templates of rynasd use the same rules)
 
 fn comma() -> bool {
     i18n::decimal_sep() == ","
@@ -64,15 +65,34 @@ fn comma() -> bool {
 
 type Lookup<'a> = &'a dyn Fn(&str) -> Option<&'static str>;
 
+fn display_event(n: &Notification, part: &str, lookup: Lookup, comma: bool) -> Option<String> {
+    if part != "body" || n.body_format == BodyFormat::Log
+        || !matches!(n.code.as_str(), "storage.raid_degraded" | "storage.raid_failed" | "storage.raid_inactive")
+    {
+        return notification_text(n, part, lookup, comma);
+    }
+
+    let mut fields = n.fields.clone();
+    if let Some(state) = fields.get_mut("state") {
+        *state = md_state_text(state, lookup);
+    }
+    if let Some(members) = fields.get_mut("members") {
+        *members = md_members_text(members, lookup);
+    }
+    if let Some(level) = fields.get_mut("level")
+        && let Some(label) = level_of(level).and_then(|l| lookup(level_key(l)))
+    {
+        *level = label.to_owned();
+    }
+    event_text(&n.code, part, &fields, lookup, comma)
+}
+
 fn title_with(n: &Notification, lookup: Lookup, comma: bool) -> String {
-    event_text(&n.code, "title", &n.fields, lookup, comma).unwrap_or_else(|| n.title.clone())
+    display_event(n, "title", lookup, comma).unwrap_or_else(|| n.title.clone())
 }
 
 fn body_with(n: &Notification, lookup: Lookup, comma: bool) -> String {
-    if n.body_format == BodyFormat::Log {
-        return n.body.clone();
-    }
-    event_text(&n.code, "body", &n.fields, lookup, comma).unwrap_or_else(|| n.body.clone())
+    display_event(n, "body", lookup, comma).unwrap_or_else(|| n.body.clone())
 }
 
 /// Title of a server notification in the current language (tracked): `nev.<code>.title`
@@ -471,6 +491,10 @@ mod tests {
         lookup(k, Lang::EN)
     }
 
+    fn zh(k: &str) -> Option<&'static str> {
+        lookup(k, Lang::from_code("zh-CN").unwrap())
+    }
+
     fn note(code: &str, fields: &[(&str, &str)], format: BodyFormat) -> Notification {
         Notification {
             code: code.into(),
@@ -515,5 +539,26 @@ mod tests {
         let vol = ["storage", "volume_full"].join(".");
         let n = note(&vol, &[("volume", "data"), ("used_pct", "91.5"), ("used_gib", "10.0"), ("free_gib", "1.0")], BodyFormat::Text);
         assert_eq!(body_with(&n, &it, true), "data usa 10,0 GiB, circa 1,0 GiB liberi (91,5%).");
+    }
+
+    #[test]
+    fn backup_outcomes_in_saved_notifications() {
+        let mut n = note("backup.job_failed", &[("name", "cs"), ("result", "exit-code"), ("exit_code", "1")], BodyFormat::Text);
+        assert_eq!(title_with(&n, &zh, false), "备份任务「cs」失败");
+        assert_eq!(body_with(&n, &zh, false), "运行结果为失败（退出码 1）。可在任务历史中查看详细输出。");
+
+        n.code.clear();
+        n.fields.clear();
+        n.source = "backup".into();
+        n.key = "backup:job:cs".into();
+        n.state = EventState::Firing;
+        n.title = "Backup job cs failed (exit code 1)".into();
+        n.body = "Result: exit-code (exit code 1). See the task history for the output.".into();
+        assert_eq!(title_with(&n, &zh, false), "备份任务「cs」失败");
+        assert_eq!(body_with(&n, &zh, false), "运行结果为失败（退出码 1）。可在任务历史中查看详细输出。");
+
+        n.source = "third-party".into();
+        assert_eq!(title_with(&n, &zh, false), n.title);
+        assert_eq!(body_with(&n, &zh, false), n.body);
     }
 }

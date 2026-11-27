@@ -684,6 +684,93 @@ pub fn event_text(
     })
 }
 
+/// Recognize stored backup events produced before the scheduler assigned event codes.
+fn legacy_backup_run(n: &Notification) -> Option<(&'static str, &str)> {
+    if !n.code.is_empty() || n.source != "backup" {
+        return None;
+    }
+    let key = n.key.strip_prefix("backup:job:")?;
+    let name = if n.state == EventState::Oneshot { key.strip_suffix(":ok")? } else { key };
+    if name.is_empty() {
+        return None;
+    }
+    let suffix = n.title.strip_prefix("Backup job ")?.strip_prefix(name)?;
+    let code = match (n.state, suffix) {
+        (EventState::Firing, s) if s.starts_with(" failed (") && s.ends_with(')') => "backup.job_failed",
+        (EventState::Resolved, " succeeded") => "backup.job_ok",
+        (EventState::Oneshot, " finished") => "backup.job_finished",
+        _ => return None,
+    };
+    Some((code, name))
+}
+
+fn legacy_run_result(body: &str) -> Option<(&str, Option<&str>, Option<&str>)> {
+    let (result, detail) = body
+        .strip_prefix("Result: ")?
+        .strip_suffix("). See the task history for the output.")?
+        .split_once(" (")?;
+    Some((result, detail.strip_prefix("exit code "), detail.strip_prefix("killed by SIG")))
+}
+
+fn run_result(
+    result: &str,
+    exit_code: Option<&str>,
+    signal: Option<&str>,
+    lookup: &dyn Fn(&str) -> Option<&'static str>,
+) -> String {
+    let label = match result {
+        "success" => lookup("sch.run.ok").map(str::to_owned),
+        "timeout" => lookup("sch.run.timeout").map(str::to_owned),
+        "signal" | "core-dump" => signal
+            .filter(|s| !s.is_empty())
+            .and_then(|s| lookup("sch.run.signal").map(|tpl| tpl.replace("{sig}", s))),
+        "exit-code" => exit_code
+            .filter(|s| s.parse::<i32>().is_ok())
+            .and_then(|s| lookup("sch.run.exit").map(|tpl| tpl.replace("{code}", s))),
+        _ => None,
+    };
+    label
+        .or_else(|| (result != "success").then(|| lookup("sch.run.failed")).flatten().map(str::to_owned))
+        .unwrap_or_else(|| result.to_owned())
+}
+
+/// Render an event for the web interface or a delivery channel, including the human-readable
+/// scheduler result. Raw log bodies and the original event fields remain available to callers.
+pub fn notification_text(
+    n: &Notification,
+    part: &str,
+    lookup: &dyn Fn(&str) -> Option<&'static str>,
+    comma: bool,
+) -> Option<String> {
+    if part == "body" && n.body_format == BodyFormat::Log {
+        return None;
+    }
+    let legacy = legacy_backup_run(n);
+    let code = legacy.map_or(n.code.as_str(), |(code, _)| code);
+    let run_body = part == "body" && code.rsplit_once('_').is_some_and(|(family, outcome)| {
+        matches!(family, "backup.job" | "snapshot.job" | "sched.task")
+            && matches!(outcome, "failed" | "ok" | "finished")
+    });
+    if legacy.is_none() && !run_body {
+        return event_text(code, part, &n.fields, lookup, comma);
+    }
+
+    let mut fields = n.fields.clone();
+    if let Some((_, name)) = legacy {
+        fields.entry("name".into()).or_insert_with(|| name.to_owned());
+    }
+    if run_body {
+        let result = fields.get("result").filter(|s| !s.is_empty()).map(|s| {
+            (s.as_str(), fields.get("exit_code").map(String::as_str), fields.get("signal").map(String::as_str))
+        }).or_else(|| legacy_run_result(&n.body));
+        if let Some((result, exit_code, signal)) = result {
+            let formatted = run_result(result, exit_code, signal, lookup);
+            fields.insert("result".into(), formatted);
+        }
+    }
+    event_text(code, part, &fields, lookup, comma)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -171,6 +171,7 @@ fn load(dir: &Path) -> (Catalog, Vec<CatalogIssue>) {
                 app: "-".into(),
                 file: dir.display().to_string(),
                 message: format!("cannot read the catalog: {e}"),
+                kind: CatalogIssueKind::DirectoryRead,
             });
             Vec::new()
         }
@@ -185,6 +186,7 @@ fn load(dir: &Path) -> (Catalog, Vec<CatalogIssue>) {
                 app: i.app,
                 file: i.file,
                 message: i.message,
+                kind: CatalogIssueKind::EntryLoad,
             })),
         }
     }

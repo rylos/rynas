@@ -27,7 +27,7 @@ pub enum ApiErr {
     /// No answer within [`TIMEOUT_MS`].
     Timeout,
     /// The server answered with an error status. `message` is English, for details only
-    /// (never parsed); `field` names the invalid form field when the server says which.
+    /// and `field` names the invalid form field when the server says which.
     Http { status: u16, code: String, retry_after: Option<u32>, message: String, field: Option<String> },
     /// The answer was not what we expected.
     Decode,
@@ -50,7 +50,7 @@ impl ApiErr {
         }
     }
 
-    /// The server's English detail (shown under the translated text, never parsed).
+    /// The server's English detail, shown under the translated text.
     pub fn message(&self) -> &str {
         match self {
             ApiErr::Http { message, .. } => message,
@@ -78,12 +78,34 @@ impl ApiErr {
     /// [`DETAIL_SEP`]. [`crate::ui::err_view`] (form errors, toasts, notices, field errors)
     /// shows the detail apart, smaller and marked `lang="en"`; it is never the main text.
     pub fn text(&self) -> String {
-        let main = crate::i18n::err_text(self.code());
-        match self.message() {
-            "" => main.to_string(),
-            m => format!("{main}{DETAIL_SEP}{m}"),
+        let message = self.message();
+        let main = if self.code() == error_codes::INVALID_VALUE {
+            snapshot_validation_text(message)
+        } else {
+            None
+        }.unwrap_or_else(|| crate::i18n::err_text(self.code()).to_string());
+        if message.is_empty() {
+            main
+        } else {
+            format!("{main}{DETAIL_SEP}{message}")
         }
     }
+}
+
+// v0.9.17 reports these snapshot checks with the generic invalid_value code.
+fn snapshot_validation_text(message: &str) -> Option<String> {
+    if let Some(share) = message.strip_prefix("there is no share ").filter(|s| !s.is_empty()) {
+        return Some(crate::i18n::tf("err.snapshot_share_missing", &[("share", share)]));
+    }
+    let (_, reason) = message.strip_prefix("job ")?.split_once(": ")?;
+    let key = if reason.starts_with("invalid snapshot directory ") {
+        "err.snapshot_directory_invalid"
+    } else if reason.starts_with("the subvolume must be an absolute path below / ") {
+        "err.snapshot_source_invalid"
+    } else {
+        return None;
+    };
+    Some(crate::i18n::t(key).to_string())
 }
 
 /// Separates the translated text of an error from the server's detail (see [`ApiErr::text`]).

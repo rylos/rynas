@@ -511,7 +511,7 @@ fn settings_dialog(j: DedupJobView, excluded: Vec<String>, modal: RwSignal<Open>
     let save = Callback::new(save);
     let foot = move || {
         let off = (!fresh).then(|| view! {
-            <button class="btn danger foot-start" type="button" disabled=move || busy.get() on:click=move |_| { error.set(None); ask_off.set(true); }>{tr("sec.disable")}</button>
+            <button class="btn danger foot-start" type="button" disabled=move || busy.get() on:click=move |_| { error.set(None); ask_off.set(true); }>{tr("dd.turn_off")}</button>
         });
         view! {
             {off}
@@ -556,7 +556,7 @@ fn settings_dialog(j: DedupJobView, excluded: Vec<String>, modal: RwSignal<Open>
         </Modal>
         // the hash database is not user data: a plain confirmation, no typed name
         {move || ask_reset.get().then(|| ui::confirm(ui::Confirm { busy, error, ..ui::Confirm::new(t("dd.reset_title").to_string(), t("dd.reset_text").to_string(), "dd.reset", true, Callback::new(reset), Callback::new(move |_| ask_reset.set(false))) }))}
-        {move || ask_off.get().then(|| ui::confirm(ui::Confirm { busy, error, ..ui::Confirm::new(tf("dd.turn_off_title", &[("name", &name2.get_value())]), tf("dd.turn_off_text", &[("name", &name2.get_value())]), "sec.disable", true, Callback::new(turn_off), Callback::new(move |_| ask_off.set(false))) }))}
+        {move || ask_off.get().then(|| ui::confirm(ui::Confirm { busy, error, ..ui::Confirm::new(tf("dd.turn_off_title", &[("name", &name2.get_value())]), tf("dd.turn_off_text", &[("name", &name2.get_value())]), "dd.turn_off", true, Callback::new(turn_off), Callback::new(move |_| ask_off.set(false))) }))}
     }
     .into_any()
 }

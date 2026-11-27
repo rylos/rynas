@@ -242,7 +242,13 @@ fn container_pill(state: ContainerState, health: Option<ContainerHealth>) -> Any
         (S::Removing | S::Stopping, _) => (Tone::Info, "dk.st.stopping"),
         (S::Unknown, _) => (Tone::Unknown, "dk.st.unknown"),
     };
-    ui::status(tone, t(key).to_string())
+    let label = t(key);
+    let title = if state == S::Running && health.is_some() {
+        format!("{} · {label}", t("dk.st.running"))
+    } else {
+        label.to_string()
+    };
+    view! { <span title=title>{ui::status(tone, label.to_string())}</span> }.into_any()
 }
 
 fn manager_key(m: StackManager) -> &'static str {

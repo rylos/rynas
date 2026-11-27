@@ -53,6 +53,48 @@ pub fn Disks() -> impl IntoView {
     }
 }
 
+/// The inventory's display strings predate localized storage states. Decode its known
+/// forms without changing device names, labels or paths, and keep other descriptions intact.
+fn disk_use_text(raw: &str) -> String {
+    match raw {
+        "boot flash" => return t("sto.usage.boot_flash").into(),
+        "swap" => return t("sto.usage.swap").into(),
+        "LUKS (locked)" => return t("sto.usage.luks_locked").into(),
+        "md member of an array (not assembled)" => return t("sto.usage.md_unknown").into(),
+        _ => {}
+    }
+    if let Some(name) = raw.strip_prefix("LUKS ").and_then(|s| s.strip_suffix(" (unlocked)")) {
+        return tf("sto.usage.luks_unlocked", &[("name", name)]);
+    }
+    if let Some(name) = raw.strip_prefix("md member of ").and_then(|s| s.strip_suffix(" (not assembled)")) {
+        return tf("sto.usage.md_member", &[("name", name)]);
+    }
+    if let Some(n) = raw.strip_suffix(" partition(s)").and_then(|s| s.parse().ok()) {
+        return i18n::tn("sto.usage.partitions", n, &[]);
+    }
+    if let Some(path) = raw.strip_prefix("mounted ").filter(|path| path.starts_with('/')) {
+        return tf("sto.usage.mount", &[("path", path)]);
+    }
+    let mount = if let Some((_, label)) = raw.split_once(" “") {
+        // A label can contain " on /"; find the delimiter outside its quotes.
+        label.find("” on /").map(|i| raw.len() - label.len() + i + "”".len())
+    } else {
+        raw.find(" on /")
+    };
+    if let Some(i) = mount {
+        return tf("sto.usage.filesystem", &[("fs", &raw[..i]), ("path", &raw[i + " on ".len()..])]);
+    }
+    raw.to_string()
+}
+
+pub(super) fn used_by_text(items: &[String]) -> String {
+    if items.is_empty() {
+        t("sto.unused").to_string()
+    } else {
+        items.iter().map(|s| disk_use_text(s)).collect::<Vec<_>>().join(", ")
+    }
+}
+
 fn disk_table(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> AnyView {
     view! {
         {ui::table("", &["sto.drive", "#sto.bay", "#sto.size", "sto.type", "#sto.temp_short", "col.status", "sto.health", "sto.used_by"], disks.into_iter().map(|d| {
@@ -60,9 +102,8 @@ fn disk_table(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> An
                         let (htone, hkey) = disk_health(&d);
                         let no_smart = d.smart_unsupported.then(|| t("sto.h.no_smart_hint"));
                         let name = d.name.clone();
-                        let used = if d.used_by.is_empty() { t("sto.unused").to_string() } else { d.used_by.join(", ") };
-                        // the server's own descriptions ("mounted /home", "member of md0") are English
-                        let used_lang = (!d.used_by.is_empty()).then_some("en");
+                        let used = used_by_text(&d.used_by);
+                        let used_title = used.clone();
                         ui::row(vec![
                             ui::cell("sto.drive", "drive-cell", view! {
                                 <button class="cell-btn" type="button" on:click=move |_| selected.set(Some(name.clone()))>
@@ -86,7 +127,7 @@ fn disk_table(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> An
                             }),
                             ui::cell("col.status", "", view! { <Status tone=ptone text=t(pkey).to_string() /> }.into_any()),
                             ui::cell("sto.health", "", view! { <span title=no_smart><Status tone=htone text=t(hkey).to_string() /></span> }.into_any()),
-                            ui::cell("sto.used_by", "muted small used-cell", view! { <span title=used.clone() lang=used_lang>{used.clone()}</span> }.into_any()),
+                            ui::cell("sto.used_by", "muted small used-cell", view! { <span title=used_title>{used}</span> }.into_any()),
                         ])
                     }).collect::<Vec<_>>())}
     }
@@ -336,7 +377,7 @@ fn overview_tab(
     let (ptone, pkey) = power(d.power_state);
     let sleeping = asleep(d.power_state);
     let opt = |v: Option<String>| Signal::derive(move || v.clone().unwrap_or_else(|| ui::DASH.into()));
-    let used = if d.used_by.is_empty() { t("sto.unused").to_string() } else { d.used_by.join(", ") };
+    let used = used_by_text(&d.used_by);
     view! {
         <div class="drawer-sec">
             {(sleeping && detail.with(Option::is_none)).then(|| standby_note(reading, read))}
@@ -394,6 +435,33 @@ fn smart_tab(
             Some(sm) => smart_view(sm),
         },
     }
+}
+
+fn self_test_kind_key(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "Short" => "sch.smart.short",
+        "Extended" => "sch.smart.long",
+        "Short offline" => "sto.stlog.short_offline",
+        "Extended offline" => "sto.stlog.long_offline",
+        "Conveyance offline" => "sto.stlog.conveyance",
+        "Selective offline" => "sto.stlog.selective",
+        _ => return None,
+    })
+}
+
+fn self_test_status_key(status: &str) -> Option<&'static str> {
+    Some(match status {
+        "Completed without error" => "sto.stlog.passed",
+        "Aborted by host" => "sto.stlog.aborted",
+        "Interrupted (host reset)" => "sto.stlog.interrupted",
+        "Completed: read failure" => "sto.stlog.read_failure",
+        "Completed: unknown failure" => "sto.stlog.unknown_failure",
+        "Completed: electrical failure" => "sto.stlog.electrical_failure",
+        "Completed: servo/seek failure" => "sto.stlog.seek_failure",
+        "Fatal or unknown error" => "sto.stlog.fatal",
+        "Self-test routine in progress" => "sto.selftest_running",
+        _ => return None,
+    })
 }
 
 fn smart_view(sm: SmartInfo) -> AnyView {
@@ -461,10 +529,15 @@ fn smart_view(sm: SmartInfo) -> AnyView {
                 <h3 class="mini-title">{tr("sto.selftests")}</h3>
                 {ui::table("compact", &["sto.type", "col.status", "#sto.at_hours"], tests.into_iter().map(|s| {
                                 let tone = match s.passed { Some(true) => Tone::Ok, Some(false) => Tone::Err, None => Tone::Unknown };
+                                let kind = self_test_kind_key(&s.kind);
+                                let status = self_test_status_key(&s.status);
+                                let kind_lang = kind.is_none().then_some("en");
+                                let status_lang = status.is_none().then_some("en");
+                                let kind_text = kind.map(t).map_or_else(|| s.kind.clone(), str::to_string);
+                                let status_text = status.map(t).map_or_else(|| s.status.clone(), str::to_string);
                                 ui::row(vec![
-                                    // smartctl's own words
-                                    ui::cell("sto.type", "", view! { <span lang="en">{s.kind}</span> }.into_any()),
-                                    ui::cell("col.status", "", view! { <span lang="en"><Status tone=tone text=s.status /></span> }.into_any()),
+                                    ui::cell("sto.type", "", view! { <span title=s.kind lang=kind_lang>{kind_text}</span> }.into_any()),
+                                    ui::cell("col.status", "", view! { <span title=s.status lang=status_lang><Status tone=tone text=status_text /></span> }.into_any()),
                                     ui::cell("sto.at_hours", "num", view! { {s.lifetime_hours.map(|h| h.to_string()).unwrap_or_default()} }.into_any()),
                                 ])
                             }).collect::<Vec<_>>())}

@@ -31,7 +31,7 @@ files.common.save	保存
 files.sidebar.smb_sftp_servers_server_in	在路径栏输入 \\server，或点击 + 添加 SMB 或 SFTP 连接。
 files.pane.remote_connections_folder_filter_only	远程连接仅支持筛选当前文件夹。
 files.conns.user	用户名
-files.conns.forget_changed	清除旧主机密钥（服务器密钥已更换）
+files.conns.forget_changed	重新记录服务器主机密钥（仅在确认服务器密钥已更换后勾选）
 files.conns.e_g_nas_nas_folder	例如 nas、\\nas\folder 或 sftp://user@server
 files.conns.optional_e_g_company	可选，例如 COMPANY
 files.conns.saved_leave_empty_keep	密码已保存，留空将继续使用原密码
@@ -293,7 +293,7 @@ files.transfers.paused	已暂停
 files.transfers.waiting_choice	等待选择
 files.transfers.counting_files_folders	正在统计文件和文件夹…
 files.transfers.n_without_copying_data_reflink	{n} 项通过 reflink 克隆或重命名直接完成，无需复制数据
-files.transfers.btrfs_reflink	Btrfs reflink 克隆
+files.transfers.btrfs_reflink	Btrfs 写时复制克隆
 files.transfers.data_copy	复制数据
 files.transfers.speed	速度
 files.transfers.average	平均速度
@@ -382,17 +382,18 @@ files.settings.otherwise_transfer_starts_in_background	关闭后，传输会在�
 files.settings.browser_notification_end	传输结束时显示浏览器通知
 files.settings.page_not_in_front	仅在此页面不处于前台时通知。
 files.key.ctrl	Ctrl
-files.key.backspace	Backspace
-files.key.insert	Insert
-files.key.tab	Tab
+files.key.backspace	退格键
+files.key.insert	插入键
+files.key.tab	制表键
 files.key.shift	Shift
 files.key.alt	Alt
-files.key.enter	Enter
-files.key.space	Space
-files.key.del	Del
-files.key.pgdn	PgDn
-files.key.pgup	PgUp
+files.key.enter	回车键
+files.key.space	空格键
+files.key.del	删除键
+files.key.pgdn	向下翻页键
+files.key.pgup	向上翻页键
 files.key.letters	字母键
+files.settings.delete_selection	删除（按回收站设置处理）
 files.settings.next_tab	下一个标签页
 files.settings.previous_tab	上一个标签页
 files.settings.go_tab	切换到指定标签页
@@ -481,6 +482,100 @@ files.iconpick.search_icon	搜索图标…
 files.sidebar.icon	图标…
 files.iconpick.automatic_icon	自动选择图标
 files.iconpick.no_icon_found	未找到图标
+files.iconpick.option.folder	文件夹 目录
+files.iconpick.option.favorite	收藏 星标
+files.iconpick.option.heart	喜欢 爱心
+files.iconpick.option.user	用户 账号
+files.iconpick.option.home	主目录 家
+files.iconpick.option.private	私密 锁定
+files.iconpick.option.key	密钥 密码
+files.iconpick.option.photos	图片 照片
+files.iconpick.option.album	相册 照片
+files.iconpick.option.music	音乐
+files.iconpick.option.video	视频 电影 播放
+files.iconpick.option.notes	文本 笔记
+files.iconpick.option.documents	文档 文件
+files.iconpick.option.spreadsheet	电子表格
+files.iconpick.option.archive_zip	压缩包 归档
+files.iconpick.option.download	下载
+files.iconpick.option.upload	上传
+files.iconpick.option.sync	同步
+files.iconpick.option.network	网络共享
+files.iconpick.option.drive	云端硬盘
+files.iconpick.option.settings	设置 配置
+files.iconpick.option.tools	工具
+files.iconpick.option.history	历史 旧文件
+files.iconpick.option.done	已完成
+files.iconpick.option.important	重要 提醒
+files.iconpick.option.question	待查看 疑问
+files.iconpick.option.watch	查看 关注
+files.iconpick.option.hidden	隐藏
+files.iconpick.option.location	位置 地点
+files.iconpick.option.draft	草稿 编辑中
+files.iconpick.option.info	信息
+files.iconpick.option.rejected	已取消 已弃用
+files.iconpick.option.search	搜索
+files.iconpick.option.transfer	传输 交换
+files.iconpick.option.work	工作 办公
+files.iconpick.option.team	团队 客户
+files.iconpick.option.suppliers	供应商 员工
+files.iconpick.option.invoices	发票 收据
+files.iconpick.option.payments	财务 付款
+files.iconpick.option.contracts	合同 签署
+files.iconpick.option.company	公司 办公楼
+files.iconpick.option.factory	生产 工厂
+files.iconpick.option.car	汽车
+files.iconpick.option.school	学校
+files.iconpick.option.health	健康 医疗
+files.iconpick.option.bank	银行
+files.iconpick.option.shopping	购物
+files.iconpick.option.travel	旅行 假期
+files.iconpick.option.games	游戏
+files.iconpick.option.books	图书 手册
+files.iconpick.option.camera	相机
+files.iconpick.option.cinema	电影
+files.iconpick.option.video_simple	视频
+files.iconpick.option.image	图片
+files.iconpick.option.document	文档
+files.iconpick.option.pdf	PDF 文档
+files.iconpick.option.email	电子邮件
+files.iconpick.option.phone	电话 手机
+files.iconpick.option.map	地图 位置
+files.iconpick.option.web	网站 互联网
+files.iconpick.option.usb_stick	U 盘 闪存
+files.iconpick.option.usb	USB 设备
+files.iconpick.option.drive_external	外接硬盘
+files.iconpick.option.sd_card	SD 卡 存储卡
+files.iconpick.option.server	服务器
+files.iconpick.option.database	数据库 数据
+files.iconpick.option.cloud	云端 云存储
+files.iconpick.option.backup	安全 备份
+files.iconpick.option.archive	归档
+files.iconpick.option.calendar	日历 年份
+files.iconpick.option.star	星标
+files.iconpick.option.heart_simple	爱心
+files.iconpick.option.lock	锁定
+files.iconpick.option.printer	打印机
+files.iconpick.option.toolbox	工具箱
+files.iconpick.option.maintenance	维护
+files.iconpick.option.wrench	扳手
+files.iconpick.option.cad	CAD 图纸
+files.iconpick.option.models	3D 模型
+files.iconpick.option.packages	软件包
+files.iconpick.option.lab	实验 测试
+files.iconpick.option.graphics	图形设计 艺术
+files.iconpick.option.ideas	创意
+files.iconpick.option.projects	项目 发布
+files.iconpick.option.reports	统计 报表 图表
+files.iconpick.option.code	代码 开发
+files.iconpick.option.git	Git 版本控制
+files.iconpick.option.linux	Linux 系统
+files.iconpick.option.windows	Windows 系统
+files.iconpick.option.mac	Apple Mac 系统
+files.iconpick.option.android	Android 安卓系统
+files.iconpick.option.pets	宠物 动物
+files.iconpick.option.garden	自然 花园
+files.iconpick.option.kids	儿童 宝宝
 files.iconpick.default	默认
 files.iconpick.folder_only	仅此文件夹
 files.iconpick.every_n	所有名为「{n}」的文件夹
@@ -502,6 +597,8 @@ files.editor.ctrl_g_editor_keys	按 Ctrl+G 查看编辑器快捷键
 files.editor.e_overwrite_y_n	{e} 要覆盖文件吗？（y 确认，n 取消）
 files.common.edit	编辑
 files.editor.not_saved	未保存
+files.editor.unknown_type	未知文件类型
+files.editor.utf8_crlf	UTF-8 · Windows 换行（CRLF）
 files.editor.q_not_found	未找到「{q}」
 files.editor.save_changes_n_before_closing	关闭前保存对「{n}」的修改？（y 保存，n 放弃，Esc 取消）
 files.editor.saving	正在保存…
@@ -559,6 +656,9 @@ files.err.session_changed_in_another_tab	会话已在另一个标签页中更改
 files.err.not_allowed	没有权限执行此操作
 files.transfers.permission_denied	访问权限不足
 files.transfers.check_shared_folder_permissions	请检查共享文件夹的权限
+files.transfers.copy_verification_failed	校验失败，副本与源文件不一致。
+files.transfers.folder_into_itself	无法将「{path}」复制或移动到其自身内部
+files.transfers.cannot_write_folder	当前账号无权写入文件夹「{path}」
 files.err.not_found_may_been_moved	找不到项目，可能已被移动或删除
 files.err.file_changed_in_meantime	文件已被修改
 files.err.busy_try_again_shortly	服务繁忙，请稍后重试
@@ -586,7 +686,7 @@ files.sidebar.apps	应用
 files.common.app_data	应用数据
 files.sidebar.n_folders	{n} 个文件夹
 files.common.backups	电脑备份
-files.backups.root	root
+files.backups.root	@（根子卷）
 files.sidebar.overlaps_backup_folder_pc_pc	与电脑 {pc} 的备份文件夹重叠。在为备份指定独立文件夹前，此处为只读。
 files.backups.backups_read_only_change_file	备份为只读。请先将文件复制到共享文件夹，再编辑副本。
 files.appdata.s_may_need_restart_see	可能需要重启 {s}，应用才能读取更改后的文件。
@@ -735,7 +835,7 @@ files.sync.sync_ask	确认同步这两个文件夹？
 files.undo.not_recorded	系统未记录此次传输所产生的项目，无法撤销
 files.transfers.destination_gone	目标路径已不可用。请检查硬盘是否已拔出或网络是否断开。
 files.transfers.source_gone	源路径已不可用。请检查硬盘是否已拔出或网络是否断开。
-files.transfers.stopped_unexpectedly	复制进程意外停止
+files.transfers.stopped_unexpectedly	任务执行进程意外停止
 files.transfers.cleaning_up	正在清理临时文件…
 files.actions.count.go_recycle.other	{n} 项将移入共享文件夹的回收站，可从中恢复。
 files.actions.count.deleted_permanently.other	将永久删除 {n} 项，删除后无法恢复。
@@ -752,7 +852,7 @@ files.sync.same_folder	左右两栏打开了同一个文件夹
 files.sync.nested	两个文件夹存在嵌套关系，请选择互不包含的文件夹
 files.dupes.nas_folder_only	仅在 NAS 上的文件夹中查找重复项。顶层目录、压缩包、远程服务器和整机备份不在搜索范围内。
 files.select.open_dual_pane	打开双栏视图（F3）以比较两个文件夹
-files.actions.two_items_named_n	存在两个名为「{n}」的项目。放到同一文件夹时会发生覆盖。
+files.actions.two_items_named_n	有两个选中项都叫「{n}」，操作已取消。请分开操作或先重命名其中一项。
 files.settings.expand_folders	允许在列表中展开文件夹
 files.settings.expand_folders_hint	列表视图中可用箭头就地展开文件夹（→ 展开，← 收起）
 files.pane.expand_folder	展开

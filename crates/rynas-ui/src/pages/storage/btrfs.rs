@@ -13,6 +13,7 @@ use rynas_api_types::storage::{
 };
 use serde_json::{Value, json};
 
+use super::disks::used_by_text;
 use super::volume::{Flow, Stage, start_task};
 use super::{Vol, disk_title, free_disks};
 use crate::api;
@@ -414,7 +415,7 @@ pub fn RepairDialog(vol: Vol, what: Repair, on_close: Callback<()>) -> impl Into
                             view! {
                                 <p class="muted small"><span class="mono strong">{d.name.clone()}</span>" "{facts}</p>
                                 {(!d.used_by.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
-                                    {tf("sto.bt.disk_holds", &[("items", &d.used_by.join(", "))])}
+                                    {tf("sto.bt.disk_holds", &[("items", &used_by_text(&d.used_by))])}
                                 }.into_any()))}
                             }
                         })}

@@ -15,7 +15,7 @@ nav.expand	展开侧栏
 nav.project	GitHub 项目
 about.title	关于rynas
 about.version	版本 {version}
-about.free	GNU AGPL-3.0下的自由软件：人人免费，包括公司，包括每个功能。
+about.free	Rynas 是按 GNU AGPL-3.0 发布的自由软件。个人和企业均可免费使用全部功能。
 about.authors	作者数
 about.role.author	作者和维护者
 about.contributors_text	每一个发送修正、翻译和想法的人 都会在GitHub上看到
@@ -131,25 +131,31 @@ nev.task.failed.title	任务失败：{type}
 nev.task.succeeded.title	任务已成功：{type}
 nev.task.partial.title	任务仅部分完成：{type}
 nev.config.apply_failed.title	应用配置失败
-nev.config.apply_ok.title	配置应用程序成功
-nev.sched.task_failed.title	任务 {name} 失败
-nev.sched.task_failed.body	结果：{result}. 参见产出的任务历史。
-nev.sched.task_ok.title	任务 {name} 已成功
-nev.sched.task_ok.body	结果：{result}. 参见产出的任务历史。
-nev.sched.task_finished.title	任务 {name} 完成
-nev.sched.task_finished.body	结果：{result}. 参见产出的任务历史。
-nev.sched.task_missed.title	任务 {name}:未赶上运行
-nev.sched.task_missed.body	NAS在预定时间停赛，赶超截止日期后又回来。
+nev.config.apply_ok.title	配置已成功应用
+nev.backup.job_failed.title	备份任务「{name}」失败
+nev.backup.job_failed.body	运行结果为{result}。可在任务历史中查看详细输出。
+nev.backup.job_ok.title	备份任务「{name}」已成功
+nev.backup.job_ok.body	运行结果为 {result}。可在任务历史中查看详细输出。
+nev.backup.job_finished.title	备份任务「{name}」已完成
+nev.backup.job_finished.body	运行结果为 {result}。可在任务历史中查看详细输出。
+nev.sched.task_failed.title	计划任务「{name}」失败
+nev.sched.task_failed.body	运行结果为 {result}。可在任务历史中查看详细输出。
+nev.sched.task_ok.title	计划任务「{name}」已成功
+nev.sched.task_ok.body	运行结果为 {result}。可在任务历史中查看详细输出。
+nev.sched.task_finished.title	计划任务「{name}」已完成
+nev.sched.task_finished.body	运行结果为 {result}。可在任务历史中查看详细输出。
+nev.sched.task_missed.title	计划任务「{name}」错过了执行时间
+nev.sched.task_missed.body	计划运行时 NAS 未开机，恢复运行时已超过补跑期限。
 nev.snapshot.job_failed.title	快照任务「{name}」失败
 nev.snapshot.job_failed.body	结果为 {result}。可在任务运行历史中查看完整输出。
 nev.snapshot.job_ok.title	快照任务「{name}」已成功
 nev.snapshot.job_ok.body	结果为 {result}。可在任务运行历史中查看详细输出。
 nev.snapshot.job_finished.title	快照任务「{name}」已结束
 nev.snapshot.job_finished.body	结果为 {result}。可在任务运行历史中查看详细输出。
-nev.auth.lockout.title	在尝试失败后锁定 {user} 的签名
-nev.auth.lockout.body	{user} 太多失败登入{ip}:进一步尝试拒绝{retry_after_s} s.
-nev.auth.totp_enabled.title	启用 {user} 的双要素认证
-nev.auth.totp_disabled.title	{user} 双因子认证已禁用
+nev.auth.lockout.title	多次登录失败，用户「{user}」已被暂时锁定
+nev.auth.lockout.body	用户「{user}」从 {ip} 多次登录失败。请等待 {retry_after_s} 秒再试。
+nev.auth.totp_enabled.title	用户「{user}」已启用双重验证
+nev.auth.totp_disabled.title	用户「{user}」已关闭双重验证
 nev.device.paired.title	已为 {user} 配对设备 {device}
 nev.device.paired.body	用户 {user} 的移动设备 {device} 已从 {ip} 完成配对。
 nev.device.renamed.title	用户 {user} 的设备 {old} 已重命名为 {new}
@@ -279,7 +285,7 @@ tasks.background	您可以关闭此窗口：任务会持续运行。
 tasks.stop_waits	请求停止：现在运行的命令在结束前可能无法取消。任务在结束后立即停止。
 task.failed	失败
 tech_details	技术细节：
-task.st.ok	确定
+task.st.ok	成功
 task.st.error	错误
 task.st.cancelled	已取消
 task.st.partial	部分完成
@@ -299,7 +305,7 @@ time.zone_help	正在运行的应用会在重启后使用新时区。
 time.zone_none	暂无匹配的时区
 time.zone_more	另有 {n} 项结果，可继续输入以缩小范围。
 time.sync	自动同步
-time.sync_help	证书校验、双因素验证码和计划任务都依赖准确的系统时间。
+time.sync_help	证书校验、双重验证和计划任务都依赖准确的系统时间。
 time.servers	时间服务器
 time.servers_help	每行填一个时间服务器，最多 8 个。留空时使用系统默认值。
 time.defaults	默认时间服务器为 {list}。
@@ -331,7 +337,7 @@ time.set_done	日期和时间已设置
 time.local_rtc	硬件时钟当前使用本地时间。夏令时切换时可能产生一小时的偏差。
 time.rtc_utc	硬件时钟使用 UTC
 nev.system.clock_unsynced.title	时钟尚未同步
-nev.system.clock_unsynced.body	时间服务器已连续 {minutes} 分钟无响应。证书校验、双因素验证码、计划任务和快照依赖准确的时间。请检查网络和时间服务器。
+nev.system.clock_unsynced.body	时间服务器已连续 {minutes} 分钟无响应。证书校验、双重验证、计划任务和快照依赖准确的时间。请检查网络和时间服务器。
 nev.system.clock_synced.title	时钟已恢复同步
 nev.updates.available.title	有 {updates} 项可用更新，其中 {security} 项为安全更新
 nev.updates.available.title_2	有 {updates} 项可用更新
@@ -466,7 +472,7 @@ proc.term_text	系统将请求进程退出。该进程中未保存的工作可�
 proc.kill_text	进程会立即结束，来不及执行清理或关闭文件。请仅在常规终止无效时使用。
 proc.signal_sent	已向进程发送信号
 task.processes.restart-service	恢复服务
-err.process_protected	系统或rynas需要这个过程：它不能被停止或改变。
+err.process_protected	系统或 Rynas 需要此进程，无法停止或修改它。
 err.pairing_invalid	配对码已失效。
 err.pairing_rejected	NAS 已拒绝此次配对。
 err.pairing_expired	配对请求在获批前已过期。
@@ -786,12 +792,12 @@ hw.events	事件
 hw.duty	风扇占空比
 hw.fan_fail	检测到风扇故障
 hw.alarm	警报
-hw.provider	硬件来源
+hw.provider	硬件监控来源
 hw.test_beep	测试蜂鸣器
-hw.stale	数据已过时
+hw.stale	数据未更新
 hw.updated	上次更新
-hw.none_title	未检测到硬件监控来源
-hw.none_text	系统未提供可监控的风扇、指示灯或盘位信息。可在仪表盘查看已检测到的温度。
+hw.none_title	未检测到可用的硬件监控接口
+hw.none_text	系统未提供风扇、指示灯或盘位的监控接口。已检测到的温度仍可在仪表盘查看。
 hw.no_events	近期暂无事件
 hw.subtitle	查看风扇、温度、状态指示灯和硬件事件
 led.green	绿色
@@ -1620,6 +1626,45 @@ sto.bt.boot	开机后
 sto.bt.auto	启动后自动降级挂载
 sto.bt.auto_text	开机时若设备缺失，但每个数据块仍有完整副本，系统会以降级模式挂载存储卷并通知管理员。关闭此设置时，系统会等待管理员手动处理。
 sto.proposal	rynas 建议值
+sto.md.member_status	{device}（{role}）
+sto.md.clean	无待处理的写入
+sto.md.idle	已启用，空闲
+sto.md.read_auto	写入前保持只读
+sto.md.write_pending	有待处理的写入
+sto.md.inactive	未启用
+sto.md.suspended	已挂起
+sto.md.clear	未配置
+sto.md.resyncing	正在重新同步
+sto.quota.qgroups	传统配额组（qgroups）
+sto.quota.squota	简单配额（squota）
+sto.usage.boot_flash	启动闪存
+sto.usage.swap	交换空间
+sto.usage.luks_locked	LUKS（已锁定）
+sto.usage.luks_unlocked	LUKS {name}（已解锁）
+sto.usage.mount	挂载于 {path}
+sto.usage.filesystem	{fs} 挂载于 {path}
+sto.usage.md_member	{name} 的成员（RAID 尚未组装）
+sto.usage.md_unknown	尚未组装的 RAID 阵列成员
+sto.usage.partitions.other	{n} 个分区
+sto.stlog.short_offline	短时离线自检
+sto.stlog.long_offline	扩展离线自检
+sto.stlog.conveyance	运输损伤离线自检
+sto.stlog.selective	选择性离线自检
+sto.stlog.passed	已完成，未发现错误
+sto.stlog.aborted	已由主机中止
+sto.stlog.interrupted	因主机重置而中断
+sto.stlog.read_failure	已完成，发现读取错误
+sto.stlog.unknown_failure	已完成，发现未知故障
+sto.stlog.electrical_failure	已完成，发现电气故障
+sto.stlog.seek_failure	已完成，发现伺服或寻道故障
+sto.stlog.fatal	发生严重或未知的自检错误
+wol.progress.starting	正在唤醒 {name}（{macs}）
+wol.progress.sent	已通过 {ifaces} 发送 3 次唤醒包
+wol.progress.wait_agent	{time} 后检测到设备上线，正在等待备份客户端响应。
+wol.progress.agent_timeout	{time} 后检测到设备上线，但备份客户端未响应。
+wol.progress.sent_again	{time} 后已通过 {ifaces} 再次发送唤醒包
+wol.progress.not_sent	无法通过 {iface} 发送唤醒包：{error}
+hw.system_temp	系统温度
 sto.stripe	条带缓存（条目数）
 sto.kernel_default	内核默认值（256）
 sto.use_proposal	{n}（rynas 建议值）
@@ -1667,7 +1712,7 @@ wiz.create_go	擦除硬盘并创建存储卷
 wiz.creating	正在创建 {name}
 wiz.created	已创建存储卷 {name}
 wiz.secure_title	保存恢复密钥和卷头备份
-wiz.secure_text	将恢复密钥和 LUKS 卷头备份保存在 NAS 之外。恢复密钥仅显示一次，有效期一小时。
+wiz.secure_text	创建存储卷后的一小时内，可查看恢复密钥一次。请将恢复密钥和 LUKS 卷头备份保存在 NAS 之外。
 wiz.open_volume	打开存储卷
 wiz.back_review	返回确认计划
 health.failed	故障
@@ -1685,7 +1730,7 @@ sys.model.invalid	最多输入 64 个字符，且不能以 # 开头。
 sys.prefs	界面偏好
 notfound	找不到页面
 notfound.text	这个地址与任何部分不相匹配。
-back_home	返回到 Dashboard 中
+back_home	返回仪表盘
 close	关闭
 copied	复制
 role.admin	管理员
@@ -1709,54 +1754,63 @@ login.signed_out	已退出登录。
 login.renew	请重新登录以开始新会话。
 login.foot	请使用具有管理员权限的系统账号登录。
 login.empty	请输入用户名和密码。
-err.invalid_credentials	错误的用户名或密码。
-err.invalid_totp	密码无效 检查设备上的时间 并尝试新的密码
-err.rate_limited	太多失败的尝试。
-err.auth_unavailable	无法提供认证服务。请检查 rynasd 是否运行。
-err.network	联系不上新星 检查一下你的连接
-err.csrf	您的会话在另一个标签中更改了。重新装入页面。
-err.backend_unavailable	rynas服务不接，请检查rynasd运行中。
-err.timeout	NAS花了太长的时间来回答。
-err.bad_gateway	rynas服务发送无效的答案。
+err.invalid_credentials	用户名或密码错误。
+err.invalid_totp	验证码无效。请检查设备时间，然后输入新的验证码。
+err.rate_limited	尝试次数过多，请稍后重试。
+err.auth_unavailable	身份验证服务不可用，请检查 rynasd 是否正在运行。
+err.network	无法连接到 NAS，请检查网络连接。
+err.csrf	登录会话已在其他标签页中更改，请刷新本页。
+err.backend_unavailable	无法连接到 Rynas 后端，请检查 rynasd 是否正在运行。
+err.timeout	等待 NAS 响应超时，请稍后重试。
+err.bad_gateway	Rynas 后端返回了无效的响应。
 err.internal	NAS内部出错，详情在系统日志中。
-err.forbidden	你的账号不能这样做。
-err.not_found	未见出。
+err.forbidden	当前账号无权执行此操作。
+err.not_found	找不到请求的项目。
 err.retry	重试
-err.offline_title	无法到达NAS
-err.offline_text	网络服务没有响应。可能正在重新启动，或者网络可能已经下架。 rynas 继续重试。
-err.unauthenticated	你的会议已经结束了。
-err.bad_request	这一请求无效。
-err.invalid_value	值无效。
-err.nothing_pending	没有待作的改动。
-err.apply_group_split	这一修改包括删除(例如文件夹的),该修改只与所有待决修改一起适用：从待决修改栏中审查并应用。
-err.conflict	同时有些事情变了，重新装入，再试一次
-err.busy	另一起行动正在展开 很快再试一次
+err.offline_title	无法连接到 NAS
+err.offline_text	网页服务暂无响应。NAS 可能正在重启，或网络连接已断开。Rynas 正在重试。
+err.unauthenticated	登录会话已结束，请重新登录。
+err.bad_request	请求无效，请检查输入。
+err.invalid_value	输入值无效。
+err.nothing_pending	没有待应用的更改。
+err.apply_group_split	本次更改包含删除操作，必须与其他待应用的更改一起提交。请在「待应用的更改」中检查后应用。
+err.conflict	数据已被其他操作更改，请刷新页面后重试。
+err.busy	另一个操作正在进行，请稍后重试。
 err.task_finished	任务已经完成。
-err.already_exists	它已经存在了。
+err.already_exists	已存在同名项目。
 err.confirmation_required	这需要明确确认。
-err.not_applied	这一改动没有应用。
+err.not_applied	更改尚未应用。
 err.method_not_allowed	不支持操作。
 err.payload_too_large	发送的数据太大了。
 err.unsupported_media_type	不支持的数据格式。
-err.permission_denied	你没有这个东西的许可。
-err.insufficient_storage	存储卷满了，或者你的配额用完了
-err.read_only	本项目只读。
+err.permission_denied	您没有访问此项目的权限。
+err.insufficient_storage	存储空间不足，或已达到配额上限。
+err.read_only	此项目为只读。
 err.share_root	共享文件夹无法在此更改。
-err.outside_share	此链接从共享文件夹中导出：它没有被遵循。
-err.password_required	存档需要密码。
-err.tool_missing	此特性需要的程序没有安装。
-err.remote_unreachable	远程服务器无法到达。
+err.outside_share	此链接指向共享文件夹之外，无法访问目标。
+err.password_required	打开压缩包需要密码。
+err.tool_missing	NAS 缺少执行此操作所需的程序。
+err.remote_unreachable	无法连接到远程服务器。
 err.remote_auth_failed	远程服务器拒绝登录。
 err.not_available	该系统没有这个功能。
 err.docker_not_installed	Docker没有安装。
 err.docker_unavailable	Docker 已安装，但服务不响应。
-err.containers_running	先停放运行的容器。
+err.containers_running	请先停止正在运行的容器。
 err.stack_not_managed	此堆栈在 rynas 外部管理：其文件无法在此更改。
 err.host_key_changed	服务器的密钥自第一次连接后就发生了变化。
-err.generic	出事了 再试一次
-session.expires	你的会议将于{n}分结束
-session.expires_1	你的会议将在1分钟后结束
-session.renew	再说一遍
+err.invalid_json	请求数据的 JSON 格式无效。
+err.missing_field	请填写必填项。
+err.unknown_field	请求中包含无法识别的字段。
+err.invalid_type	字段的数据类型有误，请检查输入。
+err.decode	无法读取 NAS 返回的数据。
+err.snapshot_share_missing	找不到共享文件夹「{share}」，请为此快照任务选择其他共享文件夹。
+err.snapshot_directory_invalid	请输入有效的快照目录绝对路径。
+err.snapshot_source_invalid	请输入有效的源子卷绝对路径。
+pca.description_example	办公笔记本
+err.generic	操作失败，请重试。
+session.expires	登录会话将在 {n} 分钟后过期
+session.expires_1	登录会话将在 1 分钟后过期
+session.renew	重新登录
 save	保存
 create	创建
 edit	编辑
@@ -1970,6 +2024,8 @@ ids.b_bad_request	输入一个ID。
 ids.b_other	当前系统不支持此操作。
 homes.b.other	其他原因
 groups.search	搜索用户组
+groups.adopt_banner.other	系统中有 {n} 个用户组是在 Rynas 外创建的。纳入管理后，即可在 Rynas 中管理这些用户组及其成员。
+groups.adopted	用户组已纳入管理
 groups.create	创建用户组
 groups.edit_title	编辑用户组「{name}」
 groups.empty	暂无用户组
@@ -2392,28 +2448,28 @@ nfs.mountd	mountd 端口
 nfs.statd	statd 端口
 nfs.lockd	lockd 端口
 nfs.ports_help	可固定这些端口，以便在防火墙中放行 NFSv3。
-sec.subtitle	您的账号、会话和两个要素认证
+sec.subtitle	管理账号会话和双重验证
 sec.account	账号
 sec.user	用户
-sec.role	作用
+sec.role	角色
 sec.realm	账号类型
 sec.realm_pam	系统用户
 sec.realm_rynas	rynas 用户
-sec.since	签署于
-sec.until	会话结束
-sec.idle	闲暇超时
-sec.idle_min	{n}分钟
-sec.totp	双要素认证
-sec.2fa_on	2FA 开机
-sec.on	打开
-sec.off	关闭
-sec.off_text	保护您的账号，除了密码外，还保护您的账号不受认证程序(Aegis, 2FAS, Google Authorator, 1Password...)的干扰。
-sec.on_text	签名请求您认证程序提供代码，保存您的恢复代码。
-sec.other_sessions	在其它任何地方的标志上打开它：其他浏览器和设备将不得不再次签名。
+sec.since	登录时间
+sec.until	会话到期时间
+sec.idle	空闲超时
+sec.idle_min	{n} 分钟
+sec.totp	双重验证
+sec.2fa_on	双重验证已启用
+sec.on	已启用
+sec.off	未启用
+sec.off_text	启用后，除密码外，登录时还需输入身份验证器应用生成的验证码。可使用 Aegis、2FAS、Google Authenticator 或 1Password 等应用。
+sec.on_text	登录时需输入身份验证器应用生成的验证码。请妥善保管恢复码。
+sec.other_sessions	启用后，其他浏览器和设备上的会话将结束，需要重新登录。
 sec.enable	设置
-sec.step_scan	扫描 QR 代码
-sec.step_scan_text	通过扫描此代码，打开您的认证程序并添加一个账号。
-sec.qr_label	带有双要素认证密钥的 QR 代码
+sec.step_scan	扫描二维码
+sec.step_scan_text	打开身份验证器应用，扫描二维码以添加账号。
+sec.qr_label	包含双重验证密钥的二维码
 dev.subtitle	管理与本 NAS 配对的手机，可重命名、撤销授权或配对新设备
 dev.pair	配对设备
 dev.list	已配对的设备
@@ -2454,47 +2510,47 @@ dev.app_qr	Android 应用下载链接二维码
 dev.app_first	还没有应用？请先下载
 dev.app_unreachable	NAS 无法连接 GitHub 检查已发布的版本；下载链接仍然可用。
 dev.app_invalid	已发布的应用信息无效，因此无法检查版本；NAS 将在几分钟后再次检查。下载链接仍然可用。
-sec.manual	不能扫描吗？请输入此密钥：
+sec.manual	无法扫描时，可在身份验证器中手动输入此密钥。
 sec.copy_secret	复制密钥
-sec.step_code	输入应用程序显示的代码
-sec.activate	打开
-sec.enabled_now	双因子认证开启。
-sec.codes_title	回收代码
-sec.codes_text	如果手机丢失，请使用其中之一 的代码签名。每个代码都工作过一次。只在现在显示：在安全的地方保存它们。
-sec.codes_file_head	rynas recovery code for {user} on {host}. 每个代码都工作过一次。
+sec.step_code	输入应用显示的验证码
+sec.activate	启用
+sec.enabled_now	双重验证已启用。
+sec.codes_title	恢复码
+sec.codes_text	手机丢失时可用恢复码登录。每个恢复码仅可使用一次。恢复码只在此处显示一次，请妥善保存。
+sec.codes_file_head	账号「{user}」在「{host}」上的 Rynas 恢复码。每个恢复码仅可使用一次。
 sec.copy_codes	复制
-sec.download	下载.txt
-sec.saved	我保存了我的复苏密码
+sec.download	下载文本文件
+sec.saved	我已保存恢复码
 sec.done	完成
-sec.disable	关机
-sec.disable_text	从您的认证程序或恢复代码中输入一个代码，以关闭两个要素的认证。
-sec.code_or_recovery	认证或恢复代码
-sec.demo	无法使用演示数据：没有要保护的账号。
-err.totp_already_enabled	双因子认证已经启动。
-err.totp_not_enrolled	设置已过期，重新开始。
+sec.disable	关闭双重验证
+sec.disable_text	输入身份验证器生成的验证码或一个恢复码，即可关闭双重验证。
+sec.code_or_recovery	验证码或恢复码
+sec.demo	演示模式下无法设置双重验证。
+err.totp_already_enabled	双重验证已启用。
+err.totp_not_enrolled	设置已过期，请重新开始。
 open	打开
-day.1	月号
-day.2	图
-day.3	结婚
-day.4	图文
-day.5	弗里语Name
-day.6	座位
-day.7	太阳
+day.1	周一
+day.2	周二
+day.3	周三
+day.4	周四
+day.5	周五
+day.6	周六
+day.7	周日
 day.long.1	星期一
 day.long.2	星期二
-day.long.3	纽约
+day.long.3	星期三
 day.long.4	星期四
-day.long.5	星期五(上午)
-day.long.6	星期六( 星期六)
-day.long.7	星期日( 星期日 )
-wg.level	适用级别
+day.long.5	星期五
+day.long.6	星期六
+day.long.7	星期日
+wg.level	要应用的级别
 wg.hours	小时
-wg.cell	{day} {from}–{to}: {level}
-wg.fill_day	{day}:所有时间至 {level}
-wg.fill_hour	{from} - {to} 每天到 {level}
+wg.cell	{day} {from}–{to}，{level}
+wg.fill_day	将{day}的所有时段设为「{level}」
+wg.fill_hour	将每天的 {from}–{to} 设为「{level}」
 wg.all_week	整周：{level}
-wg.invalid	保存的日程无法被读取：它显示为 {level} 直到您保存它。
-wg.help	选择一个关卡，然后单击或拖动小时。一天或一个小时标题会填充其行或一列。触摸：敲击一个小时来应用关卡，握住它一分一秒，然后拖动以填充矩形，刷去滚动页面。键盘：箭头移动，空间应用关卡，Shift+ Space 填充一天，Shift+Enter 每天填充小时，1– {n} 取关卡，Esc 取消拖动。
+wg.invalid	无法读取已保存的日程。重新保存前，整周暂按「{level}」显示。
+wg.help	先选择级别，再单击或拖过时段格子。点击星期或时段标题可设置整行或整列。触屏上，轻点可设置单个时段，稍加按住后拖动可设置矩形区域，滑动可滚动页面。使用键盘时，按方向键移动，按空格键设置当前时段，按 Shift+空格键设置当天所有时段，按 Shift+Enter 设置每天的同一时段，按数字键 1–{n} 选择级别，按 Esc 取消拖动。
 wgd.title	每周调度网格
 wgd.subtitle	组件预览，仅演示构建
 wgd.led	LED 亮度(按小时计)
@@ -3158,6 +3214,7 @@ dd.sz.4m	4 MiB
 dd.always_excluded	始终跳过去重
 dd.reset	重置索引
 dd.reset_title	重置去重索引？
+dd.turn_off	关闭去重
 dd.turn_off_title	关闭「{name}」的数据去重？
 dd.reset_text	将删除已有的去重索引，下次运行时重新读取所有文件。文件内容会保留。
 dd.reset_done	已重置去重索引
@@ -3238,7 +3295,7 @@ snap.restore_text	从快照 {id} 恢复所选内容。若当前存在同名内�
 snap.restore_mode	恢复方式
 snap.mode.copy	另存为副本
 snap.mode.replace	恢复到原位置
-snap.mode.copy_help	将快照版本另存至同一目录。名称会带有 restored 和恢复日期。
+snap.mode.copy_help	将快照版本恢复到原内容所在目录。如已有同名内容，恢复副本的名称会带有 restored 和恢复日期。
 snap.mode.replace_help	先将当前版本重命名为 name.rynas-before-restore-<time> 并保留，再把快照中的版本恢复到原位置。
 snap.restored	已恢复 {path}
 snap.rollback	回滚到此快照
@@ -3278,6 +3335,9 @@ snap.show_snapshots	显示此任务的快照
 snap.delete_job	删除快照任务 {name}？
 snap.delete_job_text	应用更改后会移除此任务的运行计划，并取消它与 SMB「以前的版本」的关联。磁盘上已有的快照会保留。
 snap.ret.none	仅保留最新快照
+snap.ret.all	保留所有快照。
+snap.ret.latest_counts	始终保留最新快照，并按周期保留 {counts}。
+snap.ret.age_only	未满 {min} 的快照全部保留。
 snap.u.h	小时快照
 snap.u.d	每日快照
 snap.u.w	每周快照
@@ -3287,7 +3347,7 @@ snap.preset.standard	标准
 snap.preset.light	精简
 snap.preset.long	长期
 snap.preset.custom	自定义
-snap.preset_keeps	按策略保留 {counts}。最低保留要求为 {min}。
+snap.preset_keeps	按周期保留 {counts}。未满 {min} 的快照全部保留。
 snap.preview	预览将删除的快照
 snap.preview_counts	按当前策略将保留 {keep} 个快照，有 {delete} 个符合清理条件。
 snap.preview_empty	此任务还没有快照。
@@ -3353,7 +3413,7 @@ repl.no_replicas	暂无快照副本。首次传输完成后会在此显示。
 repl.incomplete	传输中断
 repl.back	返回快照副本列表
 repl.restore_title	从快照副本恢复「{path}」？
-repl.restore_text	将副本恢复到原内容所在的共享文件夹中。文件名会加上恢复日期，原有内容会保留。
+repl.restore_text	将副本恢复到原内容所在目录。如已有同名内容，恢复副本的名称会带有 restored 和恢复日期，原有内容会保留。
 repl.promote	创建可写副本
 repl.promote_title	为「{name}」创建可写副本？
 repl.promote_text	将在目标存储卷根目录创建可共享的可写副本。原快照副本保持只读，后续快照复制可以继续。
@@ -3519,6 +3579,8 @@ bk.test.empty	连接成功。首次运行备份时将创建存储库。
 bk.test.opens	连接成功。已用此密码打开现有存储库，其中有 {n} 个备份版本。
 bk.test.locked	目标已有备份存储库，请输入该存储库的密码。
 bk.test.failed	无法连接目标
+bk.test.host_key	服务器的 SSH 主机密钥指纹为 {fingerprints}。请与服务器上显示的指纹核对。保存任务后将固定这些主机密钥。
+bk.test.host_key_missing	无法读取服务器的 SSH 主机密钥指纹。请在保存任务前核对服务器的主机密钥。
 bk.f.pw_mode	存储库密码
 bk.pw.generate	生成强密码
 bk.pw.own	使用自定密码
@@ -3989,11 +4051,11 @@ sp.subtitle	查看各存储卷的空间占用并释放空间
 sp.scan_now	测量
 sp.scanning	正在测量
 sp.scanned	测量于 {when}
-sp.never_scanned	尚未测量：“测量”会完整读取一次快照，之后只读取变化部分。
+sp.never_scanned	尚未测量。首次测量会扫描快照的文件元数据，之后只读取变化部分。
 sp.pending	{volumes} 上的快照已变化：其磁盘下次唤醒时更新数字。
 sp.measure_title	测量空间？
 sp.measure_text	此次测量会读取从未测量过的快照：在这台 NAS 上约需 {time}，以最低优先级运行，可在任务面板中停止。之后的测量，以及创建或删除快照后的更新，只比较变化部分。
-sp.measure_walks	有 {n} 个来源无法逐个快照比较，将逐个文件读取：耗时会增加。
+sp.measure_walks	有 {n} 个来源无法逐个快照比较，需要逐个扫描文件的元数据，耗时会增加。
 sp.volumes	存储卷
 sp.used_of	已用 {size}
 sp.free	可用
@@ -4583,31 +4645,31 @@ nev.removable.safe_to_remove.title	可以安全移除「{drive}」
 nev.removable.ntfs_read_only.title	「{volume}」已以只读方式挂载
 nev.removable.ntfs_read_only.body	Windows 未正常关闭此 NTFS 卷，可能是快速启动、休眠或直接拔出所致。NAS 已按只读方式挂载。请在 Windows 完全关机或对该卷运行 chkdsk 后重新接入设备，即可尝试写入。
 task.docker.install	安装 Docker
-task.docker.migrate	将 Docker 移动到一卷
+task.docker.migrate	迁移 Docker 数据到存储卷
 task.docker.container.start	启动容器
 task.docker.container.stop	停止容器
 task.docker.container.restart	重新启动容器
-task.docker.stack.up	开始堆栈
-task.docker.stack.start	开始堆栈容器
-task.docker.stack.stop	停止堆栈
-task.docker.stack.restart	重新开始堆栈
-task.docker.stack.down	把堆起来
-task.docker.stack.pull	下载堆栈图像
-task.docker.stack.update	更新堆栈
-task.docker.stack.rollback	倒回堆叠
-task.docker.stack.remove	删除堆栈
-task.docker.update-check	检查图像更新
-task.docker.image-prune	删除未使用的图像
-task.docker.auto-window	运行自动更新窗口
-task.docker.auto-update	自动更新堆栈
-nev.docker.unhealthy.title	集装箱{container}不健康
-nev.docker.unhealthy.body	它的健康检查失败了，看看它在 Docker 页面上的日志。
-nev.docker.recovered.title	集装箱{container}又健康了
-nev.docker.oom.title	集装箱 {container} 内存已耗尽
-nev.docker.oom.body	内核停止了容器的一个过程，因为它已经用完了内存。
-nev.docker.crash_loop.title	集装箱 {container} 继续重启
-nev.docker.crash_loop.body	过去 {minutes} 分钟内重启了 {restarts} 次。请在 Docker 页面查看日志。
-nev.docker.crash_loop_over.title	集装箱{container}停止重启
+task.docker.stack.up	部署并启动应用栈
+task.docker.stack.start	启动应用栈中的容器
+task.docker.stack.stop	停止应用栈
+task.docker.stack.restart	重启应用栈
+task.docker.stack.down	关闭应用栈
+task.docker.stack.pull	拉取应用栈镜像
+task.docker.stack.update	更新应用栈
+task.docker.stack.rollback	回滚应用栈
+task.docker.stack.remove	移除应用栈
+task.docker.update-check	检查镜像更新
+task.docker.image-prune	移除未使用的镜像
+task.docker.auto-window	执行自动更新
+task.docker.auto-update	自动更新应用栈
+nev.docker.unhealthy.title	容器「{container}」健康检查未通过
+nev.docker.unhealthy.body	可在 Docker 页面查看容器日志以排查健康检查失败的原因。
+nev.docker.recovered.title	容器「{container}」已恢复正常
+nev.docker.oom.title	容器「{container}」内存耗尽
+nev.docker.oom.body	容器耗尽内存，内核已终止其中一个进程。
+nev.docker.crash_loop.title	容器「{container}」反复重启
+nev.docker.crash_loop.body	容器在 {minutes} 分钟内重启了 {restarts} 次，可在 Docker 页面查看日志。
+nev.docker.crash_loop_over.title	容器「{container}」已停止反复重启
 nev.docker.disk_full.title	Docker 储存 {used_pct}% 满
 nev.docker.disk_full.body	{path} 所在文件系统即将用尽，镜像和容器可能停止工作。请移除未使用的镜像，或将 Docker 移到容量更大的存储卷。
 nev.docker.disk_ok.title	Docker 存储用量已降至 {limit_pct}% 以下
@@ -4628,7 +4690,7 @@ nev.apps.catalog_updates.title	以下应用可以更新：{apps}
 nev.apps.catalog_updates.body	应用目录已更新。请前往「应用和插件」查看可用更新。支持快照的应用可在更新前创建快照。
 nev.apps.catalog_refused.title	在线应用目录验证失败
 nev.apps.catalog_refused.body	下载的应用目录未通过验证，rynas 将继续使用当前目录。失败原因是 {reason}
-nev.apps.catalog_ok.title	在线应用目录已通过验证
+nev.apps.catalog_ok.title	在线应用目录已重新通过验证
 nev.wol.wake_failed.title	未能唤醒「{device}」
 nev.wol.wake_failed.body	NAS 为执行计划备份尝试唤醒设备，但没有收到响应。请在「网络唤醒」页面检查该设备。
 nev.wol.wake_resumed.title	已能再次唤醒「{device}」
@@ -4638,11 +4700,11 @@ cfg.key.docker	Docker 引擎和应用栈
 nt.src.docker	Docker 监控
 on	打开
 dk.title	Docker
-dk.subtitle	集装箱、堆栈、镜像和卷数
+dk.subtitle	管理容器、Compose 应用栈、镜像和 Docker 数据卷
 dk.tab.overview	概览
 dk.tab.containers	容器
-dk.tab.stacks	堆栈
-dk.tab.images	镜像卷( V)
+dk.tab.stacks	应用栈
+dk.tab.images	镜像与数据卷
 dk.module	Docker 容器和 Compose 应用栈
 dk.module_text	Docker 在容器中运行应用。rynas 会从 Docker 官方软件源安装 Docker Engine，或接管已安装的引擎。Docker 数据保存在所选存储卷上，每个 Compose 应用栈使用独立目录，并可在更新前创建快照。
 dk.installed	已安装
@@ -4658,93 +4720,93 @@ dk.block.not_debian	当前界面仅支持在 Debian 上安装 Docker。
 dk.block.unsupported_release	Docker 软件源不支持此 Debian 版本。
 dk.block.unsupported_arch	Docker 软件源不支持当前处理器架构。
 dk.task_running	Docker 任务正在运行
-dk.done	{task}:已完成
+dk.done	{task}已完成
 dk.open_web	打开
-dk.engine	发动机
-dk.eng.running	运行
-dk.eng.down	不接电话
+dk.engine	Docker 引擎
+dk.eng.running	正在运行
+dk.eng.down	无响应
 dk.eng.version	版本
-dk.eng.version_api	{v} (API {api}),最年长的客户API {min}.
-dk.eng.source	安装于
-dk.src.docker_ce	Docker 仓库 (docker-ce)
-dk.src.docker_io	Debian (docker.io) (英语).
+dk.eng.version_api	{v}（API {api}，最低支持客户端 API {min}）
+dk.eng.source	安装来源
+dk.src.docker_ce	Docker 官方软件源（docker-ce）
+dk.src.docker_io	Debian 软件源（docker.io）
 dk.src.other	其他来源
-dk.eng.compose	编译插件
+dk.eng.compose	Compose 插件
 dk.eng.buildx	Buildx 插件
-dk.eng.storage	存储驱动程序
-dk.eng.containerd_store	装入容器的镜像存储器
+dk.eng.storage	存储驱动
+dk.eng.containerd_store	containerd 镜像存储
 dk.eng.data_root	数据文件夹
-dk.eng.cgroup	组驱动程序
-dk.eng.logging	日志驱动程序
-dk.eng.live_restore	集装箱在引擎重启后幸存
-dk.eng.counts	目录
-dk.eng.counts_v	{n} 集装箱({run}]运行，{stop}停止) . {img} 镜像
-dk.warn.daemon_down	安装了 Docker , 但服务没有回答。启动 Docker. service, 或者查看它的日记。
-dk.warn.compose_missing	挂载器作曲插件缺失：堆栈无法启动或检查。
-dk.warn.data_root_on_system	Docker 将其数据保存在默认文件夹中，在卷外。在下面的设置中选择一个卷( 系统卷也) , 或者移动数据。
-dk.warn.data_root_almost_full	Docker数据的文件系统几乎已满。
-dk.warn.not_pinned	Docker的软件包没有被钉在其主要版本上：一个系统更新可以带来新的主要发行。
-dk.warn.engine_too_old	这 Docker 引擎对于当前应用和管理人员来说太老了(API已经比1.44大了). 更新。
-dk.disk	磁盘使用
-dk.disk.fs	数据文件夹的文件系统
-dk.disk.used_of	{used} {total}... {free} 免费
+dk.eng.cgroup	Cgroup 驱动
+dk.eng.logging	日志驱动
+dk.eng.live_restore	引擎重启时保持容器运行
+dk.eng.counts	资源统计
+dk.eng.counts_v	{n} 个容器（{run} 个运行中，{stop} 个已停止）· {img} 个镜像
+dk.warn.daemon_down	Docker 已安装，但服务无响应。请启动 docker.service 或查看服务日志。
+dk.warn.compose_missing	缺少 Docker Compose 插件，无法启动或检查应用栈。
+dk.warn.data_root_on_system	Docker 当前使用默认目录。可在下方指定存储卷作为数据位置，也可迁移已有数据。
+dk.warn.data_root_almost_full	Docker 数据目录所在的文件系统快满了。
+dk.warn.not_pinned	Docker 软件包尚未锁定主版本，系统更新时可能升级到新的主版本。
+dk.warn.engine_too_old	Docker Engine 的 API 版本低于 1.44，无法支持当前应用和管理工具。请更新 Docker Engine。
+dk.disk	磁盘使用情况
+dk.disk.fs	数据目录所在的文件系统
+dk.disk.used_of	已用 {used} / {total} · 可用 {free}
 dk.disk.images	镜像
 dk.disk.reclaimable	未使用的镜像
-dk.disk.containers	集装箱层
-dk.disk.volumes	已命名的卷
+dk.disk.containers	容器层
+dk.disk.volumes	命名数据卷
 dk.disk.build_cache	构建缓存
 dk.managers	Docker 管理工具
 dk.manager_root	一个Docker管理器拥有此系统的根权限，并有自己的登录：使用强大的密码保护它，并且不会将其暴露在互联网上。
-dk.col.manager	经理
+dk.col.manager	管理工具
 dk.set.title	引擎设置
-dk.set.text	保存立即应用更改。一个新的存储卷重新启动 Docker( 仅在没有容器运行时)。
+dk.set.text	保存后立即应用。更换存储卷会重启 Docker，需先停止所有正在运行的容器。
 dk.set.volume	存储卷
 dk.set.volume_help	Docker 引擎数据、containerd 数据和应用栈保存在 <volume>/docker。
-dk.set.volume_none	无( rynas 仅留下引擎配置)
-dk.set.manager	首选管理器
-dk.set.manager_help	Apps 和插件页的管理者先提供。
+dk.set.volume_none	无指定存储卷（沿用现有 Docker 引擎配置）
+dk.set.manager	首选管理工具
+dk.set.manager_help	在「应用和插件」页面优先推荐此工具。
 apps.proxy_err	无法读取网页访问设置（{err}）。应用目前只能通过局域网访问。
 dk.set.mgr_none	无
-dk.set.mgr_arcane	阿尔卡内
-dk.set.mgr_dockhand	挂起手来
-dk.set.mgr_portainer	Portainer CE 红外线
-dk.set.mgr_dockge	嵌入
-dk.set.mgr_komodo	科莫多语Name
-dk.set.pool	集装箱网络
-dk.set.pool_help	堆栈的网络的地址范围，仅在Docker没有自己的地址范围时使用。
-dk.set.pool_invalid	输入10.200.0.0/16等网络。
-dk.set.pool_size	网络大小( 前缀)
-dk.set.pool_size_help	24给每个网络254地址。
+dk.set.mgr_arcane	Arcane
+dk.set.mgr_dockhand	Dockhand
+dk.set.mgr_portainer	Portainer CE
+dk.set.mgr_dockge	Dockge
+dk.set.mgr_komodo	Komodo
+dk.set.pool	容器网络
+dk.set.pool_help	为应用栈网络分配子网的地址范围，仅在 Docker 未配置自己的地址范围时使用。
+dk.set.pool_invalid	请输入网段，例如 10.200.0.0/16。
+dk.set.pool_size	子网前缀长度
+dk.set.pool_size_help	前缀长度为 24 时，每个子网有 254 个可用地址。
 dk.set.snapshot	更新前的快照
-dk.set.snapshot_help	一个只读的相册文件夹快照，用于回滚。
-dk.set.stop	停止堆栈来取快照
+dk.set.snapshot_help	更新前创建应用栈目录的只读快照，供回滚使用。
+dk.set.stop	创建快照时停止应用栈
 dk.set.stop_help	数据库建议开启此选项。创建快照期间暂停写入，以保证文件一致性。
 dk.set.online_catalog	下载应用目录更新
-dk.set.files_app_data	在文件中显示应用程序数据
-dk.set.files_app_data_help	管理员看到每个应用程序的文件夹，并可以编辑其文件。所有者按应用程序的预期呆着。错误的更改会打破一个应用程序。
+dk.set.files_app_data	在文件管理器中显示应用数据
+dk.set.files_app_data_help	管理员可查看并编辑各应用的数据目录。文件归属沿用应用的设置，误改文件可能导致应用异常。
 dk.set.online_catalog_help	rynas 每天下载一次签名的应用目录，可独立于 rynas 版本更新获取新应用和新版本。只有通过验证的目录才会启用。
-dk.set.keep	每堆保存的快照
-dk.set.full	磁盘全警告 (%)
-dk.set.full_help	当数据文件夹的文件系统是这个完整的时通知。
-dk.set.restarts	重新启动一个崩溃循环
-dk.set.restarts_help	当一个容器在下面的窗口内重新启动时，通知会发出。
-dk.set.window	崩溃循环窗口( 分钟)
+dk.set.keep	每个应用栈保留的快照数
+dk.set.full	磁盘占用告警阈值（%）
+dk.set.full_help	Docker 数据目录所在的文件系统占用率达到此值时发送通知。
+dk.set.restarts	触发反复重启告警的次数
+dk.set.restarts_help	容器在下方设定的时间内重启次数达到此值时发送通知。
+dk.set.window	反复重启检测时长（分钟）
 dk.plan.title	将 Docker 迁移到此存储卷？
-dk.plan.text	应用新卷更改这些文件并运行这些命令。
+dk.plan.text	更换存储卷时，将修改以下文件并执行以下命令。
 dk.plan.files	文件
 dk.plan.create	创建文件夹
-dk.plan.commands	图标
-dk.plan.restart	Docker 并装入容器重启。现有镜像和容器留在旧文件夹中：使用 Move 数据将它们带入。
+dk.plan.commands	命令
+dk.plan.restart	Docker 和 containerd 将重启。已有镜像和容器保留在原目录，可使用「迁移数据」一起迁移。
 dk.plan.go	保存并应用
-dk.mig.title	将数据移动到存储卷
-dk.mig.ask	移动 Docker 的数据？
-dk.mig.text	复制镜像、容器和容器的数据到<volume>/docker,并在那里开始Docker。旧的文件夹保存到删除为止。
-dk.mig.volume	目标量
-dk.mig.running	{n}集装箱运行：先停放，移动需要 Docker已停放。
-dk.mig.go	移动数据
+dk.mig.title	迁移数据到存储卷
+dk.mig.ask	迁移 Docker 数据？
+dk.mig.text	将镜像、容器和 containerd 数据复制到 <volume>/docker，再从该目录启动 Docker。旧目录会保留，直到你手动删除。
+dk.mig.volume	目标存储卷
+dk.mig.running	还有 {n} 个容器正在运行，请停止后再迁移 Docker 数据。
+dk.mig.go	迁移数据
 dk.copy_unmeasured	不检查空间直接复制（仅在上次尝试无法测量所需空间之后使用）
-dk.mig.confirm	Docker在复制期间停下来，然后在{vol}再次开始。
-dk.vol_free	{free}免费
+dk.mig.confirm	复制期间会停止 Docker，完成后将在 {vol} 上重新启动。
+dk.vol_free	可用 {free}
 place.system	系统
 place.system_note	系统存储卷是系统磁盘上的文件夹 {path},它分享了该磁盘的空间：如果它填满了，系统可以停止工作，而该磁盘的失败会带去这个数据。
 place.not_btrfs	系统磁盘不是btrfs:制作一个平版文件夹，没有子卷，快照或NOCOW.
@@ -4764,53 +4826,53 @@ dk.col.size	大小
 dk.col.volume	存储卷
 dk.c.search	搜索容器
 dk.c.none	无容器
-dk.c.none_text	每个堆的集装箱和经理都在这里
+dk.c.none_text	各应用栈和管理工具的容器会显示在这里。
 dk.c.no_match	没有容器匹配过滤器。
 dk.f.label	显示
-dk.f.all	全部( A)
-dk.f.running	运行
+dk.f.all	全部
+dk.f.running	运行中
 dk.f.stopped	已停止
-dk.f.unhealthy	身体不健康，没有健康
-dk.st.running	运行
+dk.f.unhealthy	健康检查未通过
+dk.st.running	运行中
 dk.st.restarting	重新启动
 dk.st.paused	已暂停
 dk.st.created	已创建
 dk.st.exited	已停止
-dk.st.dead	死了，你没死吧？
+dk.st.dead	异常终止
 dk.st.stopping	停止中
 dk.st.unknown	未知
 dk.h.healthy	正常
-dk.h.starting	开始
-dk.h.unhealthy	身体不健康，没有健康
+dk.h.starting	健康检查尚未完成
+dk.h.unhealthy	健康检查未通过
 dk.a.start	启动
 dk.a.stop	停止
 dk.a.restart	重启
 dk.a.logs	日志
 dk.a.details	详细信息
-dk.a.up	上边
-dk.a.pull	拖动镜像
-dk.a.update	更新.
-dk.a.down	下调
+dk.a.up	部署并启动
+dk.a.pull	拉取镜像
+dk.a.update	更新…
+dk.a.down	关闭应用栈
 dk.a.edit	编辑文件
-dk.a.remove	删除.
+dk.a.remove	移除…
 dk.rm.go	移除
 dk.log.title	日志
-dk.log.follow	跟随
+dk.log.follow	跟随日志
 dk.log.stamps	时间戳
-dk.log.following	现场直播
-dk.log.ended	集装箱停止了伐木
+dk.log.following	实时
+dk.log.ended	容器已停止输出日志
 dk.log.paused	已暂停
 dk.log.lost	连接已丢失
 dk.log.download	下载
 dk.upd.available	有可用更新
 dk.upd.never	镜像从未检查
 dk.upd.checked	检查于 {when}
-dk.upd.stack	登记册中较新的镜像：{images}
+dk.upd.stack	镜像仓库有更新：{images}
 dk.upd.title	更新 {name}
-dk.upd.ask	最新消息{name}?
+dk.upd.ask	更新「{name}」？
 dk.upd.text	下载更新的镜像并重新创建容器。如果更新失败，堆栈会回到快照上。
 dk.upd.snapshot	更新前创建快照
-dk.upd.snapshot_help	需要为回滚。
+dk.upd.snapshot_help	创建快照后，可在需要时回滚。
 dk.upd.stop	创建快照时停止应用栈
 dk.upd.next	下次检查 {when}
 dk.au.title	自动镜像更新
@@ -4839,7 +4901,7 @@ dk.au.r_pre	发行前版本
 dk.au.r_variant	另一个镜像变体
 dk.au.r_downgrade	旧版本
 dk.au.r_unknown	版本不可读
-dk.au.r_policy	保险单仅通知
+dk.au.r_policy	更新策略设为仅通知
 dk.au.r_review	新条目需要答案或是一个重大改变
 dk.au.r_managed	rynas 不管理此堆栈的文件
 dk.au.r_failed	此版本在上次更新时失败：等待更新的版本
@@ -4848,10 +4910,10 @@ dk.au.o_rolled_back	自动更新回滚 {when} :
 dk.au.o_held	未安装的 {when} 自动更新：
 dk.au.o_failed	自动更新 {when} 失败：
 dk.g.rynas	由 rynas 管理
-dk.g.portainer	由Portainer公司管理
-dk.g.untracked	其他组成项目
+dk.g.portainer	由 Portainer 管理
+dk.g.untracked	其他 Compose 项目
 dk.m.rynas	rynas
-dk.m.portainer	波特纳
+dk.m.portainer	Portainer
 dk.m.untracked	未由rynas 管理
 dk.ss.running	运行
 dk.ss.partial	部分运行
@@ -4860,22 +4922,22 @@ dk.ss.down	未开始
 dk.s.search	搜索堆栈
 dk.s.create	创建堆栈
 dk.s.none	无堆栈
-dk.s.none_text	从作曲文件创建堆栈，或者安装一个应用程序。
+dk.s.none_text	通过 Compose 文件创建应用栈，或直接安装应用。
 dk.s.unhealthy_n	{n} 不健康
 dk.s.title	堆叠 {name}
 dk.s.folder	文件夹
-dk.s.files	编写文件
+dk.s.files	Compose 文件
 dk.s.readonly	此堆栈在 rynas 外部管理：这里只能启动，停止并重新启动。
 dk.s.readonly_adopt	此堆栈在 rynas 外部管理：在此可以启动、停止并重新启动，或者被采纳以完全管理。
 dk.s.no_folder	堆栈文件夹缺失：只能启动，停止并重新启动。
-dk.ad.adopt	通过
-dk.ad.title	收养 {name}
+dk.ad.adopt	接管
+dk.ad.title	接管「{name}」
 dk.ad.text	rynas 将在当前文件夹中管理此堆栈：编辑、启动、停止、更新。没有移动或重写。
 dk.ad.text_ro	Portainer继续管理这些文件:rynas显示它们，开始并停止堆栈并检查其镜像，但不编辑。
 dk.ad.env	环境文件
 dk.ad.env_default	文件夹的env
 dk.ad.dir	系统上的文件夹
-dk.ad.dir_help	这个系统所看到的带有作曲文件的文件夹。
+dk.ad.dir_help	请输入本机上存放 Compose 文件的目录路径。
 dk.ad.profiles	要启动的配置文件
 dk.ad.profiles_help	用逗号分隔名称。与其他配置文件的服务不开放。
 dk.ad.done	{name} 现在由rynas管理
@@ -4886,70 +4948,70 @@ dk.ad.w_in_use	另一个文件夹的容器已经使用名称 {name} : 选择另�
 dk.ad.w_networks	外部网络必须存在，然后才能开始：{networks}
 dk.ad.w_profiles	一些服务只以配置开头：{profiles}
 dk.ad.w_include	使用的文件包括：堆栈运行，但其文件在此没有被编辑。
-dk.ad.w_outside	作曲文件或环境文件位于文件夹外：堆栈运行，但其文件在此没有被编辑。
-dk.ad.w_missing	在此系统中没有找到作曲文件：提供文件夹所在位置。
+dk.ad.w_outside	Compose 文件或环境文件位于所选目录之外。应用栈可运行，请在文件所在位置编辑。
+dk.ad.w_missing	本机未找到 Compose 文件，请指定文件所在目录。
 dk.ad.changed	这些文件自上次读取或写作以来，在外的rynas中有所变化。
 dk.ad.ro_note	Portainer 管理这些文件：在此可以启动、停止并重新启动堆栈，查看其文件并检查其镜像。
-dk.ad.chip	通过
+dk.ad.chip	已接管
 dk.ad.move	移动到堆栈文件夹
 dk.ad.move_title	移动 {name} ?
 dk.ad.move_text	堆栈停止，其整个文件夹( {from}]) 随其数据被复制到 {to}, 绑定的挂载被检查，并重新开始。旧文件夹被保留着一个。 moved name, 直到您删除它。
 dk.ad.move_free	目标空闲空间
 dk.ad.move_copy	复制
-dk.ad.move_reflink	同一btrfs存储卷上的克隆(回放):快，没有额外空格
-dk.ad.move_full	每个文件的完整副本：需要与文件夹一样多的自由空间
+dk.ad.move_reflink	在同一个 Btrfs 存储卷上使用写时复制克隆（reflink），快速完成且无需额外复制数据。
+dk.ad.move_full	逐文件完整复制，需要与源目录大小相当的可用空间。
 dk.ad.move_down	堆栈已停止
 dk.ad.move_down_short	秒：复制只复制文件
 dk.ad.move_down_long	整个副本：分钟或更多 与大型应用程序数据
-dk.ad.release	释放
-dk.ad.release_title	释放{name}?
-dk.ad.release_text	rynas停止管理这堆东西 它的文档和容器都保持原样
-dk.ad.released	释放堆栈
+dk.ad.release	取消接管
+dk.ad.release_title	取消接管「{name}」？
+dk.ad.release_text	rynas 将停止管理此应用栈，文件和容器保持原样。
+dk.ad.released	已取消接管应用栈
 dk.ad.ed_ro	这些文件在此不编辑(只读，文件夹外或包括：).
 dk.ad.ed_others	堆栈还使用：{files}
 dk.im.button	导入文件夹
 dk.im.title	导入文件夹
-dk.im.text	将一个包含作曲文件(例如从备份中恢复)的文件夹注册为堆栈，其所在位置。
+dk.im.text	可将含有 Compose 文件的目录直接注册为应用栈，例如从备份恢复的目录。
 dk.im.dir_help	绝对路径，如 /volume1/docker/app.
-dk.im.name_help	作曲工程名。文件夹保留其名。
+dk.im.name_help	Compose 项目名称。目录名称会保留。
 dk.im.check	检查
 dk.im.import	导入
 dk.s.containers	容器
-dk.s.no_containers	没有容器：以 Up 开始堆栈。
+dk.s.no_containers	暂无容器，请使用「部署并启动」运行应用栈。
 dk.snap.title	快照
-dk.snap.take	拍个快照
-dk.snap.taken	拍摄的快照
-dk.snap.none	还没有快照：每次更新前都会拍出一幅快照。
+dk.snap.take	创建快照
+dk.snap.taken	已创建快照
+dk.snap.none	暂无快照，每次更新前都会创建快照。
 dk.snap.not_subvolume	应用栈目录需要是 Btrfs 子卷才能创建快照或回滚。
 dk.snap.r_manual	手动创建
 dk.snap.r_update	更新前
 dk.snap.r_pull	拉取镜像前
 dk.snap.r_rollback	回滚前
 dk.snap.rollback_title	回滚到 {when} 的快照？
-dk.snap.rollback_text	堆栈被取下，其文件夹会回到{when} 的快照，并带有那个时间的镜像，然后它又开始。当前状态会被保存为快照。
+dk.snap.rollback_text	将先停止应用栈并保存当前状态的快照，再恢复 {when} 的目录内容和镜像，最后重新启动应用栈。
 dk.snap.delete	删除{when}的快照？
-dk.snap.delete_text	{when}的快照被删除：回滚已经不可能了。
+dk.snap.delete_text	删除 {when} 的快照后，将无法回滚到该状态。
 dk.rm.title	移除 {name} ?
-dk.rm.text	停止堆放并取出其容器。所命名的卷被保存。
-dk.rm.files	并删除堆栈文件夹( 编译文件，env, app data) 及其快照
-dk.rm.adopted	堆栈文件夹、其文件和应用数据都保留在原地。要停止管理堆栈而不移除其容器，请使用 Release。
+dk.rm.text	停止应用栈并移除其容器，保留命名数据卷。
+dk.rm.files	同时删除应用栈目录、其中的 Compose 文件、.env、应用数据及相关快照
+dk.rm.adopted	应用栈目录、其中的文件和应用数据会保留。如需保留容器并停止管理该应用栈，请使用「取消接管」。
 dk.ed.name	应用栈名称
 dk.ed.name_help	小写字母，数字，-和_:也是文件夹名称。
 dk.ed.name_invalid	请输入 1 至 63 个字符，可用小写英文字母、数字、- 和 _，并以字母或数字开头。
 dk.ed.volume	存储卷
 dk.ed.compose	compose.yaml
-dk.ed.env	.env 数据
-dk.ed.env_help	作曲文件的变量(NAME=每行值),仅可按根读取。
+dk.ed.env	.env 文件
+dk.ed.env_help	填写 Compose 变量，每行使用 NAME=value 格式。文件仅 root 可读取。
 dk.ed.start	创建后启动堆栈
 dk.ad.start_import	导入后启动堆栈
 dk.ed.validate	检查
 dk.ed.created	已创建堆栈
-dk.ed.saved	已保存文件：使用 Up 应用
-dk.val.bad	docker作曲拒绝文件。
-dk.val.ok	文件有效。 Services: {services}. 已公布端口：{ports}.
-dk.val.ports	其他集装箱已使用的港口：{ports}
-dk.val.outside	{path} ( {service}) 在卷外：不在堆放快照中，文件夹不是为您所创建。
-dk.val.create	启动前创建的文件夹，由 docker- apps 拥有：{paths}
+dk.ed.saved	文件已保存，请使用「部署并启动」应用更改。
+dk.val.bad	Docker Compose 无法接受该文件，请检查配置。
+dk.val.ok	文件有效。服务：{services}。已发布端口：{ports}。
+dk.val.ports	这些端口已被其他容器占用：{ports}
+dk.val.outside	{path}（{service}）位于存储卷之外，该目录需要手动创建，应用栈快照也不会包含它。
+dk.val.create	启动前将创建以下目录，所有者为 docker-apps：{paths}
 dk.i.title	镜像
 dk.i.total	{n} · {size}
 dk.i.none	无镜像
@@ -4962,9 +5024,9 @@ dk.i.prune_text	镜像没有容器( 也停止了) , 没有堆栈，也没有保�
 dk.i.prune_none	没有镜像可以去除：每个镜像都在使用中，或者保存在恢复点上。
 dk.i.prune_total	删除：{n} . {size}
 dk.i.prune_go	移除
-dk.i.dangling	滴答声
-dk.v.title	存储卷
-dk.v.none	无名称的卷
+dk.i.dangling	悬空镜像
+dk.v.title	Docker 数据卷
+dk.v.none	暂无命名数据卷
 dk.w.open	打开 Docker
 dk.w.running	运行中的容器
 dk.w.cpu	容器总 CPU 使用率
@@ -5172,6 +5234,8 @@ apps.browse_all	浏览全部应用
 apps.empty	应用目录为空
 apps.empty_text	未能加载任何应用。请重新安装 rynas，或检查下方列出的条目。
 apps.issues	未能加载的条目有 {n} 个
+apps.issues.directory_read	无法读取应用目录
+apps.issues.entry_load	无法加载应用条目
 apps.count	显示 {n} 个应用
 apps.no_match	没有匹配的应用
 apps.no_match_text	请尝试其他搜索词或类别。
@@ -5274,10 +5338,10 @@ apps.web.auth	登录方式
 apps.web.auth_app	应用自带登录验证
 apps.web.auth_none	应用未提供登录验证，建议仅在局域网内使用
 apps.web.auth_proxy	由代理进行登录验证
-apps.web.public	发布到互联网
+apps.web.public	互联网公开访问
 apps.web.public_ok	适合
-apps.web.public_warn	可发布，需谨慎配置
-apps.web.public_never	不宜公开
+apps.web.public_warn	需谨慎配置
+apps.web.public_never	禁止公开
 apps.web.body	最大上传大小
 apps.web.timeout	响应超时时间
 apps.web.websocket	实时通信（WebSocket）
@@ -5379,7 +5443,7 @@ apps.w.access_proxy_help	通过应用独立的 HTTPS 地址连接，仅允许「
 apps.w.access_lan	通过局域网端口直接访问
 apps.w.access_lan_help	端口 {port} 会在 NAS 的所有地址上开放，连接使用 HTTP，且不受「网页访问」规则限制。
 apps.w.access_url_pending	生成安装计划后会显示访问地址。
-apps.w.access_level	默认允许当前网络连接。更改访问范围请前往
+apps.w.access_level	默认允许局域网内的设备访问。要调整访问范围，请前往
 apps.w.access_inactive	「网页访问」尚未启用。当前可通过局域网地址 {url} 访问。启用「网页访问」后，可为应用使用独立的 HTTPS 地址。
 apps.w.access_enable	启用网页访问
 apps.proxy_url	新的访问地址为 {url}
@@ -5474,13 +5538,13 @@ wa.f.upstream	转发至
 wa.f.upstream_help	以 http:// 或 https:// 开头，后接设备地址或主机名。使用 80 和 443 之外的端口时，请填写端口号。
 wa.f.upstream_bad	请输入 http://address:port 或 https://address:port，不带路径。默认端口 80 和 443 可省略。
 wa.f.upstream_required	请输入目标设备或服务的地址。
-wa.f.skip_verify	接受设备自签名证书
-wa.f.skip_verify_help	适用于使用自签名证书的设备。连接保持加密，但代理会跳过证书校验。
+wa.f.skip_verify	跳过上游 TLS 证书验证
+wa.f.skip_verify_help	适用于使用自签名证书的设备。连接仍会加密，代理会跳过上游设备的证书验证。
 wa.f.skip_warn	请仅对可信设备启用。若该设备的网络地址被其他设备占用，流量可能被读取。
 wa.f.upstream_host	发送设备自己的主机名
 wa.f.upstream_host_help	适用于只接受自身主机名或地址的服务。关闭后会将浏览器使用的名称发送给目标设备。
 wa.f.prefix	路径前缀（可选）
-wa.f.prefix_help	将按原路径转发此路径下的请求，例如 /grafana。这样可让多个服务共用一个端口。
+wa.f.prefix_help	仅转发路径匹配此前缀的请求，并保留原路径，例如 /grafana。这样可让多个服务共用一个端口。
 wa.f.websocket	无需额外配置即可转发 WebSocket 和流式请求。
 wa.f.ports	额外端口（可选）
 wa.f.ports_help	此地址还可监听这些 HTTPS 端口。可用逗号分隔多个端口，例如 8444。适用于路由器转发指定端口的情况。
@@ -5893,7 +5957,7 @@ apps.convert	转换为自定义应用栈
 apps.convert_go	转换
 apps.conv.title	将「{name}」转换为自定义应用栈？
 apps.conv.text	此应用将转换成由你自行管理的 Docker Compose 应用栈。
-apps.conv.p1	现有容器会继续运行，数据和文件会保留。
+apps.conv.p1	转换期间，容器沿用当前运行状态。现有数据和文件会保留。
 apps.conv.p2	此应用将从已安装应用列表移除，并退出应用目录的更新、迁移和回滚流程。
 apps.conv.p3	转换后可在 Docker 页面编辑、更新和创建快照。此处无法撤销转换。
 apps.conv.done	已转换为自定义应用栈
@@ -5916,7 +5980,7 @@ apps.upd.migrations_text	系统会按版本 {list} 的要求迁移已保存的�
 apps.upd.answers	新增配置项
 apps.upd.answers_text	此版本新增了需要填写的配置项。
 apps.upd.snapshot_help	更新前会创建快照。更新失败时会自动还原，也可在更新后手动回滚到此快照。
-apps.upd.no_snapshot	应用栈目录需要是 Btrfs 子卷才能创建快照。当前更新失败时会恢复更新前的文件。
+apps.upd.no_snapshot	应用栈目录需使用 Btrfs 子卷才能创建快照。本次更新将跳过快照。若更新失败，系统会还原更新前的文件。
 apps.upd.up_to_date	应用已是最新版本。
 apps.upd.downgrade	应用目录中的版本低于已安装版本，无法通过此操作降级。
 apps.upd.none	所有应用均为最新版本
@@ -6048,7 +6112,7 @@ bk.step.key	1. 生成电脑端密钥
 bk.step.config	2. btrbk.conf
 bk.step.test	3. 首次连接与测试
 bk.step.line	写入 NAS authorized_keys 的配置行
-bk.steps_note	此密钥只能通过 rynas 的命令过滤器接收 Btrfs 快照、按上述规则删除此电脑的快照，以及运行 btrbk 所需的只读命令。该密钥的权限仅限此备份文件夹。
+bk.steps_note	此密钥只能通过 Rynas 的命令过滤器接收 Btrfs 快照、按上述规则删除此电脑的快照，以及运行 btrbk 所需的只读命令。此密钥无法用于登录 Shell 或访问其他文件夹。
 bk.no_snapshots	尚未收到快照
 bk.snap.protected	受 NAS 保留策略保护
 bk.snap.incomplete	中断
@@ -6205,20 +6269,20 @@ bkpc.owner.nas	此 NAS
 bkpc.owner.pc	电脑端
 bkpc.owner.nas_help	电脑只能添加快照。NAS 每小时按下方策略清理每个子卷的旧快照，并始终保留最新快照，作为下一次增量备份的基础。
 bkpc.owner.pc_help	电脑端的 btrbk 按 target_preserve 清理旧快照，同时受下方 NAS 保留规则限制。
-bkpc.f.keep_nas_help	每个子卷分别计算，以 NAS 收到快照的时间为准。
+bkpc.f.keep_nas_help	按 NAS 接收时间，为每个子卷保留指定数量的最新快照。即使超出各周期设置的保留数量，这些快照也会保留。
 bkpc.f.min_age_nas_help	从 NAS 收到快照时开始计算保留期限。
 bkpc.f.alert_hours	多久未收到备份时通知（小时）
 bkpc.f.alert_hours_help	NAS 无法区分电脑已关机还是备份已停止。超过设定时间未收到备份会发出通知，单个子卷停止备份时会发出警告。填 0 可关闭。
 bkpc.f.alert_hours_agent	多久未收到备份时警告（小时）
-bkpc.f.alert_hours_agent_help	电脑在备份到期时处于开机状态，但未收到备份，或单个子卷停止备份时发出警告。已关机的电脑仅显示离线时长。填 0 可关闭。
+bkpc.f.alert_hours_agent_help	到了计划备份时间，电脑处于开机状态但 NAS 未收到备份时发出警告。单个子卷停止备份也会触发警告。电脑关机时只显示离线时长。填 0 可关闭警告。
 bkpc.alert_hours	{n} 小时后
 bkpc.alert	未收到备份时通知
 bkpc.alert_ssh_text	NAS 无法区分电脑已关机还是备份已停止，所以只发送通知。
 bkpc.alert_agent	未收到备份时警告
-bkpc.alert_agent_text	仅在备份到期时电脑处于开机状态才发出警告。已关机的电脑仅显示离线时长。
+bkpc.alert_agent_text	电脑开机时错过计划备份才会发出警告。电脑关机时只显示离线时长。
 bkpc.f.ignored	电脑不再发送的子卷
 bkpc.f.ignored_help	不再为这些子卷发出警告，也不再要求全量备份包含它们。已有快照会保留。
-bkpc.ret.nas	由 NAS 清理。保留 {counts}，以及未满 {min} 的所有快照。
+bkpc.ret.nas	由 NAS 清理。{rule}
 bkpc.prune	立即清理旧快照
 bkpc.pruned	旧快照已删除
 bkpc.prune_title	删除「{device}」的旧快照？
@@ -6241,7 +6305,7 @@ bkpc.measuring_note	正在 NAS 上以低优先级统计：可以关闭此页面�
 bkpc.measure_left	{pct}% · 约剩 {time}
 bkpc.measure_first	首次统计约需 {time}。
 bkpc.measure_confirm_title	首次统计空间？
-bkpc.measure_confirm_text	首次统计会完整读取每个子卷最新的快照（{tree} 的文件记录）。在此 NAS 上约需 {time}（{speed}）。它以最低优先级运行，可在任务面板中停止。结果是精确的；之后的统计只比较变化部分，只需几分钟。
+bkpc.measure_confirm_text	首次统计会扫描每个子卷最新快照的 Btrfs 元数据（文件记录共 {tree}）。预计耗时 {time}（速度约 {speed}）。任务以最低优先级运行，可在任务面板中停止。统计结果为精确值。之后只比较变化部分，通常几分钟即可完成。
 bkpc.measure_speed_here	根据此 NAS 以往的统计
 bkpc.measure_speed_ref	按参考 NAS（J4125 加机械硬盘）估算；此 NAS 自身的速度会在首次统计时得出
 pcb.pc_size	电脑上的大小
@@ -6274,11 +6338,11 @@ task.files.move	移动文件
 task.files.delete	删除文件
 task.files.compress	压缩文件
 task.files.extract	提取归档
-task.files.cleanup	转会后清理
+task.files.cleanup	文件传输后清理
 nev.pcbackup.late.title	已连续 {days} 天未收到来自 {device} 的备份
 nev.pcbackup.late.title_2	已连续 {hours} 小时未收到来自 {device} 的备份
-nev.pcbackup.late.body	{device} 开机时有备份到期，但已 {days} 天未收到备份。通知阈值为 {alert_days}。
-nev.pcbackup.late.body_2	{device} 开机时有备份到期，但已 {hours} 小时未收到备份。通知阈值为 {alert_hours} 小时。
+nev.pcbackup.late.body	{device} 在计划备份时处于开机状态，但已 {days} 天未收到备份。通知阈值为 {alert_days}。
+nev.pcbackup.late.body_2	{device} 在计划备份时处于开机状态，但已 {hours} 小时未收到备份。通知阈值为 {alert_hours} 小时。
 nev.pcbackup.quiet.title	已连续 {hours} 小时未收到来自 {device} 的数据
 nev.pcbackup.quiet.body	目前无法判断 {device} 已关机还是备份已停止。超过 {alert_hours} 小时未收到数据时发出通知。
 nev.pcbackup.subvolume_late.title	{device} 的子卷 {subject} 已停止备份
@@ -6320,11 +6384,11 @@ sysp.w.task_running	「{subject}」任务正在运行
 sysp.w.scheduler_task_running	计划任务「{subject}」正在运行
 sysp.w.smb_open_files	SMB 客户端仍有 {n} 个文件打开
 sysp.w.apt_running	软件包管理器正在运行（{subject}）。中断可能导致部分软件包安装不完整。
-sysp.w.ups_on_battery	UPS运行在电池上：在主电源恢复之前,NAS可能不会再次启动
-sysp.w.boot_trial	一个新的内核开始于下一个后靴的试验。如果失败，前一个内核会自己返回
+sysp.w.ups_on_battery	UPS 正在用电池供电，市电恢复前 NAS 可能无法重新开机。
+sysp.w.boot_trial	下次开机将试启动新内核。若启动失败，系统会自动回退到上一个内核。
 sysp.op.resync	重同步
 sysp.op.recovery	重建
-sysp.op.reshape	重塑
+sysp.op.reshape	阵列重整
 sysp.op.check	检查
 sysp.restart_scheduled	已安排重启
 sysp.shutdown_scheduled	已安排关机
@@ -6529,7 +6593,7 @@ pca.f.min_age	最短保留天数
 pca.f.min_age_help	避免因误改保留策略而过早删除备份。
 pca.f.alerts	警告
 pca.f.alert	备份逾期警告阈值（小时）
-pca.f.alert_help	电脑在备份到期时处于开机状态，但备份未运行，且距上次成功备份超过此时间时发出警告。已关机的电脑不计为逾期。填 0 可关闭通知。
+pca.f.alert_help	到了计划备份时间，电脑处于开机状态但备份未运行，且距上次成功备份已超过设定时长，系统会发出警告。关机时错过的备份不计为逾期。填 0 可关闭通知。
 pca.f.critical	严重逾期阈值（小时）
 pca.f.critical_help	备份持续逾期且超过此时间未成功时，标为严重逾期。一直离线的电脑只显示未联系时长。
 pca.download	下载
@@ -6543,9 +6607,9 @@ task.pcbackup.nightly	夜间维护电脑备份
 task.pcbackup.retention	应用电脑备份保留策略
 task.pcbackup.delete-group	删除电脑备份组
 nev.pcbackup.agent_late.title	已连续 {hours} 小时未收到来自 {device} 的备份
-nev.pcbackup.agent_late.body	{device} 开机时有备份到期，但任务未运行。距上次成功备份已超过 {hours} 小时。
+nev.pcbackup.agent_late.body	{device} 在计划备份时处于开机状态，但任务未运行。距上次成功备份已超过 {hours} 小时。
 nev.pcbackup.agent_critical.title	已连续 {hours} 小时未收到来自 {device} 的备份
-nev.pcbackup.agent_critical.body	{device} 开机时有备份到期，但任务未运行。已连续 {hours} 小时没有成功备份。
+nev.pcbackup.agent_critical.body	{device} 在计划备份时处于开机状态，但任务未运行。已连续 {hours} 小时没有成功备份。
 nev.pcbackup.agent_resumed.title	已恢复接收 {device} 的备份
 nev.pcbackup.agent_resumed.body	{device} 已生成新的有效备份版本。
 nev.pcbackup.agent_failed.title	{device} 备份失败
