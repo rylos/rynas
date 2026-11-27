@@ -66,7 +66,7 @@ impl CatalogText {
 
     pub(super) fn markdown(self, source: String) -> AnyView {
         let translated = self.signal(source);
-        (move || translated.with(|(text, lang)| crate::markdown::render(text, *lang))).into_any()
+        (move || translated.with(|(text, lang)| crate::markdown::render(text, lang))).into_any()
     }
 }
 
