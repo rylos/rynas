@@ -1558,6 +1558,8 @@ wol.progress.wait_agent	Сеть ответила через {time}. Ожида�
 wol.progress.agent_timeout	Сеть ответила через {time}, но клиент резервного копирования не ответил.
 wol.progress.sent_again	Пакеты пробуждения повторно отправлены через {ifaces} через {time}
 wol.progress.not_sent	Не удалось отправить пакет через {iface}: {error}
+wol.progress.no_iface	Нет сетевого интерфейса для отправки пакета пробуждения.
+wol.progress.no_iface_named	На этом NAS нет интерфейса {iface} для отправки пакета пробуждения.
 hw.system_temp	Температура системы
 sto.stripe	Кэш полос (записей)
 sto.kernel_default	Значение ядра по умолчанию (256)

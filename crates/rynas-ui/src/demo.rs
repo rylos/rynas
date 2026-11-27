@@ -325,7 +325,7 @@ pub fn wol_overview() -> wol::WolOverview {
         pc_device: pc.map(Into::into),
         ..WolDevice::default()
     };
-    let wake = |ago: u64, by: WolTrigger, end: WolWakeEnd, secs: Option<u32>| WolWake { at_ms: now - ago * min, by, end, secs, ifaces: vec!["eth0".into()], upid: None };
+    let wake = |ago: u64, by: WolTrigger, end: WolWakeEnd, secs: Option<u32>| WolWake { at_ms: now - ago * min, by, end, secs, ifaces: vec!["eth0".into()], upid: None, step: None };
     let user = || WolTrigger::User { name: "demo".into() };
     let view = |device: WolDevice, status: WolStatus, ip: &str, since: u64| WolDeviceView {
         device,
@@ -336,6 +336,7 @@ pub fn wol_overview() -> wol::WolOverview {
         send_iface: Some("eth0".into()),
         waking: None,
         waking_since_ms: None,
+        wake_step: None,
         history: Vec::new(),
         agent: None,
         warnings: Vec::new(),

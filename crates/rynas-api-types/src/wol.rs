@@ -187,6 +187,41 @@ pub struct WolWake {
     /// Task of the wake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upid: Option<String>,
+    /// The wake's last step (the detail of a failed send).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<WolWakeStep>,
+}
+
+/// A step of a running wake, as its task logs it: clients show these (translated) instead of
+/// the task's English lines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WolWakeStep {
+    /// The wake begins.
+    Starting { name: String, macs: Vec<String> },
+    /// The packets went out three times on these interfaces.
+    Sent { ifaces: Vec<String> },
+    /// The packets could not go out on this interface.
+    NotSent { iface: String, error: String },
+    /// No interface to send on (`iface`: the configured one, missing on this NAS).
+    NoInterface {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        iface: Option<String>,
+    },
+    /// The packets went out again on these interfaces, `secs` after the start.
+    SentAgain { ifaces: Vec<String>, secs: u32 },
+    /// The device was already on.
+    AlreadyOn,
+    /// Nothing can confirm the wake: no known address and no agent.
+    Unconfirmed,
+    /// The network answered after `secs`; the agent has not got in touch yet.
+    WaitAgent { secs: u32 },
+    /// The network answered after `secs`, the agent never got in touch.
+    AgentTimeout { secs: u32 },
+    /// The device answered after `secs`.
+    Online { secs: u32 },
+    /// No answer within `secs` (the timeout).
+    Timeout { secs: u32 },
 }
 
 /// The paired agent of a device, as it last reported.
@@ -232,6 +267,9 @@ pub struct WolDeviceView {
     /// When the running wake started (ms); `since_ms` stays the time of the last real status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waking_since_ms: Option<u64>,
+    /// The running wake's latest step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_step: Option<WolWakeStep>,
     /// Newest first, at most 20.
     #[serde(default)]
     pub history: Vec<WolWake>,
@@ -352,5 +390,16 @@ mod tests {
         let d: WolDevice = serde_json::from_str(r#"{"name":"pc","macs":["aa:bb:cc:dd:ee:f0"]}"#).unwrap();
         assert_eq!(d.port, 9);
         assert_eq!(d.wake_timeout_s, DEFAULT_WAKE_TIMEOUT_S);
+    }
+
+    #[test]
+    fn wake_step_wire() {
+        let s = WolWakeStep::SentAgain { ifaces: vec!["eth0".into()], secs: 30 };
+        assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"kind":"sent_again","ifaces":["eth0"],"secs":30}"#);
+        let n: WolWakeStep = serde_json::from_str(r#"{"kind":"no_interface"}"#).unwrap();
+        assert_eq!(n, WolWakeStep::NoInterface { iface: None });
+        // a wake stored before steps existed
+        let w: WolWake = serde_json::from_str(r#"{"at_ms":1,"by":{"kind":"backup"},"end":"online"}"#).unwrap();
+        assert_eq!(w.step, None);
     }
 }

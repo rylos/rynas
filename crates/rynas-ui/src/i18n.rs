@@ -2293,6 +2293,8 @@ dict! { BLOB, LENS;
     "wol.progress.agent_timeout" => "Network responded after {time}, but the backup client did not respond.";
     "wol.progress.sent_again" => "Wake packets sent again on {ifaces} after {time}";
     "wol.progress.not_sent" => "Could not send on {iface}: {error}";
+    "wol.progress.no_iface" => "No network interface to send the wake packet on.";
+    "wol.progress.no_iface_named" => "This NAS has no interface {iface} to send the wake packet on.";
     "hw.system_temp" => "System temperature";
     "sto.stripe" => "Stripe cache (entries)";
     "sto.kernel_default" => "Kernel default (256)";

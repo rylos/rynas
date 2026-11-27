@@ -1528,6 +1528,8 @@ wol.progress.wait_agent	La rete ha risposto dopo {time}. In attesa del client di
 wol.progress.agent_timeout	La rete ha risposto dopo {time}, ma il client di backup non ha risposto.
 wol.progress.sent_again	Pacchetti di riattivazione inviati di nuovo su {ifaces} dopo {time}
 wol.progress.not_sent	Impossibile inviare su {iface}: {error}
+wol.progress.no_iface	Nessuna interfaccia di rete da cui inviare il pacchetto di riattivazione.
+wol.progress.no_iface_named	Questo NAS non ha l'interfaccia {iface} da cui inviare il pacchetto di riattivazione.
 hw.system_temp	Temperatura di sistema
 sto.stripe	Stripe cache (voci)
 sto.kernel_default	Predefinito del kernel (256)
