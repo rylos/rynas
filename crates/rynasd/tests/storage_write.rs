@@ -8,6 +8,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use rynas_api_types::storage::{
     DiskDetail, DiskSettingsState, HealthAckResult, StoragePlan, StorageVolumes,
+    VolumeSettingsState,
 };
 use rynas_api_types::{ApiError, TaskStarted, TaskStatus, error_codes};
 use rynas_auth::ManualClock;
@@ -57,6 +58,16 @@ struct Env {
 }
 
 fn env() -> Env {
+    env_with(None)
+}
+
+/// [`env`]; with `system_label`, the root filesystem (md0, mounted at / and /home) carries
+/// that label and the mounted btrfs filesystems are listed (root and vol1).
+fn env_with(system_label: Option<&str>) -> Env {
+    let relabel = |s: String, from: &str, to: &str| match system_label {
+        Some(l) => s.replace(from, &to.replace("{}", l)),
+        None => s,
+    };
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
     std::fs::create_dir_all(root.join("etc")).unwrap();
@@ -68,8 +79,12 @@ fn env() -> Env {
     h.cmd(
         &format!("lsblk {}", LSBLK_ARGS.join(" ")),
         0,
-        &fixture("lsblk-nas.json"),
+        &relabel(fixture("lsblk-nas.json"), r#""label": "root""#, r#""label": "{}""#),
     );
+    if system_label.is_some() {
+        let show = fixture("btrfs-filesystem-show.txt").split("\n\n").take(2).collect::<Vec<_>>().join("\n\n");
+        h.cmd("btrfs filesystem show --mounted --raw", 0, &relabel(show, "Label: 'root'", "Label: '{}'"));
+    }
     h.file("/proc/mdstat", &fixture("proc-mdstat.txt"));
     h.file("/proc/self/mountinfo", &fixture("proc-self-mountinfo.txt"));
     h.cmd(
@@ -370,6 +385,32 @@ async fn disk_settings_are_staged() {
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = call(&e, "GET", "/v1/storage/disks/..%2Fx/settings", None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn the_system_volume_refuses_a_spin_down() {
+    // the root filesystem (md0, mounted at / and /home) under a label a volume can have, as
+    // on a NAS whose system shares the disks: the system writes there all the time
+    let e = env_with(Some("sys1"));
+    let (s, b) = call(&e, "GET", "/v1/storage/volumes/sys1/settings", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    assert!(serde_json::from_slice::<VolumeSettingsState>(&b).unwrap().system);
+    let (s, b) = call(&e, "GET", "/v1/storage/volumes/vol1/settings", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    assert!(!serde_json::from_slice::<VolumeSettingsState>(&b).unwrap().system);
+    let url = "/v1/storage/volumes/sys1/settings";
+    let (s, b) = call(&e, "PUT", url, Some(json!({"standby": {"standby_s": 1200}}))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert!(err(&b).message.contains("holds the system"), "{}", err(&b).message);
+    assert!(e.ops.config.pending("alice").unwrap().changes.is_empty());
+    // taking a delay away is not refused for that reason (here: no hard disk at all)
+    let (s, b) = call(&e, "PUT", url, Some(json!({"standby": {}}))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert!(!err(&b).message.contains("holds the system"), "{}", err(&b).message);
+    // a data disk is not the system's
+    let (s, b) = call(&e, "GET", "/v1/storage/disks/sda/settings", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    assert!(!serde_json::from_slice::<DiskSettingsState>(&b).unwrap().system);
 }
 
 #[tokio::test]

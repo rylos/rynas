@@ -6800,6 +6800,7 @@ sp.journal_default	Limite del registro: il predefinito del sistema (10 % del suo
 sto.vol_settings	Impostazioni del volume
 sto.vol_standby	Ferma i dischi rigidi dopo
 sto.vol_standby_hint	Vale per ogni disco rigido di questo volume: {disks}.
+sto.vol_standby_system	Questo volume contiene il sistema, che ci scrive di continuo: i suoi dischi non vengono fermati.
 sto.flex_standby	Il volume si ferma quando nessuno lo legge o lo scrive; ogni accesso di solito risveglia tutti i suoi dischi, perché la prima fascia li comprende tutti e contiene i metadati del file system.
 sto.standby_mixed	Diverso per ogni disco
 sto.awake_writes	Docker scrive qui di continuo (log dei container, dati delle app): questi dischi non si fermeranno.

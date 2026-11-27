@@ -6756,6 +6756,7 @@ apps.ph.confirm	确认此账户
 sto.vol_settings	存储卷设置
 sto.vol_standby	硬盘空闲后停转
 sto.vol_standby_hint	适用于此存储卷的每块硬盘：{disks}。
+sto.vol_standby_system	此存储卷包含系统，系统一直在向其写入：其硬盘不会停转。
 sto.flex_standby	没有任何读写时，存储卷会停转；任何访问通常都会唤醒其所有硬盘，因为第一层覆盖每块硬盘，并保存文件系统的元数据。
 sto.standby_mixed	各硬盘设置不同
 sto.awake_writes	Docker 一直在这里写入（容器日志、应用数据）：这些硬盘不会停转。

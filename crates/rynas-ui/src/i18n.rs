@@ -2048,6 +2048,7 @@ dict! { BLOB, LENS;
     "sto.vol_settings" => "Volume settings";
     "sto.vol_standby" => "Spin down hard disks after";
     "sto.vol_standby_hint" => "Applies to every hard disk of this volume: {disks}.";
+    "sto.vol_standby_system" => "This volume holds the system, which writes to it all the time: its disks are not spun down.";
     "sto.flex_standby" => "The volume spins down when nothing reads or writes it; any access usually wakes all its disks, because the first tier spans every disk and holds the file system's metadata.";
     "sto.standby_mixed" => "Different on each disk";
     "sto.awake_writes" => "Docker writes here all the time (container logs, app data): these disks will not spin down.";

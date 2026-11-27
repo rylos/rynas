@@ -528,6 +528,11 @@ impl VolumeRef {
     fn mounted(&self) -> Option<&BtrfsFilesystem> {
         self.fs.as_ref().filter(|f| f.mountpoint.is_some())
     }
+
+    /// The filesystem holds the running system (one of its subvolumes is mounted at `/`).
+    fn holds_system(&self) -> bool {
+        self.fs.as_ref().is_some_and(|f| f.mountpoints.iter().any(|m| m == "/"))
+    }
 }
 
 fn resolve(inv: &Inventory, doc: &StorageVolumes, label: &str) -> Res<VolumeRef> {
@@ -1571,6 +1576,7 @@ fn volume_settings_state(
         standby_s: if standby_mixed { None } else { delays.first().copied().flatten() },
         standby_mixed,
         blockers: h.blockers.clone(),
+        system: v.holds_system(),
         volume: v.label.clone(),
         applied,
         pending,
@@ -1638,6 +1644,13 @@ async fn volume_settings_put(
             }
         }
         if let Some(sb) = req.standby {
+            // the system writes to its volume all the time: a spin-down only cycles the disks
+            // up and down (wear); taking a delay away stays possible
+            if v.holds_system() && sb.standby_s.is_some_and(|n| n > 0) {
+                return Err(conflict(format!(
+                    "volume {name} holds the system, which writes to it all the time: its disks are not spun down"
+                )));
+            }
             if h.hdds.is_empty() {
                 return Err(conflict(format!("volume {name} has no hard disk to spin down (or it is not mounted)")));
             }
@@ -1687,11 +1700,18 @@ fn disk_blockers(s: &StorageOps, d: &DiskSummary) -> Option<StandbyBlockers> {
         .map(|m| crate::disk_standby::blockers(&s.ops, &m))
 }
 
+/// The hard disk `d` holds the running system (it is under the filesystem mounted at `/`).
+/// Blocking: lsblk and mountinfo.
+fn disk_on_system(s: &StorageOps, d: &DiskSummary) -> bool {
+    d.kind == DiskKind::Hdd && s.storage.mount_hdds("/").contains(&d.name)
+}
+
 fn disk_settings_state(
     c: &Config,
     user: &str,
     d: &DiskSummary,
     blockers: Option<StandbyBlockers>,
+    system: bool,
 ) -> Result<DiskSettingsState, String> {
     let (eff, cur, staged) = tuning_for(c, user)?;
     let find = |t: &StorageTuning| {
@@ -1722,6 +1742,7 @@ fn disk_settings_state(
             .ok()
             .and_then(|s| s.trim().parse().ok()),
         blockers,
+        system,
     })
 }
 
@@ -1745,7 +1766,7 @@ async fn disk_settings_get(
     let c = s.config().clone();
     tokio::task::spawn_blocking(move || {
         let b = disk_blockers(&s, &d);
-        disk_settings_state(&c, &user, &d, b)
+        disk_settings_state(&c, &user, &d, b, disk_on_system(&s, &d))
     })
     .await
     .map_err(Error::internal)?
@@ -1795,7 +1816,7 @@ async fn disk_settings_put(
         let value = serde_json::to_value(doc).map_err(Error::internal)?;
         c.stage(&user, TUNING_KEY, Some(value))?;
         let b = disk_blockers(&s, &d);
-        disk_settings_state(&c, &user, &d, b).map_err(Error::internal)
+        disk_settings_state(&c, &user, &d, b, disk_on_system(&s, &d)).map_err(Error::internal)
     })
     .await
     .map_err(Error::internal)?
