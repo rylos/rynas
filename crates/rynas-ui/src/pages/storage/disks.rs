@@ -724,6 +724,8 @@ fn SettingsTab(
                                 <span class="muted small">{if hdd { t("sto.standby_hint") } else { t("sto.hdd_only") }}</span>
                             </label>
                             {st.blockers.clone().map(|b| move || standby.with(|v| !v.is_empty() && v != "0").then(|| awake_notes(b.clone())))}
+                            // a disk of the system's volume: the system writes there all the time
+                            {st.system.then_some(move || standby.with(|v| !v.is_empty() && v != "0").then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { <span class="grow">{tr("sto.vol_standby_system")}</span> }.into_any())))}
                             <label class="field">
                                 <span class="field-label">{tr("sto.apm")}</span>
                                 <select class="input" disabled=!hdd prop:value=move || apm.get() on:change=move |ev| apm.set(event_target_value(&ev))>

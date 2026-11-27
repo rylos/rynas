@@ -283,6 +283,12 @@ differ). rynasd's standby watcher (`rynasd::disk_standby`) counts block I/O in
 `/proc/diskstats` every 30 s and sends ATA STANDBY IMMEDIATE once a disk had none for its
 delay, also to drives that ignore their own `hdparm -S` timer.
 
+The volume that holds the running system (mounted at `/`, e.g. a root btrfs RAID1 on the two
+hard disks of a small QNAP) gets no spin-down choice: the system writes there all the time, so
+its disks would never stay down or would cycle up and down (wear). The server refuses a
+per-volume delay there (409); the per-disk setting stays for experts, with a warning on the
+disk's Settings tab when a delay is set.
+
 ### Recommended layout
 
 - **An SSD volume** (or the system volume on SSD/NVMe) for the system, Docker (data root,

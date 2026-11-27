@@ -1725,9 +1725,12 @@ fn VolSettings(id: String, raid56: bool, tiered: bool) -> impl IntoView {
             let mem = st.proposed_memory_bytes;
             let hdds = (!st.hdds.is_empty()).then(|| st.hdds.join(", "));
             let blockers = st.blockers.clone();
+            // the system writes to its own volume all the time: no spin-down offered there
+            let system = st.system;
             card(view! {
                 {st.pending.is_some().then(|| view! { {ui::note(Tone::Info, icons::HISTORY, view! { {tr("sto.pending_note")} }.into_any())} })}
-                {hdds.map(|disks| view! {
+                {hdds.as_ref().filter(|_| system).map(|_| view! { <p class="muted small">{tr("sto.vol_standby_system")}</p> })}
+                {hdds.filter(|_| !system).map(|disks| view! {
                     <label class="field">
                         <span class="field-label">{tr("sto.vol_standby")}</span>
                         <select class="input" prop:value=move || standby.get() on:change=move |ev| standby.set(event_target_value(&ev))>
@@ -1758,7 +1761,7 @@ fn VolSettings(id: String, raid56: bool, tiered: bool) -> impl IntoView {
                     </label>
                 })}
                 {form_error(error)}
-                <div class="card-actions"><button class="btn primary sm" type="button" disabled=move || busy.get() on:click=save>{spinner(busy)}{tr("save")}</button></div>
+                {(raid56 || !system).then(|| view! { <div class="card-actions"><button class="btn primary sm" type="button" disabled=move || busy.get() on:click=save>{spinner(busy)}{tr("save")}</button></div> })}
             }
             .into_any())
         }

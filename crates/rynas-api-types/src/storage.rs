@@ -2059,6 +2059,10 @@ pub struct DiskSettingsState {
     /// A hard disk of a mounted volume: what keeps that volume awake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blockers: Option<StandbyBlockers>,
+    /// A hard disk of the volume holding the running system (`/`): the system writes there
+    /// all the time, a spin-down only makes it cycle up and down.
+    #[serde(default)]
+    pub system: bool,
 }
 
 /// `PUT /api/v1/storage/volumes/{name}/settings`.
@@ -2107,6 +2111,10 @@ pub struct VolumeSettingsState {
     /// What keeps the volume awake (`None`: no hard disk).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blockers: Option<StandbyBlockers>,
+    /// The volume holds the running system (mounted at `/`): its disks are not spun down and
+    /// the spin-down choice is refused.
+    #[serde(default)]
+    pub system: bool,
 }
 
 /// An entry of `GET /api/v1/storage/volumes/{name}/subvolumes`: the subvolumes directly
