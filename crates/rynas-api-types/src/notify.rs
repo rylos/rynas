@@ -684,34 +684,6 @@ pub fn event_text(
     })
 }
 
-/// Recognize stored backup events produced before the scheduler assigned event codes.
-fn legacy_backup_run(n: &Notification) -> Option<(&'static str, &str)> {
-    if !n.code.is_empty() || n.source != "backup" {
-        return None;
-    }
-    let key = n.key.strip_prefix("backup:job:")?;
-    let name = if n.state == EventState::Oneshot { key.strip_suffix(":ok")? } else { key };
-    if name.is_empty() {
-        return None;
-    }
-    let suffix = n.title.strip_prefix("Backup job ")?.strip_prefix(name)?;
-    let code = match (n.state, suffix) {
-        (EventState::Firing, s) if s.starts_with(" failed (") && s.ends_with(')') => "backup.job_failed",
-        (EventState::Resolved, " succeeded") => "backup.job_ok",
-        (EventState::Oneshot, " finished") => "backup.job_finished",
-        _ => return None,
-    };
-    Some((code, name))
-}
-
-fn legacy_run_result(body: &str) -> Option<(&str, Option<&str>, Option<&str>)> {
-    let (result, detail) = body
-        .strip_prefix("Result: ")?
-        .strip_suffix("). See the task history for the output.")?
-        .split_once(" (")?;
-    Some((result, detail.strip_prefix("exit code "), detail.strip_prefix("killed by SIG")))
-}
-
 fn run_result(
     result: &str,
     exit_code: Option<&str>,
@@ -745,30 +717,19 @@ pub fn notification_text(
     if part == "body" && n.body_format == BodyFormat::Log {
         return None;
     }
-    let legacy = legacy_backup_run(n);
-    let code = legacy.map_or(n.code.as_str(), |(code, _)| code);
-    let run_body = part == "body" && code.rsplit_once('_').is_some_and(|(family, outcome)| {
+    let run_body = part == "body" && n.code.rsplit_once('_').is_some_and(|(family, outcome)| {
         matches!(family, "backup.job" | "snapshot.job" | "sched.task")
             && matches!(outcome, "failed" | "ok" | "finished")
     });
-    if legacy.is_none() && !run_body {
-        return event_text(code, part, &n.fields, lookup, comma);
-    }
-
+    let result = n.fields.get("result").filter(|s| run_body && !s.is_empty());
+    let Some(result) = result else {
+        return event_text(&n.code, part, &n.fields, lookup, comma);
+    };
+    let field = |k: &str| n.fields.get(k).map(String::as_str);
+    let formatted = run_result(result, field("exit_code"), field("signal"), lookup);
     let mut fields = n.fields.clone();
-    if let Some((_, name)) = legacy {
-        fields.entry("name".into()).or_insert_with(|| name.to_owned());
-    }
-    if run_body {
-        let result = fields.get("result").filter(|s| !s.is_empty()).map(|s| {
-            (s.as_str(), fields.get("exit_code").map(String::as_str), fields.get("signal").map(String::as_str))
-        }).or_else(|| legacy_run_result(&n.body));
-        if let Some((result, exit_code, signal)) = result {
-            let formatted = run_result(result, exit_code, signal, lookup);
-            fields.insert("result".into(), formatted);
-        }
-    }
-    event_text(code, part, &fields, lookup, comma)
+    fields.insert("result".into(), formatted);
+    event_text(&n.code, part, &fields, lookup, comma)
 }
 
 #[cfg(test)]
@@ -852,6 +813,31 @@ mod tests {
             event_text("t.f", "title", &fields(&[("type", "x.y")]), &dict, false).as_deref(),
             Some("Failed: x.y")
         );
+    }
+
+    /// The run result comes from the fields; a notification without a code is never read
+    /// from its English text (notify.db gives the old ones their code once).
+    #[test]
+    fn run_results_from_fields_only() {
+        let dict = |k: &str| -> Option<&'static str> {
+            Some(match k {
+                "nev.backup.job_failed.body" => "Result: {result}.",
+                "sch.run.exit" => "exit code {code}",
+                _ => return None,
+            })
+        };
+        let mut n = Notification {
+            code: "backup.job_failed".into(),
+            fields: fields(&[("name", "cs"), ("result", "exit-code"), ("exit_code", "1")]),
+            body: "Result: exit-code (exit code 1). See the task history for the output.".into(),
+            ..Default::default()
+        };
+        assert_eq!(notification_text(&n, "body", &dict, false).as_deref(), Some("Result: exit code 1."));
+        n.code.clear();
+        n.fields.clear();
+        n.source = "backup".into();
+        n.key = "backup:job:cs".into();
+        assert_eq!(notification_text(&n, "body", &dict, false), None);
     }
 
     /// A target's language is any code of the table, sent as the plain string; the stored
