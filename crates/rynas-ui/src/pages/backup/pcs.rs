@@ -38,7 +38,7 @@ use crate::form::{In, SaveBar, area_field, form_error, number_field, save_bar_wi
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use rynas_api_types::pcagent::{PcDevice, PcMethod};
-use crate::pages::snapshots::retention_text;
+use crate::pages::snapshots::retention_summary;
 use crate::tasks;
 use crate::toast::toast;
 use crate::ui::{self, Confirm, DlgKind, EmptyState, Folds, Remote, Tone, code_block, kv, kv_act, when};
@@ -446,34 +446,10 @@ fn size_text(z: Option<SnapshotSize>) -> String {
         .unwrap_or_else(|| ui::DASH.into())
 }
 
-/// A retention age as written in the settings ("1d", "12h", "2w") in words with the right
-/// plural ("1 day", "12 hours"); anything else as written.
-fn age_text(raw: &str) -> String {
-    let s = raw.trim();
-    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
-    let Ok(n) = num.parse::<u64>() else { return s.to_string() };
-    let one = n == 1;
-    let k = match unit {
-        "h" if one => "pcb.age.h1",
-        "h" => "pcb.age.h",
-        "d" if one => "pcb.age.d1",
-        "d" => "pcb.age.d",
-        "w" if one => "pcb.age.w1",
-        "w" => "pcb.age.w",
-        "m" if one => "pcb.age.m1",
-        "m" => "pcb.age.m",
-        "y" if one => "pcb.age.y1",
-        "y" => "pcb.age.y",
-        _ => return s.to_string(),
-    };
-    tf(k, &[("n", &n.to_string())])
-}
-
 /// Who deletes old snapshots, in a sentence.
 fn rules_text(p: &PcTarget) -> String {
     if p.retention.owner == RetentionOwner::Nas {
-        let g = &p.retention.gfs;
-        return tf("bkpc.ret.nas", &[("counts", &retention_text(g)), ("min", &age_text(&g.min))]);
+        return tf("bkpc.ret.nas", &[("rule", &retention_summary(&p.retention.gfs))]);
     }
     if !p.delete.allowed {
         return t("bk.rules.off").to_string();
@@ -868,7 +844,7 @@ impl Fields {
                     .into_any()
                 } else {
                     let r = self.retention().gfs;
-                    view! { <p class="field-help">{tf("snap.preset_keeps", &[("counts", &retention_text(&r)), ("min", &age_text(&r.min))])}</p> }.into_any()
+                    view! { <p class="field-help">{retention_summary(&r)}</p> }.into_any()
                 }}
             </Show>
             <Show when=move || !nas()>

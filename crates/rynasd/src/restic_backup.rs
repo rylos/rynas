@@ -345,7 +345,7 @@ fn take_host_key(s: &ResticSvc, host: &str, port: u16) -> Option<String> {
     k.remove(&format!("{host}:{port}")).map(|(v, _)| v)
 }
 
-/// The fingerprints of `known_hosts` lines (`ssh-keygen -l`), for the test's message.
+/// The fingerprints of `known_hosts` lines (`ssh-keygen -l`), for the test result.
 fn fingerprints(lines: &str) -> String {
     let Ok(dir) = tempfile::tempdir() else {
         return String::new();
@@ -894,6 +894,7 @@ async fn test(
             host_key,
         }) => {
             let mut message = String::new();
+            let mut host_key_fingerprints = None;
             if let (Destination::Sftp { host, port, .. }, Some(k)) = (&dest, host_key) {
                 let fp = tokio::task::spawn_blocking({
                     let k = k.clone();
@@ -904,6 +905,7 @@ async fn test(
                 message = format!(
                     "server host key {fp}: compare it with the server's own; saving the job pins it"
                 );
+                host_key_fingerprints = Some(fp);
                 let mut seen = s.host_keys.lock().unwrap_or_else(|p| p.into_inner());
                 seen.retain(|_, (_, at)| at.elapsed() < KEY_TTL);
                 seen.insert(format!("{host}:{port}"), (k, Instant::now()));
@@ -912,17 +914,20 @@ async fn test(
                 outcome,
                 message,
                 snapshots,
+                host_key_fingerprints,
             }
         }
         Ok(_) => TestResult {
             outcome: TestOutcome::Failed,
             message: "unexpected answer".into(),
             snapshots: None,
+            host_key_fingerprints: None,
         },
         Err(e) => TestResult {
             outcome: TestOutcome::Failed,
             message: e,
             snapshots: None,
+            host_key_fingerprints: None,
         },
     }))
 }

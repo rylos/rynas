@@ -25,7 +25,7 @@ export const KEYS = [
   ["Ctrl+C / Ctrl+X / Ctrl+V", "files.settings.copy_cut_paste"], ["Ctrl+A", "files.common.select_all"], ["Ctrl+Shift+I", "files.common.invert_selection"],
   ["+ / −", "files.select.select_deselect_pattern"], ["Ctrl+Shift+D", "files.select.select_differences_panes"], ["Ctrl+Z", "files.undo.undo_last"],
   ["Insert", "files.settings.select_move_on"], ["F2", "files.common.rename"], ["Ctrl+Shift+N", "files.common.new_folder"],
-  ["Del", "files.common.move_recycle_bin"], ["Shift+Del", "files.common.delete_permanently"], ["Ctrl+D", "files.common.add_favorites"],
+  ["Del", "files.settings.delete_selection"], ["Shift+Del", "files.common.delete_permanently"], ["Ctrl+D", "files.common.add_favorites"],
   ["Ctrl+Shift+C", "files.common.copy_path"], ["Ctrl+U", "files.settings.upload_files"], ["Ctrl+J", "files.common.transfers"], ["Ctrl+,", "files.common.settings"],
   ["Letters", "files.settings.jump_name_starting_like"], ["j k h l, gg, G", "files.settings.vim_keys_on"],
 ];

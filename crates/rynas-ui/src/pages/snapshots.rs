@@ -29,14 +29,44 @@ pub fn valid_job_name(n: &str) -> bool {
     !b.is_empty() && b.len() <= 48 && b[0].is_ascii_alphanumeric() && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-')
 }
 
-/// GFS counts in short form: "24 h · 14 d · 8 w · 12 m".
-pub fn retention_text(r: &Retention) -> String {
-    let parts: Vec<String> = [(r.hourly, "snap.u.h"), (r.daily, "snap.u.d"), (r.weekly, "snap.u.w"), (r.monthly, "snap.u.m"), (r.yearly, "snap.u.y")]
+/// Explain the minimum guarantee and the periodic retention, when any.
+pub fn retention_summary(r: &Retention) -> String {
+    let min = r.min.trim();
+    if min == "all" {
+        return t("snap.ret.all").to_string();
+    }
+    let counts = [(r.hourly, "snap.u.h"), (r.daily, "snap.u.d"), (r.weekly, "snap.u.w"), (r.monthly, "snap.u.m"), (r.yearly, "snap.u.y")]
         .into_iter()
         .filter(|(n, _)| *n > 0)
         .map(|(n, k)| format!("{n} {}", t(k)))
-        .collect();
-    if parts.is_empty() { t("snap.ret.none").to_string() } else { parts.join(" · ") }
+        .collect::<Vec<_>>()
+        .join(" · ");
+    match (matches!(min, "latest" | "no" | ""), counts.is_empty()) {
+        (true, true) => t("snap.ret.none").to_string(),
+        (true, false) => tf("snap.ret.latest_counts", &[("counts", &counts)]),
+        (false, true) => tf("snap.ret.age_only", &[("min", &retention_age(min))]),
+        (false, false) => tf("snap.preset_keeps", &[("counts", &counts), ("min", &retention_age(min))]),
+    }
+}
+
+/// Turn a retention age such as "1d" into localized units.
+fn retention_age(raw: &str) -> String {
+    let (num, unit) = raw.split_at(raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len()));
+    let Ok(n) = num.parse::<u64>() else { return raw.to_string() };
+    let k = match (unit, n == 1) {
+        ("h", true) => "pcb.age.h1",
+        ("h", false) => "pcb.age.h",
+        ("d", true) => "pcb.age.d1",
+        ("d", false) => "pcb.age.d",
+        ("w", true) => "pcb.age.w1",
+        ("w", false) => "pcb.age.w",
+        ("m", true) => "pcb.age.m1",
+        ("m", false) => "pcb.age.m",
+        ("y", true) => "pcb.age.y1",
+        ("y", false) => "pcb.age.y",
+        _ => return raw.to_string(),
+    };
+    tf(k, &[("n", &n.to_string())])
 }
 
 fn preset_code(p: Option<RetentionPreset>) -> &'static str {
@@ -762,7 +792,7 @@ fn job_row(
             .into_any()),
             ui::cell("snap.col.retention", "", view! {
                 <div class="cell-main">
-                    <span class="tnum">{retention_text(&v.job.retention)}</span>
+                    <span class="tnum">{retention_summary(&v.job.retention)}</span>
                     <span class="cell-sub">{v.job.retention.preset.map(|p| t(match p { RetentionPreset::Standard => "snap.preset.standard", RetentionPreset::Light => "snap.preset.light", RetentionPreset::Long => "snap.preset.long" }))}</span>
                 </div>
             }
@@ -990,7 +1020,7 @@ fn job_editor(init: Option<SnapshotJobView>, close: Callback<()>) -> AnyView {
                 }
                 .into_any()
             } else {
-                view! { <p class="field-help">{move || tf("snap.preset_keeps", &[("counts", &d.with(|j| retention_text(&j.retention))), ("min", &d.with(|j| j.retention.min.clone()))])}</p> }.into_any()
+                view! { <p class="field-help">{move || d.with(|j| retention_summary(&j.retention))}</p> }.into_any()
             }}
             <div>
                 <button type="button" class="btn ghost sm" disabled=move || previewing.get() on:click=run_preview>
@@ -1118,5 +1148,21 @@ mod tests {
         assert_eq!(preset_code(Some(RetentionPreset::Light)), "light");
         assert_eq!(preset_code(None), "custom");
         assert_eq!(deletion_reason(SnapshotDeletion::Allowed), None);
+    }
+
+    #[test]
+    fn retention_summary_distinguishes_minimum_and_periods() {
+        let mut r = RetentionPreset::Light.retention();
+        assert!(retention_summary(&r).starts_with("Always keeps the latest snapshot"));
+        r.min = "all".into();
+        assert_eq!(retention_summary(&r), "Keeps all snapshots.");
+        r.min = "1d".into();
+        assert!(retention_summary(&r).contains("1 day"));
+        r.hourly = 0;
+        r.daily = 0;
+        r.weekly = 0;
+        assert_eq!(retention_summary(&r), "Keeps every snapshot younger than 1 day.");
+        r.min = "latest".into();
+        assert_eq!(retention_summary(&r), "Latest only");
     }
 }

@@ -491,6 +491,43 @@ pub(crate) fn sleep_menu(w: Wol, id: String) -> AnyView {
     .into_any()
 }
 
+/// Translate the progress lines that the Wake task itself emits. Unrecognized diagnostics
+/// still read as written by the task; the task log retains all of its original lines.
+fn wake_progress_text(raw: &str) -> Option<String> {
+    let time = |s: &str| s.parse::<u64>().ok().map(i18n::elapsed);
+    if let Some((name, macs)) = raw.strip_prefix("Waking ").and_then(|s| s.strip_suffix(')')).and_then(|s| s.rsplit_once(" (")) {
+        return Some(tf("wol.progress.starting", &[("name", name), ("macs", macs)]));
+    }
+    if let Some(ifaces) = raw.strip_prefix("Sent on ").and_then(|s| s.strip_suffix(" (3×)")) {
+        return Some(tf("wol.progress.sent", &[("ifaces", ifaces)]));
+    }
+    if let Some(s) = raw.strip_prefix("Network up after ").and_then(|s| s.strip_suffix(" s, waiting for the agent")) {
+        return Some(tf("wol.progress.wait_agent", &[("time", &time(s)?)]));
+    }
+    if let Some(s) = raw.strip_prefix("The network answered after ").and_then(|s| s.strip_suffix(" s but the agent did not get in touch")) {
+        return Some(tf("wol.progress.agent_timeout", &[("time", &time(s)?)]));
+    }
+    if let Some((ifaces, s)) = raw.strip_prefix("Sent again on ").and_then(|s| s.strip_suffix(" s")).and_then(|s| s.rsplit_once(" after ")) {
+        return Some(tf("wol.progress.sent_again", &[("ifaces", ifaces), ("time", &time(s)?)]));
+    }
+    if let Some((iface, error)) = raw.strip_prefix("Not sent on ").and_then(|s| s.split_once(": ")) {
+        return Some(tf("wol.progress.not_sent", &[("iface", iface), ("error", error)]));
+    }
+    if let Some(s) = raw.strip_prefix("Online after ").and_then(|s| s.strip_suffix(" s")) {
+        return Some(tf("wol.end.online", &[("time", &time(s)?)]));
+    }
+    if let Some(s) = raw.strip_prefix("No answer within ").and_then(|s| s.strip_suffix(" s")) {
+        return Some(tf("wol.end.timeout", &[("time", &time(s)?)]));
+    }
+    if raw.ends_with(" is already on") {
+        return Some(t("wol.end.already_on").into());
+    }
+    if raw == "Nothing can confirm the wake: the device has no known address and no agent" {
+        return Some(t("wol.end.unconfirmed").into());
+    }
+    None
+}
+
 pub(crate) fn wake_line(w: Wol, id: String, open: Option<Callback<()>>) -> AnyView {
     let id = StoredValue::new(id);
     let state = Memo::new(move |_| {
@@ -503,7 +540,12 @@ pub(crate) fn wake_line(w: Wol, id: String, open: Option<Callback<()>>) -> AnyVi
         let (run, end) = state.get()?;
         let close = move |_| w.dismiss(&id.get_value());
         let x = view! { <button type="button" class="icon-btn sm" aria-label=tr("close") on:click=close><Icon icon=icons::X size=14 /></button> };
-        let line = run.line.clone().map(|l| view! { <span lang="en" class="wol-task-line">{l}</span> });
+        let line = run.line.map(|raw| {
+            let localized = wake_progress_text(&raw);
+            let lang = localized.is_none().then_some("en");
+            let shown = localized.unwrap_or_else(|| raw.clone());
+            view! { <span title=raw lang=lang class="wol-task-line">{shown}</span> }
+        });
         match end {
             // running: the task's last line (the seconds are on the button)
             None if !run.done => line.map(|l| view! { <p class="wol-progress small" role="status">{l}</p> }.into_any()),

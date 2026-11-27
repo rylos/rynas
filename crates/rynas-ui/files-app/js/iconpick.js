@@ -9,6 +9,7 @@ import { esc, baseName } from "./format.js";
 import { h } from "./ui.js";
 import { mount, realTarget, place, bounds } from "./host.js";
 import { ICON_CHOICES, ICON_COLORS, folderIcon, autoFolderGlyph } from "./icons.js";
+import { ICON_LABEL_KEYS } from "./icon-labels.js";
 
 let current = null;
 
@@ -52,7 +53,12 @@ export function pickIcon(at, path) {
     const g = shown()?.g;
     const c = shown()?.c || "";
     const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-    const list = ICON_CHOICES.filter(([, w]) => words.every((q) => w.includes(q)));
+    const list = [];
+    for (const [glyph, keywords] of ICON_CHOICES) {
+      const label = Object.hasOwn(ICON_LABEL_KEYS, keywords) ? t(ICON_LABEL_KEYS[keywords]) : keywords;
+      const search = (keywords + " " + label).toLowerCase();
+      if (words.every((word) => search.includes(word))) list.push([glyph, label]);
+    }
     el.querySelector(".ip-grid").innerHTML = list.length
       ? list.map(([gl, w]) => `<button type="button" class="gi ${c ? "ic-" + c : "ez-dir"} ${gl === g ? "on" : ""}" data-g="${gl}" title="${esc(w)}">${gl}</button>`).join("")
       : `<div class="hint">${t("files.iconpick.no_icon_found")}</div>`;

@@ -21,7 +21,7 @@ use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::schedule::ScheduleEditor;
 use crate::pages::scheduler::{trigger_text};
-use crate::pages::snapshots::retention_text;
+use crate::pages::snapshots::retention_summary;
 use crate::tasks;
 use crate::toast::toast;
 use crate::ui::{self, Confirm, EmptyState, ErrorBox, Remote, Skeleton, Tone, confirm, drawer};
@@ -706,7 +706,7 @@ fn editor(init: Option<ReplicaView>, jobs: Remote<Vec<SnapshotJobView>>, close: 
                 {number_field("snap.f.yearly", None, y, set_y, 0, 1000)}
                 {text_field("snap.f.min", min, set_min, none, In { mono: true, help: Some("snap.f.min_help"), ..In::default() })}
             </div>
-            <p class="field-help">{move || tf("snap.preset_keeps", &[("counts", &d.with(|f| retention_text(&f.retention))), ("min", &d.with(|f| f.retention.min.clone()))])}</p>
+            <p class="field-help">{move || d.with(|f| retention_summary(&f.retention))}</p>
             <h3 class="form-section">{tr("repl.sec.transfer")}</h3>
             {move || is_ssh.get().then(|| segmented("repl.f.compress", COMPRESS, compress, set_compress))}
             {number_field("repl.f.rate", Some("repl.f.rate_help"), rate, set_rate, 0, 10_000_000)}

@@ -295,6 +295,7 @@ fn update_dialog(stack: String, close: Callback<()>) -> AnyView {
         let form = move || {
             detail.get().map(|d| {
                 SchemaForm {
+                    texts: super::texts::CatalogText::new(&d.card.id),
                     form: StoredValue::new(d.form.clone()),
                     overlays: StoredValue::new(d.overlays.clone()),
                     values,

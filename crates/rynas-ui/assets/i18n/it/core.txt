@@ -132,6 +132,12 @@ nev.task.succeeded.title	Attività riuscita: {type}
 nev.task.partial.title	Attività completata solo in parte: {type}
 nev.config.apply_failed.title	Applicazione della configurazione non riuscita
 nev.config.apply_ok.title	Applicazione della configurazione riuscita
+nev.backup.job_failed.title	Processo di backup «{name}» non riuscito
+nev.backup.job_failed.body	Risultato: {result}. Consulta la cronologia delle attività per l’output.
+nev.backup.job_ok.title	Processo di backup «{name}» riuscito
+nev.backup.job_ok.body	Risultato: {result}. Consulta la cronologia delle attività per l’output.
+nev.backup.job_finished.title	Processo di backup «{name}» terminato
+nev.backup.job_finished.body	Risultato: {result}. Consulta la cronologia delle attività per l’output.
 nev.sched.task_failed.title	Attività {name} non riuscita
 nev.sched.task_failed.body	Esito: {result}. L'output è nella cronologia dell'attività.
 nev.sched.task_ok.title	Attività {name} riuscita
@@ -1483,6 +1489,46 @@ sto.bt.boot	Dopo l'avvio
 sto.bt.auto	Monta automaticamente in modalità degradata dopo l'avvio
 sto.bt.auto_text	Se all'avvio manca un dispositivo e ogni chunk ha ancora una copia, il volume viene montato in modalità degradata così resta disponibile, e gli amministratori vengono avvisati. Se disattivato, attende un amministratore.
 sto.proposal	Proposta di rynas
+sto.md.member_status	{device} ({role})
+sto.md.clean	Nessuna scrittura in sospeso
+sto.md.idle	Attivo, inattivo al momento
+sto.md.read_auto	Sola lettura fino alla prima scrittura
+sto.md.write_pending	Scritture in sospeso
+sto.md.inactive	Inattivo
+sto.md.suspended	Sospeso
+sto.md.clear	Non configurato
+sto.md.resyncing	Risincronizzazione in corso
+sto.quota.qgroups	Gruppi di quote tradizionali (qgroups)
+sto.quota.squota	Quote semplificate (squota)
+sto.usage.boot_flash	Unità flash di avvio
+sto.usage.swap	Spazio di swap
+sto.usage.luks_locked	LUKS (bloccato)
+sto.usage.luks_unlocked	LUKS {name} (sbloccato)
+sto.usage.mount	Montato in {path}
+sto.usage.filesystem	{fs} montato in {path}
+sto.usage.md_member	Membro di {name} (RAID non assemblato)
+sto.usage.md_unknown	Membro di un array RAID non assemblato
+sto.usage.partitions.one	{n} partizione
+sto.usage.partitions.other	{n} partizioni
+sto.stlog.short_offline	Autotest breve offline
+sto.stlog.long_offline	Autotest esteso offline
+sto.stlog.conveyance	Autotest di trasporto offline
+sto.stlog.selective	Autotest selettivo offline
+sto.stlog.passed	Completato senza errori
+sto.stlog.aborted	Interrotto dall’host
+sto.stlog.interrupted	Interrotto da un ripristino dell’host
+sto.stlog.read_failure	Completato con errore di lettura
+sto.stlog.unknown_failure	Completato con un errore sconosciuto
+sto.stlog.electrical_failure	Completato con un guasto elettrico
+sto.stlog.seek_failure	Completato con un guasto al servo o al posizionamento
+sto.stlog.fatal	Errore di autotest grave o sconosciuto
+wol.progress.starting	Riattivazione di {name} ({macs})
+wol.progress.sent	Pacchetti di riattivazione inviati su {ifaces} (3×)
+wol.progress.wait_agent	La rete ha risposto dopo {time}. In attesa del client di backup.
+wol.progress.agent_timeout	La rete ha risposto dopo {time}, ma il client di backup non ha risposto.
+wol.progress.sent_again	Pacchetti di riattivazione inviati di nuovo su {ifaces} dopo {time}
+wol.progress.not_sent	Impossibile inviare su {iface}: {error}
+hw.system_temp	Temperatura di sistema
 sto.stripe	Stripe cache (voci)
 sto.kernel_default	Predefinito del kernel (256)
 sto.use_proposal	{n} (proposta)
@@ -1616,6 +1662,15 @@ err.docker_unavailable	Docker è installato ma il suo servizio non risponde.
 err.containers_running	Ferma prima i container in esecuzione.
 err.stack_not_managed	Questo stack è gestito fuori da rynas: i suoi file non si possono modificare qui.
 err.host_key_changed	La chiave del server è cambiata dalla prima connessione.
+err.invalid_json	I dati della richiesta non sono in formato JSON valido.
+err.missing_field	Compila il campo obbligatorio.
+err.unknown_field	La richiesta contiene un campo sconosciuto.
+err.invalid_type	Un campo contiene un tipo di dati errato.
+err.decode	Impossibile leggere la risposta del NAS.
+err.snapshot_share_missing	Cartella condivisa {share} non trovata. Scegli un’altra cartella per questa attività di snapshot.
+err.snapshot_directory_invalid	Inserisci un percorso assoluto valido per la cartella degli snapshot.
+err.snapshot_source_invalid	Inserisci un percorso assoluto valido per il sottovolume di origine.
+pca.description_example	Portatile dell’ufficio
 err.generic	Qualcosa è andato storto. Riprova.
 session.expires	La sessione scade tra {n} min
 session.expires_1	La sessione scade tra 1 min
@@ -1834,6 +1889,9 @@ ids.b_bad_request	Inserisci un ID.
 ids.b_other	Non disponibile su questo sistema.
 homes.b.other	un altro motivo
 groups.search	Cerca gruppi
+groups.adopt_banner.one	{n} gruppo di questo sistema è stato creato fuori da rynas. Adottalo per gestirlo insieme ai suoi membri in rynas.
+groups.adopt_banner.other	{n} gruppi di questo sistema sono stati creati fuori da rynas. Adottali per gestirli insieme ai loro membri in rynas.
+groups.adopted	Gruppi adottati
 groups.create	Crea gruppo
 groups.edit_title	Modifica gruppo {name}
 groups.empty	Ancora nessun gruppo
@@ -2982,6 +3040,7 @@ dd.always_excluded	Mai deduplicati
 dd.reset	Azzera l'indice
 dd.reset_title	Azzerare l'indice?
 dd.turn_off_title	Disattivare la deduplicazione di {name}?
+dd.turn_off	Disattiva la deduplicazione
 dd.reset_text	L'indice dei dati noti viene eliminato: la prossima esecuzione rilegge tutto. I dati non vengono toccati.
 dd.reset_done	Indice azzerato
 dd.turn_off_text	La deduplicazione di {name} si ferma. Lo spazio già liberato resta libero.
@@ -3061,7 +3120,7 @@ snap.restore_text	La versione dello snapshot {id} torna nella cartella condivisa
 snap.restore_mode	Dove
 snap.mode.copy	Accanto all'attuale
 snap.mode.replace	Al suo posto
-snap.mode.copy_help	Ripristinato come «nome (restored data)» accanto alla versione attuale.
+snap.mode.copy_help	Ripristina nella cartella originale. Se il nome è già in uso, la copia ripristinata prende un nome con la data del ripristino.
 snap.mode.replace_help	La versione attuale viene prima rinominata in nome.rynas-before-restore-<ora>, poi la versione dello snapshot prende il suo posto.
 snap.restored	{path} ripristinato
 snap.rollback	Torna alla versione precedente
@@ -3101,6 +3160,9 @@ snap.show_snapshots	Mostra gli snapshot di questo job
 snap.delete_job	Eliminare il job di snapshot {name}?
 snap.delete_job_text	Con il job se ne vanno la pianificazione e le versioni precedenti SMB. Gli snapshot già su disco restano.
 snap.ret.none	Solo il più recente
+snap.ret.all	Conserva tutti gli snapshot.
+snap.ret.latest_counts	Conserva sempre lo snapshot più recente, più {counts} secondo i periodi.
+snap.ret.age_only	Conserva tutti gli snapshot con meno di {min}.
 snap.u.h	orari
 snap.u.d	giornalieri
 snap.u.w	settimanali
@@ -3178,7 +3240,7 @@ repl.no_replicas	Ancora nessuna replica: compaiono dopo il primo trasferimento.
 repl.incomplete	Trasferimento interrotto
 repl.back	Torna alle repliche
 repl.restore_title	Ripristinare {path} dalla replica?
-repl.restore_text	Una copia viene messa accanto all'originale nella cartella condivisa, con la data del ripristino nel nome. Nulla viene sovrascritto.
+repl.restore_text	Ripristina la copia nella cartella originale. Se il nome è già in uso, la copia ripristinata prende un nome con la data del ripristino. I file esistenti restano al loro posto.
 repl.promote	Promuovi
 repl.promote_title	Promuovere {name}?
 repl.promote_text	Crea una copia scrivibile di questa replica come nuova cartella nella radice del volume di destinazione, pronta da condividere. La replica resta in sola lettura, quindi i trasferimenti successivi continuano.
@@ -3344,6 +3406,8 @@ bk.test.empty	Raggiungibile: il repository verrà creato alla prima esecuzione.
 bk.test.opens	Raggiungibile: un repository esistente si apre con questa password ({n} versioni).
 bk.test.locked	C'è già un repository: indica la sua password per usarlo.
 bk.test.failed	Non raggiungibile
+bk.test.host_key	Impronte digitali delle chiavi host SSH del server: {fingerprints}. Confrontale con quelle mostrate sul server. Salvando il lavoro, queste chiavi verranno registrate.
+bk.test.host_key_missing	Impossibile leggere le impronte digitali delle chiavi host SSH. Verifica le chiavi host del server prima di salvare il lavoro.
 bk.f.pw_mode	Password del repository
 bk.pw.generate	Generane una robusta
 bk.pw.own	Usa la mia
@@ -4469,6 +4533,8 @@ apps.browse_all	Sfoglia tutte le app
 apps.empty	Il catalogo è vuoto
 apps.empty_text	Nessuna app è stata caricata. Reinstalla rynas o controlla le voci elencate sotto.
 apps.issues	Voci non caricate: {n}
+apps.issues.directory_read	Impossibile leggere il catalogo delle app
+apps.issues.entry_load	Impossibile caricare la voce dell’app
 apps.count	Mostrate: {n}
 apps.no_match	Nessuna app corrisponde
 apps.no_match_text	Prova un'altra parola o categoria.
@@ -5250,7 +5316,7 @@ apps.src.never	Mai
 apps.src.no_key	Gli aggiornamenti online del catalogo non sono ancora disponibili in questa versione: il catalogo arriva con gli aggiornamenti di rynas.
 apps.src.off	Gli aggiornamenti online del catalogo sono disattivati nelle impostazioni di Docker.
 apps.src.expired	Il catalogo online non è stato rinnovato in tempo: rynas continua a usarlo, ma non è arrivato un catalogo più recente.
-apps.src.error	L'ultimo controllo non è riuscito; il catalogo in uso resta:
+apps.src.error	L’ultimo controllo non è riuscito. Il catalogo attuale resta in uso.
 apps.upd.pick	Seleziona
 apps.upd.selected	Aggiorna le selezionate
 apps.upd.selected_title	Aggiornare le app selezionate?
@@ -5535,7 +5601,7 @@ bkpc.alert_agent	Avvertimento se non arriva niente
 bkpc.alert_agent_text	Solo se il PC era acceso quando un backup era dovuto. Un PC spento mostra solo «Non visto da…».
 bkpc.f.ignored	Sottovolumi che il PC non invia più
 bkpc.f.ignored_help	Nessun avviso per loro e non previsti in una serie completa. I loro snapshot restano.
-bkpc.ret.nas	Gestita dal NAS: conserva {counts}, e tutto ciò che ha meno di {min}
+bkpc.ret.nas	Gestita dal NAS. {rule}
 bkpc.prune	Elimina i vecchi ora
 bkpc.pruned	Vecchi snapshot eliminati
 bkpc.prune_title	Eliminare gli snapshot vecchi di {device}?

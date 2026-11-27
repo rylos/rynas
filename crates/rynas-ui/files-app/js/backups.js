@@ -86,7 +86,7 @@ export function snapshotLabel(name) {
   const p = parseSnapshot(name);
   if (!p) return null;
   const when = snapshotFormat(p.h !== null).format(new Date(Date.UTC(p.y, p.mo - 1, p.d, p.h ?? 0, p.mi ?? 0)));
-  const what = p.prefix === "@" ? `@ (${t("files.backups.root")})` : p.prefix;
+  const what = p.prefix === "@" ? t("files.backups.root") : p.prefix;
   return `${when} · ${what}` + (p.n ? ` #${p.n}` : "");
 }
 
@@ -101,7 +101,7 @@ export function entryParts(e) {
   if (!p) return null;
   const opts = p.h !== null ? { dateStyle: "short", timeStyle: "short", timeZone: "UTC" } : { dateStyle: "short", timeZone: "UTC" };
   const when = dateFormat(opts).format(new Date(Date.UTC(p.y, p.mo - 1, p.d, p.h ?? 0, p.mi ?? 0)));
-  const what = (p.prefix === "@" ? `@ (${t("files.backups.root")})` : p.prefix) + (p.n ? ` #${p.n}` : "");
+  const what = (p.prefix === "@" ? t("files.backups.root") : p.prefix) + (p.n ? ` #${p.n}` : "");
   return { what, when };
 }
 

@@ -12,6 +12,7 @@
 //! - Lists are read again on `docker.changed` and when an `apps.*` or `docker.*` task ends.
 
 mod catalog;
+pub(crate) mod texts;
 mod installed;
 pub(crate) mod wizard;
 
