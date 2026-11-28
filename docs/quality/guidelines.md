@@ -132,8 +132,13 @@ Budgets come from `docs/phase1/plan.md`; design tokens from `docs/phase0/02-ui.m
   result somewhere). A view finds the task running for what it shows with `tasks::use_task(kind,
   subject)` (`TaskInfo::subject`, set with `TaskManager::spawn_on`), never with a page-local
   "busy" flag only; a task that stops at its time budget or skips items calls
-  `TaskCtx::partial` and never ends as a plain success. Reviewers reject a `for … run_task`
-  loop in the UI.
+  `TaskCtx::partial` and never ends as a plain success. One exception (2026-11-28): a
+  **resumable automatic pass** (started by rynas, not by a person) that saves its progress
+  before it stops and is taken up again by events (e.g. Space's update after a change of
+  snapshots: checkpoints, re-run at the next change or housekeeping with the disks awake) ends
+  Ok when its slice is over, with a log line saying what is left for next time; its numbers
+  stay marked pending. The same work started by a person (Measure) still ends partial at its
+  budget. Reviewers reject a `for … run_task` loop in the UI.
 - A20c MUST: heavy commands (tree walks, measures, copies nobody waits for) are built with
   `rynasd::heavy::heavy_cmd` (nice 19, idle I/O class) and run with `TaskCtx::run` or
   `TaskCtx::run_blocking` (killed on cancel); a command whose progress shows gets a stall
@@ -488,7 +493,9 @@ interface shows in English and switches when the file arrives.
     asked; a sleeping drive runs no self-test);
   - no full measure on a timer: measures run on request (with the expected time and progress)
     and incrementally after the events that change their answer; a time budget ends **partial**,
-    never "ok" with nothing measured;
+    never "ok" with nothing measured (exception, A20b: a resumable automatic pass that saved its
+    progress and is re-triggered by events ends Ok with a log line of what is left; it hands
+    over only after real progress, and no timer of its own takes it up again);
   - a new periodic job gets a row in the table of tasks.md (period, disks touched, why).
 - S2 MUST: charts on `<canvas>`; series data and sizes read once per sample (or layout change),
   theme colors once per theme (`getComputedStyle` forces a style recalculation of the page), and

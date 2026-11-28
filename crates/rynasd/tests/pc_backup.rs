@@ -609,13 +609,14 @@ async fn the_space_follows_new_backups_where_they_changed() {
     let plan = detail(&e, "pc").await.measure_plan.unwrap();
     assert_eq!((plan.pairs, plan.walks, plan.estimate_s, plan.measured_here), (0, 0, 0, false));
     let first = pc(list(&e).await).usage.unwrap();
-    // a new backup: stale until measured; then only the new pair and the one before it
+    // a new backup: stale until measured; then only the new pair (it also reads what the
+    // previous newest holds alone)
     let mut entries = e.host.folders.lock().unwrap().get(std::path::Path::new(path)).unwrap().1.clone();
     entries.push(snap_u("home", 1));
     folder(&e, path, entries);
     assert!(pc(list(&e).await).usage_stale);
     task(&e, "POST", "/v1/pc-backups/targets/pc/usage", None).await;
-    assert_eq!(e.host.measured.lock().unwrap().len(), 5);
+    assert_eq!(e.host.measured.lock().unwrap().len(), 4);
     let p = pc(list(&e).await);
     assert!(!p.usage_stale && p.usage.unwrap().total_bytes > first.total_bytes);
     assert_eq!((p.measure.task, p.measure.error), (None, None));
