@@ -14,14 +14,13 @@ use std::cell::Cell;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::notify::{AckAllResult, BodyFormat, EventState, Notification, NotificationChangeKind, NotificationEvent, NotifySeverity, event_text, notification_text};
+use rynas_api_types::notify::{AckAllResult, BodyFormat, EventState, Notification, NotificationChangeKind, NotificationEvent, NotifySeverity, notification_text};
 
 use crate::alerts::{self, Alert};
 use crate::api;
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::live::Live;
-use crate::pages::storage::{level_key, volume::{level_of, md_members_text, md_state_text}};
 use crate::prefs::{storage_get, storage_set, use_ui};
 use crate::toast::toast;
 use crate::ui::{EmptyState, Tone, cpu_offset};
@@ -65,34 +64,12 @@ fn comma() -> bool {
 
 type Lookup<'a> = &'a dyn Fn(&str) -> Option<&'static str>;
 
-fn display_event(n: &Notification, part: &str, lookup: Lookup, comma: bool) -> Option<String> {
-    if part != "body" || n.body_format == BodyFormat::Log
-        || !matches!(n.code.as_str(), "storage.raid_degraded" | "storage.raid_failed" | "storage.raid_inactive")
-    {
-        return notification_text(n, part, lookup, comma);
-    }
-
-    let mut fields = n.fields.clone();
-    if let Some(state) = fields.get_mut("state") {
-        *state = md_state_text(state, lookup);
-    }
-    if let Some(members) = fields.get_mut("members") {
-        *members = md_members_text(members, lookup);
-    }
-    if let Some(level) = fields.get_mut("level")
-        && let Some(label) = level_of(level).and_then(|l| lookup(level_key(l)))
-    {
-        *level = label.to_owned();
-    }
-    event_text(&n.code, part, &fields, lookup, comma)
-}
-
 fn title_with(n: &Notification, lookup: Lookup, comma: bool) -> String {
-    display_event(n, "title", lookup, comma).unwrap_or_else(|| n.title.clone())
+    notification_text(n, "title", lookup, comma).unwrap_or_else(|| n.title.clone())
 }
 
 fn body_with(n: &Notification, lookup: Lookup, comma: bool) -> String {
-    display_event(n, "body", lookup, comma).unwrap_or_else(|| n.body.clone())
+    notification_text(n, "body", lookup, comma).unwrap_or_else(|| n.body.clone())
 }
 
 /// Title of a server notification in the current language (tracked): `nev.<code>.title`
@@ -539,6 +516,27 @@ mod tests {
         let vol = ["storage", "volume_full"].join(".");
         let n = note(&vol, &[("volume", "data"), ("used_pct", "91.5"), ("used_gib", "10.0"), ("free_gib", "1.0")], BodyFormat::Text);
         assert_eq!(body_with(&n, &it, true), "data usa 10,0 GiB, circa 1,0 GiB liberi (91,5%).");
+    }
+
+    /// RAID events read their state and members from the codes; one stored before the codes
+    /// shows its English body.
+    #[test]
+    fn raid_state_and_members_from_codes() {
+        let base = [("array", "md2"), ("level", "raid1"), ("degraded", "1"), ("raid_disks", "2"), ("state", "clean, degraded"), ("members", "sdb3 (faulty)")];
+        let mut fields = base.to_vec();
+        fields.extend([("state_codes", "clean,degraded"), ("member_roles", "sdb3:faulty")]);
+        let n = note("storage.raid_degraded", &fields, BodyFormat::Text);
+        assert_eq!(
+            body_with(&n, &zh, false),
+            "md2（RAID 1）正在降级运行。共 2 个成员设备，其中 1 个缺失。当前状态为「无待处理的写入、降级」。阵列成员：sdb3（故障）。"
+        );
+        assert_eq!(
+            body_with(&n, &en, false),
+            "md2 (RAID 1) is running without redundancy: 1 of 2 members missing, state “clean, degraded”. Members: sdb3 (faulty)."
+        );
+        let old = note("storage.raid_degraded", &base, BodyFormat::Text);
+        assert_eq!(body_with(&old, &zh, false), old.body);
+        assert_eq!(title_with(&old, &zh, false), "RAID 阵列 md2 已降级");
     }
 
     #[test]

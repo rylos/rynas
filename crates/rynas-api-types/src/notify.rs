@@ -602,6 +602,57 @@ fn key_word(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
+/// `items` joined with the language's list separator: the text between `{a}` and `{b}` of
+/// `nev.list_join` ("{a}, {b}"; "{a}、{b}" in Chinese), ", " without it.
+pub fn join_list<S: AsRef<str>>(items: &[S], lookup: &dyn Fn(&str) -> Option<&'static str>) -> String {
+    let sep = lookup("nev.list_join")
+        .and_then(|t| t.split_once("{a}"))
+        .and_then(|(_, rest)| rest.split_once("{b}"))
+        .map_or(", ", |(sep, _)| sep);
+    items.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(sep)
+}
+
+/// md array state flags ([`crate::storage::MdStateFlag`] codes, see
+/// [`crate::storage::MdArray::state_codes`]) as text, from `nev.md_state.<code>`, joined as a
+/// list ([`join_list`]); a code without a text (mdadm's own word) stays as it is. The web
+/// interface's array card and the RAID events read the same words.
+pub fn md_state_text<'a>(
+    codes: impl IntoIterator<Item = &'a str>,
+    lookup: &dyn Fn(&str) -> Option<&'static str>,
+) -> String {
+    let words: Vec<&str> = codes
+        .into_iter()
+        .filter(|c| !c.is_empty())
+        .map(|c| lookup(&format!("nev.md_state.{c}")).unwrap_or(c))
+        .collect();
+    join_list(&words, lookup)
+}
+
+/// A field that holds a list of codes, as text: `state_codes` (md state flags, comma
+/// separated: [`md_state_text`]) and `member_roles` (md members as `device:role` pairs, comma
+/// separated: `nev.md_member` with the role from `nev.md_role.<role>`). `None` for any other
+/// field.
+fn code_list(name: &str, v: &str, lookup: &dyn Fn(&str) -> Option<&'static str>) -> Option<String> {
+    match name {
+        "state_codes" => Some(md_state_text(v.split(','), lookup)),
+        "member_roles" => {
+            let tpl = lookup("nev.md_member").unwrap_or("{device} ({role})");
+            let members: Vec<String> = v
+                .split(',')
+                .map(|pair| match pair.rsplit_once(':') {
+                    Some((device, role)) => {
+                        let role = lookup(&format!("nev.md_role.{role}")).unwrap_or(role);
+                        tpl.replace("{role}", role).replace("{device}", device)
+                    }
+                    None => pair.to_string(),
+                })
+                .collect();
+            Some(join_list(&members, lookup))
+        }
+        _ => None,
+    }
+}
+
 /// One placeholder value as shown: `nev.<code>.<field>.<value in lowercase>` when the
 /// dictionary has it (closed sets: SMART fail types, mdadm events, UPS reasons…), the task
 /// name `task.<value>` for a field `type`, a decimal number with a comma when `comma`,
@@ -613,6 +664,17 @@ fn shown_value(
     lookup: &dyn Fn(&str) -> Option<&'static str>,
     comma: bool,
 ) -> String {
+    if let Some(s) = code_list(name, v, lookup) {
+        return s;
+    }
+    // md levels ("raid1", "linear") of the storage events, shared by every RAID event
+    if name == "level"
+        && code.starts_with("storage.")
+        && key_word(v)
+        && let Some(s) = lookup(&format!("nev.md_level.{v}"))
+    {
+        return s.to_string();
+    }
     let lower = v.to_ascii_lowercase();
     if key_word(&lower)
         && let Some(s) = lookup(&format!("nev.{code}.{name}.{lower}"))
@@ -838,6 +900,71 @@ mod tests {
         n.source = "backup".into();
         n.key = "backup:job:cs".into();
         assert_eq!(notification_text(&n, "body", &dict, false), None);
+    }
+
+    /// RAID events: the state and the members from their codes, never from mdadm's words; an
+    /// event without the codes (stored by an older version) has no translated body.
+    #[test]
+    fn raid_state_and_members_from_codes() {
+        let zh = |k: &str| -> Option<&'static str> {
+            Some(match k {
+                "nev.r.d.body" => "{array}：状态「{state_codes}」。成员：{member_roles}。",
+                "nev.r.d.body_2" => "{array}：状态「{state_codes}」。",
+                "nev.md_state.clean" => "无待处理的写入",
+                "nev.md_state.degraded" => "降级",
+                "nev.md_role.faulty" => "故障",
+                "nev.md_member" => "{device}（{role}）",
+                _ => return None,
+            })
+        };
+        let f = fields(&[
+            ("array", "md2"),
+            ("state", "clean, degraded"),
+            ("state_codes", "clean,degraded,recovering"),
+            ("members", "sdb3 (faulty), dm-2 (rebuilding)"),
+            ("member_roles", "sdb3:faulty,dm-2:rebuilding"),
+        ]);
+        assert_eq!(
+            event_text("r.d", "body", &f, &zh, false).as_deref(),
+            // a code without a text stays as it is, a role without one too
+            Some("md2：状态「无待处理的写入, 降级, recovering」。成员：sdb3（故障）, dm-2（rebuilding）。")
+        );
+        let f = fields(&[("array", "md2"), ("state_codes", "degraded")]);
+        assert_eq!(event_text("r.d", "body", &f, &zh, false).as_deref(), Some("md2：状态「降级」。"));
+        // the md level by its code in the storage events; unknown levels, other events: as sent
+        let lvl = |k: &str| -> Option<&'static str> {
+            Some(match k {
+                "nev.storage.x.title" => "{array}（{level}）",
+                "nev.other.x.title" => "{level}",
+                "nev.md_level.raid1" => "RAID 1",
+                "nev.md_level.linear" => "线性",
+                _ => return None,
+            })
+        };
+        let title = |code: &str, level: &str| event_text(code, "title", &fields(&[("array", "md2"), ("level", level)]), &lvl, false);
+        assert_eq!(title("storage.x", "raid1").as_deref(), Some("md2（RAID 1）"));
+        assert_eq!(title("storage.x", "linear").as_deref(), Some("md2（线性）"));
+        assert_eq!(title("storage.x", "raid9").as_deref(), Some("md2（raid9）"));
+        assert_eq!(title("other.x", "raid1").as_deref(), Some("raid1"));
+        // stored before the codes: no text, the caller shows the English body
+        let f = fields(&[("array", "md2"), ("state", "clean, degraded"), ("members", "sdb3 (faulty)")]);
+        assert_eq!(event_text("r.d", "body", &f, &zh, false), None);
+        assert_eq!(md_state_text(["clean", "degraded"], &zh), "无待处理的写入, 降级");
+        // the language's list separator; mdadm's own word for one without a code
+        let zh_join = |k: &str| -> Option<&'static str> {
+            match k {
+                "nev.list_join" => Some("{a}、{b}"),
+                k => zh(k),
+            }
+        };
+        assert_eq!(md_state_text(["clean", "degraded", "frozen"], &zh_join), "无待处理的写入、降级、frozen");
+        let f = fields(&[("array", "md2"), ("state_codes", "degraded"), ("member_roles", "sdb3:faulty,sdc3:faulty")]);
+        assert_eq!(
+            event_text("r.d", "body", &f, &zh_join, false).as_deref(),
+            Some("md2：状态「降级」。成员：sdb3（故障）、sdc3（故障）。")
+        );
+        assert_eq!(join_list(&["a", "b"], &|_| None), "a, b");
+        assert_eq!(join_list(&["a", "b"], &|_| Some("broken")), "a, b");
     }
 
     /// A target's language is any code of the table, sent as the plain string; the stored

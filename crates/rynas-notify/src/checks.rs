@@ -460,8 +460,21 @@ impl StorageWatch {
                     e = field(e, "state", &a.state);
                     e = field(e, "degraded", a.degraded);
                     e = field(e, "raid_disks", a.raid_disks);
+                    // the state and the members as codes, for the translated texts
+                    // (`rynas_api_types::notify`): a word without a code as mdadm says it
+                    let codes = a.state_codes();
+                    if !codes.is_empty() {
+                        e = field(e, "state_codes", codes.join(","));
+                    }
                     if !faulty.is_empty() {
                         e = field(e, "members", faulty.join(", "));
+                        let roles: Vec<_> = a
+                            .members
+                            .iter()
+                            .filter(|m| !matches!(m.role, rynas_api_types::storage::MemberRole::Active))
+                            .map(|m| format!("{}:{}", m.device, m.role.as_str()))
+                            .collect();
+                        e = field(e, "member_roles", roles.join(","));
                     }
                     e
                 },
@@ -1231,6 +1244,48 @@ mod tests {
         );
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].key.as_deref(), Some("storage:btrfs:u1:1:errors"));
+    }
+
+    /// A RAID event carries its state and its members as codes next to mdadm's words.
+    #[test]
+    fn raid_event_codes() {
+        use rynas_api_types::storage::{MdMember, MdStateFlag, MemberRole};
+        let member = |device: &str, role| MdMember { device: device.into(), role, ..Default::default() };
+        let md = |state: &str, flags: Vec<MdStateFlag>, words: &[&str]| MdArray {
+            name: "md2".into(),
+            level: "raid5".into(),
+            health: ArrayHealth::Degraded,
+            raid_disks: 3,
+            degraded: 1,
+            state: state.into(),
+            state_flags: flags,
+            state_words: words.iter().map(|w| w.to_string()).collect(),
+            members: vec![member("sda3", MemberRole::Active), member("sdb3", MemberRole::Faulty), member("sdc3", MemberRole::Rebuilding)],
+            ..Default::default()
+        };
+        let mut w = StorageWatch::default();
+        let a = md(
+            "clean, degraded, recovering",
+            vec![MdStateFlag::Clean, MdStateFlag::Degraded, MdStateFlag::Recovering],
+            &["clean", "degraded", "recovering"],
+        );
+        let ev = w.check(&[], &[a], &[], &[]);
+        let e = ev.iter().find(|e| e.code == "storage.raid_degraded").unwrap();
+        assert_eq!(e.fields["state"], "clean, degraded, recovering");
+        assert_eq!(e.fields["state_codes"], "clean,degraded,recovering");
+        assert_eq!(e.fields["members"], "sdb3 (faulty), sdc3 (rebuilding)");
+        assert_eq!(e.fields["member_roles"], "sdb3:faulty,sdc3:rebuilding");
+        // a word without a code goes as mdadm says it, the others keep their codes
+        let mut w = StorageWatch::default();
+        let a = md(
+            "clean, degraded, frozen",
+            vec![MdStateFlag::Clean, MdStateFlag::Degraded, MdStateFlag::Other],
+            &["clean", "degraded", "frozen"],
+        );
+        let ev = w.check(&[], &[a], &[], &[]);
+        let e = ev.iter().find(|e| e.code == "storage.raid_degraded").unwrap();
+        assert_eq!(e.fields["state_codes"], "clean,degraded,frozen");
+        assert_eq!(e.fields["member_roles"], "sdb3:faulty,sdc3:rebuilding");
     }
 
     /// A btrfs volume left unmounted by a missing device fires until it is mounted; chunks a

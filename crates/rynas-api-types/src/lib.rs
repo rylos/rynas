@@ -131,9 +131,14 @@ pub struct DiskRate {
     pub busy_pct: f32,
 }
 
+/// `Temperature.id` of the board's system sensor, read by a hardware module (the vendor's
+/// "system temperature"): clients call it the system temperature in their own language.
+pub const SYSTEM_SENSOR_ID: &str = "board";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Temperature {
-    /// Stable id, e.g. "cpu", "nvme0", "bay2", "nic:eth0".
+    /// Stable id, e.g. "cpu", "nvme0", "bay2", "nic:eth0", [`SYSTEM_SENSOR_ID`]: clients name
+    /// the sensors they know by it, never by `label`.
     pub id: String,
     /// Human label, e.g. "CPU", "NVMe 0", "Bay 2".
     pub label: String,

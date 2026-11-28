@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use rynas_api_types::storage::{ArrayHealth, MdArray, MdMember, MemberRole, SyncProgress};
+use rynas_api_types::storage::{ArrayHealth, MdArray, MdMember, MdStateFlag, MemberRole, SyncProgress};
 
 use crate::host::Host;
 
@@ -459,6 +459,7 @@ pub fn build(
         .filter(|_| !stale)
         .or_else(|| sys.array_state.clone())
         .unwrap_or_else(|| if st.active { "active" } else { "inactive" }.to_string());
+    let (state_flags, state_words): (Vec<_>, Vec<_>) = state_words(&state).into_iter().unzip();
     let bitmap = match (
         &st.bitmap,
         &sys.bitmap_location,
@@ -487,6 +488,8 @@ pub fn build(
         size: st.blocks * 1024,
         component_size: sys.component_size,
         chunk_bytes: st.chunk_bytes.or(detail.and_then(|d| d.chunk_bytes)),
+        state_flags,
+        state_words,
         state,
         health,
         degraded,
@@ -500,9 +503,92 @@ pub fn build(
     }
 }
 
+/// The words of an md array state as codes, each with mdadm's own word: mdadm's `State :`
+/// ("clean, degraded, recovering", "active, FAILED, Not Started", "clean, resyncing (DELAYED)":
+/// the qualifier in parentheses is a word of its own) or a sysfs `array_state` ("active-idle",
+/// "read-auto"). A word said twice (mdadm 4.2+: "broken, FAILED") is kept once.
+pub fn state_words(state: &str) -> Vec<(MdStateFlag, String)> {
+    let mut out: Vec<(MdStateFlag, String)> = Vec::new();
+    for part in state.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+        let (base, qualifier) = match part.strip_suffix(')').and_then(|p| p.split_once('(')) {
+            Some((base, q)) => (base.trim(), Some(q.trim())),
+            None => (part, None),
+        };
+        for w in std::iter::once(base).chain(qualifier).filter(|w| !w.is_empty()) {
+            let flag = state_flag(w);
+            let seen = out.iter().any(|(f, x)| if flag == MdStateFlag::Other { x == w } else { *f == flag });
+            if !seen {
+                out.push((flag, w.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// The code of one state word.
+fn state_flag(w: &str) -> MdStateFlag {
+    match w.to_ascii_lowercase().as_str() {
+        "clean" => MdStateFlag::Clean,
+        "active" => MdStateFlag::Active,
+        "active-idle" => MdStateFlag::ActiveIdle,
+        "read-auto" | "auto-read-only" => MdStateFlag::ReadAuto,
+        "write-pending" => MdStateFlag::WritePending,
+        "readonly" | "read-only" => MdStateFlag::ReadOnly,
+        "inactive" | "not started" => MdStateFlag::Inactive,
+        "suspended" => MdStateFlag::Suspended,
+        "clear" => MdStateFlag::Clear,
+        "degraded" => MdStateFlag::Degraded,
+        "failed" | "broken" => MdStateFlag::Failed,
+        "resyncing" => MdStateFlag::Resyncing,
+        "recovering" => MdStateFlag::Recovering,
+        "reshaping" => MdStateFlag::Reshaping,
+        "checking" => MdStateFlag::Checking,
+        "repairing" => MdStateFlag::Repairing,
+        "delayed" => MdStateFlag::Delayed,
+        "pending" => MdStateFlag::Pending,
+        "remote" => MdStateFlag::Remote,
+        _ => MdStateFlag::Other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_words_as_codes() {
+        use MdStateFlag as F;
+        let flags = |s: &str| state_words(s).into_iter().map(|(f, _)| f).collect::<Vec<_>>();
+        assert_eq!(flags("clean, degraded, recovering"), [F::Clean, F::Degraded, F::Recovering]);
+        assert_eq!(flags("active, FAILED, Not Started"), [F::Active, F::Failed, F::Inactive]);
+        assert_eq!(flags("active-idle"), [F::ActiveIdle]);
+        assert_eq!(flags("read-auto"), [F::ReadAuto]);
+        // qualifiers are words of their own
+        assert_eq!(flags("clean, resyncing (DELAYED)"), [F::Clean, F::Resyncing, F::Delayed]);
+        assert_eq!(flags("active, resyncing (PENDING)"), [F::Active, F::Resyncing, F::Pending]);
+        assert_eq!(flags("clean, recovering (REMOTE)"), [F::Clean, F::Recovering, F::Remote]);
+        // said twice: once
+        assert_eq!(flags("active, broken, FAILED"), [F::Active, F::Failed]);
+        // a word without a code keeps mdadm's word, the others their codes
+        assert_eq!(
+            state_words("clean, frozen (X)"),
+            [(F::Clean, "clean".to_string()), (F::Other, "frozen".to_string()), (F::Other, "X".to_string())]
+        );
+        assert!(state_words("").is_empty());
+        let a = MdArray {
+            state_flags: vec![F::Clean, F::Other, F::Degraded],
+            state_words: vec!["clean".into(), "fro,zen".into(), "degraded".into()],
+            ..Default::default()
+        };
+        assert_eq!(a.state_codes(), ["clean", "fro zen", "degraded"]);
+        // every code reads back as serde writes it
+        for f in MdStateFlag::ALL {
+            assert_eq!(serde_json::to_value(f).unwrap(), f.as_str());
+        }
+        for r in [MemberRole::Active, MemberRole::Spare, MemberRole::Faulty, MemberRole::Journal, MemberRole::Rebuilding, MemberRole::Unknown] {
+            assert_eq!(serde_json::to_value(r).unwrap(), r.as_str());
+        }
+    }
 
     const MDSTAT: &str = include_str!("../tests/fixtures/proc-mdstat.txt");
 

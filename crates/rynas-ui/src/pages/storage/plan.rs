@@ -29,7 +29,8 @@ fn coded(prefix: &str, code: String, args: &PlanArgs) -> Option<String> {
     let values: [(&str, Option<String>); 6] = [
         ("subject", args.subject.clone()),
         ("other", args.other.clone()),
-        ("items", (!args.items.is_empty()).then(|| args.items.join(", "))),
+        // what uses a disk from its structured entries, else the list as sent
+        ("items", (!args.items.is_empty() || !args.uses.is_empty()).then(|| super::disks::uses_text(&args.uses, &args.items))),
         ("size", args.size_bytes.map(i18n::bytes_si)),
         ("n", args.count.map(|n| n.to_string())),
         ("level", level),

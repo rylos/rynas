@@ -191,6 +191,10 @@ pub struct DiskSummary {
     /// means blank. Leftovers that are not live (old partitions, an unassembled array) do not
     /// make it busy: see `in_use`.
     pub used_by: Vec<String>,
+    /// `used_by` as structured entries, in the same order: what a client shows in its own
+    /// language ([`DiskUse::text`] is the English `used_by` entry).
+    #[serde(default)]
+    pub usage: Vec<DiskUse>,
     /// Something on it is live (mounted, assembled array, open LUKS, swap): not a candidate.
     #[serde(default)]
     pub in_use: bool,
@@ -219,6 +223,86 @@ pub struct DiskContent {
     /// Its label (for an md member, the array name).
     #[serde(default)]
     pub label: Option<String>,
+}
+
+/// One thing that sits on a disk (`DiskSummary.usage`): a `used_by` entry with its parts as
+/// fields, so a client names it in its own language and never reads the English text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DiskUse {
+    /// The machine's own boot flash.
+    BootFlash,
+    /// Active swap space.
+    Swap,
+    /// An assembled md array (`array` "md2", `level` "raid5").
+    MdArray { array: String, level: String },
+    /// A member of an md array that is not assembled; `array` is the superblock's name when
+    /// it has one.
+    MdMember { array: Option<String> },
+    /// A LUKS container that is not open.
+    LuksLocked,
+    /// An open LUKS container, mapped as `name`.
+    LuksUnlocked { name: String },
+    /// An LVM logical volume.
+    Lvm { name: String },
+    /// A file system (`fs` as blkid names it), mounted at `path` when it is.
+    Filesystem {
+        fs: String,
+        label: Option<String>,
+        path: Option<String>,
+    },
+    /// Mounted at `path` without a known file system type.
+    Mounted { path: String },
+    /// A partition table and nothing else rynas knows about.
+    Partitions { count: u32 },
+    /// A btrfs that belongs to another volume (`uuid`), on `device`: what a replacement disk
+    /// would erase.
+    ForeignBtrfs {
+        label: Option<String>,
+        uuid: String,
+        device: String,
+    },
+    /// Anything else, described in English.
+    Other { text: String },
+    /// A kind this client does not know (a newer server): the `used_by` entry at the same
+    /// position names it.
+    #[serde(other)]
+    Unknown,
+}
+
+impl DiskUse {
+    /// The English `used_by` entry ("md2 (raid5)", "btrfs “data” on /volume1").
+    pub fn text(&self) -> String {
+        match self {
+            DiskUse::BootFlash => "boot flash".into(),
+            DiskUse::Swap => "swap".into(),
+            DiskUse::MdArray { array, level } => format!("{array} ({level})"),
+            DiskUse::MdMember { array } => {
+                format!("md member of {} (not assembled)", array.as_deref().unwrap_or("an array"))
+            }
+            DiskUse::LuksLocked => "LUKS (locked)".into(),
+            DiskUse::LuksUnlocked { name } => format!("LUKS {name} (unlocked)"),
+            DiskUse::Lvm { name } => format!("LVM {name}"),
+            DiskUse::Filesystem { fs, label, path } => {
+                let named = match label {
+                    Some(l) => format!("{fs} “{l}”"),
+                    None => fs.clone(),
+                };
+                match path {
+                    Some(p) => format!("{named} on {p}"),
+                    None => named,
+                }
+            }
+            DiskUse::Mounted { path } => format!("mounted {path}"),
+            DiskUse::Partitions { count } => format!("{count} partition(s)"),
+            DiskUse::ForeignBtrfs { label, uuid, device } => {
+                let label = label.as_deref().map(|l| format!(" “{l}”")).unwrap_or_default();
+                format!("btrfs{label} {uuid} on {device} (part of another volume?)")
+            }
+            DiskUse::Other { text } => text.clone(),
+            DiskUse::Unknown => String::new(),
+        }
+    }
 }
 
 /// USB `(vendor, product)` ids of internal boot flash modules that are the same on every
@@ -390,9 +474,79 @@ pub struct SelfTest {
     pub kind: String,
     /// smartctl's status text, e.g. "Completed without error".
     pub status: String,
+    /// `kind` as a stable code, from the numeric value of the log entry.
+    #[serde(default)]
+    pub kind_code: SelfTestKind,
+    /// `status` as a stable code, from the numeric value of the log entry.
+    #[serde(default)]
+    pub status_code: SelfTestStatus,
     pub passed: Option<bool>,
     pub lifetime_hours: Option<u64>,
     pub lba_first_error: Option<u64>,
+}
+
+/// The kind of a self-test log entry. `other`: a kind without a code (vendor tests):
+/// `SelfTest.kind` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfTestKind {
+    /// ATA short offline test.
+    ShortOffline,
+    /// ATA extended offline test.
+    ExtendedOffline,
+    /// ATA conveyance offline test.
+    ConveyanceOffline,
+    /// ATA selective offline test.
+    SelectiveOffline,
+    /// ATA short test in captive mode (the drive answers nothing else meanwhile).
+    ShortCaptive,
+    ExtendedCaptive,
+    ConveyanceCaptive,
+    SelectiveCaptive,
+    /// NVMe short test.
+    Short,
+    /// NVMe extended test.
+    Extended,
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+/// The outcome of a self-test log entry. `other`: an outcome without a code:
+/// `SelfTest.status` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfTestStatus {
+    /// Completed without error.
+    Passed,
+    /// Aborted by the host (ATA) or by a self-test command (NVMe).
+    AbortedByHost,
+    /// Interrupted by a host or controller reset.
+    InterruptedByReset,
+    /// A fatal error, or an unknown error that kept the test from finishing.
+    Fatal,
+    /// Completed with a failure of unknown kind (NVMe: a failed segment it does not name).
+    UnknownFailure,
+    /// NVMe: completed with one or more failed segments (a real failure).
+    SegmentFailed,
+    /// NVMe: aborted because the namespace was removed.
+    AbortedNamespaceRemoved,
+    /// NVMe: aborted by a Format NVM command.
+    AbortedFormat,
+    /// NVMe: aborted by a sanitize operation.
+    AbortedSanitize,
+    /// NVMe: aborted for an unknown reason.
+    AbortedUnknown,
+    ElectricalFailure,
+    /// Servo or seek failure.
+    ServoFailure,
+    ReadFailure,
+    /// Completed, with suspected handling damage.
+    HandlingDamage,
+    InProgress,
+    #[default]
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -476,6 +630,110 @@ pub enum MemberRole {
     Unknown,
 }
 
+impl MemberRole {
+    /// The wire name, as serde writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemberRole::Active => "active",
+            MemberRole::Spare => "spare",
+            MemberRole::Faulty => "faulty",
+            MemberRole::Journal => "journal",
+            MemberRole::Rebuilding => "rebuilding",
+            MemberRole::Unknown => "unknown",
+        }
+    }
+}
+
+/// One word of an md array's state (`MdArray.state` is mdadm's or sysfs's comma-separated
+/// list; a qualifier in parentheses, "resyncing (DELAYED)", is a word of its own). `other`: a
+/// word without a code, `MdArray.state_words` has it at the same position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MdStateFlag {
+    /// No writes pending.
+    Clean,
+    Active,
+    /// Active and idle (sysfs `active-idle`).
+    ActiveIdle,
+    /// Read-only until the first write (`read-auto`).
+    ReadAuto,
+    WritePending,
+    ReadOnly,
+    /// Not running (`inactive`, mdadm's "Not Started").
+    Inactive,
+    Suspended,
+    /// No array configured on the device (sysfs `clear`).
+    Clear,
+    Degraded,
+    /// Too many members missing (`FAILED`, `broken`).
+    Failed,
+    Resyncing,
+    Recovering,
+    Reshaping,
+    Checking,
+    Repairing,
+    /// The resync or recovery before it waits for another array on the same disks (`DELAYED`).
+    Delayed,
+    /// The resync before it waits for the first write (`PENDING`).
+    Pending,
+    /// The resync before it is done by a cluster peer (`REMOTE`).
+    Remote,
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+impl MdStateFlag {
+    pub const ALL: [MdStateFlag; 20] = [
+        MdStateFlag::Clean,
+        MdStateFlag::Active,
+        MdStateFlag::ActiveIdle,
+        MdStateFlag::ReadAuto,
+        MdStateFlag::WritePending,
+        MdStateFlag::ReadOnly,
+        MdStateFlag::Inactive,
+        MdStateFlag::Suspended,
+        MdStateFlag::Clear,
+        MdStateFlag::Degraded,
+        MdStateFlag::Failed,
+        MdStateFlag::Resyncing,
+        MdStateFlag::Recovering,
+        MdStateFlag::Reshaping,
+        MdStateFlag::Checking,
+        MdStateFlag::Repairing,
+        MdStateFlag::Delayed,
+        MdStateFlag::Pending,
+        MdStateFlag::Remote,
+        MdStateFlag::Other,
+    ];
+
+    /// The wire name, as serde writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MdStateFlag::Clean => "clean",
+            MdStateFlag::Active => "active",
+            MdStateFlag::ActiveIdle => "active_idle",
+            MdStateFlag::ReadAuto => "read_auto",
+            MdStateFlag::WritePending => "write_pending",
+            MdStateFlag::ReadOnly => "read_only",
+            MdStateFlag::Inactive => "inactive",
+            MdStateFlag::Suspended => "suspended",
+            MdStateFlag::Clear => "clear",
+            MdStateFlag::Degraded => "degraded",
+            MdStateFlag::Failed => "failed",
+            MdStateFlag::Resyncing => "resyncing",
+            MdStateFlag::Recovering => "recovering",
+            MdStateFlag::Reshaping => "reshaping",
+            MdStateFlag::Checking => "checking",
+            MdStateFlag::Repairing => "repairing",
+            MdStateFlag::Delayed => "delayed",
+            MdStateFlag::Pending => "pending",
+            MdStateFlag::Remote => "remote",
+            MdStateFlag::Other => "other",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct MdMember {
     /// Component device, e.g. "sda3".
@@ -541,6 +799,13 @@ pub struct MdArray {
     pub component_size: Option<u64>,
     /// md's own state, e.g. "clean", "active", "clean, degraded, recovering".
     pub state: String,
+    /// `state` word by word as stable codes, in the same order (a word said twice once).
+    #[serde(default)]
+    pub state_flags: Vec<MdStateFlag>,
+    /// mdadm's own word for each of `state_flags`, same positions: what a client shows for
+    /// `other`.
+    #[serde(default)]
+    pub state_words: Vec<String>,
     pub health: ArrayHealth,
     /// Number of missing members.
     pub degraded: u32,
@@ -556,6 +821,22 @@ pub struct MdArray {
     /// (sysfs `none` otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reshape_position: Option<u64>,
+}
+
+impl MdArray {
+    /// The state as codes for the translated texts: the code of each word, mdadm's own word
+    /// (without commas) where it has none. Clients show a code they have no text for as it is.
+    pub fn state_codes(&self) -> Vec<String> {
+        self.state_flags
+            .iter()
+            .enumerate()
+            .map(|(i, f)| match f {
+                MdStateFlag::Other => self.state_words.get(i).map_or(String::new(), |w| w.replace(',', " ")),
+                f => f.as_str().to_string(),
+            })
+            .filter(|c| !c.is_empty())
+            .collect()
+    }
 }
 
 // ------------------------------------------------------------------ btrfs
@@ -1564,6 +1845,10 @@ pub struct PlanArgs {
     /// A list: disks, what uses a disk (`md2 (raid5)`), SMART reason codes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<String>,
+    /// What uses a disk, when `items` names it (`data_erased`): the same entries in the same
+    /// order, structured, for a client to name in its own language.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uses: Vec<DiskUse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

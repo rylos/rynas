@@ -492,6 +492,7 @@ pub(crate) fn check_new_disk(
         let args = PlanArgs {
             subject: Some(name.to_string()),
             items: usage.used_by.clone(),
+            uses: usage.uses.clone(),
             ..Default::default()
         };
         warn(p, PlanWarningCode::DataErased, args);
@@ -1970,6 +1971,8 @@ mod tests {
             .unwrap();
         assert_eq!(erased.args.subject.as_deref(), Some("sde"));
         assert!(!erased.args.items.is_empty());
+        // the same entries, structured, for the translated warning
+        assert_eq!(erased.args.items, erased.args.uses.iter().map(rynas_api_types::storage::DiskUse::text).collect::<Vec<_>>());
         let a = argvs(&p);
         assert!(a.iter().any(|l| l == "systemctl start backup.mount"));
         let fstab = p

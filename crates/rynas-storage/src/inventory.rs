@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rynas_api_types::storage::{
-    ArrayHealth, BtrfsDevice, BtrfsDeviceErrors, BtrfsFilesystem, DiskContent, DiskKind, DiskSummary,
+    ArrayHealth, BtrfsDevice, BtrfsDeviceErrors, BtrfsFilesystem, DiskContent, DiskKind, DiskSummary, DiskUse,
     HealthVerdict, NodeKind, Partition, PowerState, QuotaMode, ScrubStatus, StorageTree, Subvolume,
     TreeNode, VolumeTree,
 };
@@ -29,7 +29,9 @@ pub fn disk_kind(d: &BlockDev) -> DiskKind {
 /// What a disk is used for.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DiskUsage {
+    /// The English entries of `uses`, one each.
     pub used_by: Vec<String>,
+    pub uses: Vec<DiskUse>,
     /// Something on it is live: mounted, an assembled array, an open LUKS mapping, swap.
     pub in_use: bool,
     /// The root filesystem lives on it.
@@ -60,9 +62,10 @@ fn mountpoints_of(g: &BlockGraph, x: &BlockDev) -> Vec<String> {
 pub fn disk_usage(g: &BlockGraph, disk: &str) -> DiskUsage {
     let mut u = DiskUsage::default();
     let Some(d) = g.get(disk) else { return u };
-    let mut push = |s: String| {
-        if !u.used_by.contains(&s) {
-            u.used_by.push(s);
+    let mut uses: Vec<DiskUse> = Vec::new();
+    let mut push = |x: DiskUse| {
+        if !uses.contains(&x) {
+            uses.push(x);
         }
     };
     let mut devs: Vec<&BlockDev> = vec![d];
@@ -71,10 +74,10 @@ pub fn disk_usage(g: &BlockGraph, disk: &str) -> DiskUsage {
     let mut system = false;
     for x in &devs {
         if x.is_md() && !x.is_disk() {
-            push(format!("{} ({})", x.kname, x.kind));
+            push(DiskUse::MdArray { array: x.kname.clone(), level: x.kind.clone() });
             live = true;
         } else if x.kind == "crypt" {
-            push(format!("LUKS {} (unlocked)", x.name));
+            push(DiskUse::LuksUnlocked { name: x.name.clone() });
             live = true;
         } else if x.fstype.as_deref() == Some("crypto_LUKS")
             && !x
@@ -82,9 +85,9 @@ pub fn disk_usage(g: &BlockGraph, disk: &str) -> DiskUsage {
                 .iter()
                 .any(|c| g.get(c).is_some_and(|c| c.kind == "crypt"))
         {
-            push("LUKS (locked)".to_string());
+            push(DiskUse::LuksLocked);
         } else if x.kind == "lvm" {
-            push(format!("LVM {}", x.name));
+            push(DiskUse::Lvm { name: x.name.clone() });
             live = true;
         }
         let mps = mountpoints_of(g, x);
@@ -92,7 +95,7 @@ pub fn disk_usage(g: &BlockGraph, disk: &str) -> DiskUsage {
         for mp in &mps {
             live = true;
             if mp == "[SWAP]" {
-                push("swap".into());
+                push(DiskUse::Swap);
                 continue;
             }
             if mp == "/" || mp == "/usr" || mp == "/boot" || mp == "/boot/efi" {
@@ -100,33 +103,33 @@ pub fn disk_usage(g: &BlockGraph, disk: &str) -> DiskUsage {
             }
             fs_mps.push(mp);
         }
-        let named = |fs: &str| match &x.label {
-            Some(l) => format!("{fs} “{l}”"),
-            None => fs.to_string(),
+        let named = |fs: &str, path: Option<&str>| DiskUse::Filesystem {
+            fs: fs.to_string(),
+            label: x.label.clone(),
+            path: path.map(str::to_string),
         };
         // one entry per filesystem with its main mountpoint ("/" first, else the shortest),
         // not one per btrfs subvolume or bind mount
         if let Some(main) = fs_mps.iter().min_by_key(|m| (**m != "/", m.len(), **m)) {
             push(match x.fstype.as_deref() {
-                Some(fs) if fs != "swap" => format!("{} on {main}", named(fs)),
-                _ => format!("mounted {main}"),
+                Some(fs) if fs != "swap" => named(fs, Some(main)),
+                _ => DiskUse::Mounted { path: main.to_string() },
             });
         } else if let Some(fs) = &x.fstype
             && mps.is_empty()
             && !matches!(fs.as_str(), "crypto_LUKS" | "linux_raid_member")
         {
-            push(named(fs));
+            push(named(fs, None));
         }
         if x.fstype.as_deref() == Some("linux_raid_member") && x.children.is_empty() {
-            push(format!(
-                "md member of {} (not assembled)",
-                x.label.as_deref().unwrap_or("an array")
-            ));
+            push(DiskUse::MdMember { array: x.label.clone() });
         }
     }
-    if u.used_by.is_empty() && !d.children.is_empty() {
-        u.used_by.push(format!("{} partition(s)", d.children.len()));
+    if uses.is_empty() && !d.children.is_empty() {
+        uses.push(DiskUse::Partitions { count: d.children.len() as u32 });
     }
+    u.used_by = uses.iter().map(DiskUse::text).collect();
+    u.uses = uses;
     u.in_use = live;
     u.system = system;
     u
@@ -161,13 +164,16 @@ pub fn contents(g: &BlockGraph, disk: &str) -> Vec<DiskContent> {
     v
 }
 
-/// What `used_by` says first about a boot flash.
+/// What `used_by` says first about a boot flash ([`DiskUse::BootFlash`]).
 pub const BOOT_FLASH: &str = "boot flash";
 
 /// Marks a disk as the machine's own boot flash: a system disk, never a candidate for a
 /// volume, whatever lsblk says about its mounts or its removable flag.
 pub fn mark_boot_flash(s: &mut DiskSummary) {
     s.system = true;
+    if !s.usage.contains(&DiskUse::BootFlash) {
+        s.usage.insert(0, DiskUse::BootFlash);
+    }
     if !s.used_by.iter().any(|u| u == BOOT_FLASH) {
         s.used_by.insert(0, BOOT_FLASH.to_string());
     }
@@ -243,6 +249,7 @@ pub fn summary(
         smr: zoned || known_smr(&model),
         removable: d.removable || d.hotplug,
         used_by: usage.used_by,
+        usage: usage.uses,
         in_use: usage.in_use,
         system: usage.system,
         contents: contents(g, &d.kname),
@@ -650,6 +657,45 @@ mod tests {
         let sde = disk_usage(g, "sde");
         assert!(!sde.in_use);
         assert_eq!(sde.used_by, ["LUKS (locked)"]);
+        assert_eq!(sde.uses, [DiskUse::LuksLocked]);
+        // the structured entries, one per English entry, in the same order
+        assert!(sda.uses.contains(&DiskUse::MdArray { array: "md2".into(), level: "raid5".into() }));
+        assert!(sda.uses.contains(&DiskUse::LuksUnlocked { name: "rynas-vol1".into() }));
+        assert!(sda.uses.contains(&DiskUse::Filesystem {
+            fs: "btrfs".into(),
+            label: Some("vol1".into()),
+            path: Some("/vol1".into()),
+        }));
+        assert_eq!(sda.used_by, sda.uses.iter().map(DiskUse::text).collect::<Vec<_>>());
+    }
+
+    /// Every kind of use reads in English as `used_by` always said it.
+    #[test]
+    fn disk_use_texts() {
+        let cases = [
+            (DiskUse::BootFlash, "boot flash"),
+            (DiskUse::Swap, "swap"),
+            (DiskUse::MdArray { array: "md2".into(), level: "raid5".into() }, "md2 (raid5)"),
+            (DiskUse::MdMember { array: Some("nas:2".into()) }, "md member of nas:2 (not assembled)"),
+            (DiskUse::MdMember { array: None }, "md member of an array (not assembled)"),
+            (DiskUse::LuksLocked, "LUKS (locked)"),
+            (DiskUse::LuksUnlocked { name: "rynas-vol1".into() }, "LUKS rynas-vol1 (unlocked)"),
+            (DiskUse::Lvm { name: "vg-data".into() }, "LVM vg-data"),
+            (DiskUse::Filesystem { fs: "vfat".into(), label: Some("EFI".into()), path: Some("/boot/efi".into()) }, "vfat “EFI” on /boot/efi"),
+            (DiskUse::Filesystem { fs: "ext4".into(), label: None, path: None }, "ext4"),
+            (DiskUse::Mounted { path: "/mnt/x".into() }, "mounted /mnt/x"),
+            (DiskUse::Partitions { count: 2 }, "2 partition(s)"),
+        ];
+        for (u, text) in cases {
+            assert_eq!(u.text(), text);
+            let json = serde_json::to_value(&u).unwrap();
+            assert!(json["kind"].is_string(), "{json}");
+            assert_eq!(serde_json::from_value::<DiskUse>(json).unwrap(), u);
+        }
+        assert_eq!(
+            serde_json::to_value(DiskUse::Partitions { count: 3 }).unwrap(),
+            serde_json::json!({"kind": "partitions", "count": 3})
+        );
     }
 
     /// What an unused drive still carries, for the "will be erased" acknowledgement: the
@@ -692,11 +738,15 @@ mod tests {
 
     #[test]
     fn boot_flash_is_a_system_disk() {
-        let mut s = DiskSummary { used_by: vec!["vfat “boot”".into()], ..Default::default() };
+        let vfat = DiskUse::Filesystem { fs: "vfat".into(), label: Some("boot".into()), path: None };
+        let mut s = DiskSummary { used_by: vec![vfat.text()], usage: vec![vfat.clone()], ..Default::default() };
         mark_boot_flash(&mut s);
         mark_boot_flash(&mut s);
         assert!(s.system);
         assert_eq!(s.used_by, [BOOT_FLASH, "vfat “boot”"]);
+        assert_eq!(s.usage, [DiskUse::BootFlash, vfat]);
+        // the two lists stay aligned, entry by entry
+        assert_eq!(s.used_by, s.usage.iter().map(DiskUse::text).collect::<Vec<_>>());
         let ids = vec![("f400".to_string(), "f400".to_string())];
         assert!(usb_id_matches(&ids, "F400", "f400\n"));
         assert!(!usb_id_matches(&ids, "f400", "f401"));
@@ -730,6 +780,7 @@ mod tests {
         let sdb = disk_usage(&g, "sdb");
         assert_eq!(sda.used_by, ["swap", "btrfs “root” on /", "vfat “EFI” on /boot/efi"]);
         assert_eq!(sdb.used_by, ["swap", "btrfs “root” on /", "vfat “EFI2”"]);
+        assert_eq!(sdb.uses[2], DiskUse::Filesystem { fs: "vfat".into(), label: Some("EFI2".into()), path: None });
         assert!(sda.in_use && sda.system);
         // the second member holds the root filesystem just as much
         assert!(sdb.in_use && sdb.system);

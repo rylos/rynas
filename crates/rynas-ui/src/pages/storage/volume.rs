@@ -660,35 +660,14 @@ fn usage_card(v: &Vol) -> AnyView {
     .into_any()
 }
 
-/// The state can be a compound mdadm value or a single sysfs state.
-pub(crate) fn md_state_text(state: &str, lookup: &dyn Fn(&str) -> Option<&'static str>) -> String {
-    state
-        .split(',')
-        .map(str::trim)
-        .map(|part| {
-            let key = match part {
-                "clean" => "sto.md.clean",
-                "active" => "sto.active",
-                "active-idle" => "sto.md.idle",
-                "read-auto" | "auto-read-only" => "sto.md.read_auto",
-                "write-pending" => "sto.md.write_pending",
-                "readonly" | "read-only" => "sto.readonly",
-                "inactive" | "Not Started" => "sto.md.inactive",
-                "suspended" => "sto.md.suspended",
-                "clear" => "sto.md.clear",
-                "degraded" => "health.degraded",
-                "broken" | "failed" => "health.failed",
-                "resyncing" => "sto.md.resyncing",
-                "recovering" => "sto.r.rebuilding",
-                "reshaping" => "sto.sync.reshape",
-                "checking" => "sto.sync.check",
-                "repairing" => "sto.sync.repair",
-                _ => return part,
-            };
-            lookup(key).unwrap_or(part)
-        })
-        .collect::<Vec<_>>()
-        .join(" · ")
+/// The array's state from its codes (the words the RAID events use too); mdadm's own word for
+/// one without a code.
+fn md_state_text(a: &MdArray) -> String {
+    let codes = a.state_codes();
+    if codes.is_empty() {
+        return a.state.clone();
+    }
+    rynas_api_types::notify::md_state_text(codes.iter().map(String::as_str), &i18n::try_t)
 }
 
 fn member_role(role: MemberRole) -> (Tone, &'static str) {
@@ -702,41 +681,26 @@ fn member_role(role: MemberRole) -> (Tone, &'static str) {
     }
 }
 
-/// Stored RAID notifications list members as `device (role)`, joined with `, `.
-pub(crate) fn md_members_text(members: &str, lookup: &dyn Fn(&str) -> Option<&'static str>) -> String {
-    let Some(template) = lookup("sto.md.member_status") else { return members.to_string() };
-    members.split(", ").map(|entry| {
-        let Some((device, role)) = entry.strip_suffix(')').and_then(|entry| entry.rsplit_once(" (")) else {
-            return entry.to_string();
-        };
-        let role = match role {
-            "active" => MemberRole::Active,
-            "spare" => MemberRole::Spare,
-            "faulty" => MemberRole::Faulty,
-            "rebuilding" => MemberRole::Rebuilding,
-            "journal" => MemberRole::Journal,
-            "unknown" => MemberRole::Unknown,
-            _ => return entry.to_string(),
-        };
-        lookup(member_role(role).1).map_or_else(
-            || entry.to_string(),
-            |label| template.replace("{role}", label).replace("{device}", device),
-        )
-    }).collect::<Vec<_>>().join(", ")
-}
-
 #[cfg(test)]
 #[test]
-fn raid_notification_status_and_members_are_localized() {
-    let zh = i18n::Lang::from_code("zh-CN").unwrap();
-    let lookup = |key: &str| i18n::text_in(zh, key);
-    assert_eq!(md_state_text("clean, degraded, recovering", &lookup), "无待处理的写入 · 降级 · 正在重建");
-    assert_eq!(md_state_text("recovering, vendor-state", &lookup), "正在重建 · vendor-state");
+fn array_state_from_codes() {
+    use rynas_api_types::storage::MdStateFlag;
+    let a = |flags: Vec<MdStateFlag>, words: &[&str]| MdArray {
+        state: words.join(", "),
+        state_flags: flags,
+        state_words: words.iter().map(|w| w.to_string()).collect(),
+        ..Default::default()
+    };
     assert_eq!(
-        md_members_text("sdd1 (rebuilding), nvme0n1p2 (faulty), dm-2 (vendor-role)", &lookup),
-        "sdd1（正在重建）, nvme0n1p2（故障）, dm-2 (vendor-role)",
+        md_state_text(&a(vec![MdStateFlag::Clean, MdStateFlag::Degraded, MdStateFlag::Recovering], &["clean", "degraded", "recovering"])),
+        "clean, degraded, rebuilding"
     );
-    assert_eq!(md_members_text("sdd1", &lookup), "sdd1");
+    assert_eq!(
+        md_state_text(&a(vec![MdStateFlag::Resyncing, MdStateFlag::Delayed], &["resyncing", "DELAYED"])),
+        "resynchronizing, delayed"
+    );
+    // a word without a code: only that word as mdadm says it
+    assert_eq!(md_state_text(&a(vec![MdStateFlag::Clean, MdStateFlag::Other], &["clean", "frozen"])), "clean, frozen");
 }
 
 fn raid_card(a: MdArray, selected: RwSignal<Option<String>>) -> AnyView {
@@ -747,7 +711,7 @@ fn raid_card(a: MdArray, selected: RwSignal<Option<String>>) -> AnyView {
             <WidgetHead icon=icons::LAYERS title="sto.raid"><Status tone=tone text=t(key).to_string() /></WidgetHead>
             <dl class="kvs">
                 {kv_row("sto.level", sig(md_level_text(&a)), "")}
-                {kv_row("sto.md_state", sig(md_state_text(&a.state, &i18n::try_t)), "")}
+                {kv_row("sto.md_state", sig(md_state_text(&a)), "")}
                 {kv_row("sto.array", sig(a.md_name.clone().map(|n| format!("{} ({n})", a.name)).unwrap_or_else(|| a.name.clone())), "mono")}
                 {kv_row("sto.size", sig(i18n::bytes_si(a.size)), "tnum")}
                 {a.mismatch_cnt.map(|m| kv_row("sto.mismatch", sig(m.to_string()), "tnum"))}
@@ -1183,8 +1147,8 @@ pub fn disk_checklist(disks: Vec<rynas_api_types::storage::DiskSummary>, chosen:
                                 {contents_text(&d).map(|what| view! { <span class="small warn-text">{tf("wiz.holds", &[("what", &what)])}</span> })}
                             </span>
                             {d.smr.then(|| view! { <span class="chip warn" title=t("sto.smr_hint")>"SMR"</span> })}
-                            {(!d.used_by.is_empty()).then(|| {
-                                let what = used_by_text(&d.used_by);
+                            {(!d.used_by.is_empty() || !d.usage.is_empty()).then(|| {
+                                let what = used_by_text(&d);
                                 view! { <span class="chip warn" title=tf("wiz.will_erase", &[("what", &what)])>{tr("wiz.erase_chip")}</span> }
                             })}
                             <Status tone=htone text=t(hkey).to_string() />

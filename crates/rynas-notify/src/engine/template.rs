@@ -450,15 +450,17 @@ mod tests {
         e.fields.extend([
             ("level".to_string(), "raid1".to_string()),
             ("state".to_string(), "clean, degraded".to_string()),
+            ("state_codes".to_string(), "clean,degraded".to_string()),
+            ("members".to_string(), "sdb3 (faulty)".to_string()),
+            ("member_roles".to_string(), "sdb3:faulty".to_string()),
             ("degraded".to_string(), "1".to_string()),
             ("raid_disks".to_string(), "2".to_string()),
         ]);
         let ctx = t.event_ctx(&e, false, NotifyLanguage::new("it").unwrap(), utc);
         assert_eq!(ctx.title, "RAID md2 degradato");
-        assert!(
-            ctx.body.starts_with("md2 (raid1) è senza ridondanza"),
-            "{}",
-            ctx.body
+        assert_eq!(
+            ctx.body,
+            "md2 (RAID 1) è senza ridondanza: mancano 1 membri su 2, stato «nessuna scrittura in sospeso, degradato». Membri: sdb3 (guasto)."
         );
         // English targets keep the server's text
         let ctx = t.event_ctx(&e, false, NotifyLanguage::EN, utc);

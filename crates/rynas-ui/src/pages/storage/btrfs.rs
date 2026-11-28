@@ -414,8 +414,8 @@ pub fn RepairDialog(vol: Vol, what: Repair, on_close: Callback<()>) -> impl Into
                                 .join(" · ");
                             view! {
                                 <p class="muted small"><span class="mono strong">{d.name.clone()}</span>" "{facts}</p>
-                                {(!d.used_by.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
-                                    {tf("sto.bt.disk_holds", &[("items", &used_by_text(&d.used_by))])}
+                                {(!d.used_by.is_empty() || !d.usage.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
+                                    {tf("sto.bt.disk_holds", &[("items", &used_by_text(&d))])}
                                 }.into_any()))}
                             }
                         })}
