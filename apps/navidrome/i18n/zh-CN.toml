@@ -1,0 +1,17 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "用于个人音乐收藏的流媒体服务器，兼容 Subsonic 应用。"
+
+[ports]
+web.purpose = "网页播放器和 Subsonic API"
+
+[folders]
+DATA_FOLDER.description = "媒体库数据库、缓存和设置"
+
+[shares]
+MUSIC.label = "音乐"
+MUSIC.description = "存放音乐的共享文件夹，以只读方式挂载到 /music。"
+
+[[notes]]
+text = "首次访问时创建管理员账户，请在安装后立即打开 Navidrome。此条目已关闭向上游发送使用统计。"

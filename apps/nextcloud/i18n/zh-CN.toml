@@ -1,0 +1,28 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "提供文件、日历、联系人及在线协作，配有桌面和手机同步客户端。"
+
+[ports]
+web.purpose = "网页界面、WebDAV 和同步客户端"
+
+[folders]
+HTML_FOLDER.description = "Nextcloud 程序、config.php、应用和主题"
+DATA_FOLDER.description = "用户文件（所有者为 www-data，UID 33）"
+DB_FOLDER.description = "MariaDB 数据库"
+
+[form]
+NEXTCLOUD_ADMIN_USER.title = "管理员用户名"
+NEXTCLOUD_ADMIN_PASSWORD.title = "管理员密码"
+NEXTCLOUD_ADMIN_PASSWORD.description = "仅用于首次安装，后续可在 Nextcloud 中修改。"
+NEXTCLOUD_DOMAIN.title = "公开访问主机名"
+NEXTCLOUD_DOMAIN.description = "用户访问 Nextcloud 时使用的其他主机名，例如 cloud.example.lan。NAS 的主机名始终受信任。"
+
+[[notes]]
+text = "后台任务默认通过 AJAX 运行。规模较大时，请改用 Webcron 或定时任务容器。"
+
+[[groups]]
+title = "管理员"
+
+[[groups]]
+title = "访问"

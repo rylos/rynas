@@ -11,6 +11,8 @@
 //!   overlays/*.yaml       optional compose merge patches, listed in app.toml
 //!   migrations/*.toml     optional value migrations, one per package version
 //!   tests/values.toml     answers used by CI to render the entry
+//!   i18n/<lang>.toml      optional translations of the texts, by field (i18n.rs)
+//!   i18n/<lang>.md        optional translation of description.md
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -130,6 +132,8 @@ pub struct CatalogApp {
     /// Path of `metadata/icon.svg`.
     pub icon: PathBuf,
     pub screenshots: Vec<PathBuf>,
+    /// The translations of `i18n/`, by language code.
+    pub translations: BTreeMap<String, crate::i18n::Translation>,
 }
 
 /// A loaded catalogue.
@@ -235,7 +239,7 @@ pub fn merge(shipped: Catalog, online: Catalog, running: Version) -> (Catalog, B
     (Catalog { source: shipped.source, apps }, origin)
 }
 
-const ALLOWED_TOP: &[&str] =&["app.toml", "compose.yaml", "form.json", "description.md", "metadata", "overlays", "migrations", "tests"];
+const ALLOWED_TOP: &[&str] = &["app.toml", "compose.yaml", "form.json", "description.md", "metadata", "overlays", "migrations", "tests", crate::i18n::DIR];
 
 fn read(dir: &Path, rel: &str, app: &str, issues: &mut Issues) -> Option<String> {
     match fs::read_to_string(dir.join(rel)) {
@@ -247,13 +251,13 @@ fn read(dir: &Path, rel: &str, app: &str, issues: &mut Issues) -> Option<String>
     }
 }
 
-fn list(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn list(dir: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(dir).map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect()).unwrap_or_default();
     v.sort();
     v
 }
 
-fn file_name(p: &Path) -> String {
+pub(crate) fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
@@ -377,10 +381,15 @@ impl CatalogApp {
             None => TestValues::default(),
         };
 
+        let translations = crate::i18n::load(dir, id, &mut issues);
+
         let (Some(manifest), Some(compose_doc), Some(form)) = (manifest, compose_doc, form) else {
             return Err(issues);
         };
         manifest.check(id, &mut issues);
+        for (code, t) in &translations {
+            t.check(id, code, &manifest, &form, &mut issues);
+        }
 
         let mut taken: Vec<&str> = PROVIDED_VARS.to_vec();
         taken.extend(manifest.declared_envs());
@@ -450,6 +459,7 @@ impl CatalogApp {
             description,
             icon,
             screenshots,
+            translations,
         };
         if issues.is_empty() {
             // the test values must render

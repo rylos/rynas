@@ -260,7 +260,7 @@ fn update_dialog(stack: String, close: Callback<()>) -> AnyView {
         }
         let Some(app) = plan.data.with(|p| p.as_ref().filter(|p| !p.missing_values.is_empty()).map(|p| p.app.clone())) else { return false };
         spawn_local(async move {
-            match api::get::<AppDetail>(&format!("/api/v1/apps/catalog/{}", api::encode(&app))).await {
+            match api::get::<AppDetail>(&super::texts::url(&format!("/api/v1/apps/catalog/{}", api::encode(&app)))).await {
                 Ok(d) => {
                     let _ = values.try_set(schema_form::defaults(&d.form));
                     let _ = detail.try_set(Some(d));
@@ -295,7 +295,7 @@ fn update_dialog(stack: String, close: Callback<()>) -> AnyView {
         let form = move || {
             detail.get().map(|d| {
                 SchemaForm {
-                    texts: super::texts::CatalogText::new(&d.card.id),
+                    texts: super::texts::CatalogText::new(d.texts.clone()),
                     form: StoredValue::new(d.form.clone()),
                     overlays: StoredValue::new(d.overlays.clone()),
                     values,

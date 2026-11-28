@@ -1,0 +1,13 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "私人的信封预算工具，支持跨设备同步和可选的端到端加密。"
+
+[ports]
+web.purpose = "网页应用和同步服务器"
+
+[folders]
+DATA_FOLDER.description = "账户服务文件和预算文件"
+
+[[notes]]
+text = "请通过网页访问提供的 HTTPS 地址打开 Actual。浏览器会阻止它通过普通 HTTP 运行。首次访问时设置服务器密码。"

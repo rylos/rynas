@@ -1,0 +1,18 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "浏览器中的 PDF 工具箱，支持合并、拆分、转换、压缩、OCR、签名和涂黑隐去。"
+
+[ports]
+web.purpose = "网页界面和 REST API"
+
+[folders]
+CONFIGS_FOLDER.description = "settings.yml、用户数据库和密钥"
+STORAGE_FOLDER.description = "跨会话保留的文件"
+LOGS_FOLDER.description = "应用日志"
+
+[[notes]]
+text = "使用 admin 和 stirling 登录并立即设置新密码。登录验证会保持开启，以防网络上的其他用户随意使用。"
+
+[[notes]]
+text = "Stirling-PDF 的部分功能采用商业许可。单点登录、审计等企业功能需要付费许可密钥。此条目关闭了匿名分析。"

@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use rynas_api_types::TaskStatus;
 use rynas_api_types::apps::{AppCard, AppCatalog, CatalogIssueKind, CatalogSourceState, FolderIntent, FolderSsd, GpuNeed, NoteLevel, RamGate, ShareAccess, WebAuth, WebPublic};
 
-use super::texts::{CatalogText, lookup};
+use super::texts::{self, CatalogText};
 use super::{AppDetail, CATEGORIES, antifeature_chips, antifeature_keys, app_icon, apps, category_key, install_block, ram_pill};
 use crate::form::search_box;
 use crate::i18n::{self, t, tf, tr};
@@ -121,7 +121,7 @@ pub fn browse() -> AnyView {
                 qv.is_empty()
                     || x.name.to_lowercase().contains(&qv)
                     || x.summary.to_lowercase().contains(&qv)
-                    || lookup(&x.id, &x.summary).0.to_lowercase().contains(&qv)
+                    || x.texts.as_ref().and_then(|t| t.summary.as_ref()).is_some_and(|s| s.to_lowercase().contains(&qv))
                     || x.id.contains(&qv)
             })
             .filter(|x| cv.is_empty() || x.categories.iter().any(|k| category_key(*k) == cv))
@@ -161,7 +161,7 @@ pub fn browse() -> AnyView {
 
 /// One catalogue card.
 fn card(c: AppCard) -> AnyView {
-    let texts = CatalogText::new(&c.id);
+    let texts = CatalogText::new(c.texts.clone());
     let a = apps();
     let (id, id2) = (c.id.clone(), c.id.clone());
     let installed = c.installed.first().cloned();
@@ -188,7 +188,7 @@ fn card(c: AppCard) -> AnyView {
                     <span class="cell-sub">{tf("apps.version", &[("v", &c.app_version)])}" · "<span class="mono">{c.license.clone()}</span></span>
                 </div>
             </header>
-            <p class="app-sum">{texts.span(c.summary.clone())}</p>
+            <p class="app-sum">{texts.span(|t| t.summary.as_ref(), &c.summary)}</p>
             <div class="chips">
                 {(!c.installed.is_empty()).then(|| ui::status(Tone::Ok, t("apps.installed").to_string()))}
                 {c.update_available.then(|| view! { <span class="chip accent"><Icon icon=icons::DOWNLOAD size=12 />{tr("dk.upd.available")}</span> })}
@@ -253,9 +253,11 @@ fn yes_no(b: bool) -> String {
 pub(super) fn notes_view(texts: CatalogText, notes: &[rynas_api_types::apps::AppNote]) -> AnyView {
     notes
         .iter()
-        .map(|n| {
+        .enumerate()
+        .map(|(i, n)| {
             let (tone, icon) = if n.level == NoteLevel::Warning { (Tone::Warn, icons::TRIANGLE_ALERT) } else { (Tone::Info, icons::INFO) };
-            ui::note(tone, icon, texts.span(n.text.clone()))
+            let i = u32::try_from(i).unwrap_or(u32::MAX);
+            ui::note(tone, icon, texts.span(|t| t.notes.get(&i), &n.text))
         })
         .collect_view()
         .into_any()
@@ -273,7 +275,7 @@ fn ports_table(texts: CatalogText, c: &AppCard) -> Option<AnyView> {
                     Some(p.env.clone()),
                     "cell-sub mono",
                 )),
-                ui::cell("apps.col.purpose", "wrap", texts.span(p.purpose.clone())),
+                ui::cell("apps.col.purpose", "wrap", texts.span(|t| t.ports.get(&p.name), &p.purpose)),
                 ui::cell("apps.col.reach", "", view! {
                     <div class="chips">
                         {p.proxied.then(|| view! { <span class="chip">{tr("apps.port.proxied")}</span> })}
@@ -292,7 +294,7 @@ fn folders_table(texts: CatalogText, d: &AppDetail) -> Option<AnyView> {
         .iter()
         .map(|f| {
             ui::row(vec![
-                ui::cell("apps.col.folder", "", view! { <div class="cell-main"><span class="mono">{format!("./{}", f.path)}</span><span class="cell-sub">{texts.span(f.description.clone())}</span></div> }.into_any()),
+                ui::cell("apps.col.folder", "", view! { <div class="cell-main"><span class="mono">{format!("./{}", f.path)}</span><span class="cell-sub">{texts.span(|t| t.folders.get(&f.env), &f.description)}</span></div> }.into_any()),
                 ui::cell("apps.col.kind", "", view! {
                     <div class="chips">
                         <span class="chip">{intent_text(f.intent)}</span>
@@ -319,7 +321,7 @@ fn shares_table(texts: CatalogText, d: &AppDetail) -> Option<AnyView> {
         .iter()
         .map(|s| {
             ui::row(vec![
-                ui::cell("shares.folder", "", view! { <div class="cell-main">{texts.span(s.label.clone())}<span class="cell-sub">{texts.span(s.description.clone())}</span></div> }.into_any()),
+                ui::cell("shares.folder", "", view! { <div class="cell-main">{texts.span(|t| t.shares.get(&s.env)?.label.as_ref(), &s.label)}<span class="cell-sub">{texts.span(|t| t.shares.get(&s.env)?.description.as_ref(), &s.description)}</span></div> }.into_any()),
                 ui::cell("apps.col.access", "", view! {
                     <div class="chips">
                         <span class="chip">{tr(if s.access == ShareAccess::Rw { "rm.set.rw" } else { "perm.ro" })}</span>
@@ -362,11 +364,11 @@ fn web_view(d: &AppDetail) -> Option<AnyView> {
 }
 
 /// A titled list of names and descriptions from the entry.
-fn name_list(texts: CatalogText, title: &'static str, items: Vec<(String, String, bool)>) -> Option<AnyView> {
+fn name_list(title: &'static str, items: Vec<(String, AnyView, bool)>) -> Option<AnyView> {
     (!items.is_empty()).then(|| {
         view! {
             <h4 class="mini-title">{tr(title)}</h4>
-            <ul class="small app-list">{items.into_iter().map(|(n, d, shown)| view! { <li><span class="mono">{n}</span>" — "{texts.span(d)}{shown.then(|| view! { " "<span class="chip">{tr("apps.secret.shown")}</span> })}</li> }).collect_view()}</ul>
+            <ul class="small app-list">{items.into_iter().map(|(n, d, shown)| view! { <li><span class="mono">{n}</span>" — "{d}{shown.then(|| view! { " "<span class="chip">{tr("apps.secret.shown")}</span> })}</li> }).collect_view()}</ul>
         }
         .into_any()
     })
@@ -432,13 +434,13 @@ fn detail_body(d: AppDetail) -> AnyView {
     let has_af = !c.antifeatures.is_empty();
     // only the catalogue's own files (served by the API): nothing loads from another site
     let shots: Vec<String> = d.screenshots.iter().filter(|s| s.starts_with("/api/")).cloned().collect();
-    let texts = CatalogText::new(&c.id);
-    let secrets = d.secrets.iter().map(|s| (s.env.clone(), s.description.clone(), s.show)).collect();
-    let volumes = d.named_volumes.iter().map(|v| (v.name.clone(), v.description.clone(), false)).collect();
+    let texts = CatalogText::new(d.texts.clone());
+    let secrets = d.secrets.iter().map(|s| (s.env.clone(), texts.span(|t| t.secrets.get(&s.env), &s.description), s.show)).collect();
+    let volumes = d.named_volumes.iter().map(|v| (v.name.clone(), texts.span(|t| t.named_volumes.get(&v.name), &v.description), false)).collect();
     view! {
         <div class="app-detail">
             {detail_head(&d)}
-            {texts.markdown(d.description.clone())}
+            {texts.markdown(&d.description)}
             {(!shots.is_empty()).then(|| view! {
                 <div class="app-shots">{shots.into_iter().map(|s| view! { <a href=s.clone() target="_blank" rel="noopener"><img src=s.clone() alt=tr("apps.screenshot") loading="lazy" /></a> }).collect_view()}</div>
             })}
@@ -449,8 +451,8 @@ fn detail_body(d: AppDetail) -> AnyView {
             {web_view(&d)}
             {folders_table(texts, &d)}
             {shares_table(texts, &d)}
-            {name_list(texts, "apps.d.secrets", secrets)}
-            {name_list(texts, "apps.d.volumes", volumes)}
+            {name_list("apps.d.secrets", secrets)}
+            {name_list("apps.d.volumes", volumes)}
             {(!d.maintainers.is_empty()).then(|| view! { <dl class="kvs">{ui::kv_text("apps.maintainers", d.maintainers.join(", "), "")}{ui::kv_text("apps.d.manager", yes_no(c.manager), "")}</dl> })}
         </div>
     }
@@ -460,7 +462,9 @@ fn detail_body(d: AppDetail) -> AnyView {
 /// The detail drawer of one entry.
 pub fn detail_drawer(id: String) -> AnyView {
     let a = apps();
-    let d = Remote::<AppDetail>::new(format!("/api/v1/apps/catalog/{}", crate::api::encode(&id)));
+    let path = format!("/api/v1/apps/catalog/{}", crate::api::encode(&id));
+    let d = Remote::<AppDetail>::new(texts::url(&path));
+    texts::follow_lang(d, path);
     let close = Callback::new(move |_| a.detail.set(None));
     let title = Signal::derive(move || d.data.with(|d| d.as_ref().map(|d| d.card.name.clone())).unwrap_or_else(|| t("apps.details").to_string()));
     let body = view! { {move || d.view(10, move || d.data.get().map(detail_body).unwrap_or_else(|| ().into_any()))} }.into_any();

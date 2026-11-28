@@ -1,0 +1,17 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "Cloudflare Tunnel 连接器，允许通过互联网访问应用，无需开放路由器端口。"
+
+[form]
+TUNNEL_TOKEN.title = "隧道令牌"
+TUNNEL_TOKEN.description = "在 Cloudflare 控制台中创建隧道后获取的令牌，也就是安装命令中 --token 后面的长字符串。"
+
+[[notes]]
+text = "已发布主机名的流量经过 Cloudflare，TLS 也在 Cloudflare 端终止，因此 Cloudflare 可以看到流量内容。隧道需要 Cloudflare 账户及由该账户管理的域名。"
+
+[[notes]]
+text = "在 Cloudflare 控制台的 Zero Trust → Networks → Tunnels 中创建隧道，将令牌复制到此处，然后添加公共主机名。可指向 https://localhost（rynas 的网页访问，需设置 No TLS Verify），也可指向 http://localhost:2283 等应用的本地端口。"
+
+[[groups]]
+title = "隧道"

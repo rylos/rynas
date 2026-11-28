@@ -1,0 +1,23 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "轻量的 MQTT 消息代理，为传感器、Zigbee2MQTT、Home Assistant 和 Frigate 提供家庭自动化消息服务。"
+
+[ports]
+mqtt.purpose = "局域网设备和应用使用的 MQTT 服务（需要密码）"
+
+[folders]
+DATA_FOLDER.description = "生成的 mosquitto.conf、密码文件和保留消息"
+
+[secrets]
+MQTT_PASSWORD.description = "MQTT 用户的密码"
+
+[form]
+MQTT_USER.title = "MQTT 用户名"
+MQTT_USER.description = "设备和应用（如 Zigbee2MQTT、Home Assistant、Frigate）用这个用户名登录。"
+
+[[notes]]
+text = "客户端使用此处设置的用户名和安装后显示的密码连接 mqtt://<NAS address>:1883。匿名访问已关闭。"
+
+[[groups]]
+title = "访问"

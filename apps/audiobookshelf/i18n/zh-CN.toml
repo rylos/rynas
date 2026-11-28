@@ -1,0 +1,20 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "有声书和播客服务器，支持在网页及手机应用间同步播放进度。"
+
+[ports]
+web.purpose = "网页界面、API 和手机应用同步"
+
+[folders]
+CONFIG_FOLDER.description = "数据库和设置"
+METADATA_FOLDER.description = "封面、作者图片、备份和流媒体缓存"
+
+[shares]
+AUDIOBOOKS.label = "有声书"
+AUDIOBOOKS.description = "存放有声书的共享文件夹，挂载到 /audiobooks。授予写入权限后，Audiobookshelf 可以保存封面和上传文件。"
+PODCASTS.label = "播客"
+PODCASTS.description = "存放已下载播客节目的共享文件夹，挂载到 /podcasts。"
+
+[[notes]]
+text = "首次访问时创建 root 账户。请在安装后立即打开 Audiobookshelf，并将 /audiobooks 和 /podcasts 添加为媒体库。"

@@ -1,0 +1,25 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "轻量的密码管理服务，兼容 Bitwarden 客户端。"
+
+[ports]
+web.purpose = "网页密码库、客户端 API 和实时同步（WebSocket）"
+
+[folders]
+DATA_FOLDER.description = "SQLite 数据库、附件、Send 分享和密钥"
+
+[form]
+DOMAIN.title = "公开访问地址"
+DOMAIN.description = "用户打开的 HTTPS 地址，例如 https://vault.example.lan。WebAuthn、附件和邮件链接需要此地址。"
+SIGNUPS_ALLOWED.title = "允许注册新账户"
+SIGNUPS_ALLOWED.description = "开启后可创建自己的账户，创建完成后即可关闭。"
+
+[[notes]]
+text = "Bitwarden 客户端和网页密码库需要 HTTPS。使用前，请通过 rynas 的「网页访问」模块或其他 TLS 代理发布 Vaultwarden。"
+
+[[notes]]
+text = "安装后默认开放注册，方便创建自己的账户。创建完成后，可在应用栈设置中关闭注册。"
+
+[[groups]]
+title = "访问"

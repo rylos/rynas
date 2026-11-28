@@ -411,8 +411,8 @@ Paths are relative to `/api/v1`.
 
 | Method | Path | Body | Answer |
 |---|---|---|---|
-| GET | `/apps/catalog` | — | `AppCatalog` {source, apps [`AppCard`] sorted by name, issues [{app, file, message}], installed_ram_mb?, arch, docker_installed, stacks_dir?} |
-| GET | `/apps/catalog/{id}` | — | `AppDetail` {card, description (Markdown), homepage, source?, changelog_url, maintainers, host_network, form `AppForm`, web `AppWeb`?, folders, shares, secrets [{env, description, show}], hardware, overlays, named_volumes, notes, screenshots [URL]} |
+| GET | `/apps/catalog?lang=<code>` | — | `AppCatalog` {source, apps [`AppCard`] sorted by name, issues [{app, file, message}], installed_ram_mb?, arch, docker_installed, stacks_dir?} |
+| GET | `/apps/catalog/{id}?lang=<code>` | — | `AppDetail` {card, description (Markdown), homepage, source?, changelog_url, maintainers, host_network, form `AppForm`, web `AppWeb`?, folders, shares, secrets [{env, description, show}], hardware, overlays, named_volumes, notes, screenshots [URL], texts `AppTexts`?}. `?lang=` (optional, both reads): the language of the entries' own texts (§ 6.14); each card carries `texts` with its summary and port purposes, the detail every translated text |
 | GET | `/apps/catalog/{id}/icon` | — | the SVG: `image/svg+xml`, at most 64 KiB, `nosniff`, a sandboxing CSP (only `data:` images and inline styles); `ETag`, and 304 on `If-None-Match` |
 | GET | `/apps/catalog/{id}/screenshots/{file}` | — | a PNG or WebP of the entry, at most 1 MiB. Only file names the loader listed are served; nothing from the request reaches the filesystem |
 | POST | `/apps/catalog/{id}/plan` | `AppInstallRequest` (optional) | `AppInstallPlan`. No side effects. Works without Docker (warning `docker_not_installed`) |
@@ -2169,6 +2169,8 @@ apps/<id>/
   overlays/<name>.yaml  compose merge patches listed in app.toml (optional)
   migrations/<ver>.toml value migrations (optional)
   tests/values.toml     answers CI renders with (required)
+  i18n/<lang>.toml      translations of the texts of app.toml and form.json (optional, § 6.14)
+  i18n/<lang>.md        translation of description.md (optional, § 6.14)
 ```
 
 Any other file is an error. `<id>` is `[a-z0-9][a-z0-9-]*`, at most 40 characters, equal to
@@ -2496,6 +2498,87 @@ expires (30 days); re-enable the workflow (or push) when GitHub says so.
 
 On the NAS nothing changes: the daily catalogue check (§ 6.12) brings the new entry versions
 and the per-stack automatic update (§ 5.8) applies them inside the policy.
+
+### 6.14 Translations (2026-11-28)
+
+English stays the source of every entry. An entry may carry translations of its own texts in
+`i18n/`, one pair of files per language, so they travel with the entry wherever it comes
+from: the shipped catalogue, the online one (§ 6.12) or a third-party source, which ships its
+translations the same way. The UI bundles nothing of the catalogue: the server sends the texts.
+
+```
+apps/<id>/i18n/zh-CN.toml   the short texts of app.toml and form.json
+apps/<id>/i18n/zh-CN.md     description.md
+```
+
+**Language codes.** A BCP 47 tag in its usual case, as in the UI language table
+(`crates/rynas-ui/assets/i18n/languages.txt`): `it`, `ru`, `zh-CN`, `pt-BR`, `zh-Hant`,
+`es-419`. Plain `en` is the entry itself. Either file may be left out (a language with only
+the long description, or only the short texts).
+
+**The `.toml` file** names the field each text translates, never the English text; it mirrors
+`app.toml` and `form.json`:
+
+```toml
+description = "文档归档工具，可扫描、识别文字、标记并建立全文搜索索引。"  # app.toml description
+
+[ports]                       # [[ports]] by name
+web.purpose = "网页界面和 REST API"
+
+[folders]                     # [[folders]] by env
+DATA_FOLDER.description = "搜索索引、分类器和设置"
+
+[shares]                      # [[shares]] by env: label, description
+CONSUME.label = "导入目录"
+CONSUME.description = "扫描仪或手动放入此处的文档会被导入，随后从此目录移除。"
+
+[share_set]                   # label, description
+[user_photos]                 # description
+[secrets]                     # [[secrets]] by env: description
+[overlays]                    # [[overlays]] by file name (overlays/<name>.yaml): description
+[named_volumes]               # [[named_volumes]] by name: description
+
+[form]                        # form.json properties by name
+PAPERLESS_ADMIN_USER.title = "管理员用户名"
+PAPERLESS_ADMIN_PASSWORD.description = "首次启动时用于创建超级用户，后续可在 Paperless 中修改。"
+# also .placeholder, and .enum_labels = [...] (all of them, in the order of the field's)
+
+[[notes]]                     # one per [[notes]] of app.toml, same order; without `text`:
+text = "..."                  # that note stays English
+
+[[groups]]                    # one per x-groups entry of form.json, same order
+title = "管理员"
+```
+
+**Checks** (`rynas_apps::i18n`, part of `CatalogApp::load`, so `cargo test -p rynas-apps`, the
+publication and the NAS all run them): unknown keys and files are errors; a key must name an
+item the entry has (a port, folder, share, secret, overlay, volume, form field) and a text the
+entry has there (no `description` for a field without one, no `enum_labels` for a field
+without labels); `[[notes]]` and `[[groups]]` have exactly the entry's count when present;
+`enum_labels` the field's length; no text is empty (leave a key out to show English); the
+card line is at most 140 characters. A renamed port, a removed form field or an added note
+therefore fails the entry instead of leaving a translation behind silently; a reworded English
+text does not, so whoever rewords one updates or drops its translations in the same change.
+Translations are presentation only: changing them alone does not bump `version` (as
+`featured`), so an online catalogue brings them with the next version of the entry.
+
+**API.** `GET /apps/catalog?lang=<code>` and `GET /apps/catalog/{id}?lang=<code>` (§ 5.2) add
+`texts` (`AppTexts`) when the entry has a translation for the language: the one with that code
+(any case), else the one of its primary language (`it` for `it-CH`); never another region or
+script (`zh-TW` does not get `zh-CN`). `AppTexts.lang` is the code of the translation used,
+for the `lang` attribute of what shows it; it holds only translated texts, keyed like the API
+objects (ports by `name`, folders, shares and secrets by `env`, overlays by `file`, notes and
+form groups by position, form fields by property name). Every other text falls back to its
+English field, one by one; the English fields never change meaning, so older clients keep
+working. The UI asks in its own language (`?lang=`, read again when the language changes) and
+marks each text with its language, English ones `lang="en"`.
+
+**Older rynas.** A loader before 0.9.21 does not know `i18n/` and refuses an entry that has
+it; in the online catalogue that refuses the whole download unless the entry's `min_rynas`
+says it needs a newer rynas (§ 6.12). So the entries that have translations take
+`min_rynas = "0.9.21"` with the 0.9.21 release, before an online catalogue with them is
+published: NAS on older versions then skip those entries in the download and keep their
+shipped ones.
 
 ## 7. Open points between waves
 

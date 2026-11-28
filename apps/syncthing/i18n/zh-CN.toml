@@ -1,0 +1,29 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "设备间持续运行的点对点文件同步工具。"
+
+[ports]
+web.purpose = "网页界面"
+sync-tcp.purpose = "同步协议（TCP）"
+sync-quic.purpose = "同步协议（QUIC）"
+discovery.purpose = "局域网设备发现"
+
+[folders]
+CONFIG_FOLDER.description = "Syncthing 配置、密钥和索引数据库"
+
+[share_set]
+label = "要同步的共享文件夹"
+description = "各个选中的共享文件夹会挂载到 /shares/<share>。请在 Syncthing 中添加这些路径下的文件夹。"
+
+[secrets]
+ST_API_KEY.description = "rynas 使用的 Syncthing REST 接口密钥"
+
+[[notes]]
+text = "初始界面没有登录验证。安装后，请立即在 Syncthing 的 Actions → Settings → GUI 中设置用户名和密码。"
+
+[[notes]]
+text = "Syncthing 中的文件夹位于 /shares/<share> 下。请先在这里选一个或多个共享文件夹，再将对应路径下的文件夹添加到 Syncthing。"
+
+[[notes]]
+text = "桥接网络使用发布的 UDP 端口进行局域网发现。如果设备在局域网内互相找不到，请在另一台设备上手动添加 NAS 地址 tcp://<nas>:22000。"

@@ -1,0 +1,19 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "在本地运行的家庭自动化中心，支持数千种设备集成。"
+
+[ports]
+web.purpose = "网页界面及配套应用 API（主机网络，始终可从局域网访问）"
+
+[folders]
+CONFIG_FOLDER.description = "configuration.yaml、集成配置和记录数据库"
+
+[[notes]]
+text = "按上游说明，Home Assistant 以特权模式在主机网络运行，以便访问 USB 无线设备、蓝牙和本地设备。"
+
+[[notes]]
+text = "使用 rynas 代理时，请在 configuration.yaml 的 http 配置中设置 use_x_forwarded_for: true 和 trusted_proxies: [127.0.0.1, ::1]。Home Assistant 没有对应的环境变量。"
+
+[[notes]]
+text = "首次访问时进入初始设置流程并创建所有者账户，请在安装后立即打开它。"

@@ -1,0 +1,28 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "轻量的自托管 Git 平台，支持仓库、议题、合并请求、软件包和持续集成。"
+
+[ports]
+web.purpose = "网页界面、API 和通过 HTTP 访问 Git"
+ssh.purpose = "通过 SSH 访问 Git（内置 SSH 服务器）"
+
+[folders]
+DATA_FOLDER.description = "仓库、LFS 对象、SQLite 数据库和 app.ini（custom/conf）"
+
+[secrets]
+SECRET_KEY.description = "Forgejo 的 security.SECRET_KEY，用于加密保存的凭据。"
+INTERNAL_TOKEN.description = "Forgejo 内部 API 的令牌"
+
+[form]
+ROOT_URL.title = "公开访问地址"
+ROOT_URL.description = "用户打开的地址，用于克隆链接、邮件和 OAuth 回调，例如 https://git.example.lan/。"
+
+[[notes]]
+text = "本安装跳过初始设置页，第一个注册的账户将成为管理员。安装后请立即注册。如不需要其他账户，请在站点管理中关闭公开注册。"
+
+[[notes]]
+text = "升级 Forgejo 主版本前需要手动检查。本条目跟随长期支持分支（15.x）。"
+
+[[groups]]
+title = "访问"

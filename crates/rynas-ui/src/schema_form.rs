@@ -17,7 +17,9 @@
 //! The form stays JSON ([`Form`], the wire shape of `rynas_api_types::apps::AppForm`) and is
 //! read where it is used: no typed copy of the schema in the wasm (size).
 //!
-//! Titles and descriptions can be translated for bundled entries. Values are JSON values
+//! Titles, descriptions, placeholders, `enum_labels`, group titles and overlay descriptions
+//! come in English from the entry, or in the UI language when the entry's translation has them
+//! ([`CatalogText`], `AppTexts::form`), each marked with its `lang`. Values are JSON values
 //! (string, integer, boolean) keyed by property name: [`defaults`] → edits → [`answers`].
 
 use std::collections::BTreeMap;
@@ -382,13 +384,16 @@ fn text_of(v: Option<&Value>) -> String {
     }
 }
 
-/// What one field shows, read once from the schema.
+/// A text of the entry and the language it is in (the translation's, or `en`).
+type Text = (String, String);
+
+/// What one field shows, read once from the schema, its texts in the UI language when the
+/// entry is translated into it.
 #[derive(Clone)]
 struct Def {
-    texts: CatalogText,
     ty: Ty,
-    title: String,
-    description: Option<String>,
+    title: Text,
+    description: Option<Text>,
     widget: Option<Widget>,
     format: Option<Format>,
     placeholder: String,
@@ -396,26 +401,45 @@ struct Def {
     minimum: Option<i64>,
     maximum: Option<i64>,
     enum_values: Option<Vec<Value>>,
-    enum_labels: Vec<String>,
+    /// What each `enum` value shows: its `enum_labels` entry, else the value.
+    enum_labels: Vec<Text>,
 }
 
 impl Def {
-    fn of(f: Field, texts: CatalogText) -> Def {
+    fn of(name: &str, f: Field, texts: CatalogText) -> Def {
+        let field = |pick: fn(&rynas_api_types::apps::AppFieldTexts) -> Option<&String>, english: &str| texts.text(|t| t.form.get(name).and_then(pick), english);
+        let enum_values = f.enum_values().cloned();
+        let labels = f.enum_labels();
+        let (translated, lang) = texts.with(|t| t.map(|t| (t.form.get(name).map(|x| x.enum_labels.clone()).unwrap_or_default(), t.lang.clone()))).unwrap_or_default();
+        let enum_labels = enum_values
+            .iter()
+            .flatten()
+            .enumerate()
+            .map(|(i, v)| match (translated.get(i).filter(|_| translated.len() == labels.len()), labels.get(i)) {
+                (Some(l), _) => (l.clone(), lang.clone()),
+                (None, Some(l)) => (l.clone(), "en".to_string()),
+                (None, None) => (text_of(Some(v)), "en".to_string()),
+            })
+            .collect();
         Def {
-            texts,
             ty: f.ty(),
-            title: f.title().to_string(),
-            description: f.description().map(str::to_string),
+            title: field(|x| x.title.as_ref(), f.title()),
+            description: f.description().map(|d| field(|x| x.description.as_ref(), d)),
             widget: f.widget(),
             format: f.format(),
-            placeholder: f.placeholder().unwrap_or_default().to_string(),
+            placeholder: f.placeholder().map(|p| field(|x| x.placeholder.as_ref(), p).0).unwrap_or_default(),
             max_length: f.max_length(),
             minimum: f.minimum(),
             maximum: f.maximum(),
-            enum_values: f.enum_values().cloned(),
-            enum_labels: f.enum_labels(),
+            enum_values,
+            enum_labels,
         }
     }
+}
+
+/// A text in a `span` marked with its language.
+fn span((text, lang): Text) -> AnyView {
+    view! { <span lang=lang>{text}</span> }.into_any()
 }
 
 /// What a form draws and reads: the schema, the answers, the overlays (switch hints), the
@@ -440,8 +464,12 @@ impl SchemaForm {
         if secs.is_empty() {
             return view! { <p class="muted small">{tr("sf.no_questions")}</p> }.into_any();
         }
+        let groups = self.form.with_value(Form::groups);
         secs.into_iter()
             .map(|(title, fields)| {
+                // the group of the section (a field is in one group only), for its translation
+                let group = fields.first().and_then(|k| groups.iter().position(|(_, g)| g.contains(k))).and_then(|i| u32::try_from(i).ok());
+                let title = self.texts.text(|t| t.groups.get(&group?), &title);
                 let advanced = |k: &String| self.form.with_value(|f| f.field(k).is_some_and(Field::advanced));
                 let (adv, main): (Vec<String>, Vec<String>) = fields.into_iter().partition(advanced);
                 let main = main.into_iter().map(|k| self.clone().field(k)).collect_view();
@@ -451,7 +479,7 @@ impl SchemaForm {
                 });
                 view! {
                     <fieldset class="sf-group">
-                        {(!title.is_empty()).then(|| view! { <legend class="mini-title">{self.texts.span(title)}</legend> })}
+                        {(!title.0.is_empty()).then(|| view! { <legend class="mini-title">{span(title)}</legend> })}
                         <div class="form">{main}{adv}</div>
                     </fieldset>
                 }
@@ -463,7 +491,7 @@ impl SchemaForm {
 
     /// One property: the widget its type and `x-ui` ask for, hidden while `visible_if` fails.
     fn field(self, name: String) -> AnyView {
-        let Some(f) = self.form.with_value(|fm| fm.field(&name).map(|field| Def::of(field, self.texts))) else { return ().into_any() };
+        let Some(f) = self.form.with_value(|fm| fm.field(&name).map(|field| Def::of(&name, field, self.texts))) else { return ().into_any() };
         let (form, values) = (self.form, self.values);
         let key = StoredValue::new(name.clone());
         let shown = Memo::new(move |_| form.with_value(|fm| values.with(|v| fm.field(&key.get_value()).is_some_and(|f| visible(fm, v, f)))));
@@ -495,13 +523,21 @@ impl SchemaForm {
 
     /// A boolean: a switch, with what its overlays add.
     fn switch(&self, name: &str, f: &Def, get: Signal<Option<Value>>, set: Callback<Value>) -> AnyView {
-        let on_adds: Vec<String> = self.overlays.with_value(|o| o.iter().filter(|o| o.when == name).map(|o| o.description.clone()).collect());
-        let off_adds: Vec<String> = self.overlays.with_value(|o| o.iter().filter(|o| o.when.strip_prefix('!') == Some(name)).map(|o| o.description.clone()).collect());
+        let texts = self.texts;
+        let adds = |on: bool| -> Vec<Text> {
+            self.overlays.with_value(|o| {
+                o.iter()
+                    .filter(|o| if on { o.when == name } else { o.when.strip_prefix('!') == Some(name) })
+                    .map(|o| texts.text(|t| t.overlays.get(&o.file), &o.description))
+                    .collect()
+            })
+        };
+        let (on_adds, off_adds) = (adds(true), adds(false));
         let checked = move || get.with(|v| matches!(v, Some(Value::Bool(true))));
-        let hint = |key: &'static str, list: Vec<String>| {
+        let hint = |key: &'static str, list: Vec<Text>| {
             (!list.is_empty()).then(|| {
                 let entries = list.into_iter().enumerate().map(|(i, text)| {
-                    view! { {if i > 0 { " · " } else { "" }}{f.texts.span(text)} }
+                    view! { {if i > 0 { " · " } else { "" }}{span(text)} }
                 }).collect_view();
                 view! { <span class="field-help">{tr(key)}" "{entries}</span> }
             })
@@ -510,8 +546,8 @@ impl SchemaForm {
             <label class="switch-row">
                 <input type="checkbox" role="switch" class="switch" prop:checked=checked on:change=move |ev| set.run(Value::Bool(event_target_checked(&ev))) />
                 <span class="switch-text">
-                    <span class="switch-label">{f.texts.span(f.title.clone())}</span>
-                    {f.description.clone().map(|d| view! { <span class="field-help">{f.texts.span(d)}</span> })}
+                    <span class="switch-label">{span(f.title.clone())}</span>
+                    {f.description.clone().map(|d| view! { <span class="field-help">{span(d)}</span> })}
                     {hint("sf.when_on", on_adds)}
                     {hint("sf.when_off", off_adds)}
                 </span>
@@ -525,7 +561,7 @@ impl SchemaForm {
 fn label(f: &Def, required: bool, id: String) -> AnyView {
     view! {
         <label class="field-label" for=id>
-            {f.texts.span(f.title.clone())}
+            {span(f.title.clone())}
             {(!required).then(|| view! { " "<span class="muted small">{tr("sf.optional")}</span> })}
         </label>
     }
@@ -534,7 +570,7 @@ fn label(f: &Def, required: bool, id: String) -> AnyView {
 
 fn help_err(f: &Def, hid: &str, eid: String, err: Signal<Option<String>>) -> AnyView {
     view! {
-        {f.description.clone().map(|d| view! { <span class="field-help" id=hid.to_string()>{f.texts.span(d)}</span> })}
+        {f.description.clone().map(|d| view! { <span class="field-help" id=hid.to_string()>{span(d)}</span> })}
         <span class="field-error" id=eid aria-live="polite">
             {move || err.get().map(|e| view! { <Icon icon=icons::CIRCLE_X size=12 />{crate::ui::err_view(e)} })}
         </span>
@@ -626,9 +662,9 @@ fn select(f: &Def, required: bool, get: Signal<Option<Value>>, set: Callback<Val
         .enumerate()
         .map(|(i, v)| {
             let val = text_of(Some(v));
-            let text = f.texts.signal(labels.get(i).cloned().unwrap_or_else(|| val.clone()));
+            let (text, lang) = labels.get(i).cloned().unwrap_or_else(|| (val.clone(), "en".to_string()));
             let v2 = val.clone();
-            view! { <option value=val selected=move || cur() == v2 lang=move || text.with(|(_, lang)| *lang)>{move || text.with(|(s, _)| s.clone())}</option> }
+            view! { <option value=val selected=move || cur() == v2 lang=lang>{text}</option> }
         })
         .collect_view();
     view! {

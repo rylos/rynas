@@ -1,0 +1,23 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "轻量的 OpenID Connect 身份提供方，使用通行密钥登录。"
+
+[ports]
+web.purpose = "登录页面、OIDC 端点和管理界面"
+
+[folders]
+DATA_FOLDER.description = "SQLite 数据库、签名密钥及上传的标志"
+
+[secrets]
+ENCRYPTION_KEY.description = "加密数据库中存储的签名密钥和机密信息"
+
+[form]
+APP_URL.title = "公开访问地址"
+APP_URL.description = "Pocket ID 的 HTTPS 地址，不含路径，例如 https://id.example.lan。通行密钥会绑定到该地址。"
+
+[[notes]]
+text = "安装后，打开 Pocket ID 地址下的 /setup 创建管理员并注册通行密钥。通行密钥与公开访问地址绑定，请仔细选择，之后更改地址会导致这些密钥失效。"
+
+[[groups]]
+title = "访问"

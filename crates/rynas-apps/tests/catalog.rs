@@ -376,6 +376,79 @@ volumes:
     }
 }
 
+#[test]
+fn translations_are_keyed_by_field_and_checked_against_the_entry() {
+    // the shipped ones load (the catalogue validates) and fill the API texts
+    let c = catalog();
+    let fr = c.get("frigate").unwrap();
+    let t = fr.texts("zh-CN").expect("frigate is translated into zh-CN");
+    assert_eq!(t.lang, "zh-CN");
+    assert!(t.summary.is_some() && t.description.is_some());
+    assert_eq!(t.overlays.keys().collect::<Vec<_>>(), vec!["overlays/hw-accel.yaml"]);
+    assert_eq!(t.form["LIBVA_DRIVER"].enum_labels.len(), 2);
+    assert_eq!(t.notes.len(), fr.manifest.notes.len());
+    let card = fr.card_texts("zh-CN").unwrap();
+    assert!(card.summary.is_some() && card.form.is_empty() && card.description.is_none());
+    assert!(fr.texts("en").is_none() && fr.texts("zh-TW").is_none());
+
+    // a translation that drifted from its entry is refused, with every problem named
+    let tmp = tempfile::tempdir().unwrap();
+    let dst = tmp.path().join("paperless-ngx");
+    copy_dir(&apps_dir().join("paperless-ngx"), &dst);
+    fs::write(
+        dst.join("i18n/zh-CN.toml"),
+        r#"description = "文档"
+[ports]
+http.purpose = "网页"
+[folders]
+DATA_FOLDER.description = " "
+[shares]
+CONSUME.label = "导入"
+[secrets]
+NOPE.description = "x"
+[form]
+PAPERLESS_ADMIN_USER.placeholder = "admin"
+GONE.title = "x"
+[[notes]]
+text = "x"
+[[groups]]
+title = "管理员"
+"#,
+    )
+    .unwrap();
+    fs::write(dst.join("i18n/zh-cn.md"), "x").unwrap();
+    fs::write(dst.join("i18n/notes.txt"), "x").unwrap();
+    let text = CatalogApp::load(&dst).unwrap_err().to_string();
+    for needle in [
+        "i18n/zh-CN.toml: `ports.http`: no such item in the entry",
+        "`folders.DATA_FOLDER.description` is empty",
+        "`secrets.NOPE`: no such item",
+        "`form.PAPERLESS_ADMIN_USER.placeholder`: the entry has no such text",
+        "`form.GONE`: no such item",
+        "1 [[notes]] for the 0 notes of app.toml",
+        "1 [[groups]] for the 2 x-groups of form.json",
+        "i18n/zh-cn.md: `zh-cn` is not a language code",
+        "i18n/notes.txt: translations are <lang>.toml or <lang>.md",
+    ] {
+        assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
+    }
+    // unknown keys are refused by the parser
+    fs::remove_file(dst.join("i18n/zh-cn.md")).unwrap();
+    fs::remove_file(dst.join("i18n/notes.txt")).unwrap();
+    fs::write(dst.join("i18n/zh-CN.toml"), "summary = \"x\"\n").unwrap();
+    let text = CatalogApp::load(&dst).unwrap_err().to_string();
+    assert!(text.contains("i18n/zh-CN.toml") && text.contains("summary"), "{text}");
+    // a card line too long for the card
+    fs::write(dst.join("i18n/zh-CN.toml"), format!("description = \"{}\"\n", "文".repeat(141))).unwrap();
+    let text = CatalogApp::load(&dst).unwrap_err().to_string();
+    assert!(text.contains("longer than 140 characters"), "{text}");
+    // the long description alone is a translation too
+    fs::remove_file(dst.join("i18n/zh-CN.toml")).unwrap();
+    let app = CatalogApp::load(&dst).unwrap();
+    let t = app.texts("zh-CN").unwrap();
+    assert!(t.description.is_some() && t.summary.is_none() && app.card_texts("zh-CN").is_none());
+}
+
 fn bind_of<'a>(doc: &'a Value, service: &str, target: &str) -> Option<&'a Value> {
     doc["services"][service]["volumes"].as_sequence()?.iter().find(|v| v.get("target").and_then(Value::as_str) == Some(target))
 }

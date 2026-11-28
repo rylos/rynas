@@ -161,6 +161,10 @@ pub struct AppCard {
     pub installed: Vec<String>,
     /// One of the installed stacks has an update in the catalogue.
     pub update_available: bool,
+    /// The card's texts (summary, port purposes) in the language asked for, when the entry
+    /// is translated into it ([`AppTexts`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texts: Option<AppTexts>,
 }
 
 /// An entry the catalogue could not load (shown to administrators, never installable).
@@ -576,6 +580,83 @@ pub struct AppNamedVolume {
     pub description: String,
 }
 
+/// The texts of an entry in one language, from the entry's own translation
+/// (`apps/<id>/i18n/<lang>.toml` and `<lang>.md`, `docs/phase2/docker-apps.md` § 6.14).
+///
+/// The catalogue endpoints add it when asked for a language (`?lang=<code>`) the entry is
+/// translated into. Only translated texts are here: a text missing from it stays the English
+/// one of the plain field, which never changes meaning. Everything here is in [`AppTexts::lang`]
+/// (for the `lang` attribute of what shows it); the plain fields are English.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AppTexts {
+    /// The language of these texts: the code of the translation that matched (`zh-CN`), which
+    /// may be less specific than the one asked for (`it` for `it-CH`).
+    pub lang: String,
+    /// [`AppCard::summary`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// [`AppDetail::description`] (Markdown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// [`AppPort::purpose`] by [`AppPort::name`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ports: BTreeMap<String, String>,
+    /// [`AppFolder::description`] by [`AppFolder::env`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub folders: BTreeMap<String, String>,
+    /// [`AppShare::label`] and [`AppShare::description`] by [`AppShare::env`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shares: BTreeMap<String, AppLabelTexts>,
+    /// [`AppShareSet::label`] and [`AppShareSet::description`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_set: Option<AppLabelTexts>,
+    /// [`AppSecret::description`] (and [`ShownSecret::description`]) by env.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secrets: BTreeMap<String, String>,
+    /// [`AppOverlay::description`] by [`AppOverlay::file`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overlays: BTreeMap<String, String>,
+    /// [`AppNamedVolume::description`] by [`AppNamedVolume::name`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub named_volumes: BTreeMap<String, String>,
+    /// [`AppNote::text`] by position in [`AppDetail::notes`] (the install plan lists the same
+    /// notes in the same order).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub notes: BTreeMap<u32, String>,
+    /// The texts of the install form's fields by property name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub form: BTreeMap<String, AppFieldTexts>,
+    /// [`FormGroup::title`] by position in [`AppForm::groups`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<u32, String>,
+}
+
+/// A translated label and description ([`AppTexts::shares`], [`AppTexts::share_set`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AppLabelTexts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// The translated texts of one form field ([`AppTexts::form`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AppFieldTexts {
+    /// [`FormField::title`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// [`FormField::description`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// [`FormUi::placeholder`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    /// [`FormUi::enum_labels`], same order and length (empty: not translated).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enum_labels: Vec<String>,
+}
+
 /// `GET /api/v1/apps/catalog/{id}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AppDetail {
@@ -605,6 +686,10 @@ pub struct AppDetail {
     pub notes: Vec<AppNote>,
     /// Relative URLs of the screenshots (`/api/v1/apps/catalog/<id>/screenshots/<file>`).
     pub screenshots: Vec<String>,
+    /// Every translated text of the entry in the language asked for, when the entry is
+    /// translated into it ([`AppTexts`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texts: Option<AppTexts>,
 }
 
 // ------------------------------------------------------------------ install

@@ -1,0 +1,35 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "文档归档工具，可扫描、识别文字、标记并建立全文搜索索引。"
+
+[ports]
+web.purpose = "网页界面和 REST API"
+
+[folders]
+DATA_FOLDER.description = "搜索索引、分类器和设置"
+MEDIA_FOLDER.description = "原始文档和归档文档"
+DB_FOLDER.description = "PostgreSQL 数据库"
+EXPORT_FOLDER.description = "文档导出目标目录"
+
+[shares]
+CONSUME.label = "导入目录"
+CONSUME.description = "扫描仪或手动放入此处的文档会被导入，随后从此目录移除。"
+
+[named_volumes]
+redisdata.description = "消息代理的任务队列（丢失后会重建）"
+
+[form]
+PAPERLESS_ADMIN_USER.title = "管理员用户名"
+PAPERLESS_ADMIN_PASSWORD.title = "管理员密码"
+PAPERLESS_ADMIN_PASSWORD.description = "首次启动时用于创建超级用户，后续可在 Paperless 中修改。"
+PAPERLESS_OCR_LANGUAGE.title = "OCR 语言"
+PAPERLESS_OCR_LANGUAGE.description = "使用 + 连接 Tesseract 语言代码，例如 eng、deu+eng、ita+eng。镜像包含 eng、deu、fra、ita 和 spa。"
+PAPERLESS_URL.title = "公开访问地址"
+PAPERLESS_URL.description = "用户使用的地址，若与 NAS 地址不同，请在这里填写，例如 https://docs.example.lan。"
+
+[[groups]]
+title = "管理员"
+
+[[groups]]
+title = "文档"

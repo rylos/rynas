@@ -1,0 +1,19 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "全网 DNS 服务器，可为家里的每台设备拦截广告和跟踪器。"
+
+[ports]
+dns.purpose = "局域网 DNS（TCP）"
+dns-udp.purpose = "局域网 DNS（UDP）"
+web.purpose = "设置向导和网页界面"
+
+[folders]
+CONF_FOLDER.description = "AdGuardHome.yaml，存放设置、过滤器和客户端配置"
+WORK_FOLDER.description = "过滤列表、查询日志和统计信息"
+
+[[notes]]
+text = "AdGuard Home 需要 53 端口。若安装时提示端口已被占用，通常是系统解析器的本地监听占用。对于 systemd-resolved，请在 /etc/systemd/resolved.conf.d/ 下的配置片段设置 DNSStubListener=no，并按 AdGuard Home 常见问题的说明重启服务。"
+
+[[notes]]
+text = "请在设置向导中保留管理界面的容器端口 3000 和 DNS 端口 53，然后将路由器 DHCP 分配的 DNS 改为 NAS 地址。DHCP 服务需要主机网络，此安装不提供。"

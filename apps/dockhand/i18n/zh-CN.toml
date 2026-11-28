@@ -1,0 +1,16 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "Docker 管理工具，支持 Compose 应用栈、Git 部署、更新检查和 restic 备份。"
+
+[ports]
+web.purpose = "网页界面"
+
+[folders]
+DATA_FOLDER.description = "Dockhand 数据库、设置和加密密钥文件"
+
+[[notes]]
+text = "Dockhand 可以访问 Docker 套接字，因此拥有这台 NAS 的 root 权限，也使用自己的登录系统。请勿将它暴露到互联网。"
+
+[[notes]]
+text = "Dockhand 按 Business Source License 1.1 提供源码，个人使用和内部使用免费。"

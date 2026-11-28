@@ -1,0 +1,13 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "监控网站、服务和端口，提供状态页和通知。"
+
+[ports]
+web.purpose = "网页界面和状态页"
+
+[folders]
+DATA_FOLDER.description = "监控数据库和上传内容"
+
+[[notes]]
+text = "首次访问时创建管理员账户，请在安装后立即打开 Uptime Kuma。经 rynas 代理访问时，需将 Settings → Reverse Proxy → Trusted Proxies 设为 Yes。"
