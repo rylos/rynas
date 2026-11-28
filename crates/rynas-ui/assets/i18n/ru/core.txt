@@ -110,6 +110,13 @@ nev.md_role.journal	журнал
 nev.md_role.rebuilding	восстанавливается
 nev.md_role.unknown	роль неизвестна
 nev.md_member	{device} ({role})
+nev.md_level.linear	линейный
+nev.md_level.raid0	RAID 0
+nev.md_level.raid1	RAID 1
+nev.md_level.raid4	RAID 4
+nev.md_level.raid5	RAID 5
+nev.md_level.raid6	RAID 6
+nev.md_level.raid10	RAID 10
 nev.storage.volume_started_degraded.title	Том {volume} запущен в деградированном режиме
 nev.storage.volume_started_degraded.body	Запущены в деградированном режиме: {arrays}. Они остались неактивными после загрузки, потому что отсутствует диск, и были запущены на имеющихся дисках, чтобы том был доступен. Если отсутствующий диск выпал раньше и вернулся позже, на имеющихся дисках могут быть более старые данные, чем на нём. Подключите снова или замените отсутствующий диск, чтобы восстановить избыточность: он будет восстановлен с имеющихся дисков.
 nev.storage.volume_start_failed.title	Не удалось запустить том {volume}

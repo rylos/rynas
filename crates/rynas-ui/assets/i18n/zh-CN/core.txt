@@ -110,6 +110,13 @@ nev.md_role.journal	日志盘
 nev.md_role.rebuilding	正在重建
 nev.md_role.unknown	角色未知
 nev.md_member	{device}（{role}）
+nev.md_level.linear	线性
+nev.md_level.raid0	RAID 0
+nev.md_level.raid1	RAID 1
+nev.md_level.raid4	RAID 4
+nev.md_level.raid5	RAID 5
+nev.md_level.raid6	RAID 6
+nev.md_level.raid10	RAID 10
 nev.storage.volume_started_degraded.title	存储卷 {volume} 已以降级模式启动
 nev.storage.volume_started_degraded.body	以下阵列缺少硬盘，开机时未启动：{arrays}。系统已用现有硬盘启动阵列，以便访问存储卷。若缺失的硬盘曾更早掉线、之后又接回，当前在线硬盘上的数据可能比它旧。重新连接或更换缺失硬盘，即可从当前在线硬盘重建冗余。
 nev.storage.initramfs_refresh_failed.title	初始引导镜像未更新

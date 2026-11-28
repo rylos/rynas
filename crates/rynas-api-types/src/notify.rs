@@ -655,6 +655,14 @@ fn shown_value(
     if let Some(s) = code_list(name, v, lookup) {
         return s;
     }
+    // md levels ("raid1", "linear") of the storage events, shared by every RAID event
+    if name == "level"
+        && code.starts_with("storage.")
+        && key_word(v)
+        && let Some(s) = lookup(&format!("nev.md_level.{v}"))
+    {
+        return s.to_string();
+    }
     let lower = v.to_ascii_lowercase();
     if key_word(&lower)
         && let Some(s) = lookup(&format!("nev.{code}.{name}.{lower}"))
@@ -925,6 +933,21 @@ mod tests {
         );
         let f = fields(&[("array", "md2"), ("state_codes", "degraded")]);
         assert_eq!(event_text("r.d", "body", &f, &zh, false).as_deref(), Some("md2：状态「降级」。"));
+        // the md level by its code in the storage events; unknown levels, other events: as sent
+        let lvl = |k: &str| -> Option<&'static str> {
+            Some(match k {
+                "nev.storage.x.title" => "{array}（{level}）",
+                "nev.other.x.title" => "{level}",
+                "nev.md_level.raid1" => "RAID 1",
+                "nev.md_level.linear" => "线性",
+                _ => return None,
+            })
+        };
+        let title = |code: &str, level: &str| event_text(code, "title", &fields(&[("array", "md2"), ("level", level)]), &lvl, false);
+        assert_eq!(title("storage.x", "raid1").as_deref(), Some("md2（RAID 1）"));
+        assert_eq!(title("storage.x", "linear").as_deref(), Some("md2（线性）"));
+        assert_eq!(title("storage.x", "raid9").as_deref(), Some("md2（raid9）"));
+        assert_eq!(title("other.x", "raid1").as_deref(), Some("raid1"));
         // stored before the codes: no text, the caller shows the English body
         let f = fields(&[("array", "md2"), ("state", "clean, degraded"), ("members", "sdb3 (faulty)")]);
         assert_eq!(event_text("r.d", "body", &f, &zh, false), None);

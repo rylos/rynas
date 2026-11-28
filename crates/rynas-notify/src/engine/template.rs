@@ -458,7 +458,7 @@ mod tests {
         assert_eq!(ctx.title, "RAID md2 degradato");
         assert_eq!(
             ctx.body,
-            "md2 (raid1) è senza ridondanza: mancano 1 membri su 2, stato «nessuna scrittura in sospeso, degradato». Membri: sdb3 (guasto)."
+            "md2 (RAID 1) è senza ridondanza: mancano 1 membri su 2, stato «nessuna scrittura in sospeso, degradato». Membri: sdb3 (guasto)."
         );
         // English targets keep the server's text
         let ctx = t.event_ctx(&e, false, NotifyLanguage::EN, utc);

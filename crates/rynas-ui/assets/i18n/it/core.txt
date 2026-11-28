@@ -110,6 +110,13 @@ nev.md_role.journal	journal
 nev.md_role.rebuilding	in ricostruzione
 nev.md_role.unknown	ruolo sconosciuto
 nev.md_member	{device} ({role})
+nev.md_level.linear	lineare
+nev.md_level.raid0	RAID 0
+nev.md_level.raid1	RAID 1
+nev.md_level.raid4	RAID 4
+nev.md_level.raid5	RAID 5
+nev.md_level.raid6	RAID 6
+nev.md_level.raid10	RAID 10
 nev.storage.volume_started_degraded.title	Volume {volume} avviato in modalità degradata
 nev.storage.volume_started_degraded.body	Avviati in modalità degradata: {arrays}. Erano rimasti inattivi dopo l'avvio perché manca un disco e sono stati avviati sui dischi presenti, così il volume è disponibile. Se il disco mancante era uscito prima ed è tornato dopo, i dischi presenti possono avere dati più vecchi dei suoi. Ricollega o sostituisci il disco mancante per ripristinare la ridondanza: viene ricostruito dai dischi presenti.
 nev.storage.volume_start_failed.title	Impossibile avviare il volume {volume}
