@@ -80,13 +80,36 @@ nev.storage.disk_warning.title	Диск {disk_label} требует вниман
 nev.storage.disk_failing.title	Диск {disk_label} неисправен
 nev.storage.disk_ok.title	Диск {disk_label} снова исправен
 nev.storage.raid_degraded.title	RAID {array} деградирован
-nev.storage.raid_degraded.body	{array} ({level}) работает без избыточности: отсутствует участников — {degraded} из {raid_disks}, состояние «{state}». Участники: {members}.
-nev.storage.raid_degraded.body_2	{array} ({level}) работает без избыточности: отсутствует участников — {degraded} из {raid_disks}, состояние «{state}».
+nev.storage.raid_degraded.body	{array} ({level}) работает без избыточности: отсутствует участников — {degraded} из {raid_disks}, состояние «{state_codes}». Участники: {member_roles}.
+nev.storage.raid_degraded.body_2	{array} ({level}) работает без избыточности: отсутствует участников — {degraded} из {raid_disks}, состояние «{state_codes}».
 nev.storage.raid_failed.title	Отказ RAID {array}
-nev.storage.raid_failed.body	{array} ({level}) отказал: отсутствует участников — {degraded} из {raid_disks}, состояние «{state}». Участники: {members}.
-nev.storage.raid_failed.body_2	{array} ({level}) отказал: отсутствует участников — {degraded} из {raid_disks}, состояние «{state}».
+nev.storage.raid_failed.body	{array} ({level}) отказал: отсутствует участников — {degraded} из {raid_disks}, состояние «{state_codes}». Участники: {member_roles}.
+nev.storage.raid_failed.body_2	{array} ({level}) отказал: отсутствует участников — {degraded} из {raid_disks}, состояние «{state_codes}».
 nev.storage.raid_inactive.title	RAID {array} неактивен
-nev.storage.raid_inactive.body	{array} ({level}) не работает, состояние «{state}».
+nev.storage.raid_inactive.body	{array} ({level}) не работает, состояние «{state_codes}».
+nev.md_state.clean	нет ожидающих операций записи
+nev.md_state.active	активен
+nev.md_state.active_idle	активен (простаивает)
+nev.md_state.read_auto	только чтение до первой записи
+nev.md_state.write_pending	есть ожидающие операции записи
+nev.md_state.read_only	только чтение
+nev.md_state.inactive	неактивен
+nev.md_state.suspended	приостановлен
+nev.md_state.clear	не настроен
+nev.md_state.degraded	деградирован
+nev.md_state.failed	отказ
+nev.md_state.resyncing	повторная синхронизация
+nev.md_state.recovering	восстановление
+nev.md_state.reshaping	перестроение
+nev.md_state.checking	проверка
+nev.md_state.repairing	исправление
+nev.md_role.active	активен
+nev.md_role.spare	резервный
+nev.md_role.faulty	сбойный
+nev.md_role.journal	журнал
+nev.md_role.rebuilding	восстанавливается
+nev.md_role.unknown	роль неизвестна
+nev.md_member	{device} ({role})
 nev.storage.volume_started_degraded.title	Том {volume} запущен в деградированном режиме
 nev.storage.volume_started_degraded.body	Запущены в деградированном режиме: {arrays}. Они остались неактивными после загрузки, потому что отсутствует диск, и были запущены на имеющихся дисках, чтобы том был доступен. Если отсутствующий диск выпал раньше и вернулся позже, на имеющихся дисках могут быть более старые данные, чем на нём. Подключите снова или замените отсутствующий диск, чтобы восстановить избыточность: он будет восстановлен с имеющихся дисков.
 nev.storage.volume_start_failed.title	Не удалось запустить том {volume}
@@ -1517,15 +1540,6 @@ sto.bt.boot	После загрузки
 sto.bt.auto	Автоматически монтировать в деградированном режиме после загрузки
 sto.bt.auto_text	Если при загрузке отсутствует устройство, а у каждого чанка ещё есть копия, том монтируется в деградированном режиме, чтобы оставаться доступным, и администраторы получают уведомление. Если выключено, том ждёт администратора.
 sto.proposal	Предложение rynas
-sto.md.member_status	{device} ({role})
-sto.md.clean	Нет ожидающих операций записи
-sto.md.idle	Активен, простаивает
-sto.md.read_auto	Только чтение до первой записи
-sto.md.write_pending	Есть ожидающие операции записи
-sto.md.inactive	Неактивен
-sto.md.suspended	Приостановлен
-sto.md.clear	Не настроен
-sto.md.resyncing	Выполняется повторная синхронизация
 sto.quota.qgroups	Традиционные группы квот (qgroups)
 sto.quota.squota	Упрощённые квоты (squota)
 sto.usage.boot_flash	Загрузочный флеш-накопитель
@@ -1536,6 +1550,9 @@ sto.usage.mount	Смонтировано в {path}
 sto.usage.filesystem	{fs} смонтирована в {path}
 sto.usage.md_member	Компонент {name} (RAID не собран)
 sto.usage.md_unknown	Компонент несобранного массива RAID
+sto.usage.md_array	{name} ({level})
+sto.usage.lvm	Том LVM {name}
+sto.usage.fs_label	{fs} «{label}»
 sto.usage.partitions.one	{n} раздел
 sto.usage.partitions.other	{n} раздела
 sto.usage.partitions.few	{n} раздела
@@ -1552,6 +1569,7 @@ sto.stlog.unknown_failure	Завершён с неизвестной ошибк�
 sto.stlog.electrical_failure	Завершён с электрической неисправностью
 sto.stlog.seek_failure	Завершён с ошибкой сервопривода или позиционирования
 sto.stlog.fatal	Критическая или неизвестная ошибка самотеста
+sto.stlog.handling_damage	Завершён, есть подозрение на механическое повреждение
 wol.progress.starting	Пробуждение {name} ({macs})
 wol.progress.sent	Пакеты пробуждения отправлены через {ifaces} (3×)
 wol.progress.wait_agent	Сеть ответила через {time}. Ожидание клиента резервного копирования.

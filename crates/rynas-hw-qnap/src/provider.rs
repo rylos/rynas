@@ -71,7 +71,7 @@ impl QnapProvider {
             .trim()
             .parse()
             .ok()?;
-        Some(Temperature { id: "board".into(), label: "System".into(), celsius: Some(milli as f32 / 1000.0) })
+        Some(Temperature { id: rynas_api_types::SYSTEM_SENSOR_ID.into(), label: "System".into(), celsius: Some(milli as f32 / 1000.0) })
     }
 }
 

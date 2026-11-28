@@ -6,7 +6,7 @@
 //! medium, when the disk is spun down: it prints "Device is in STANDBY mode, exit(2)".
 
 use rynas_api_types::storage::{
-    DiskKind, HealthReason, HealthVerdict, NvmeHealth, PowerState, ReasonArgs, SelfTest, Severity,
+    DiskKind, HealthReason, HealthVerdict, NvmeHealth, PowerState, ReasonArgs, SelfTest, SelfTestKind, SelfTestStatus, Severity,
     SmartAttribute, SmartInfo,
 };
 use serde_json::Value;
@@ -233,6 +233,8 @@ pub fn parse(json: &str, now_ms: u64) -> SmartRead {
             info.self_tests.push(SelfTest {
                 kind: str_at(t, &["type", "string"]).unwrap_or("").to_string(),
                 status: str_at(t, &["status", "string"]).unwrap_or("").to_string(),
+                kind_code: u64_at(t, &["type", "value"]).map_or(SelfTestKind::Other, ata_test_kind),
+                status_code: u64_at(t, &["status", "value"]).map_or(SelfTestStatus::Other, ata_test_status),
                 passed: bool_at(t, &["status", "passed"]),
                 lifetime_hours: u64_at(t, &["lifetime_hours"]),
                 lba_first_error: u64_at(t, &["lba"]),
@@ -295,6 +297,9 @@ pub fn parse(json: &str, now_ms: u64) -> SmartRead {
                     status: str_at(t, &["self_test_result", "string"])
                         .unwrap_or("")
                         .to_string(),
+                    kind_code: u64_at(t, &["self_test_code", "value"])
+                        .map_or(SelfTestKind::Other, nvme_test_kind),
+                    status_code: result.map_or(SelfTestStatus::Other, nvme_test_status),
                     // 0 = completed without error; 1/2 = aborted by host/reset (not a fault)
                     passed: result.map(|r| r == 0 || r == 1 || r == 2),
                     lifetime_hours: u64_at(t, &["power_on_hours"]),
@@ -798,9 +803,81 @@ pub fn known_smr(model: &str) -> bool {
     PREFIXES.iter().any(|p| m.starts_with(p))
 }
 
+/// The kind of an ATA self-test log entry from its LBA-low value (ACS-3, SMART EXECUTE OFF-LINE
+/// IMMEDIATE subcommands): captive and vendor tests have no code.
+fn ata_test_kind(value: u64) -> SelfTestKind {
+    match value {
+        1 => SelfTestKind::ShortOffline,
+        2 => SelfTestKind::ExtendedOffline,
+        3 => SelfTestKind::ConveyanceOffline,
+        4 => SelfTestKind::SelectiveOffline,
+        _ => SelfTestKind::Other,
+    }
+}
+
+/// The outcome of an ATA self-test log entry from its status byte: the high nibble is the
+/// result, the low one the remaining tenths.
+fn ata_test_status(value: u64) -> SelfTestStatus {
+    match (value >> 4) & 0xf {
+        0 => SelfTestStatus::Passed,
+        1 => SelfTestStatus::AbortedByHost,
+        2 => SelfTestStatus::InterruptedByReset,
+        3 => SelfTestStatus::Fatal,
+        4 => SelfTestStatus::UnknownFailure,
+        5 => SelfTestStatus::ElectricalFailure,
+        6 => SelfTestStatus::ServoFailure,
+        7 => SelfTestStatus::ReadFailure,
+        8 => SelfTestStatus::HandlingDamage,
+        0xf => SelfTestStatus::InProgress,
+        _ => SelfTestStatus::Other,
+    }
+}
+
+/// The kind of an NVMe self-test log entry (Self-test Code): vendor tests have no code.
+fn nvme_test_kind(value: u64) -> SelfTestKind {
+    match value {
+        1 => SelfTestKind::Short,
+        2 => SelfTestKind::Extended,
+        _ => SelfTestKind::Other,
+    }
+}
+
+/// The outcome of an NVMe self-test log entry (Self-test Result): the aborts for a removed
+/// namespace, a format, a sanitize or no reason, and the failed segments the device numbers,
+/// have no code.
+fn nvme_test_status(value: u64) -> SelfTestStatus {
+    match value {
+        0 => SelfTestStatus::Passed,
+        1 => SelfTestStatus::AbortedByHost,
+        2 => SelfTestStatus::InterruptedByReset,
+        5 => SelfTestStatus::Fatal,
+        6 => SelfTestStatus::UnknownFailure,
+        _ => SelfTestStatus::Other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_test_codes() {
+        assert_eq!(ata_test_kind(1), SelfTestKind::ShortOffline);
+        assert_eq!(ata_test_kind(4), SelfTestKind::SelectiveOffline);
+        assert_eq!(ata_test_kind(0x81), SelfTestKind::Other);
+        assert_eq!(ata_test_status(0), SelfTestStatus::Passed);
+        // read failure with 90% left
+        assert_eq!(ata_test_status(0x79), SelfTestStatus::ReadFailure);
+        assert_eq!(ata_test_status(0x84), SelfTestStatus::HandlingDamage);
+        assert_eq!(ata_test_status(0xf3), SelfTestStatus::InProgress);
+        assert_eq!(ata_test_status(0x90), SelfTestStatus::Other);
+        assert_eq!(nvme_test_kind(2), SelfTestKind::Extended);
+        assert_eq!(nvme_test_kind(0xe), SelfTestKind::Other);
+        assert_eq!(nvme_test_status(2), SelfTestStatus::InterruptedByReset);
+        assert_eq!(nvme_test_status(7), SelfTestStatus::Other);
+        assert_eq!(serde_json::to_value(SelfTestStatus::InterruptedByReset).unwrap(), "interrupted_by_reset");
+        assert_eq!(serde_json::from_value::<SelfTestKind>("captive".into()).unwrap(), SelfTestKind::Other);
+    }
 
     fn data(json: &str) -> SmartData {
         match parse(json, 1) {
@@ -829,6 +906,9 @@ mod tests {
         assert_eq!(i.self_tests.len(), 3);
         assert_eq!(i.self_tests[0].kind, "Short offline");
         assert_eq!(i.self_tests[0].passed, Some(true));
+        assert_eq!(i.self_tests[0].kind_code, SelfTestKind::ShortOffline);
+        assert_eq!(i.self_tests[1].kind_code, SelfTestKind::ExtendedOffline);
+        assert_eq!(i.self_tests[0].status_code, SelfTestStatus::Passed);
         assert_eq!(i.extended_test_minutes, Some(1003));
         assert_eq!(i.error_log_count, Some(0));
         assert_eq!(i.life_remaining_pct, None);
@@ -904,6 +984,7 @@ mod tests {
         let st = by("self_test_failed");
         assert!(st.args.name.is_some() && st.args.detail.is_some(), "{st:?}");
         assert_eq!(d.info.self_tests[0].lba_first_error, Some(1_953_525_000));
+        assert_eq!(d.info.self_tests[0].status_code, SelfTestStatus::ReadFailure);
         assert_eq!(d.info.exit_status, 0xc0);
     }
 
@@ -937,6 +1018,9 @@ mod tests {
         assert_eq!(i.self_tests.len(), 2);
         assert_eq!(i.self_tests[0].kind, "Short");
         assert_eq!(i.self_tests[0].passed, Some(true));
+        assert_eq!(i.self_tests[0].kind_code, SelfTestKind::Short);
+        assert_eq!(i.self_tests[1].kind_code, SelfTestKind::Extended);
+        assert_eq!(i.self_tests[0].status_code, SelfTestStatus::Passed);
         assert_eq!(d.write_cache, None);
         let (v, r) = verdict(i, DiskKind::Nvme);
         assert_eq!(v, HealthVerdict::Healthy, "{r:?}");

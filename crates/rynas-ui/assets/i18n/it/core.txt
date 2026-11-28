@@ -80,13 +80,36 @@ nev.storage.disk_warning.title	Il disco {disk_label} richiede attenzione
 nev.storage.disk_failing.title	Disco {disk_label} in avaria
 nev.storage.disk_ok.title	Disco {disk_label} di nuovo integro
 nev.storage.raid_degraded.title	RAID {array} degradato
-nev.storage.raid_degraded.body	{array} ({level}) è senza ridondanza: mancano {degraded} membri su {raid_disks}, stato «{state}». Membri: {members}.
-nev.storage.raid_degraded.body_2	{array} ({level}) è senza ridondanza: mancano {degraded} membri su {raid_disks}, stato «{state}».
+nev.storage.raid_degraded.body	{array} ({level}) è senza ridondanza: mancano {degraded} membri su {raid_disks}, stato «{state_codes}». Membri: {member_roles}.
+nev.storage.raid_degraded.body_2	{array} ({level}) è senza ridondanza: mancano {degraded} membri su {raid_disks}, stato «{state_codes}».
 nev.storage.raid_failed.title	RAID {array} guasto
-nev.storage.raid_failed.body	{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato «{state}». Membri: {members}.
-nev.storage.raid_failed.body_2	{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato «{state}».
+nev.storage.raid_failed.body	{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato «{state_codes}». Membri: {member_roles}.
+nev.storage.raid_failed.body_2	{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato «{state_codes}».
 nev.storage.raid_inactive.title	RAID {array} inattivo
-nev.storage.raid_inactive.body	{array} ({level}) non è in funzione, stato «{state}».
+nev.storage.raid_inactive.body	{array} ({level}) non è in funzione, stato «{state_codes}».
+nev.md_state.clean	nessuna scrittura in sospeso
+nev.md_state.active	attivo
+nev.md_state.active_idle	attivo (a riposo)
+nev.md_state.read_auto	sola lettura fino alla prima scrittura
+nev.md_state.write_pending	scritture in sospeso
+nev.md_state.read_only	sola lettura
+nev.md_state.inactive	inattivo
+nev.md_state.suspended	sospeso
+nev.md_state.clear	non configurato
+nev.md_state.degraded	degradato
+nev.md_state.failed	guasto
+nev.md_state.resyncing	risincronizzazione in corso
+nev.md_state.recovering	ricostruzione in corso
+nev.md_state.reshaping	rimodellamento in corso
+nev.md_state.checking	controllo in corso
+nev.md_state.repairing	riparazione in corso
+nev.md_role.active	attivo
+nev.md_role.spare	riserva
+nev.md_role.faulty	guasto
+nev.md_role.journal	journal
+nev.md_role.rebuilding	in ricostruzione
+nev.md_role.unknown	ruolo sconosciuto
+nev.md_member	{device} ({role})
 nev.storage.volume_started_degraded.title	Volume {volume} avviato in modalità degradata
 nev.storage.volume_started_degraded.body	Avviati in modalità degradata: {arrays}. Erano rimasti inattivi dopo l'avvio perché manca un disco e sono stati avviati sui dischi presenti, così il volume è disponibile. Se il disco mancante era uscito prima ed è tornato dopo, i dischi presenti possono avere dati più vecchi dei suoi. Ricollega o sostituisci il disco mancante per ripristinare la ridondanza: viene ricostruito dai dischi presenti.
 nev.storage.volume_start_failed.title	Impossibile avviare il volume {volume}
@@ -1489,15 +1512,6 @@ sto.bt.boot	Dopo l'avvio
 sto.bt.auto	Monta automaticamente in modalità degradata dopo l'avvio
 sto.bt.auto_text	Se all'avvio manca un dispositivo e ogni chunk ha ancora una copia, il volume viene montato in modalità degradata così resta disponibile, e gli amministratori vengono avvisati. Se disattivato, attende un amministratore.
 sto.proposal	Proposta di rynas
-sto.md.member_status	{device} ({role})
-sto.md.clean	Nessuna scrittura in sospeso
-sto.md.idle	Attivo, inattivo al momento
-sto.md.read_auto	Sola lettura fino alla prima scrittura
-sto.md.write_pending	Scritture in sospeso
-sto.md.inactive	Inattivo
-sto.md.suspended	Sospeso
-sto.md.clear	Non configurato
-sto.md.resyncing	Risincronizzazione in corso
 sto.quota.qgroups	Gruppi di quote tradizionali (qgroups)
 sto.quota.squota	Quote semplificate (squota)
 sto.usage.boot_flash	Unità flash di avvio
@@ -1508,6 +1522,9 @@ sto.usage.mount	Montato in {path}
 sto.usage.filesystem	{fs} montato in {path}
 sto.usage.md_member	Membro di {name} (RAID non assemblato)
 sto.usage.md_unknown	Membro di un array RAID non assemblato
+sto.usage.md_array	{name} ({level})
+sto.usage.lvm	Volume LVM {name}
+sto.usage.fs_label	{fs} «{label}»
 sto.usage.partitions.one	{n} partizione
 sto.usage.partitions.other	{n} partizioni
 sto.stlog.short_offline	Autotest breve offline
@@ -1522,6 +1539,7 @@ sto.stlog.unknown_failure	Completato con un errore sconosciuto
 sto.stlog.electrical_failure	Completato con un guasto elettrico
 sto.stlog.seek_failure	Completato con un guasto al servo o al posizionamento
 sto.stlog.fatal	Errore di autotest grave o sconosciuto
+sto.stlog.handling_damage	Completato con sospetto danno da manipolazione
 wol.progress.starting	Riattivazione di {name} ({macs})
 wol.progress.sent	Pacchetti di riattivazione inviati su {ifaces} (3×)
 wol.progress.wait_agent	La rete ha risposto dopo {time}. In attesa del client di backup.

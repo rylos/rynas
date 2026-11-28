@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_params_map;
 use rynas_api_types::storage::{
-    DiskContent, DiskSummary, FlexBlocker, FlexLayout, FlexPending, MdArray, ScrubState, ScrubStatus, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings, VolumeStandby,
+    DiskContent, DiskSummary, FlexBlocker, FlexLayout, FlexPending, MdArray, MdStateFlag, ScrubState, ScrubStatus, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings, VolumeStandby,
     VolumeSettingsState,
 };
 use rynas_api_types::{TaskInfo, TaskStarted, TaskStatus};
@@ -660,35 +660,13 @@ fn usage_card(v: &Vol) -> AnyView {
     .into_any()
 }
 
-/// The state can be a compound mdadm value or a single sysfs state.
-pub(crate) fn md_state_text(state: &str, lookup: &dyn Fn(&str) -> Option<&'static str>) -> String {
-    state
-        .split(',')
-        .map(str::trim)
-        .map(|part| {
-            let key = match part {
-                "clean" => "sto.md.clean",
-                "active" => "sto.active",
-                "active-idle" => "sto.md.idle",
-                "read-auto" | "auto-read-only" => "sto.md.read_auto",
-                "write-pending" => "sto.md.write_pending",
-                "readonly" | "read-only" => "sto.readonly",
-                "inactive" | "Not Started" => "sto.md.inactive",
-                "suspended" => "sto.md.suspended",
-                "clear" => "sto.md.clear",
-                "degraded" => "health.degraded",
-                "broken" | "failed" => "health.failed",
-                "resyncing" => "sto.md.resyncing",
-                "recovering" => "sto.r.rebuilding",
-                "reshaping" => "sto.sync.reshape",
-                "checking" => "sto.sync.check",
-                "repairing" => "sto.sync.repair",
-                _ => return part,
-            };
-            lookup(key).unwrap_or(part)
-        })
-        .collect::<Vec<_>>()
-        .join(" · ")
+/// The array's state from its codes (the words the RAID events use too); mdadm's own words
+/// when one of them has no code.
+fn md_state_text(a: &MdArray) -> String {
+    if a.state_flags.is_empty() || a.state_flags.contains(&MdStateFlag::Other) {
+        return a.state.clone();
+    }
+    rynas_api_types::notify::md_state_text(a.state_flags.iter().map(|f| f.as_str()), &i18n::try_t)
 }
 
 fn member_role(role: MemberRole) -> (Tone, &'static str) {
@@ -702,41 +680,13 @@ fn member_role(role: MemberRole) -> (Tone, &'static str) {
     }
 }
 
-/// Stored RAID notifications list members as `device (role)`, joined with `, `.
-pub(crate) fn md_members_text(members: &str, lookup: &dyn Fn(&str) -> Option<&'static str>) -> String {
-    let Some(template) = lookup("sto.md.member_status") else { return members.to_string() };
-    members.split(", ").map(|entry| {
-        let Some((device, role)) = entry.strip_suffix(')').and_then(|entry| entry.rsplit_once(" (")) else {
-            return entry.to_string();
-        };
-        let role = match role {
-            "active" => MemberRole::Active,
-            "spare" => MemberRole::Spare,
-            "faulty" => MemberRole::Faulty,
-            "rebuilding" => MemberRole::Rebuilding,
-            "journal" => MemberRole::Journal,
-            "unknown" => MemberRole::Unknown,
-            _ => return entry.to_string(),
-        };
-        lookup(member_role(role).1).map_or_else(
-            || entry.to_string(),
-            |label| template.replace("{role}", label).replace("{device}", device),
-        )
-    }).collect::<Vec<_>>().join(", ")
-}
-
 #[cfg(test)]
 #[test]
-fn raid_notification_status_and_members_are_localized() {
-    let zh = i18n::Lang::from_code("zh-CN").unwrap();
-    let lookup = |key: &str| i18n::text_in(zh, key);
-    assert_eq!(md_state_text("clean, degraded, recovering", &lookup), "无待处理的写入 · 降级 · 正在重建");
-    assert_eq!(md_state_text("recovering, vendor-state", &lookup), "正在重建 · vendor-state");
-    assert_eq!(
-        md_members_text("sdd1 (rebuilding), nvme0n1p2 (faulty), dm-2 (vendor-role)", &lookup),
-        "sdd1（正在重建）, nvme0n1p2（故障）, dm-2 (vendor-role)",
-    );
-    assert_eq!(md_members_text("sdd1", &lookup), "sdd1");
+fn array_state_from_codes() {
+    let a = |state: &str, flags: Vec<MdStateFlag>| MdArray { state: state.into(), state_flags: flags, ..Default::default() };
+    assert_eq!(md_state_text(&a("clean, degraded, recovering", vec![MdStateFlag::Clean, MdStateFlag::Degraded, MdStateFlag::Recovering])), "clean, degraded, rebuilding");
+    // a word without a code: mdadm's words as they are
+    assert_eq!(md_state_text(&a("clean, resyncing (DELAYED)", vec![MdStateFlag::Clean, MdStateFlag::Other])), "clean, resyncing (DELAYED)");
 }
 
 fn raid_card(a: MdArray, selected: RwSignal<Option<String>>) -> AnyView {
@@ -747,7 +697,7 @@ fn raid_card(a: MdArray, selected: RwSignal<Option<String>>) -> AnyView {
             <WidgetHead icon=icons::LAYERS title="sto.raid"><Status tone=tone text=t(key).to_string() /></WidgetHead>
             <dl class="kvs">
                 {kv_row("sto.level", sig(md_level_text(&a)), "")}
-                {kv_row("sto.md_state", sig(md_state_text(&a.state, &i18n::try_t)), "")}
+                {kv_row("sto.md_state", sig(md_state_text(&a)), "")}
                 {kv_row("sto.array", sig(a.md_name.clone().map(|n| format!("{} ({n})", a.name)).unwrap_or_else(|| a.name.clone())), "mono")}
                 {kv_row("sto.size", sig(i18n::bytes_si(a.size)), "tnum")}
                 {a.mismatch_cnt.map(|m| kv_row("sto.mismatch", sig(m.to_string()), "tnum"))}
@@ -1183,8 +1133,8 @@ pub fn disk_checklist(disks: Vec<rynas_api_types::storage::DiskSummary>, chosen:
                                 {contents_text(&d).map(|what| view! { <span class="small warn-text">{tf("wiz.holds", &[("what", &what)])}</span> })}
                             </span>
                             {d.smr.then(|| view! { <span class="chip warn" title=t("sto.smr_hint")>"SMR"</span> })}
-                            {(!d.used_by.is_empty()).then(|| {
-                                let what = used_by_text(&d.used_by);
+                            {(!d.usage.is_empty()).then(|| {
+                                let what = used_by_text(&d.usage);
                                 view! { <span class="chip warn" title=tf("wiz.will_erase", &[("what", &what)])>{tr("wiz.erase_chip")}</span> }
                             })}
                             <Status tone=htone text=t(hkey).to_string() />

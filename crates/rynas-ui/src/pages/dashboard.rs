@@ -831,7 +831,7 @@ const VOLUMES_SHOWN: usize = 6;
 pub fn temp_label(id: &str, label: &str) -> String {
     match id.strip_prefix("bay") {
         Some(n) if n.chars().all(|c| c.is_ascii_digit()) => format!("{} {n}", t("sto.bay")),
-        _ if id == "board" && label == "System" => t("hw.system_temp").to_string(),
+        _ if id == rynas_api_types::SYSTEM_SENSOR_ID => t("hw.system_temp").to_string(),
         _ => label.to_string(),
     }
 }

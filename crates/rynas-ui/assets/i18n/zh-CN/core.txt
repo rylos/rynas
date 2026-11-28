@@ -80,13 +80,36 @@ nev.storage.disk_warning.title	硬盘 {disk_label} 需要检查
 nev.storage.disk_failing.title	硬盘 {disk_label} 发生故障
 nev.storage.disk_ok.title	硬盘 {disk_label} 已恢复正常
 nev.storage.raid_degraded.title	RAID 阵列 {array} 已降级
-nev.storage.raid_degraded.body	{array}（{level}）正在降级运行。共 {raid_disks} 个成员设备，其中 {degraded} 个缺失。当前状态为「{state}」。阵列成员：{members}。
-nev.storage.raid_degraded.body_2	{array}（{level}）正在降级运行。共 {raid_disks} 个成员设备，其中 {degraded} 个缺失。当前状态为「{state}」。
+nev.storage.raid_degraded.body	{array}（{level}）正在降级运行。共 {raid_disks} 个成员设备，其中 {degraded} 个缺失。当前状态为「{state_codes}」。阵列成员：{member_roles}。
+nev.storage.raid_degraded.body_2	{array}（{level}）正在降级运行。共 {raid_disks} 个成员设备，其中 {degraded} 个缺失。当前状态为「{state_codes}」。
 nev.storage.raid_failed.title	RAID 阵列 {array} 发生故障
-nev.storage.raid_failed.body	{array}（{level}）发生故障。共 {raid_disks} 个成员设备，其中 {degraded} 个缺失。当前状态为「{state}」。阵列成员：{members}。
-nev.storage.raid_failed.body_2	{array}（{level}）发生故障。共 {raid_disks} 个成员设备，其中 {degraded} 个缺失。当前状态为「{state}」。
+nev.storage.raid_failed.body	{array}（{level}）发生故障。共 {raid_disks} 个成员设备，其中 {degraded} 个缺失。当前状态为「{state_codes}」。阵列成员：{member_roles}。
+nev.storage.raid_failed.body_2	{array}（{level}）发生故障。共 {raid_disks} 个成员设备，其中 {degraded} 个缺失。当前状态为「{state_codes}」。
 nev.storage.raid_inactive.title	RAID 阵列 {array} 未激活
-nev.storage.raid_inactive.body	{array}（{level}）未运行，当前状态为「{state}」。
+nev.storage.raid_inactive.body	{array}（{level}）未运行，当前状态为「{state_codes}」。
+nev.md_state.clean	无待处理的写入
+nev.md_state.active	运行中
+nev.md_state.active_idle	运行中（空闲）
+nev.md_state.read_auto	写入前保持只读
+nev.md_state.write_pending	有待处理的写入
+nev.md_state.read_only	只读
+nev.md_state.inactive	未启用
+nev.md_state.suspended	已挂起
+nev.md_state.clear	未配置
+nev.md_state.degraded	降级
+nev.md_state.failed	故障
+nev.md_state.resyncing	正在重新同步
+nev.md_state.recovering	正在重建
+nev.md_state.reshaping	正在重整阵列
+nev.md_state.checking	正在检查
+nev.md_state.repairing	正在修复
+nev.md_role.active	正常
+nev.md_role.spare	备用盘
+nev.md_role.faulty	故障
+nev.md_role.journal	日志盘
+nev.md_role.rebuilding	正在重建
+nev.md_role.unknown	角色未知
+nev.md_member	{device}（{role}）
 nev.storage.volume_started_degraded.title	存储卷 {volume} 已以降级模式启动
 nev.storage.volume_started_degraded.body	以下阵列缺少硬盘，开机时未启动：{arrays}。系统已用现有硬盘启动阵列，以便访问存储卷。若缺失的硬盘曾更早掉线、之后又接回，当前在线硬盘上的数据可能比它旧。重新连接或更换缺失硬盘，即可从当前在线硬盘重建冗余。
 nev.storage.initramfs_refresh_failed.title	初始引导镜像未更新
@@ -1626,15 +1649,6 @@ sto.bt.boot	开机后
 sto.bt.auto	启动后自动降级挂载
 sto.bt.auto_text	开机时若设备缺失，但每个数据块仍有完整副本，系统会以降级模式挂载存储卷并通知管理员。关闭此设置时，系统会等待管理员手动处理。
 sto.proposal	rynas 建议值
-sto.md.member_status	{device}（{role}）
-sto.md.clean	无待处理的写入
-sto.md.idle	已启用，空闲
-sto.md.read_auto	写入前保持只读
-sto.md.write_pending	有待处理的写入
-sto.md.inactive	未启用
-sto.md.suspended	已挂起
-sto.md.clear	未配置
-sto.md.resyncing	正在重新同步
 sto.quota.qgroups	传统配额组（qgroups）
 sto.quota.squota	简单配额（squota）
 sto.usage.boot_flash	启动闪存
@@ -1645,6 +1659,9 @@ sto.usage.mount	挂载于 {path}
 sto.usage.filesystem	{fs} 挂载于 {path}
 sto.usage.md_member	{name} 的成员（RAID 尚未组装）
 sto.usage.md_unknown	尚未组装的 RAID 阵列成员
+sto.usage.md_array	{name}（{level}）
+sto.usage.lvm	LVM 卷 {name}
+sto.usage.fs_label	{fs}「{label}」
 sto.usage.partitions.other	{n} 个分区
 sto.stlog.short_offline	短时离线自检
 sto.stlog.long_offline	扩展离线自检
@@ -1658,6 +1675,7 @@ sto.stlog.unknown_failure	已完成，发现未知故障
 sto.stlog.electrical_failure	已完成，发现电气故障
 sto.stlog.seek_failure	已完成，发现伺服或寻道故障
 sto.stlog.fatal	发生严重或未知的自检错误
+sto.stlog.handling_damage	已完成，疑似存在搬运损伤
 wol.progress.starting	正在唤醒 {name}（{macs}）
 wol.progress.sent	已通过 {ifaces} 发送 3 次唤醒包
 wol.progress.wait_agent	{time} 后检测到设备上线，正在等待备份客户端响应。

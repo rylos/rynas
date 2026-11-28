@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use rynas_api_types::storage::{ArrayHealth, MdArray, MdMember, MemberRole, SyncProgress};
+use rynas_api_types::storage::{ArrayHealth, MdArray, MdMember, MdStateFlag, MemberRole, SyncProgress};
 
 use crate::host::Host;
 
@@ -487,6 +487,7 @@ pub fn build(
         size: st.blocks * 1024,
         component_size: sys.component_size,
         chunk_bytes: st.chunk_bytes.or(detail.and_then(|d| d.chunk_bytes)),
+        state_flags: state_flags(&state),
         state,
         health,
         degraded,
@@ -500,9 +501,56 @@ pub fn build(
     }
 }
 
+/// The words of an md array state as codes: mdadm's `State :` ("clean, degraded, recovering",
+/// "active, FAILED, Not Started") or a sysfs `array_state` ("active-idle", "read-auto").
+pub fn state_flags(state: &str) -> Vec<MdStateFlag> {
+    state
+        .split(',')
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(|w| match w.to_ascii_lowercase().as_str() {
+            "clean" => MdStateFlag::Clean,
+            "active" => MdStateFlag::Active,
+            "active-idle" => MdStateFlag::ActiveIdle,
+            "read-auto" | "auto-read-only" => MdStateFlag::ReadAuto,
+            "write-pending" => MdStateFlag::WritePending,
+            "readonly" | "read-only" => MdStateFlag::ReadOnly,
+            "inactive" | "not started" => MdStateFlag::Inactive,
+            "suspended" => MdStateFlag::Suspended,
+            "clear" => MdStateFlag::Clear,
+            "degraded" => MdStateFlag::Degraded,
+            "failed" | "broken" => MdStateFlag::Failed,
+            "resyncing" => MdStateFlag::Resyncing,
+            "recovering" => MdStateFlag::Recovering,
+            "reshaping" => MdStateFlag::Reshaping,
+            "checking" => MdStateFlag::Checking,
+            "repairing" => MdStateFlag::Repairing,
+            _ => MdStateFlag::Other,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_words_as_codes() {
+        use MdStateFlag as F;
+        assert_eq!(state_flags("clean, degraded, recovering"), [F::Clean, F::Degraded, F::Recovering]);
+        assert_eq!(state_flags("active, FAILED, Not Started"), [F::Active, F::Failed, F::Inactive]);
+        assert_eq!(state_flags("active-idle"), [F::ActiveIdle]);
+        assert_eq!(state_flags("read-auto"), [F::ReadAuto]);
+        assert_eq!(state_flags("clean, resyncing (DELAYED)"), [F::Clean, F::Other]);
+        assert!(state_flags("").is_empty());
+        // every code reads back as serde writes it
+        for f in MdStateFlag::ALL {
+            assert_eq!(serde_json::to_value(f).unwrap(), f.as_str());
+        }
+        for r in [MemberRole::Active, MemberRole::Spare, MemberRole::Faulty, MemberRole::Journal, MemberRole::Rebuilding, MemberRole::Unknown] {
+            assert_eq!(serde_json::to_value(r).unwrap(), r.as_str());
+        }
+    }
 
     const MDSTAT: &str = include_str!("../tests/fixtures/proc-mdstat.txt");
 
