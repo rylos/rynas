@@ -840,7 +840,8 @@ mod tests {
         st.plan.plan.interval_hours = 24;
         st.plan.plan.start_delay_min = 1;
         st.plan.trigger = Some(TaskTrigger::Calendar { on_calendar: "*-*-* 03:00:00".into(), cron: None, persistent: true, randomized_delay_s: 0 });
-        let t = now_ms();
+        // a fixed noon: with the clock the next 03:00 is under an hour away between 02:00 and 03:00
+        let t = rome_ms("2026-11-18T12:00");
         st.last_ok_ms = Some(t - 2 * 86_400_000);
         assert_eq!(decide(&st, t, t + 61_000, &tz), Decision::Start(RunTrigger::Timer));
         st.last_ok_ms = Some(t + 63_000);

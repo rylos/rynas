@@ -1069,7 +1069,7 @@ async fn snapshot_jobs_stage_their_task() {
     .await;
     assert_eq!(
         (s, code(&b).as_str()),
-        (StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE)
+        (StatusCode::BAD_REQUEST, error_codes::SNAPSHOT_SHARE_MISSING)
     );
     apply(&e);
     // the task of a job goes with the job
