@@ -72,6 +72,8 @@ struct TestEnv {
     line_sets: Mutex<BTreeMap<String, BTreeSet<(u64, u64)>>>,
     line_reads: AtomicUsize,
     line_stop_at: Mutex<Option<usize>>,
+    /// How long building a pair's candidate list and reading one reference list take.
+    line_delays: Mutex<(Duration, Duration)>,
 }
 
 /// A line of [`TestEnv::line_sets`] as a source of numbers: subvolume of snapshot `i` is
@@ -80,6 +82,7 @@ struct FakeLine<'a> {
     sets: Vec<BTreeSet<(u64, u64)>>,
     reads: &'a AtomicUsize,
     stop: &'a dyn Fn() -> bool,
+    delays: (Duration, Duration),
 }
 
 impl Source for FakeLine<'_> {
@@ -93,8 +96,12 @@ impl Source for FakeLine<'_> {
         let cb: BTreeMap<u64, u64> = self.sets[b].difference(&self.sets[a]).copied().collect();
         let ca: BTreeMap<u64, u64> = self.sets[a].difference(&self.sets[b]).copied().collect();
         let all = candidate_list(&cb, &ca);
-        let (sets, reads) = (&self.sets, self.reads);
+        std::thread::sleep(self.delays.0);
+        let (sets, reads, read_delay) = (&self.sets, self.reads, self.delays.1);
         let mut roots = |bytenr: u64| {
+            if !read_delay.is_zero() {
+                std::thread::sleep(read_delay);
+            }
             reads.fetch_add(1, Ordering::SeqCst);
             Ok(Some(sets.iter().enumerate().filter(|(_, s)| s.range((bytenr, 0)..=(bytenr, u64::MAX)).next().is_some()).map(|(i, _)| i as u64 + 1).collect()))
         };
@@ -161,7 +168,7 @@ impl Env for TestEnv {
         let sets = sets.ok_or_else(|| WalkError::Unsupported("no neighbour comparison here".into()))?;
         let at = *self.line_stop_at.lock().unwrap();
         let stop = || stop() || at.is_some_and(|n| self.line_reads.load(Ordering::SeqCst) >= n);
-        let mut src = FakeLine { sets, reads: &self.line_reads, stop: &stop };
+        let mut src = FakeLine { sets, reads: &self.line_reads, stop: &stop, delays: *self.line_delays.lock().unwrap() };
         rynas_btrfs::pcspace::measure_resumable(line, &mut src, true, anchor, cp, hooks)
     }
 }
@@ -209,6 +216,7 @@ fn world() -> World {
         line_sets: Mutex::new(BTreeMap::new()),
         line_reads: AtomicUsize::new(0),
         line_stop_at: Mutex::new(None),
+        line_delays: Mutex::new((Duration::ZERO, Duration::ZERO)),
     });
     let thumbs = dir.path().join("thumbs");
     std::fs::create_dir_all(thumbs.join("1000")).unwrap();
@@ -637,12 +645,61 @@ async fn automatic_updates_hand_over_after_their_slice_and_still_finish() {
     // the two new pairs, each candidate read once
     assert_eq!(w.env.line_reads.load(Ordering::SeqCst) - before, candidates(3, 4) + candidates(4, 5));
 
-    // an update someone cancelled keeps what it did but is not taken up by itself
+    // an update someone cancelled: its numbers show as not up to date, nothing takes it up
+    // by itself
     add(6);
     scan(ScanMode::Changes, true);
     assert!(!unfinished());
+    assert_eq!(overview(&w).await.pending, ["vol1"]);
+    // an update that goes on next time, then cancelled: it still goes on next time
+    assert_eq!(scan(ScanMode::Changes, false).partial, None);
+    assert!(unfinished());
+    scan(ScanMode::Changes, true);
+    assert!(unfinished());
+    assert_eq!(overview(&w).await.pending, ["vol1"]);
     w.space.changes_slice_ms.store(super::CHANGES_SLICE.as_millis() as u64, Ordering::Release);
     scan(ScanMode::Changes, false);
     assert_eq!(freed(&overview(&w).await), Some(truth(7)));
+    assert!(!unfinished() && overview(&w).await.pending.is_empty());
     assert!(logs.lock().unwrap().iter().any(|l| l.contains("left for next time")));
+}
+
+#[tokio::test]
+async fn an_automatic_update_counts_a_third_of_its_slice_before_it_hands_over() {
+    let w = world();
+    let sets = big_line(6);
+    for (i, s) in sets.iter().enumerate() {
+        w.env.line_sets.lock().unwrap().insert(format!("u{i}"), s.clone());
+    }
+    let add = |i: usize| subvol(&w.env.vol.join(format!(".snapshots/big/big.2026110{}T0100", i + 1)), &format!(r#"{{"readonly": true, "uuid": "u{i}"}}"#));
+    let truth: u64 = sets.iter().flatten().collect::<BTreeSet<_>>().iter().map(|e| e.1).sum();
+    let freed = |o: &SpaceOverview| o.volumes[0].sources.iter().find(|s| s.dir.ends_with(".snapshots/big")).and_then(|s| s.freed_bytes);
+    let scan = || w.space.scan(Some("vol1"), ScanMode::Changes, &DockerFacts::default(), &|_| {}, &|_| {}, &|| false).unwrap();
+    for i in 0..4 {
+        add(i);
+    }
+    w.space.scan(Some("vol1"), ScanMode::Full, &DockerFacts::default(), &|_| {}, &|_| {}, &|| false).unwrap();
+    add(4);
+    add(5);
+    // a slice of 150 ms (so at least 50 ms of counting), building a pair's candidates takes
+    // longer than the whole slice, each reference list 100 µs
+    let slice = Duration::from_millis(150);
+    w.space.changes_slice_ms.store(slice.as_millis() as u64, Ordering::Release);
+    *w.env.line_delays.lock().unwrap() = (Duration::from_millis(200), Duration::from_micros(100));
+    let mut passes = 0;
+    loop {
+        passes += 1;
+        assert!(passes < 40, "never finished");
+        let (t, reads) = (std::time::Instant::now(), w.env.line_reads.load(Ordering::SeqCst));
+        let end = scan();
+        assert_eq!(end.partial, None);
+        if !w.space.progress.lock().unwrap().unfinished.contains("vol1") {
+            break;
+        }
+        // handed over only after counting long enough, never right after building the list
+        assert!(t.elapsed() >= Duration::from_millis(200) + slice / 3, "{:?}", t.elapsed());
+        assert!(w.env.line_reads.load(Ordering::SeqCst) > reads);
+    }
+    assert!(passes >= 2, "{passes}");
+    assert_eq!(freed(&overview(&w).await), Some(truth));
 }

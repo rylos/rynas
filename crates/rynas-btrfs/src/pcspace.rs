@@ -8,7 +8,8 @@
 //! same subvolume of the PC over time, oldest first: received incrementally, each one a
 //! snapshot of the one before) are measured by what changed between neighbours, and every
 //! number is kept per snapshot, so a measure only works on the pairs of neighbours that are
-//! new since the last one (a new backup: two pairs per line).
+//! new since the last one (a new backup: one pair per line, which also reads what the
+//! previous newest holds alone).
 //!
 //! The unit is the whole data extent, by its start (`disk_bytenr`) and on-disk size
 //! (`disk_num_bytes`: compressed extents count what they take), as btrfs frees an extent
@@ -42,9 +43,14 @@
 //! back-reference walk: a pair of 228 802 candidates took more than 10 minutes on a J4125 with
 //! disks), so a measure keeps its progress in a [`Checkpoint`] the caller writes down
 //! ([`Hooks::save`]): every finished pair at once ([`PairDone`], by a [`PairKey`]: both
-//! snapshots' UUIDs and generations and their own neighbours), and inside a pair a
-//! [`PairCursor`] (how many candidates, in ascending start, are counted, with their sums and a
-//! fingerprint of the candidate list) at most every [`SAVE_EVERY`] and when the pair stops. A
+//! snapshots' UUIDs and generations), and inside a pair a [`PairCursor`] (how many
+//! candidates, in ascending start, are counted, with their sums and a fingerprint of the
+//! candidate list) at most every [`SAVE_EVERY`] and when the pair stops; a cursor goes
+//! [`CURSOR_MAX_AGE`] after its count began. Born and died depend on the two snapshots only
+//! and always carry over. What each of the two holds alone (`LOGICAL_INO_V2` lists every root,
+//! so one pair gives it exactly) is kept with the neighbours it was counted with ([`Sides`])
+//! and used only while they are still the neighbours, also when the line changes during a
+//! count ([`Hooks::line_moved`]); a snapshot's own data comes from either of its pairs. A
 //! later measure reuses a finished pair as it is and goes on in a stopped one from its cursor
 //! when the candidates are the same list (else it counts that pair again): the numbers are
 //! those of a measure never stopped.
@@ -141,8 +147,9 @@ pub trait Source {
 /// a stop always are).
 pub const SAVE_EVERY: Duration = Duration::from_secs(30);
 
-/// How long a cursor inside a pair stays usable: its sums come from reference lists read
-/// then, and a count spread over weeks would add up moments far apart.
+/// How long after its count began a cursor inside a pair stays usable: its sums come from
+/// reference lists read since then, and a count spread over weeks would add up moments far
+/// apart.
 pub const CURSOR_MAX_AGE: Duration = Duration::from_secs(7 * 86_400);
 
 /// A pair of neighbours as a checkpoint knows it: both snapshots with their generations. What
@@ -204,6 +211,9 @@ pub struct PairCursor {
     /// The neighbours the "alone" sums were counted with.
     #[serde(default, flatten)]
     pub sides: Sides,
+    /// When this count began (ms since the epoch; kept when it goes on).
+    #[serde(default)]
+    pub started_ms: u64,
 }
 
 /// A finished pair.
@@ -215,13 +225,11 @@ pub struct PairDone {
     pub sides: Sides,
 }
 
-/// A pair stopped part way, and when (ms since the epoch).
+/// A pair stopped part way.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairPartial {
     pub key: PairKey,
     pub cursor: PairCursor,
-    #[serde(default)]
-    pub at_ms: u64,
 }
 
 /// The progress of measures not finished yet (one per volume or folder, kept by the caller):
@@ -267,9 +275,9 @@ impl Checkpoint {
         self.pairs.drain(..over);
     }
 
-    fn put_cursor(&mut self, key: PairKey, cursor: PairCursor, at_ms: u64) {
+    fn put_cursor(&mut self, key: PairKey, cursor: PairCursor) {
         self.partial.retain(|p| p.key != key);
-        self.partial.push(PairPartial { key, cursor, at_ms });
+        self.partial.push(PairPartial { key, cursor });
         let over = self.partial.len().saturating_sub(Self::MAX_PARTIAL);
         self.partial.drain(..over);
     }
@@ -279,10 +287,10 @@ impl Checkpoint {
         self.pairs.retain(|p| &p.key != key);
     }
 
-    /// Drops the cursors saved before `now_ms - max_age`.
+    /// Drops the cursors of counts begun before `now_ms - max_age`.
     pub fn expire(&mut self, now_ms: u64, max_age: Duration) {
         let oldest = now_ms.saturating_sub(max_age.as_millis() as u64);
-        self.partial.retain(|p| p.at_ms >= oldest);
+        self.partial.retain(|p| p.cursor.started_ms >= oldest);
     }
 
     /// Keeps only what describes snapshots there now (`now`: UUID → generation): both
@@ -314,6 +322,13 @@ pub trait Hooks {
     /// The checkpoint changed in a way worth keeping: write it down (the caller may write
     /// less often; what it holds when the measure returns is the state to keep).
     fn save(&mut self, _cp: &Checkpoint) {}
+    /// Whether the line's snapshots are no longer those the measure began with (one received
+    /// or deleted meanwhile: a listing, no extent read). Asked when a pair ends and whenever
+    /// a cursor is saved; then what the pair's two snapshots hold alone is not used and the
+    /// measure stops, to go on with the line as it is.
+    fn line_moved(&mut self) -> bool {
+        false
+    }
 }
 
 /// [`Hooks`] that only pass the steps on.
@@ -518,35 +533,61 @@ fn pair_resumable(src: &mut dyn Source, newer: usize, key: PairKey, nb: &(Option
     let mut last: Option<PairCursor> = None;
     let mut first: Option<u64> = None;
     let mut at = Instant::now();
-    // a cursor of a fresh count (no `from`, or another candidate list) has fresh sides
+    let mut moved = false;
+    // a cursor of a fresh count (no `from`, or another candidate list) has fresh sides and
+    // starts now; a resumed one keeps its own
     let fresh = Sides { before: nb.0.clone(), after: nb.1.clone(), ..Sides::default() };
-    let sided = |c: &PairCursor| {
-        let resumed = from.as_ref().is_some_and(|f| f.fingerprint == c.fingerprint && f.total == c.total && c.done >= f.done);
-        PairCursor { sides: if resumed { from.as_ref().map(|f| f.sides.clone()).unwrap_or_default() } else { fresh.clone() }, ..c.clone() }
+    let started = now_ms();
+    let sided = |c: &PairCursor, moved: bool| {
+        let resumed = from.as_ref().filter(|f| f.fingerprint == c.fingerprint && f.total == c.total && c.done >= f.done);
+        let mut sides = resumed.map_or_else(|| fresh.clone(), |f| f.sides.clone());
+        if moved {
+            (sides.stale_older, sides.stale_newer) = (true, true);
+        }
+        PairCursor { sides, started_ms: resumed.map_or(started, |f| f.started_ms), ..c.clone() }
     };
     let r = src.pair_from(newer - 1, newer, from.as_ref(), &mut |c: &PairCursor| {
-        let c = sided(c);
+        let mut c = sided(c, moved);
         let start = *first.get_or_insert(c.done);
         hooks.extents(newer, c.done, c.total, start);
         if c.done > 0 && saved.as_ref() != Some(&c) && at.elapsed() >= every {
-            cp.put_cursor(key.clone(), c.clone(), now_ms());
+            // the line changed meanwhile (a receive, a deletion): what each holds alone may
+            // have been counted with other neighbours
+            if !moved && hooks.line_moved() {
+                moved = true;
+                c = sided(&c, true);
+            }
+            cp.put_cursor(key.clone(), c.clone());
             hooks.save(cp);
             saved = Some(c.clone());
             at = Instant::now();
         }
         last = Some(c);
     });
+    let moved = moved || hooks.line_moved();
     match r {
         Ok(f) => {
-            let sides = last.map(|c| c.sides).unwrap_or(fresh);
+            let mut sides = last.map(|c| c.sides).unwrap_or(fresh);
+            if moved {
+                (sides.stale_older, sides.stale_newer) = (true, true);
+            }
             cp.put_facts(key, f, sides.clone());
             hooks.save(cp);
+            // the rest of this line waits for the next measure, which sees it as it is now
+            if moved {
+                return Err(WalkError::Stopped);
+            }
             Ok((f, sides, false))
         }
         Err(e) => {
-            if let Some(c) = last.filter(|c| c.done > 0 && saved.as_ref() != Some(c)) {
-                cp.put_cursor(key, c, now_ms());
-                hooks.save(cp);
+            if let Some(mut c) = last.filter(|c| c.done > 0) {
+                if moved {
+                    (c.sides.stale_older, c.sides.stale_newer) = (true, true);
+                }
+                if saved.as_ref() != Some(&c) {
+                    cp.put_cursor(key, c);
+                    hooks.save(cp);
+                }
             }
             Err(e)
         }
@@ -574,7 +615,18 @@ fn measure_core(line: &[Snap], src: &mut dyn Source, walk: bool, anchor: bool, c
         j += 1;
         let a = b - 1;
         let nb = neighbours(line, b);
-        let (f, sides, reused) = pair_resumable(src, b, pair_key(line, &generations, b), &nb, cp, hooks, every)?;
+        let key = pair_key(line, &generations, b);
+        // compared only for what its snapshots hold alone: a cursor whose "alone" is mixed
+        // gives nothing more, the pair is counted afresh
+        let edge = |e: &Option<Edge>| e.as_ref().map(|e| e.uuid.clone());
+        let bd_known = edge(&out.known[b].born) == Some(id(a)) && edge(&out.known[a].died) == Some(id(b));
+        if bd_known && cp.cursor(&key).is_some_and(|c| {
+            let s = c.sides.seen_with(&nb);
+            s.stale_older || s.stale_newer
+        }) {
+            cp.drop_pair(&key);
+        }
+        let (f, sides, reused) = pair_resumable(src, b, key, &nb, cp, hooks, every)?;
         if reused {
             out.reused += 1;
         } else {
@@ -602,8 +654,23 @@ fn measure_core(line: &[Snap], src: &mut dyn Source, walk: bool, anchor: bool, c
             // a snapshot whose own data is still out of date (its pairs' counts were mixed
             // across a change of neighbours): one of its pairs again, counted afresh
             if let Some(i) = (0..n).find(|&i| !exclusive_current(line, &out.known[i], i)) {
-                let p = if i + 1 < n { i + 1 } else { i };
-                cp.drop_pair(&pair_key(line, &generations, p));
+                // a finished pair that read it with these neighbours first (nothing read),
+                // else its pair with the newer neighbour (or the older one) counted afresh
+                let valid = |p: usize| {
+                    cp.done(&pair_key(line, &generations, p)).is_some_and(|d| {
+                        let s = d.sides.seen_with(&neighbours(line, p));
+                        if p == i { !s.stale_newer } else { !s.stale_older }
+                    })
+                };
+                let around: Vec<usize> = [i + 1, i].into_iter().filter(|&p| p >= 1 && p < n).collect();
+                let p = match around.iter().copied().find(|&p| valid(p)) {
+                    Some(p) => p,
+                    None => {
+                        let p = around[0];
+                        cp.drop_pair(&pair_key(line, &generations, p));
+                        p
+                    }
+                };
                 queue.push_back(p);
                 total += 1;
             }
@@ -984,15 +1051,19 @@ mod tests {
         }
     }
 
-    /// Everything a measure tells.
+    /// Everything a measure tells; `moved`: the line changed meanwhile.
     #[derive(Default)]
     struct Told {
         saves: Vec<Checkpoint>,
         extents: Vec<(usize, u64, u64, u64)>,
         reused: Vec<usize>,
+        moved: bool,
     }
 
     impl Hooks for Told {
+        fn line_moved(&mut self) -> bool {
+            self.moved
+        }
         fn reused(&mut self, newer: usize) {
             self.reused.push(newer);
         }
@@ -1200,24 +1271,69 @@ mod tests {
     }
 
     #[test]
+    fn what_a_snapshot_holds_alone_is_never_taken_from_a_count_with_other_neighbours() {
+        let sets = big_history(4);
+        let none = BTreeSet::new();
+        let c = |a: usize, b: usize| sets[a].symmetric_difference(&sets[b]).count();
+        let mut cp = Checkpoint::default();
+        let sides = |cp: &Checkpoint, o: &str, n: &str| cp.pairs.iter().find(|p| p.key.older == o && p.key.newer == n).map(|p| p.sides.clone()).unwrap();
+        // s0 s1 s2: stopped in (s1, s2) at 768
+        let mut src = Counted::new(&sets[..3], &none);
+        src.stop_after = Some(c(0, 1) + 600);
+        assert_eq!(measure_core(&line_of(&names(3)), &mut src, true, true, &mut cp, &mut Told::default(), Duration::MAX), Err(WalkError::Stopped));
+        // s3 came: (s1, s2) goes on with its newer side mixed; stopped in (s2, s3) at 768
+        let mut src = Counted::new(&sets[..4], &none);
+        src.stop_after = Some(c(1, 2) - 768 + 600);
+        assert_eq!(measure_core(&line_of(&names(4)), &mut src, true, true, &mut cp, &mut Told::default(), Duration::MAX), Err(WalkError::Stopped));
+        let s = sides(&cp, "s1", "s2");
+        assert!(s.stale_newer && !s.stale_older, "{s:?}");
+        assert_eq!(cp.partial.len(), 1);
+        // s1 went: (s2, s3) goes on with its older side mixed; the numbers are still right
+        let left = vec![sets[0].clone(), sets[2].clone(), sets[3].clone()];
+        let ln: Vec<String> = ["s0", "s2", "s3"].iter().map(|s| s.to_string()).collect();
+        let mut src = Counted::new(&left, &none);
+        let r = measure_core(&line_of(&ln), &mut src, true, true, &mut cp, &mut Told::default(), Duration::MAX).unwrap();
+        check(&r, &truth_of(&left, &none));
+        let s = sides(&cp, "s2", "s3");
+        assert!(s.stale_older && !s.stale_newer, "{s:?}");
+    }
+
+    #[test]
+    fn a_line_that_changes_during_a_count_is_measured_again_as_it_is() {
+        let sets = big_history(3);
+        let none = BTreeSet::new();
+        let l = line_of(&names(3));
+        let mut src = Counted::new(&sets, &none);
+        let mut cp = Checkpoint::default();
+        // a snapshot came or went while (s0, s1) was counted: born and died kept, both sides
+        // stale, and the measure stops to go on with the line as it is
+        let mut told = Told { moved: true, ..Told::default() };
+        assert_eq!(measure_core(&l, &mut src, true, true, &mut cp, &mut told, Duration::MAX), Err(WalkError::Stopped));
+        assert_eq!(cp.pairs.len(), 1);
+        assert!(cp.pairs[0].sides.stale_older && cp.pairs[0].sides.stale_newer);
+        let r = measure_core(&l, &mut src, true, true, &mut cp, &mut Told::default(), Duration::MAX).unwrap();
+        check(&r, &truth_of(&sets, &none));
+    }
+
+    #[test]
     fn a_checkpoint_stays_small() {
         let key = |i: usize| PairKey { older: format!("a{i}"), newer: format!("b{i}"), generations: (0, 0) };
         let mut cp = Checkpoint::default();
         for i in 0..Checkpoint::MAX_PAIRS + 10 {
-            cp.put_cursor(key(i), PairCursor { done: 1, ..PairCursor::default() }, 0);
+            cp.put_cursor(key(i), PairCursor { done: 1, ..PairCursor::default() });
             cp.put_facts(key(i), PairFacts::default(), Sides::default());
         }
         assert_eq!(cp.pairs.len(), Checkpoint::MAX_PAIRS);
         assert!(cp.partial.is_empty());
         assert_eq!(cp.pairs[0].key, key(10));
         for i in 0..Checkpoint::MAX_PARTIAL + 3 {
-            cp.put_cursor(key(i), PairCursor::default(), if i % 2 == 0 { 1_000 } else { 9_000_000_000 });
+            cp.put_cursor(key(i), PairCursor { started_ms: if i % 2 == 0 { 1_000 } else { 9_000_000_000 }, ..PairCursor::default() });
         }
         assert_eq!(cp.partial.len(), Checkpoint::MAX_PARTIAL);
-        // cursors older than their limit go
+        // counts begun longer ago than the limit go
         let mut aged = cp.clone();
         aged.expire(9_000_000_000 + 1000, CURSOR_MAX_AGE);
-        assert!(!aged.partial.is_empty() && aged.partial.iter().all(|p| p.at_ms == 9_000_000_000));
+        assert!(!aged.partial.is_empty() && aged.partial.iter().all(|p| p.cursor.started_ms == 9_000_000_000));
         let line: BTreeSet<&str> = ["a20", "b30"].into_iter().collect();
         let before = cp.pairs.len();
         cp.forget(&line);

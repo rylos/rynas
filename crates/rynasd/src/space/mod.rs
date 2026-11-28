@@ -481,6 +481,9 @@ pub struct Space {
     progress: Mutex<MeasureProgress>,
     /// [`CHANGES_SLICE`] (tests shorten it).
     changes_slice_ms: std::sync::atomic::AtomicU64,
+    /// Volumes whose update someone cancelled: their numbers are not up to date (shown as
+    /// pending) and nothing takes them up by itself; the next scan of the volume clears it.
+    stale: Mutex<BTreeSet<String>>,
 }
 
 /// What measures not finished yet did, kept across passes and restarts
@@ -622,6 +625,8 @@ struct LineHooks<'a> {
     /// When the checkpoint was last written (it is kept in memory at every change, written
     /// at most every [`CHECKPOINT_WRITE_EVERY`], and always when the line measure returns).
     written: Option<Instant>,
+    /// The line's snapshots as listed when its measure began ([`Space::line_listing`]).
+    listed: Option<BTreeSet<String>>,
 }
 
 /// Least time between two writes of the checkpoint while a line is measured.
@@ -697,6 +702,16 @@ impl Hooks for LineHooks<'_> {
             self.meter.add(want - p.credited);
             p.credited = want;
         }
+    }
+
+    fn line_moved(&mut self) -> bool {
+        let (Some(then), Some(now)) = (self.listed.as_ref(), self.space.line_listing(self.line)) else { return false };
+        let moved = *then != now;
+        if moved {
+            let dir = self.line.snaps.first().and_then(|s| s.path.parent()).map(|p| p.display().to_string()).unwrap_or_default();
+            (self.log)(&format!("{dir}: its snapshots changed while they were measured; the next update goes on with them as they are"));
+        }
+        moved
     }
 
     fn save(&mut self, cp: &Checkpoint) {
@@ -790,7 +805,32 @@ impl Space {
             waiting: Mutex::new(BTreeSet::new()),
             progress: Mutex::new(progress),
             changes_slice_ms: (CHANGES_SLICE.as_millis() as u64).into(),
+            stale: Mutex::new(BTreeSet::new()),
         })
+    }
+
+    /// Whether an automatic update has comparisons to make in `s` (the checks of
+    /// [`Space::measure_by_lines`] in [`ScanMode::Changes`]): only then is a source it did
+    /// not reach in its slice left for next time.
+    fn changes_work(&self, label: &str, s: &Source, pc: &BTreeMap<String, Known>) -> bool {
+        let live = has_live(s);
+        let known = self.known.lock().unwrap().get(label).cloned().unwrap_or_default();
+        let lines = source_lines(s, live, &known, pc);
+        !lines.is_empty()
+            && lines.iter().all(|l| l.cheap)
+            && (live || !lines.iter().any(|l| rynas_btrfs::pcspace::needs_walk(&l.snaps)))
+            && lines.iter().any(|l| !rynas_btrfs::pcspace::pairs_needed(&l.snaps).is_empty())
+    }
+
+    /// The UUIDs of the snapshots of line `l` there now: its folder listed again, no extent
+    /// read (compared with the same listing made when the line's measure began, so names the
+    /// discovery leaves out cancel out).
+    fn line_listing(&self, l: &SourceLine) -> Option<BTreeSet<String>> {
+        let first = l.snaps.first()?;
+        let (dir, name) = (first.path.parent()?, first.path.file_name()?.to_string_lossy().into_owned());
+        let line = line_of(&name);
+        let probe = self.env.probe();
+        Some(probe.dirs(dir).into_iter().filter(|n| line_of(n) == line).filter_map(|n| probe.subvol(&dir.join(&n)).and_then(|f| f.uuid)).collect())
     }
 
     /// How long an automatic update works before it hands over ([`CHANGES_SLICE`]).
@@ -1052,6 +1092,7 @@ impl Space {
             pending: {
                 let mut p = self.pending.lock().unwrap().clone();
                 p.extend(self.progress.lock().unwrap().unfinished.iter().cloned());
+                p.extend(self.stale.lock().unwrap().iter().cloned());
                 p.into_iter().collect()
             },
         }
@@ -1143,7 +1184,8 @@ impl Space {
         let mut cp = self.progress.lock().unwrap().volumes.get(label).cloned().unwrap_or_default();
         let (mut freed, mut own) = (0u64, 0u64);
         for l in &lines {
-            let mut hooks = LineHooks { space: self, label, line: l, meter, log, walk_bps: bps, pair_ms, now: None, written: None };
+            let listed = self.line_listing(l);
+            let mut hooks = LineHooks { space: self, label, line: l, meter, log, walk_bps: bps, pair_ms, now: None, written: None, listed };
             let r = self.env.measure_line(&l.snaps, !live, stop, log, &mut cp, &mut hooks);
             // what the measure did, written down however it ended
             self.keep_checkpoint(label, &cp, true);
@@ -1233,7 +1275,8 @@ impl Space {
                 continue;
             }
             // changes from now on make the volume pending again
-            self.pending.lock().unwrap().remove(label);
+            let was_pending = self.pending.lock().unwrap().remove(label);
+            let was_stale = self.stale.lock().unwrap().remove(label);
             updated.push(label.clone());
             let prev = read_prev(label);
             let prev_cat = |c: SpaceCategory| prev.as_ref().and_then(|v| v.categories.iter().find(|x| x.category == c)).map(|x| (x.bytes, x.reclaimable_bytes)).unwrap_or_default();
@@ -1255,7 +1298,9 @@ impl Space {
                 let keep: Vec<PathBuf> = s.live.iter().filter(|l| l.exists()).cloned().collect();
                 let skipped = !set.is_empty() && stop();
                 let by_lines = if set.is_empty() || skipped { Ok(None) } else { self.measure_by_lines(label, s, mode, &pc, &stop, log, &meter) };
-                let cut = skipped || matches!(by_lines, Err(WalkError::Stopped));
+                // left for later: stopped in it, or not begun for lack of time (after a change
+                // only when it has comparisons such an update can make)
+                let cut = matches!(by_lines, Err(WalkError::Stopped)) || (skipped && (full || self.changes_work(label, s, &pc)));
                 let m = match by_lines {
                     Ok(Some(m)) => Some(m),
                     Ok(None) if set.is_empty() => Some(Measured::default()),
@@ -1270,7 +1315,7 @@ impl Space {
                 // stopped by its time without a number: what was compared is kept, the next
                 // update goes on with it, and a person's Measure ends partial (a measure
                 // someone cancelled keeps what it compared but is not taken up by itself)
-                if !set.is_empty() && m.is_none_or(|m| m.freed.is_none()) && (cut || stop()) && !cancelled() {
+                if !set.is_empty() && m.is_none_or(|m| m.freed.is_none()) && (cut || (full && stop())) && !cancelled() {
                     left.push(format!("{} {}", kind_word(s.kind), s.name));
                     if full {
                         stopped.push(format!("{label}: {}", s.name));
@@ -1407,6 +1452,14 @@ impl Space {
             };
             self.write_json(&format!("{label}.json"), &v);
             log(&format!("{label}: done in {} s", v.scan_s));
+            if cancelled() {
+                // cancelled: the numbers are not up to date (shown as pending), what it
+                // compared is kept, nothing takes it up by itself (an earlier continuation stays)
+                if !full || was_pending || was_stale {
+                    self.stale.lock().unwrap().insert(label.clone());
+                }
+                continue;
+            }
             // what is left goes on next time: the next change of snapshots, the next
             // housekeeping with the disks awake, or Measure
             let was = {
@@ -3194,7 +3247,7 @@ mod unit_tests {
             "v".into(),
             Checkpoint {
                 pairs: vec![PairDone { key: key(1), facts: Default::default(), sides: Default::default() }],
-                partial: vec![PairPartial { key: key(2), cursor: PairCursor { total: 10_000, done: 4_000, ..Default::default() }, at_ms: 0 }],
+                partial: vec![PairPartial { key: key(2), cursor: PairCursor { total: 10_000, done: 4_000, ..Default::default() } }],
             },
         );
         // finished: nothing; stopped: its candidates left at the reference rate; other: a pair

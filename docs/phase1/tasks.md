@@ -169,10 +169,12 @@ next update started the same pair again). The comparisons keep their progress pe
 renamed into place; kept in memory at every change, written at most every 30 s while a line is
 measured and always when its measure returns): each finished pair, keyed by both snapshots'
 UUIDs and generations, and inside a pair a cursor (candidates counted in ascending start, the
-partial sums, a fingerprint of the candidate list; dropped after 7 days) every 30 s and when it
+partial sums, a fingerprint of the candidate list; dropped 7 days after its count began) every 30 s and when it
 stops. Born and died depend on the two snapshots only and always carry over; what each of the two
 holds alone is recorded with the neighbours it was counted with, and a side whose neighbour
-changed during or after the count is not used. A snapshot's own data comes from either of its
+changed during or after the count is not used (the line's snapshots are listed again when a pair
+ends and when a cursor is saved: a receive or a deletion meanwhile marks both sides stale and
+the pass stops, to go on with the line as it is at the next update, which that change starts). A snapshot's own data comes from either of its
 pairs, so a new backup compares only the new pair (it also reads what the previous newest holds
 alone) and a new snapshot never restarts the newest pair, even one that spans many passes; if a
 snapshot's own data is still out of date after its pairs (counts mixed across a change of
@@ -188,8 +190,9 @@ there; an automatic update has no failing limit: it works a 30-minute slice (`CH
 soft: it hands over only after a pair compared to its end or at least a third of the slice spent
 counting candidates, so building a long pair's candidate list again never eats a whole pass;
 pairs taken from the checkpoint do not count), then ends **Ok** logging what is left (the
-exception of guidelines A20b); a cancelled update keeps what it did but is not taken up by
-itself; the volume stays pending
+exception of guidelines A20b); a cancelled update keeps what it did and the volume shows as
+pending (its numbers are not up to date), but it is not taken up by itself and an earlier
+unfinished continuation is kept; otherwise the volume stays pending
 (`MeasureProgress.unfinished`) and goes on at the next change of snapshots, at the next daily
 housekeeping once its disks are awake (also the first after a start), or with Measure; no new
 timer. The estimate counts a finished pair as nothing and a stopped one by its candidates left at

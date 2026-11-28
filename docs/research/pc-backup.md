@@ -922,12 +922,14 @@ left Storage › Space's automatic update one pair of 228 802 candidates; its 10
 stopped it every time and, since results were kept only when a whole line ended, the next pass
 started the same pair again. `rynas_btrfs::pcspace` now keeps progress in a `Checkpoint` the
 caller writes down: every finished pair at once (`PairDone`, keyed by both snapshots' UUIDs and
-generations and their own neighbours, as what each holds alone depends on them), and inside a
+generations), and inside a
 pair a `PairCursor`: the candidates are counted in ascending start, and the cursor holds how
 many are done, the partial born/died/exclusive sums and a fingerprint of the candidate list,
-saved every 30 s and when the pair stops (dropped after 7 days). Born and died depend on the two
-snapshots only; what each holds alone is kept with the neighbours it was counted with and used
-only while they are the same. Since a snapshot's own data can come from either of its two pairs,
+saved every 30 s and when the pair stops (dropped 7 days after its count began). Born and died
+depend on the two snapshots only; what each holds alone is kept with the neighbours it was
+counted with and used only while they are the same (the snapshots of the line are listed again
+when a pair ends and when a cursor is saved: a receive or deletion meanwhile marks both sides
+stale and the pass stops, to go on with the line as it is). Since a snapshot's own data can come from either of its two pairs,
 a new backup now compares one pair per line instead of two, and a new snapshot never restarts
 the newest pair. A later pass takes a finished pair as it is and
 goes on in a stopped one from the cursor when the regenerated candidate list has the same
