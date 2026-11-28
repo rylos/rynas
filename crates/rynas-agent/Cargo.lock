@@ -1858,7 +1858,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rynas-agent"
-version = "0.9.20"
+version = "0.9.21"
 dependencies = [
  "bytes",
  "crossterm",
@@ -1881,7 +1881,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-api-types"
-version = "0.9.20"
+version = "0.9.21"
 dependencies = [
  "rynas-schedule",
  "serde",
@@ -1890,7 +1890,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-schedule"
-version = "0.9.20"
+version = "0.9.21"
 dependencies = [
  "jiff",
  "serde",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-tls"
-version = "0.9.20"
+version = "0.9.21"
 dependencies = [
  "base64",
  "getrandom 0.4.3",
