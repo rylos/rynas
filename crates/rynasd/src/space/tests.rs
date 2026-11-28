@@ -595,3 +595,54 @@ async fn measures_go_on_from_where_they_stopped() {
     assert_eq!(freed(&overview(&w).await), Some(truth(5)));
     assert!(!unfinished(&progress()) && overview(&w).await.pending.is_empty());
 }
+
+#[tokio::test]
+async fn automatic_updates_hand_over_after_their_slice_and_still_finish() {
+    let w = world();
+    let sets = big_line(7);
+    for (i, s) in sets.iter().enumerate() {
+        w.env.line_sets.lock().unwrap().insert(format!("u{i}"), s.clone());
+    }
+    let add = |i: usize| subvol(&w.env.vol.join(format!(".snapshots/big/big.2026110{}T0100", i + 1)), &format!(r#"{{"readonly": true, "uuid": "u{i}"}}"#));
+    let truth = |n: usize| -> u64 { sets[..n].iter().flatten().collect::<BTreeSet<_>>().iter().map(|e| e.1).sum() };
+    let candidates = |a: usize, b: usize| sets[a].symmetric_difference(&sets[b]).count();
+    let freed = |o: &SpaceOverview| o.volumes[0].sources.iter().find(|s| s.dir.ends_with(".snapshots/big")).and_then(|s| s.freed_bytes);
+    let unfinished = || w.space.progress.lock().unwrap().unfinished.contains("vol1");
+    let logs = Mutex::new(Vec::<String>::new());
+    let log = |l: &str| logs.lock().unwrap().push(l.to_string());
+    let scan = |mode, cancelled: bool| w.space.scan(Some("vol1"), mode, &DockerFacts::default(), &log, &|_| {}, &|| cancelled).unwrap();
+    for i in 0..4 {
+        add(i);
+    }
+    assert_eq!(scan(ScanMode::Full, false).partial, None);
+    assert_eq!(freed(&overview(&w).await), Some(truth(4)));
+
+    // a slice already over: each pass still counts something before it hands over (taking
+    // a finished pair from the checkpoint is not enough), ends Ok, and the passes finish
+    w.space.changes_slice_ms.store(0, Ordering::Release);
+    add(4);
+    add(5);
+    let before = w.env.line_reads.load(Ordering::SeqCst);
+    let mut passes = 0;
+    loop {
+        passes += 1;
+        assert!(passes < 40, "never finished");
+        assert_eq!(scan(ScanMode::Changes, false).partial, None);
+        if !unfinished() {
+            break;
+        }
+    }
+    assert!(passes > 3, "{passes}");
+    assert_eq!(freed(&overview(&w).await), Some(truth(6)));
+    // the two new pairs, each candidate read once
+    assert_eq!(w.env.line_reads.load(Ordering::SeqCst) - before, candidates(3, 4) + candidates(4, 5));
+
+    // an update someone cancelled keeps what it did but is not taken up by itself
+    add(6);
+    scan(ScanMode::Changes, true);
+    assert!(!unfinished());
+    w.space.changes_slice_ms.store(super::CHANGES_SLICE.as_millis() as u64, Ordering::Release);
+    scan(ScanMode::Changes, false);
+    assert_eq!(freed(&overview(&w).await), Some(truth(7)));
+    assert!(logs.lock().unwrap().iter().any(|l| l.contains("left for next time")));
+}

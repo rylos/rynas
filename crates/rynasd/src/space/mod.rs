@@ -479,6 +479,8 @@ pub struct Space {
     waiting: Mutex<BTreeSet<String>>,
     /// What unfinished measures did (`<state>/space/measure-progress.json`).
     progress: Mutex<MeasureProgress>,
+    /// [`CHANGES_SLICE`] (tests shorten it).
+    changes_slice_ms: std::sync::atomic::AtomicU64,
 }
 
 /// What measures not finished yet did, kept across passes and restarts
@@ -500,6 +502,9 @@ struct MeasureProgress {
     extent_us: u64,
     #[serde(default)]
     pair_extents: u64,
+    /// Changed since the file was last written.
+    #[serde(skip)]
+    dirty: bool,
 }
 
 impl MeasureProgress {
@@ -549,14 +554,23 @@ struct Meter<'a> {
     done: std::sync::atomic::AtomicU64,
     shown: std::sync::atomic::AtomicU8,
     pct: &'a dyn Fn(u8),
-    /// The volume's pass got somewhere (a pair compared or taken from the checkpoint, a
-    /// candidate counted): an automatic update may hand over at its time.
+    /// The volume's pass got somewhere: a pair compared to its end, or candidates counted
+    /// for at least `min_counting_ms` (taking pairs from the checkpoint or building a pair's
+    /// candidate list does not count). Only then may an automatic update hand over at its
+    /// time, so each pass moves on by real work even when building a list takes long.
     progressed: AtomicBool,
+    min_counting_ms: std::sync::atomic::AtomicU64,
 }
 
 impl<'a> Meter<'a> {
     fn new(total_ms: u64, pct: &'a dyn Fn(u8)) -> Self {
-        Meter { total: total_ms.max(1).into(), done: 0.into(), shown: 0.into(), pct, progressed: AtomicBool::new(false) }
+        Meter { total: total_ms.max(1).into(), done: 0.into(), shown: 0.into(), pct, progressed: AtomicBool::new(false), min_counting_ms: 0.into() }
+    }
+
+    /// A new volume's pass: nothing done yet; counting must last `min_counting` to count.
+    fn begin_volume(&self, min_counting: Duration) {
+        self.progressed.store(false, Ordering::Release);
+        self.min_counting_ms.store(min_counting.as_millis() as u64, Ordering::Release);
     }
 
     fn add(&self, ms: u64) {
@@ -590,6 +604,8 @@ struct PairNow {
     began: Option<(Instant, u64)>,
     done: u64,
     total: u64,
+    /// Taken whole from the checkpoint.
+    reused: bool,
 }
 
 /// What [`Space::measure_by_lines`] does with a line measure's news: the progress bar, the
@@ -603,7 +619,13 @@ struct LineHooks<'a> {
     walk_bps: u64,
     pair_ms: u64,
     now: Option<PairNow>,
+    /// When the checkpoint was last written (it is kept in memory at every change, written
+    /// at most every [`CHECKPOINT_WRITE_EVERY`], and always when the line measure returns).
+    written: Option<Instant>,
 }
+
+/// Least time between two writes of the checkpoint while a line is measured.
+const CHECKPOINT_WRITE_EVERY: Duration = Duration::from_secs(30);
 
 impl LineHooks<'_> {
     /// The pair in progress ended (`whole`: compared to its end, its expected time all shown).
@@ -611,13 +633,15 @@ impl LineHooks<'_> {
         let Some(p) = self.now.take() else { return };
         if whole {
             self.meter.add(p.planned.saturating_sub(p.credited));
-            self.meter.progressed.store(true, Ordering::Release);
+            if !p.reused {
+                self.meter.progressed.store(true, Ordering::Release);
+            }
         }
         let us = p.began.and_then(|(t, from)| {
             let n = p.done.saturating_sub(from);
             (n >= RATE_MIN_EXTENTS).then(|| (t.elapsed().as_micros() / u128::from(n)) as u64)
         });
-        let extents = (whole && p.total > 0).then_some(p.total);
+        let extents = (whole && !p.reused && p.total > 0).then_some(p.total);
         if us.is_some() || extents.is_some() {
             self.space.progress.lock().unwrap().learn(us, extents);
         }
@@ -637,7 +661,7 @@ impl Hooks for LineHooks<'_> {
         match s {
             Step::Pair { newer, .. } => {
                 let planned = self.space.progress.lock().unwrap().pair_ms(self.label, self.line, newer, self.pair_ms);
-                self.now = Some(PairNow { newer, planned, credited: 0, began: None, done: 0, total: 0 });
+                self.now = Some(PairNow { newer, planned, credited: 0, began: None, done: 0, total: 0, reused: false });
             }
             Step::Walk { index } => {
                 let path = self.line.snaps.get(index).map(|x| x.path.clone()).unwrap_or_default();
@@ -649,7 +673,9 @@ impl Hooks for LineHooks<'_> {
     }
 
     fn reused(&mut self, _newer: usize) {
-        self.meter.progressed.store(true, Ordering::Release);
+        if let Some(p) = self.now.as_mut() {
+            p.reused = true;
+        }
     }
 
     fn extents(&mut self, _newer: usize, done: u64, total: u64, from: u64) {
@@ -662,7 +688,8 @@ impl Hooks for LineHooks<'_> {
             p.began = Some((Instant::now(), done));
         }
         (p.done, p.total) = (done, total);
-        if done > from {
+        let min = Duration::from_millis(self.meter.min_counting_ms.load(Ordering::Acquire));
+        if done > from && p.began.is_some_and(|(t, _)| t.elapsed() >= min) {
             self.meter.progressed.store(true, Ordering::Release);
         }
         let want = (u128::from(p.planned) * u128::from(done.saturating_sub(from)) / u128::from(total.saturating_sub(from).max(1))) as u64;
@@ -673,7 +700,10 @@ impl Hooks for LineHooks<'_> {
     }
 
     fn save(&mut self, cp: &Checkpoint) {
-        self.space.keep_checkpoint(self.label, cp);
+        let write = self.written.is_none_or(|t| t.elapsed() >= CHECKPOINT_WRITE_EVERY);
+        if self.space.keep_checkpoint(self.label, cp, write) {
+            self.written = Some(Instant::now());
+        }
     }
 }
 
@@ -759,7 +789,13 @@ impl Space {
             pending: Mutex::new(BTreeSet::new()),
             waiting: Mutex::new(BTreeSet::new()),
             progress: Mutex::new(progress),
+            changes_slice_ms: (CHANGES_SLICE.as_millis() as u64).into(),
         })
+    }
+
+    /// How long an automatic update works before it hands over ([`CHANGES_SLICE`]).
+    fn changes_slice(&self) -> Duration {
+        Duration::from_millis(self.changes_slice_ms.load(Ordering::Acquire))
     }
 
     /// Docker and PC backups, once they exist.
@@ -822,24 +858,34 @@ impl Space {
     }
 
     fn save_progress(&self) {
-        let p = self.progress.lock().unwrap().clone();
+        let p = {
+            let mut p = self.progress.lock().unwrap();
+            p.dirty = false;
+            p.clone()
+        };
         self.write_json(PROGRESS_FILE, &p);
     }
 
-    /// Writes down volume `label`'s checkpoint (a pair finished, or stopped part way).
-    fn keep_checkpoint(&self, label: &str, cp: &Checkpoint) {
-        {
+    /// Keeps volume `label`'s checkpoint (a pair finished, or stopped part way) and, with
+    /// `write`, writes the file when anything changed since it was last written. Returns
+    /// whether it wrote.
+    fn keep_checkpoint(&self, label: &str, cp: &Checkpoint, write: bool) -> bool {
+        let dirty = {
             let mut p = self.progress.lock().unwrap();
-            if p.volumes.get(label).unwrap_or(&Checkpoint::default()) == cp {
-                return;
+            if p.volumes.get(label).unwrap_or(&Checkpoint::default()) != cp {
+                if cp.is_empty() {
+                    p.volumes.remove(label);
+                } else {
+                    p.volumes.insert(label.to_string(), cp.clone());
+                }
+                p.dirty = true;
             }
-            if cp.is_empty() {
-                p.volumes.remove(label);
-            } else {
-                p.volumes.insert(label.to_string(), cp.clone());
-            }
+            p.dirty
+        };
+        if write && dirty {
+            self.save_progress();
         }
-        self.save_progress();
+        write && dirty
     }
 
     fn save_known(&self) {
@@ -1097,8 +1143,10 @@ impl Space {
         let mut cp = self.progress.lock().unwrap().volumes.get(label).cloned().unwrap_or_default();
         let (mut freed, mut own) = (0u64, 0u64);
         for l in &lines {
-            let mut hooks = LineHooks { space: self, label, line: l, meter, log, walk_bps: bps, pair_ms, now: None };
+            let mut hooks = LineHooks { space: self, label, line: l, meter, log, walk_bps: bps, pair_ms, now: None, written: None };
             let r = self.env.measure_line(&l.snaps, !live, stop, log, &mut cp, &mut hooks);
+            // what the measure did, written down however it ended
+            self.keep_checkpoint(label, &cp, true);
             let r = match r {
                 Ok(r) => {
                     hooks.finish(true);
@@ -1133,7 +1181,7 @@ impl Space {
             }
             let uuids: BTreeSet<&str> = l.snaps.iter().map(|x| x.uuid.as_str()).collect();
             cp.forget(&uuids);
-            self.keep_checkpoint(label, &cp);
+            self.keep_checkpoint(label, &cp, true);
             freed = freed.saturating_add(line_freed(&r, live));
             own = own.saturating_add(r.known.iter().map(|k| k.exclusive.as_ref().map_or(0, |e| e.bytes)).sum::<u64>());
         }
@@ -1193,9 +1241,9 @@ impl Space {
             // a person's Measure has a time budget (beyond it the task ends partial); an
             // automatic update hands over after its slice, once it got somewhere (the rest
             // goes on next time from the checkpoint, the task ends Ok)
-            let budget = if full { VOLUME_BUDGET.max(Duration::from_secs(plan.estimate_s.saturating_mul(3))) } else { CHANGES_SLICE };
+            let budget = if full { VOLUME_BUDGET.max(Duration::from_secs(plan.estimate_s.saturating_mul(3))) } else { self.changes_slice() };
             let deadline = started + budget;
-            meter.progressed.store(false, Ordering::Release);
+            meter.begin_volume(if full { Duration::ZERO } else { budget / 3 });
             let stop = || cancelled() || (Instant::now() > deadline && (full || meter.progressed.load(Ordering::Acquire)));
             log(&format!("{label}: measuring"));
             let (total, free) = self.env.space(mount).unwrap_or((0, 0));
@@ -1219,11 +1267,12 @@ impl Space {
                         None
                     }
                 };
-                // stopped without a number: what was compared is kept for the next measure;
-                // a person's Measure that ran out of time ends partial
-                if !set.is_empty() && m.is_none_or(|m| m.freed.is_none()) && (cut || stop()) {
+                // stopped by its time without a number: what was compared is kept, the next
+                // update goes on with it, and a person's Measure ends partial (a measure
+                // someone cancelled keeps what it compared but is not taken up by itself)
+                if !set.is_empty() && m.is_none_or(|m| m.freed.is_none()) && (cut || stop()) && !cancelled() {
                     left.push(format!("{} {}", kind_word(s.kind), s.name));
-                    if full && !cancelled() {
+                    if full {
                         stopped.push(format!("{label}: {}", s.name));
                     }
                 }
@@ -1392,6 +1441,7 @@ impl Space {
                     d.sources.get(label).into_iter().flatten().flat_map(|s| s.snaps.iter()).filter_map(|x| x.facts.uuid.clone().map(|u| (u, x.facts.generation))).collect();
                 if let Some(cp) = p.volumes.get_mut(label) {
                     cp.retain_present(&now);
+                    cp.expire(now_ms(), rynas_btrfs::pcspace::CURSOR_MAX_AGE);
                 }
             }
             p.volumes.retain(|v, cp| vols.contains(v) && !cp.is_empty());
@@ -3114,5 +3164,49 @@ mod unit_tests {
         assert_eq!(line_freed(&r, false), 1000);
         assert_eq!(partial_of(&[]), None);
         assert!(partial_of(&["volume1: docs".into()]).unwrap().contains("volume1: docs"));
+    }
+
+    #[test]
+    fn the_progress_follows_the_work_and_the_corrected_size() {
+        let shown = Mutex::new(Vec::new());
+        let pct = |p: u8| shown.lock().unwrap().push(p);
+        let m = Meter::new(1000, &pct);
+        m.add(250);
+        // a pair four times bigger than planned: the total grows, the bar never goes back
+        m.resize(500, 2000);
+        m.add(0);
+        m.add(1000);
+        // one smaller than planned: the total shrinks
+        m.resize(1000, 0);
+        m.add(0);
+        m.add(10_000);
+        assert_eq!(*shown.lock().unwrap(), [25, 50, 83, 99]);
+    }
+
+    #[test]
+    fn a_pair_is_expected_to_take_what_is_left_of_it() {
+        use rynas_btrfs::pcspace::{Checkpoint, PairCursor, PairDone, PairPartial};
+        let snap = |u: &str| PcSnap { path: PathBuf::from(u), uuid: u.into(), known: Known::default() };
+        let l = SourceLine { snaps: vec![snap("a"), snap("b"), snap("c"), snap("d")], generations: vec![1, 2, 3, 4], cheap: true };
+        let key = |b: usize| rynas_btrfs::pcspace::pair_key(&l.snaps, &l.generations, b);
+        let mut p = MeasureProgress::default();
+        p.volumes.insert(
+            "v".into(),
+            Checkpoint {
+                pairs: vec![PairDone { key: key(1), facts: Default::default(), sides: Default::default() }],
+                partial: vec![PairPartial { key: key(2), cursor: PairCursor { total: 10_000, done: 4_000, ..Default::default() }, at_ms: 0 }],
+            },
+        );
+        // finished: nothing; stopped: its candidates left at the reference rate; other: a pair
+        assert_eq!([p.pair_ms("v", &l, 1, 7_000), p.pair_ms("v", &l, 2, 7_000), p.pair_ms("v", &l, 3, 7_000)], [0, 6_000 * REF_EXTENT_US / 1000, 7_000]);
+        assert!(p.resumes("v", &l, 1) && p.resumes("v", &l, 2) && !p.resumes("v", &l, 3));
+        // timed here: this NAS's rate, and the candidates a pair usually has
+        p.learn(Some(2_000), Some(500));
+        p.learn(Some(1_000), None);
+        assert_eq!((p.extent_us, p.pair_extents), (1_500, 500));
+        assert_eq!([p.pair_ms("v", &l, 2, 7_000), p.pair_ms("v", &l, 3, 7_000)], [9_000, 750]);
+        // another generation is another snapshot: nothing known of its pair
+        let l2 = SourceLine { snaps: l.snaps.clone(), generations: vec![1, 9, 3, 4], cheap: true };
+        assert_eq!(p.pair_ms("v", &l2, 1, 7_000), 750);
     }
 }

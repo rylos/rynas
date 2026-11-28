@@ -881,7 +881,8 @@ died(A)`, and a line takes `distinct(newest) + Σ died`. One full tree search of
 snapshot of a line gives the first `distinct` (the anchor); everything is kept per subvolume UUID
 in the record (`Stored.space`; read-only snapshots never change) and a later measure compares
 only pairs whose neighbours changed: after a new backup the new pair and the one before it (two
-per line), after a retention pass the pairs around what went. The unit is the whole extent at its
+per line; one since 2026-11-28, see "Checkpoints" below), after a retention pass the pairs around
+what went. The unit is the whole extent at its
 on-disk size (compressed data counts what it takes); metadata is not counted, data shared between
 two lines would count in both, a lone snapshot's own data is its whole size (shown as such in the
 note). A comparison that cannot be made (a writable snapshot, a send that fails) falls back to the
@@ -924,7 +925,11 @@ caller writes down: every finished pair at once (`PairDone`, keyed by both snaps
 generations and their own neighbours, as what each holds alone depends on them), and inside a
 pair a `PairCursor`: the candidates are counted in ascending start, and the cursor holds how
 many are done, the partial born/died/exclusive sums and a fingerprint of the candidate list,
-saved every 30 s and when the pair stops. A later pass takes a finished pair as it is and
+saved every 30 s and when the pair stops (dropped after 7 days). Born and died depend on the two
+snapshots only; what each holds alone is kept with the neighbours it was counted with and used
+only while they are the same. Since a snapshot's own data can come from either of its two pairs,
+a new backup now compares one pair per line instead of two, and a new snapshot never restarts
+the newest pair. A later pass takes a finished pair as it is and
 goes on in a stopped one from the cursor when the regenerated candidate list has the same
 fingerprint (the list comes from read-only snapshots, so it does; otherwise the pair is counted
 again). The result equals an uninterrupted pass (tested by stopping a fake source at many

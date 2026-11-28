@@ -141,26 +141,48 @@ pub trait Source {
 /// a stop always are).
 pub const SAVE_EVERY: Duration = Duration::from_secs(30);
 
-/// A pair of neighbours as a checkpoint knows it: both snapshots with their generations, and
-/// their own neighbours (what each one holds alone depends on them).
+/// How long a cursor inside a pair stays usable: its sums come from reference lists read
+/// then, and a count spread over weeks would add up moments far apart.
+pub const CURSOR_MAX_AGE: Duration = Duration::from_secs(7 * 86_400);
+
+/// A pair of neighbours as a checkpoint knows it: both snapshots with their generations. What
+/// each of the two holds alone also depends on their own neighbours: the cursor and the facts
+/// say which ones they were read with ([`Sides`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairKey {
     pub older: String,
     pub newer: String,
-    /// The older one's older neighbour.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub before: Option<String>,
-    /// The newer one's newer neighbour.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after: Option<String>,
     /// Of the older and the newer.
     #[serde(default)]
     pub generations: (u64, u64),
 }
 
-impl PairKey {
-    fn uuids(&self) -> impl Iterator<Item = &str> {
-        [Some(&self.older), Some(&self.newer), self.before.as_ref(), self.after.as_ref()].into_iter().flatten().map(String::as_str)
+/// The neighbours what each snapshot of a pair holds alone was read with: `before` the older
+/// one's older neighbour, `after` the newer one's newer neighbour. A count that went on after
+/// one of them changed has that side's sum mixed (`stale_*`): born and died stay exact (they
+/// depend on the two snapshots only), that side's "alone" is not used.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale_older: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale_newer: bool,
+}
+
+impl Sides {
+    /// These sides as seen with the neighbours `now` (`before`, `after`): a side whose
+    /// neighbour changed is stale from now on.
+    fn seen_with(&self, now: &(Option<String>, Option<String>)) -> Sides {
+        Sides {
+            before: now.0.clone(),
+            after: now.1.clone(),
+            stale_older: self.stale_older || self.before != now.0,
+            stale_newer: self.stale_newer || self.after != now.1,
+        }
     }
 }
 
@@ -179,6 +201,9 @@ pub struct PairCursor {
     /// Candidates with too many references to list (counted as shared).
     #[serde(default)]
     pub truncated: u64,
+    /// The neighbours the "alone" sums were counted with.
+    #[serde(default, flatten)]
+    pub sides: Sides,
 }
 
 /// A finished pair.
@@ -186,13 +211,17 @@ pub struct PairCursor {
 pub struct PairDone {
     pub key: PairKey,
     pub facts: PairFacts,
+    #[serde(default, flatten)]
+    pub sides: Sides,
 }
 
-/// A pair stopped part way.
+/// A pair stopped part way, and when (ms since the epoch).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairPartial {
     pub key: PairKey,
     pub cursor: PairCursor,
+    #[serde(default)]
+    pub at_ms: u64,
 }
 
 /// The progress of measures not finished yet (one per volume or folder, kept by the caller):
@@ -203,6 +232,10 @@ pub struct Checkpoint {
     pub pairs: Vec<PairDone>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub partial: Vec<PairPartial>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 impl Checkpoint {
@@ -216,32 +249,46 @@ impl Checkpoint {
     }
 
     pub fn facts(&self, key: &PairKey) -> Option<PairFacts> {
-        self.pairs.iter().find(|p| &p.key == key).map(|p| p.facts)
+        self.done(key).map(|p| p.facts)
+    }
+
+    fn done(&self, key: &PairKey) -> Option<&PairDone> {
+        self.pairs.iter().find(|p| &p.key == key)
     }
 
     pub fn cursor(&self, key: &PairKey) -> Option<&PairCursor> {
         self.partial.iter().find(|p| &p.key == key).map(|p| &p.cursor)
     }
 
-    fn put_facts(&mut self, key: PairKey, facts: PairFacts) {
-        self.partial.retain(|p| p.key != key);
-        self.pairs.retain(|p| p.key != key);
-        self.pairs.push(PairDone { key, facts });
+    fn put_facts(&mut self, key: PairKey, facts: PairFacts, sides: Sides) {
+        self.drop_pair(&key);
+        self.pairs.push(PairDone { key, facts, sides });
         let over = self.pairs.len().saturating_sub(Self::MAX_PAIRS);
         self.pairs.drain(..over);
     }
 
-    fn put_cursor(&mut self, key: PairKey, cursor: PairCursor) {
+    fn put_cursor(&mut self, key: PairKey, cursor: PairCursor, at_ms: u64) {
         self.partial.retain(|p| p.key != key);
-        self.partial.push(PairPartial { key, cursor });
+        self.partial.push(PairPartial { key, cursor, at_ms });
         let over = self.partial.len().saturating_sub(Self::MAX_PARTIAL);
         self.partial.drain(..over);
     }
 
-    /// Keeps only what describes snapshots there now (`now`: UUID → generation): every UUID
-    /// of the key present, the two compared ones with the generations they had.
+    fn drop_pair(&mut self, key: &PairKey) {
+        self.partial.retain(|p| &p.key != key);
+        self.pairs.retain(|p| &p.key != key);
+    }
+
+    /// Drops the cursors saved before `now_ms - max_age`.
+    pub fn expire(&mut self, now_ms: u64, max_age: Duration) {
+        let oldest = now_ms.saturating_sub(max_age.as_millis() as u64);
+        self.partial.retain(|p| p.at_ms >= oldest);
+    }
+
+    /// Keeps only what describes snapshots there now (`now`: UUID → generation): both
+    /// snapshots of the pair present with the generations they had.
     pub fn retain_present(&mut self, now: &BTreeMap<String, u64>) {
-        let ok = |k: &PairKey| k.uuids().all(|u| now.contains_key(u)) && now.get(&k.older) == Some(&k.generations.0) && now.get(&k.newer) == Some(&k.generations.1);
+        let ok = |k: &PairKey| now.get(&k.older) == Some(&k.generations.0) && now.get(&k.newer) == Some(&k.generations.1);
         self.pairs.retain(|p| ok(&p.key));
         self.partial.retain(|p| ok(&p.key));
     }
@@ -264,7 +311,8 @@ pub trait Hooks {
     /// Inside pair `newer`: `done` of its `total` candidate extents counted, `from` of them
     /// already before this measure.
     fn extents(&mut self, _newer: usize, _done: u64, _total: u64, _from: u64) {}
-    /// The checkpoint changed in a way worth keeping: write it down.
+    /// The checkpoint changed in a way worth keeping: write it down (the caller may write
+    /// less often; what it holds when the measure returns is the state to keep).
     fn save(&mut self, _cp: &Checkpoint) {}
 }
 
@@ -281,13 +329,13 @@ impl Hooks for StepOnly<'_> {
 pub fn pair_key(line: &[Snap], generations: &[u64], newer: usize) -> PairKey {
     let (a, b) = (newer - 1, newer);
     let g = |i: usize| generations.get(i).copied().unwrap_or(0);
-    PairKey {
-        older: line[a].uuid.clone(),
-        newer: line[b].uuid.clone(),
-        before: a.checked_sub(1).map(|i| line[i].uuid.clone()),
-        after: line.get(b + 1).map(|s| s.uuid.clone()),
-        generations: (g(a), g(b)),
-    }
+    PairKey { older: line[a].uuid.clone(), newer: line[b].uuid.clone(), generations: (g(a), g(b)) }
+}
+
+/// The neighbours of the pair ending at `newer` now: the older one's older, the newer one's
+/// newer.
+fn neighbours(line: &[Snap], newer: usize) -> (Option<String>, Option<String>) {
+    ((newer - 1).checked_sub(1).map(|i| line[i].uuid.clone()), line.get(newer + 1).map(|s| s.uuid.clone()))
 }
 
 /// A fingerprint (FNV-1a) of a candidate list.
@@ -390,17 +438,30 @@ pub struct LineSpace {
 /// The pairs `(newer - 1, newer)` a measure compares (by the newer index): those whose
 /// numbers are missing or were read with other neighbours.
 pub fn pairs_needed(line: &[Snap]) -> Vec<usize> {
+    let n = line.len();
     let id = |i: usize| line[i].uuid.as_str();
     let edge = |e: &Option<Edge>| e.as_ref().map(|e| e.uuid.clone());
-    (1..line.len())
-        .filter(|&b| {
-            let a = b - 1;
-            edge(&line[b].known.born).as_deref() != Some(id(a))
-                || edge(&line[a].known.died).as_deref() != Some(id(b))
-                || !line[b].known.exclusive_for(Some(id(a)), line.get(b + 1).map(|s| s.uuid.as_str()))
-                || (a == 0 && !line[0].known.exclusive_for(None, Some(id(1))))
-        })
-        .collect()
+    // born and died need their own pair; a comparison also reads what each of its two
+    // snapshots holds alone, so a snapshot whose own data is out of date only needs one of
+    // its two pairs: one already compared, else the one with its newer neighbour (the newest
+    // pair is the one most likely compared anyway when the next snapshot comes)
+    let mut need: BTreeSet<usize> = (1..n)
+        .filter(|&b| edge(&line[b].known.born).as_deref() != Some(id(b - 1)) || edge(&line[b - 1].known.died).as_deref() != Some(id(b)))
+        .collect();
+    if n >= 2 {
+        for i in 0..n {
+            if exclusive_current(line, &line[i].known, i) || need.contains(&i) || need.contains(&(i + 1)) {
+                continue;
+            }
+            need.insert(if i + 1 < n { i + 1 } else { i });
+        }
+    }
+    need.into_iter().collect()
+}
+
+/// Whether `k`'s own data was read with the neighbours snapshot `i` of `line` has now.
+fn exclusive_current(line: &[Snap], k: &Known, i: usize) -> bool {
+    k.exclusive_for(i.checked_sub(1).map(|j| line[j].uuid.as_str()), line.get(i + 1).map(|s| s.uuid.as_str()))
 }
 
 /// Whether measuring `line` needs a full tree search (nothing known of any snapshot's
@@ -443,33 +504,48 @@ pub fn measure_resumable(line: &[Snap], src: &mut dyn Source, walk: bool, anchor
 }
 
 /// One pair compared with its progress kept in `cp` (a cursor at most every `every`, and
-/// when it stops; the facts when it ends).
-fn pair_resumable(src: &mut dyn Source, newer: usize, key: PairKey, cp: &mut Checkpoint, hooks: &mut dyn Hooks, every: Duration) -> Result<PairFacts, WalkError> {
-    let from = cp.cursor(&key).cloned();
-    let mut saved = from.clone();
+/// when it stops; the facts when it ends). `nb`: the pair's neighbours now. Returns the facts
+/// and the sides they were read with; a pair finished before is taken as it is.
+#[allow(clippy::too_many_arguments)]
+fn pair_resumable(src: &mut dyn Source, newer: usize, key: PairKey, nb: &(Option<String>, Option<String>), cp: &mut Checkpoint, hooks: &mut dyn Hooks, every: Duration) -> Result<(PairFacts, Sides, bool), WalkError> {
+    if let Some(d) = cp.done(&key) {
+        hooks.reused(newer);
+        return Ok((d.facts, d.sides.seen_with(nb), true));
+    }
+    // a count going on after a neighbour changed: that side's "alone" is mixed from now on
+    let from = cp.cursor(&key).map(|c| PairCursor { sides: c.sides.seen_with(nb), ..c.clone() });
+    let mut saved = cp.cursor(&key).cloned();
     let mut last: Option<PairCursor> = None;
     let mut first: Option<u64> = None;
     let mut at = Instant::now();
+    // a cursor of a fresh count (no `from`, or another candidate list) has fresh sides
+    let fresh = Sides { before: nb.0.clone(), after: nb.1.clone(), ..Sides::default() };
+    let sided = |c: &PairCursor| {
+        let resumed = from.as_ref().is_some_and(|f| f.fingerprint == c.fingerprint && f.total == c.total && c.done >= f.done);
+        PairCursor { sides: if resumed { from.as_ref().map(|f| f.sides.clone()).unwrap_or_default() } else { fresh.clone() }, ..c.clone() }
+    };
     let r = src.pair_from(newer - 1, newer, from.as_ref(), &mut |c: &PairCursor| {
+        let c = sided(c);
         let start = *first.get_or_insert(c.done);
         hooks.extents(newer, c.done, c.total, start);
-        if c.done > 0 && saved.as_ref() != Some(c) && at.elapsed() >= every {
-            cp.put_cursor(key.clone(), c.clone());
+        if c.done > 0 && saved.as_ref() != Some(&c) && at.elapsed() >= every {
+            cp.put_cursor(key.clone(), c.clone(), now_ms());
             hooks.save(cp);
             saved = Some(c.clone());
             at = Instant::now();
         }
-        last = Some(c.clone());
+        last = Some(c);
     });
     match r {
         Ok(f) => {
-            cp.put_facts(key, f);
+            let sides = last.map(|c| c.sides).unwrap_or(fresh);
+            cp.put_facts(key, f, sides.clone());
             hooks.save(cp);
-            Ok(f)
+            Ok((f, sides, false))
         }
         Err(e) => {
             if let Some(c) = last.filter(|c| c.done > 0 && saved.as_ref() != Some(c)) {
-                cp.put_cursor(key, c);
+                cp.put_cursor(key, c, now_ms());
                 hooks.save(cp);
             }
             Err(e)
@@ -486,36 +562,51 @@ fn measure_core(line: &[Snap], src: &mut dyn Source, walk: bool, anchor: bool, c
     if anchor && !walk && needs_walk(line) {
         return Err(WalkError::Unsupported("nothing measured yet: a full measure is needed".into()));
     }
+    cp.expire(now_ms(), CURSOR_MAX_AGE);
     let id = |i: usize| line[i].uuid.clone();
     let todo = pairs_needed(line);
     let generations: Vec<u64> = (0..n).map(|i| src.generation(i)).collect();
-    for (j, &b) in todo.iter().enumerate() {
-        hooks.step(Step::Pair { done: j, total: todo.len(), newer: b });
+    let mut total = todo.len();
+    let mut queue: std::collections::VecDeque<usize> = todo.into_iter().collect();
+    let mut j = 0;
+    while let Some(b) = queue.pop_front() {
+        hooks.step(Step::Pair { done: j, total, newer: b });
+        j += 1;
         let a = b - 1;
-        let key = pair_key(line, &generations, b);
-        let f = match cp.facts(&key) {
-            Some(f) => {
-                hooks.reused(b);
-                out.reused += 1;
-                f
-            }
-            None => {
-                let f = pair_resumable(src, b, key, cp, hooks, every)?;
-                out.pairs += 1;
-                f
-            }
-        };
+        let nb = neighbours(line, b);
+        let (f, sides, reused) = pair_resumable(src, b, pair_key(line, &generations, b), &nb, cp, hooks, every)?;
+        if reused {
+            out.reused += 1;
+        } else {
+            out.pairs += 1;
+        }
         let k = &mut out.known;
+        // born and died depend on the two snapshots only; what each holds alone counts only
+        // when read with the neighbours it has now
         k[b].born = Some(Edge { uuid: id(a), bytes: f.born });
         k[a].died = Some(Edge { uuid: id(b), bytes: f.died });
-        k[b].exclusive = Some(Excl { bytes: f.excl_newer, older: Some(id(a)), newer: (b + 1 < n).then(|| id(b + 1)) });
-        if a == 0 {
-            k[0].exclusive = Some(Excl { bytes: f.excl_older, older: None, newer: Some(id(1)) });
+        if !sides.stale_newer {
+            k[b].exclusive = Some(Excl { bytes: f.excl_newer, older: Some(id(a)), newer: nb.1.clone() });
+        }
+        if !sides.stale_older {
+            k[a].exclusive = Some(Excl { bytes: f.excl_older, older: nb.0.clone(), newer: Some(id(b)) });
         }
         if let Some((da, db)) = f.distinct {
             k[a].distinct = Some(da);
             k[b].distinct = Some(db);
-            out.walks += 2;
+            if !reused {
+                out.walks += 2;
+            }
+        }
+        if queue.is_empty() && n >= 2 {
+            // a snapshot whose own data is still out of date (its pairs' counts were mixed
+            // across a change of neighbours): one of its pairs again, counted afresh
+            if let Some(i) = (0..n).find(|&i| !exclusive_current(line, &out.known[i], i)) {
+                let p = if i + 1 < n { i + 1 } else { i };
+                cp.drop_pair(&pair_key(line, &generations, p));
+                queue.push_back(p);
+                total += 1;
+            }
         }
     }
     let bytes = |e: &Option<Edge>| e.as_ref().map_or(0, |e| e.bytes);
@@ -759,13 +850,13 @@ mod tests {
         let r = run(&mut src, &names, &mut known, false).unwrap();
         check(&r, &src);
         assert!(src.pairs.is_empty() && r.pairs == 0 && r.walks == 0);
-        // a new backup: the new pair, and the previous newest's own data again
+        // a new backup: the new pair only (it also reads what the previous newest holds alone)
         let next = history(6).pop().unwrap();
         src.sets.push(next);
         let names = ["s0", "s1", "s2", "s3", "s4", "s5"];
         let r = run(&mut src, &names, &mut known, false).unwrap();
         check(&r, &src);
-        assert_eq!(src.pairs, [(3, 4), (4, 5)]);
+        assert_eq!(src.pairs, [(4, 5)]);
         // the oldest went: only the new oldest is compared again
         src.pairs.clear();
         src.sets.remove(0);
@@ -773,20 +864,20 @@ mod tests {
         let r = run(&mut src, &names, &mut known, false).unwrap();
         check(&r, &src);
         assert_eq!(src.pairs, [(0, 1)]);
-        // one in the middle went: the new pair, and the older neighbour's own data again
+        // one in the middle went: the new pair, which reads its two snapshots' own data again
         src.pairs.clear();
         src.sets.remove(2);
         let names = ["s1", "s2", "s4", "s5"];
         let r = run(&mut src, &names, &mut known, false).unwrap();
         check(&r, &src);
-        assert_eq!(src.pairs, [(0, 1), (1, 2)]);
+        assert_eq!(src.pairs, [(1, 2)]);
         // the anchor of the first measure (s4) went: the numbers kept still hold
         src.pairs.clear();
         src.sets.remove(2);
         let names = ["s1", "s2", "s5"];
         let r = run(&mut src, &names, &mut known, false).unwrap();
         check(&r, &src);
-        assert_eq!(src.pairs, [(0, 1), (1, 2)]);
+        assert_eq!(src.pairs, [(1, 2)]);
         // one full search in all
         assert_eq!(src.walks, [4]);
     }
@@ -1049,7 +1140,8 @@ mod tests {
         let mut kept = cp.clone();
         kept.retain_present(&now);
         assert!(kept.pairs.iter().all(|p| p.key.older != "s1" || p.key.generations.0 == 22));
-        // a snapshot gone in the middle: the pairs that had it as a neighbour are compared again
+        // a snapshot gone in the middle: pairs that had it as a neighbour keep born and died,
+        // their "alone" on that side comes from the new pair
         let mut src = Counted::new(&sets, &none);
         src.stop_after = Some(3 * 2000);
         let mut cp = Checkpoint::default();
@@ -1061,28 +1153,71 @@ mod tests {
         let mut told = Told::default();
         let r = measure_core(&line_of(&ln), &mut src, true, true, &mut cp, &mut told, Duration::MAX).unwrap();
         check(&r, &truth_of(&left, &none));
-        assert!(told.reused.is_empty(), "{:?}", told.reused);
+        assert_eq!(told.reused, [1]);
         let now: BTreeMap<String, u64> = ln.iter().map(|n| (n.clone(), 0)).collect();
         cp.retain_present(&now);
-        assert!(cp.pairs.iter().all(|p| p.key.uuids().all(|u| u != "s2")));
-        assert!(cp.partial.iter().all(|p| p.key.uuids().all(|u| u != "s2")));
+        let gone = |k: &PairKey| k.older == "s2" || k.newer == "s2";
+        assert!(cp.pairs.iter().all(|p| !gone(&p.key)) && cp.partial.iter().all(|p| !gone(&p.key)));
+    }
+
+    #[test]
+    fn new_snapshots_between_passes_never_start_a_pair_again() {
+        let all = big_history(9);
+        let none = BTreeSet::new();
+        let mut known: BTreeMap<String, Known> = BTreeMap::new();
+        let mut cp = Checkpoint::default();
+        let (mut n, mut reads, mut passes, mut stopped) = (3, 0usize, 0, 0);
+        loop {
+            passes += 1;
+            assert!(passes < 60, "never finished");
+            let names = names(n);
+            let l: Vec<Snap> = names.iter().map(|x| Snap { path: PathBuf::from(x), uuid: x.clone(), known: known.get(x).cloned().unwrap_or_default() }).collect();
+            let mut src = Counted::new(&all[..n], &none);
+            // each pass reads about one pair, and a snapshot comes after it: the newest pair is
+            // often stopped and a new snapshot changes its neighbour before it goes on
+            src.stop_after = Some(2000);
+            let r = measure_core(&l, &mut src, true, true, &mut cp, &mut Told::default(), Duration::MAX);
+            reads += src.reads.get();
+            match r {
+                Ok(r) => {
+                    for (s, k) in l.iter().zip(&r.known) {
+                        known.insert(s.uuid.clone(), k.clone());
+                    }
+                    if n == all.len() {
+                        check(&r, &truth_of(&all, &none));
+                        break;
+                    }
+                }
+                Err(WalkError::Stopped) => stopped += 1,
+                Err(e) => panic!("{e}"),
+            }
+            n = (n + 1).min(all.len());
+        }
+        assert!(stopped >= 3, "{stopped}");
+        // each pair's candidates counted once, also across the new snapshots
+        let want: usize = (1..all.len()).map(|b| all[b - 1].symmetric_difference(&all[b]).count()).sum();
+        assert_eq!(reads, want);
     }
 
     #[test]
     fn a_checkpoint_stays_small() {
-        let key = |i: usize| PairKey { older: format!("a{i}"), newer: format!("b{i}"), before: None, after: None, generations: (0, 0) };
+        let key = |i: usize| PairKey { older: format!("a{i}"), newer: format!("b{i}"), generations: (0, 0) };
         let mut cp = Checkpoint::default();
         for i in 0..Checkpoint::MAX_PAIRS + 10 {
-            cp.put_cursor(key(i), PairCursor { done: 1, ..PairCursor::default() });
-            cp.put_facts(key(i), PairFacts::default());
+            cp.put_cursor(key(i), PairCursor { done: 1, ..PairCursor::default() }, 0);
+            cp.put_facts(key(i), PairFacts::default(), Sides::default());
         }
         assert_eq!(cp.pairs.len(), Checkpoint::MAX_PAIRS);
         assert!(cp.partial.is_empty());
         assert_eq!(cp.pairs[0].key, key(10));
         for i in 0..Checkpoint::MAX_PARTIAL + 3 {
-            cp.put_cursor(key(i), PairCursor::default());
+            cp.put_cursor(key(i), PairCursor::default(), if i % 2 == 0 { 1_000 } else { 9_000_000_000 });
         }
         assert_eq!(cp.partial.len(), Checkpoint::MAX_PARTIAL);
+        // cursors older than their limit go
+        let mut aged = cp.clone();
+        aged.expire(9_000_000_000 + 1000, CURSOR_MAX_AGE);
+        assert!(!aged.partial.is_empty() && aged.partial.iter().all(|p| p.at_ms == 9_000_000_000));
         let line: BTreeSet<&str> = ["a20", "b30"].into_iter().collect();
         let before = cp.pairs.len();
         cp.forget(&line);
