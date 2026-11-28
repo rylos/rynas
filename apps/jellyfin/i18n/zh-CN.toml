@@ -27,3 +27,20 @@ text = "首次访问时进入设置向导并创建管理员账户，请在安装
 
 [[groups]]
 title = "播放"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "19b23817"
+"description.md" = "f5147585"
+"ports.web.purpose" = "600acb71"
+"ports.discovery.purpose" = "f509df3c"
+"folders.CONFIG_FOLDER.description" = "209cbf24"
+"folders.CACHE_FOLDER.description" = "9cd271e1"
+"shares.MEDIA.label" = "58a8eecd"
+"shares.MEDIA.description" = "c2c43be6"
+"overlays.hw-transcoding.description" = "e9b61177"
+"notes[0].text" = "f216a290"
+"form.HW_TRANSCODING.title" = "747ec4cc"
+"form.HW_TRANSCODING.description" = "bd60b7c5"
+"groups[0].title" = "db4ef444"

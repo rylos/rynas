@@ -14,3 +14,13 @@ text = "Dockge 可以访问 Docker 套接字，因此拥有这台 NAS 的 root �
 
 [[notes]]
 text = "Dockge 最近一次发布是在 2025 年 3 月。Arcane 或 Dockhand 仍在维护，可以使用同一个应用栈目录。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "a10ac450"
+"description.md" = "8b740650"
+"ports.web.purpose" = "f437e909"
+"folders.DATA_FOLDER.description" = "5425207a"
+"notes[0].text" = "0164a7ab"
+"notes[1].text" = "fd597746"

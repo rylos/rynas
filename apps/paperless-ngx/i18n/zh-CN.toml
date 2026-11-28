@@ -33,3 +33,26 @@ title = "管理员"
 
 [[groups]]
 title = "文档"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "892e6fbc"
+"description.md" = "33001546"
+"ports.web.purpose" = "0aa42040"
+"folders.DATA_FOLDER.description" = "1d696692"
+"folders.MEDIA_FOLDER.description" = "c75e5542"
+"folders.DB_FOLDER.description" = "332b7ea8"
+"folders.EXPORT_FOLDER.description" = "e5bbdf02"
+"shares.CONSUME.label" = "ffd69b2d"
+"shares.CONSUME.description" = "97dcb6a8"
+"named_volumes.redisdata.description" = "9e533daa"
+"form.PAPERLESS_ADMIN_PASSWORD.title" = "8c81ae20"
+"form.PAPERLESS_ADMIN_PASSWORD.description" = "88b2e960"
+"form.PAPERLESS_ADMIN_USER.title" = "d1f1bc2a"
+"form.PAPERLESS_OCR_LANGUAGE.title" = "665ef10d"
+"form.PAPERLESS_OCR_LANGUAGE.description" = "6df48139"
+"form.PAPERLESS_URL.title" = "9ac2b656"
+"form.PAPERLESS_URL.description" = "280f975d"
+"groups[0].title" = "c8b0be26"
+"groups[1].title" = "35bdf8a3"

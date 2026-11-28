@@ -2513,8 +2513,8 @@ apps/<id>/i18n/zh-CN.md     description.md
 
 **Language codes.** A BCP 47 tag in its usual case, as in the UI language table
 (`crates/rynas-ui/assets/i18n/languages.txt`): `it`, `ru`, `zh-CN`, `pt-BR`, `zh-Hant`,
-`es-419`. Plain `en` is the entry itself. Either file may be left out (a language with only
-the long description, or only the short texts).
+`es-419`. Plain `en` is the entry itself. The `.md` may be left out; the `.toml` holds at
+least the stamps (below), so a language with only the long description still has one.
 
 **The `.toml` file** names the field each text translates, never the English text; it mirrors
 `app.toml` and `form.json`:
@@ -2533,7 +2533,6 @@ CONSUME.label = "导入目录"
 CONSUME.description = "扫描仪或手动放入此处的文档会被导入，随后从此目录移除。"
 
 [share_set]                   # label, description
-[user_photos]                 # description
 [secrets]                     # [[secrets]] by env: description
 [overlays]                    # [[overlays]] by file name (overlays/<name>.yaml): description
 [named_volumes]               # [[named_volumes]] by name: description
@@ -2548,7 +2547,26 @@ text = "..."                  # that note stays English
 
 [[groups]]                    # one per x-groups entry of form.json, same order
 title = "管理员"
+
+[sources]                     # the stamp of the English each text was made from, by key
+"description" = "3f2a9c1e"
+"description.md" = "8b07d2aa"
+"ports.web.purpose" = "c41e0b7d"
 ```
+
+**Stamps.** `[sources]` names every translated text (`description`, `description.md`,
+`ports.<name>.purpose`, `shares.<ENV>.label`, `notes[<i>].text`, `form.<FIELD>.enum_labels`,
+`groups[<i>].title`…) with 8 hex digits of an FNV-1a hash of the English it was translated
+from (trimmed, Windows line ends read as `\n`; `enum_labels` joined by line ends). It is
+not a security measure, only a way to notice that the English moved on. After rewording an
+English text (or moving notes), review its translations and stamp them again:
+
+```
+cargo run -p rynas-apps --example catalog-i18n -- apps/<id>   # or: apps (every entry)
+```
+
+It rewrites only the `[sources]` table at the end of each `<lang>.toml` (making the file for a
+`<lang>.md` alone) and leaves the texts as they are.
 
 **Checks** (`rynas_apps::i18n`, part of `CatalogApp::load`, so `cargo test -p rynas-apps`, the
 publication and the NAS all run them): unknown keys and files are errors; a key must name an
@@ -2556,9 +2574,11 @@ item the entry has (a port, folder, share, secret, overlay, volume, form field) 
 entry has there (no `description` for a field without one, no `enum_labels` for a field
 without labels); `[[notes]]` and `[[groups]]` have exactly the entry's count when present;
 `enum_labels` the field's length; no text is empty (leave a key out to show English); the
-card line is at most 140 characters. A renamed port, a removed form field or an added note
-therefore fails the entry instead of leaving a translation behind silently; a reworded English
-text does not, so whoever rewords one updates or drops its translations in the same change.
+card line is at most 140 characters; every translated text has a stamp equal to the one of
+the entry's current English, and every stamp belongs to a translated text; `i18n` is a
+readable folder; the entry's `min_rynas` is at least 0.9.21 (`I18N_MIN_RYNAS`, below). A
+renamed port, a removed form field, an added or moved note or a reworded English text
+therefore fails the entry instead of leaving a stale translation behind silently.
 Translations are presentation only: changing them alone does not bump `version` (as
 `featured`), so an online catalogue brings them with the next version of the entry.
 
@@ -2575,10 +2595,11 @@ marks each text with its language, English ones `lang="en"`.
 
 **Older rynas.** A loader before 0.9.21 does not know `i18n/` and refuses an entry that has
 it; in the online catalogue that refuses the whole download unless the entry's `min_rynas`
-says it needs a newer rynas (§ 6.12). So the entries that have translations take
-`min_rynas = "0.9.21"` with the 0.9.21 release, before an online catalogue with them is
-published: NAS on older versions then skip those entries in the download and keep their
-shipped ones.
+says it needs a newer rynas (§ 6.12). So an entry with `i18n/` must have
+`min_rynas` ≥ 0.9.21 (`rynas_apps::i18n::I18N_MIN_RYNAS`, checked with the entry, so CI and
+the publication refuse it otherwise; the index takes `min_rynas` from `app.toml`). Every
+translated entry has it: NAS on older versions skip those entries in a download and keep
+their shipped ones.
 
 ## 7. Open points between waves
 

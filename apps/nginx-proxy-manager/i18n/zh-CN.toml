@@ -27,3 +27,20 @@ text = "将代理主机转发到 host.docker.internal 及应用端口，或转�
 
 [[groups]]
 title = "管理员"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "627e19cb"
+"description.md" = "83033e97"
+"ports.http.purpose" = "2dc9817b"
+"ports.https.purpose" = "c64a1be3"
+"ports.admin.purpose" = "56136042"
+"folders.DATA_FOLDER.description" = "2d13c851"
+"folders.LETSENCRYPT_FOLDER.description" = "509bd308"
+"secrets.ADMIN_PASSWORD.description" = "589a465b"
+"notes[0].text" = "538c4775"
+"notes[1].text" = "2551823b"
+"form.INITIAL_ADMIN_EMAIL.title" = "bbaf2713"
+"form.INITIAL_ADMIN_EMAIL.description" = "9069c592"
+"groups[0].title" = "c8b0be26"

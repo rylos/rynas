@@ -21,3 +21,16 @@ text = "安装后，打开 Pocket ID 地址下的 /setup 创建管理员并注�
 
 [[groups]]
 title = "访问"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "20740672"
+"description.md" = "6e1e6cec"
+"ports.web.purpose" = "e188be67"
+"folders.DATA_FOLDER.description" = "d045b874"
+"secrets.ENCRYPTION_KEY.description" = "def82a57"
+"notes[0].text" = "621c67b7"
+"form.APP_URL.title" = "9ac2b656"
+"form.APP_URL.description" = "fdc0e593"
+"groups[0].title" = "65a984f2"

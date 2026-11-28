@@ -11,3 +11,12 @@ DATA_FOLDER.description = "账户服务文件和预算文件"
 
 [[notes]]
 text = "请通过网页访问提供的 HTTPS 地址打开 Actual。浏览器会阻止它通过普通 HTTP 运行。首次访问时设置服务器密码。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "015e3703"
+"description.md" = "b101bb3e"
+"ports.web.purpose" = "1cb44e79"
+"folders.DATA_FOLDER.description" = "a1c16ef0"
+"notes[0].text" = "70e890d6"

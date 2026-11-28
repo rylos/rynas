@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rynas_apps::compose::{self, ImageRef};
 use rynas_apps::plan::{self, ImageChangeKind, RamGate, UsedPort};
 use rynas_apps::render::{self, Provided};
-use rynas_apps::{Catalog, CatalogApp, RenderError};
+use rynas_apps::{Catalog, CatalogApp, RenderError, i18n};
 use yaml_serde::Value;
 
 fn apps_dir() -> PathBuf {
@@ -429,6 +429,7 @@ title = "管理员"
         "1 [[groups]] for the 2 x-groups of form.json",
         "i18n/zh-cn.md: `zh-cn` is not a language code",
         "i18n/notes.txt: translations are <lang>.toml or <lang>.md",
+        "`description` has no stamp in [sources]",
     ] {
         assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
     }
@@ -442,11 +443,64 @@ title = "管理员"
     fs::write(dst.join("i18n/zh-CN.toml"), format!("description = \"{}\"\n", "文".repeat(141))).unwrap();
     let text = CatalogApp::load(&dst).unwrap_err().to_string();
     assert!(text.contains("longer than 140 characters"), "{text}");
-    // the long description alone is a translation too
+    // the long description alone is a translation too, once stamped
     fs::remove_file(dst.join("i18n/zh-CN.toml")).unwrap();
+    assert!(CatalogApp::load(&dst).unwrap_err().to_string().contains("`description.md` has no stamp"));
+    assert_eq!(i18n::restamp(&dst).unwrap(), vec![dst.join("i18n/zh-CN.toml")]);
     let app = CatalogApp::load(&dst).unwrap();
     let t = app.texts("zh-CN").unwrap();
     assert!(t.description.is_some() && t.summary.is_none() && app.card_texts("zh-CN").is_none());
+}
+
+#[test]
+fn translations_follow_the_english_they_were_made_from() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dst = tmp.path().join("frigate");
+    copy_dir(&apps_dir().join("frigate"), &dst);
+    let edit = |file: &str, from: &str, to: &str| {
+        let p = dst.join(file);
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(text.contains(from), "{from} not in {file}");
+        fs::write(p, text.replacen(from, to, 1)).unwrap();
+    };
+    // a reworded port purpose and swapped notes: the translations are stale
+    edit("app.toml", "purpose = \"Web interface", "purpose = \"Web UI");
+    let notes: Vec<String> = fs::read_to_string(dst.join("app.toml")).unwrap().lines().filter(|l| l.starts_with("text = ")).map(str::to_owned).collect();
+    edit("app.toml", &notes[0], "text = \"@first@\"");
+    edit("app.toml", &notes[1], &notes[0]);
+    edit("app.toml", "text = \"@first@\"", &notes[1]);
+    let text = CatalogApp::load(&dst).unwrap_err().to_string();
+    for needle in ["`ports.web.purpose`: the English text changed", "`notes[0].text`: the English text changed", "`notes[1].text`: the English text changed"] {
+        assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
+    }
+    // after a review: stamped again, the rest of the file untouched, and stable
+    let before = fs::read_to_string(dst.join("i18n/zh-CN.toml")).unwrap();
+    assert_eq!(i18n::restamp(&dst).unwrap().len(), 1);
+    let after = fs::read_to_string(dst.join("i18n/zh-CN.toml")).unwrap();
+    assert_eq!(before.split("[sources]").next(), after.split("[sources]").next());
+    assert!(CatalogApp::load(&dst).is_ok());
+    assert!(i18n::restamp(&dst).unwrap().is_empty(), "a second run changes nothing");
+    // a stamp for a text that is not translated
+    fs::write(dst.join("i18n/zh-CN.toml"), after.replace("[sources]\n", "[sources]\n\"ports.nope.purpose\" = \"00000000\"\n")).unwrap();
+    assert!(CatalogApp::load(&dst).unwrap_err().to_string().contains("[sources] `ports.nope.purpose` stamps no translated text"));
+    fs::write(dst.join("i18n/zh-CN.toml"), &after).unwrap();
+
+    // translations need a rynas that reads them
+    edit("app.toml", "min_rynas = \"0.9.21\"", "min_rynas = \"0.9.20\"");
+    assert!(CatalogApp::load(&dst).unwrap_err().to_string().contains("min_rynas must be at least 0.9.21"));
+    edit("app.toml", "min_rynas = \"0.9.20\"", "min_rynas = \"0.9.21\"");
+    // `i18n` must be a folder
+    fs::remove_dir_all(dst.join("i18n")).unwrap();
+    fs::write(dst.join("i18n"), "x").unwrap();
+    assert!(CatalogApp::load(&dst).unwrap_err().to_string().contains("frigate/i18n: must be a folder"));
+}
+
+#[test]
+fn stamps_ignore_line_ends_and_outer_space() {
+    assert_eq!(i18n::stamp("a\r\nb\n"), i18n::stamp(" a\nb"));
+    assert_ne!(i18n::stamp("Web interface"), i18n::stamp("Web UI"));
+    assert_eq!(i18n::stamp("x").len(), 8);
+    assert_eq!(i18n::I18N_MIN_RYNAS.to_string(), "0.9.21");
 }
 
 fn bind_of<'a>(doc: &'a Value, service: &str, target: &str) -> Option<&'a Value> {

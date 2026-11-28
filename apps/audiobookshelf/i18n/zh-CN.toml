@@ -18,3 +18,17 @@ PODCASTS.description = "存放已下载播客节目的共享文件夹，挂载�
 
 [[notes]]
 text = "首次访问时创建 root 账户。请在安装后立即打开 Audiobookshelf，并将 /audiobooks 和 /podcasts 添加为媒体库。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "ad3e91f6"
+"description.md" = "3860f109"
+"ports.web.purpose" = "cd6caf6c"
+"folders.CONFIG_FOLDER.description" = "d856144c"
+"folders.METADATA_FOLDER.description" = "97514f60"
+"shares.AUDIOBOOKS.label" = "3a1d6571"
+"shares.AUDIOBOOKS.description" = "b25c22ca"
+"shares.PODCASTS.label" = "b5fdf75d"
+"shares.PODCASTS.description" = "4e534bab"
+"notes[0].text" = "08e0460f"

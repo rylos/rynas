@@ -14,3 +14,13 @@ ENCRYPTION_KEY.description = "用于加密保存的镜像仓库和 Git 凭据"
 
 [[notes]]
 text = "Arcane 可以访问 Docker 套接字，因此拥有这台 NAS 的 root 权限，也使用自己的登录系统。请勿将它暴露到互联网。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "3d9cd233"
+"description.md" = "85b596ba"
+"ports.web.purpose" = "f437e909"
+"folders.DATA_FOLDER.description" = "0b7890de"
+"secrets.ENCRYPTION_KEY.description" = "b70a35be"
+"notes[0].text" = "d1f99579"

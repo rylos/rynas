@@ -9,26 +9,42 @@
 //! `[[notes]]` in the order of `app.toml`), never the English text. The loader refuses a key
 //! whose field is not in the entry, a text for a field the entry leaves empty and lists whose
 //! length differs, so a renamed port or a removed form field cannot leave a translation
-//! behind silently. English stays the source: whatever a translation leaves out is shown in
-//! English.
+//! behind silently. Each translated text also carries a stamp of the English it was made
+//! from (`[sources]`, [`stamp`]): a reworded English text, or notes moved around, fail the
+//! entry until someone reviews the translation and stamps it again ([`restamp`], the
+//! `catalog-i18n` example). English stays the source: whatever a translation leaves out is
+//! shown in English.
 //!
 //! The server picks the translation for the language a client asks for ([`pick`]) and sends
 //! it as [`AppTexts`] next to the English fields, which keep their meaning.
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rynas_api_types::apps::{AppFieldTexts, AppLabelTexts, AppTexts};
 use serde::Deserialize;
 
-use crate::catalog::{CatalogApp, file_name, list};
+use crate::catalog::{CatalogApp, file_name};
 use crate::error::Issues;
 use crate::form::FormSchema;
 use crate::manifest::AppManifest;
+use crate::version::Version;
 
 /// The folder of the translations inside an entry.
 pub const DIR: &str = "i18n";
+
+/// The first rynas that loads `i18n/`: an older loader refuses an entry with it, and in an
+/// online catalogue (§ 6.12) a failing entry is skipped only when its `min_rynas` is above the
+/// running version, otherwise the whole download is refused. So an entry with translations
+/// needs at least this `min_rynas`.
+pub const I18N_MIN_RYNAS: Version = Version::new(0, 9, 21);
+
+/// The key of the long description (`<lang>.md`) in `[sources]`.
+pub const LONG_DESCRIPTION: &str = "description.md";
+
+/// The comment written above `[sources]` by [`restamp`].
+const SOURCES_COMMENT: &str = "# Stamps of the English each text was translated from: after a review, refresh them with\n# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>";
 
 /// Longest translated card line, in characters (`app.toml` `description` has 140 bytes of
 /// English).
@@ -55,8 +71,6 @@ pub struct Translation {
     pub shares: BTreeMap<String, LabelText>,
     #[serde(default)]
     pub share_set: Option<LabelText>,
-    #[serde(default)]
-    pub user_photos: Option<DescriptionText>,
     /// `[[secrets]]` by `env`.
     #[serde(default)]
     pub secrets: BTreeMap<String, DescriptionText>,
@@ -76,6 +90,11 @@ pub struct Translation {
     /// `form.json` `x-groups`: one per group, in the same order.
     #[serde(default)]
     pub groups: Vec<GroupText>,
+    /// The [`stamp`] of the English each text was translated from, by the text's key
+    /// (`description`, `description.md`, `ports.web.purpose`, `notes[0].text`,
+    /// `form.FIELD.enum_labels`…).
+    #[serde(default)]
+    pub sources: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -148,11 +167,58 @@ pub fn is_lang_code(s: &str) -> bool {
     s != "en" && s.len() <= 35 && (2..=3).contains(&primary.len()) && primary.bytes().all(|c| c.is_ascii_lowercase()) && parts.all(subtag_ok)
 }
 
+/// The stamp of an English text: 8 hex digits of its FNV-1a hash, after trimming and with
+/// Windows line ends read as `\n` (a checkout may convert them). Not a security measure: it
+/// only notices that the English changed.
+pub fn stamp(english: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in english.replace("\r\n", "\n").trim().bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{:08x}", (h >> 32) ^ (h & 0xffff_ffff))
+}
+
+/// The files of `i18n/`, sorted; `None` (with the problem in `issues`) when `i18n` is not a
+/// readable folder. An entry without `i18n` has none.
+fn files(dir: &Path, app: &str, issues: &mut Issues) -> Option<Vec<PathBuf>> {
+    let root = dir.join(DIR);
+    match fs::metadata(&root) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(e) => {
+            issues.push(app, DIR, format!("cannot read: {e}"));
+            return None;
+        }
+        Ok(m) if !m.is_dir() => {
+            issues.push(app, DIR, "must be a folder of translations");
+            return None;
+        }
+        Ok(_) => {}
+    }
+    match fs::read_dir(&root) {
+        Ok(rd) => {
+            let mut v = Vec::new();
+            for e in rd {
+                match e {
+                    Ok(e) => v.push(e.path()),
+                    Err(e) => issues.push(app, DIR, format!("cannot read: {e}")),
+                }
+            }
+            v.sort();
+            Some(v)
+        }
+        Err(e) => {
+            issues.push(app, DIR, format!("cannot read: {e}"));
+            None
+        }
+    }
+}
+
 /// Reads `i18n/` of an entry: every `<lang>.toml` and `<lang>.md`, by language. Problems go
 /// to `issues`; [`Translation::check`] compares each one with the entry afterwards.
 pub(crate) fn load(dir: &Path, app: &str, issues: &mut Issues) -> BTreeMap<String, Translation> {
     let mut out: BTreeMap<String, Translation> = BTreeMap::new();
-    for p in list(&dir.join(DIR)) {
+    for p in files(dir, app, issues).unwrap_or_default() {
         let name = file_name(&p);
         let rel = format!("{DIR}/{name}");
         let (code, md) = match (name.strip_suffix(".toml"), name.strip_suffix(".md")) {
@@ -234,10 +300,84 @@ fn overlay_name(file: &str) -> Option<&str> {
 }
 
 impl Translation {
+    /// Every text the translation has whose English the entry has, by key, with that English
+    /// (the keys of `[sources]`).
+    pub fn translated(&self, m: &AppManifest, form: &FormSchema, long: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut add = |key: String, translated: bool, english: Option<&str>| {
+            if let (true, Some(en)) = (translated, english.filter(|e| has(e))) {
+                out.push((key, en.to_owned()));
+            }
+        };
+        add("description".into(), self.description.is_some(), Some(m.description.as_str()));
+        add(LONG_DESCRIPTION.into(), self.long_description.is_some(), Some(long));
+        for p in &m.ports {
+            add(format!("ports.{}.purpose", p.name), self.ports.contains_key(&p.name), Some(p.purpose.as_str()));
+        }
+        for f in &m.folders {
+            add(format!("folders.{}.description", f.env), self.folders.contains_key(&f.env), Some(f.description.as_str()));
+        }
+        for s in &m.shares {
+            let t = self.shares.get(&s.env);
+            add(format!("shares.{}.label", s.env), t.is_some_and(|t| t.label.is_some()), Some(s.label.as_str()));
+            add(format!("shares.{}.description", s.env), t.is_some_and(|t| t.description.is_some()), Some(s.description.as_str()));
+        }
+        if let (Some(s), Some(t)) = (&m.share_set, &self.share_set) {
+            add("share_set.label".into(), t.label.is_some(), Some(s.label.as_str()));
+            add("share_set.description".into(), t.description.is_some(), Some(s.description.as_str()));
+        }
+        for s in &m.secrets {
+            add(format!("secrets.{}.description", s.env), self.secrets.contains_key(&s.env), Some(s.description.as_str()));
+        }
+        for o in &m.overlays {
+            let name = overlay_name(&o.file).unwrap_or_default();
+            add(format!("overlays.{name}.description"), self.overlays.contains_key(name), Some(o.description.as_str()));
+        }
+        for v in &m.named_volumes {
+            add(format!("named_volumes.{}.description", v.name), self.named_volumes.contains_key(&v.name), Some(v.description.as_str()));
+        }
+        if self.notes.len() == m.notes.len() {
+            for (i, (t, n)) in self.notes.iter().zip(&m.notes).enumerate() {
+                add(format!("notes[{i}].text"), t.text.is_some(), Some(n.text.as_str()));
+            }
+        }
+        for (name, f) in &form.properties {
+            let Some(t) = self.form.get(name) else { continue };
+            let ui = f.ui.as_ref();
+            add(format!("form.{name}.title"), t.title.is_some(), Some(f.title.as_str()));
+            add(format!("form.{name}.description"), t.description.is_some(), f.description.as_deref());
+            add(format!("form.{name}.placeholder"), t.placeholder.is_some(), ui.and_then(|u| u.placeholder.as_deref()));
+            let labels = ui.map(|u| u.enum_labels.join("\n"));
+            add(format!("form.{name}.enum_labels"), t.enum_labels.is_some(), labels.as_deref());
+        }
+        if self.groups.len() == form.groups.len() {
+            for (i, (t, g)) in self.groups.iter().zip(&form.groups).enumerate() {
+                add(format!("groups[{i}].title"), t.title.is_some(), Some(g.title.as_str()));
+            }
+        }
+        out
+    }
+
     /// Compares the translation with the entry: every key names a field the entry has, with
-    /// a text, lists have the entry's length, no text is empty, the card line fits.
-    pub(crate) fn check(&self, app: &str, code: &str, m: &AppManifest, form: &FormSchema, issues: &mut Issues) {
+    /// a text, lists have the entry's length, no text is empty, the card line fits, and every
+    /// text is stamped with the English the entry has now (`long`: `description.md`).
+    pub(crate) fn check(&self, app: &str, code: &str, m: &AppManifest, form: &FormSchema, long: &str, issues: &mut Issues) {
         let mut c = Checker { app, rel: format!("{DIR}/{code}.toml"), issues };
+        let translated = self.translated(m, form, long);
+        for (key, english) in &translated {
+            match self.sources.get(key) {
+                None => c.err(format!("`{key}` has no stamp in [sources] (stamp it: cargo run -p rynas-apps --example catalog-i18n -- apps/{app})")),
+                Some(s) if *s != stamp(english) => c.err(format!(
+                    "`{key}`: the English text changed since it was translated (review the translation, then stamp it again: cargo run -p rynas-apps --example catalog-i18n -- apps/{app})"
+                )),
+                Some(_) => {}
+            }
+        }
+        for key in self.sources.keys() {
+            if !translated.iter().any(|(k, _)| k == key) {
+                c.err(format!("[sources] `{key}` stamps no translated text"));
+            }
+        }
         c.text("description", self.description.as_deref(), true);
         if self.description.as_ref().is_some_and(|d| d.chars().count() > SUMMARY_MAX_CHARS) {
             c.err(format!("description is longer than {SUMMARY_MAX_CHARS} characters (the long text goes in {code}.md)"));
@@ -266,12 +406,6 @@ impl Translation {
             match &m.share_set {
                 Some(s) => c.label("share_set", t, has(&s.label), has(&s.description)),
                 None => c.err("`share_set`: the entry has no [share_set]".into()),
-            }
-        }
-        if let Some(t) = &self.user_photos {
-            match &m.user_photos {
-                Some(u) => c.text("user_photos.description", Some(&t.description), has(&u.description)),
-                None => c.err("`user_photos`: the entry has no [user_photos]".into()),
             }
         }
         for (env, t) in &self.secrets {
@@ -403,6 +537,63 @@ pub fn pick<'a>(translations: &'a BTreeMap<String, Translation>, want: &str) -> 
         return None;
     }
     find(want).or_else(|| find(want.split_once('-')?.0))
+}
+
+/// Stamps every translation of the entry at `entry` with the English it has now: rewrites the
+/// `[sources]` table of each `i18n/<lang>.toml` (made for a `<lang>.md` alone), the rest of
+/// the file as it was. For after a review of the translations; returns the files written.
+/// Fails, writing nothing, on a file it cannot read or parse.
+pub fn restamp(entry: &Path) -> Result<Vec<PathBuf>, String> {
+    let read = |p: &Path| fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()));
+    let m: AppManifest = toml::from_str(&read(&entry.join("app.toml"))?).map_err(|e| format!("app.toml: {e}"))?;
+    let form_path = entry.join("form.json");
+    let form = if form_path.exists() { FormSchema::parse(&read(&form_path)?).map_err(|e| format!("form.json: {e}"))? } else { FormSchema::empty() };
+    let long = read(&entry.join("description.md"))?;
+    let mut issues = Issues::default();
+    let translations = load(entry, &m.id, &mut issues);
+    if !issues.is_empty() {
+        return Err(issues.to_string());
+    }
+    let mut writes = Vec::new();
+    for (code, t) in &translations {
+        let path = entry.join(DIR).join(format!("{code}.toml"));
+        let text = if path.exists() { read(&path)? } else { String::new() };
+        let mut block = format!("{SOURCES_COMMENT}\n[sources]\n");
+        for (key, english) in t.translated(&m, &form, &long) {
+            block.push_str(&format!("\"{key}\" = \"{}\"\n", stamp(&english)));
+        }
+        let new = with_sources(&text, &block);
+        if new != text {
+            writes.push((path, new));
+        }
+    }
+    let mut out = Vec::new();
+    for (p, text) in writes {
+        fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+        out.push(p);
+    }
+    Ok(out)
+}
+
+/// `text` (a translation file) with its `[sources]` table, and the comment above it, replaced
+/// by `block` at the end.
+fn with_sources(text: &str, block: &str) -> String {
+    let comment: Vec<&str> = SOURCES_COMMENT.lines().collect();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut in_sources = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_sources = t == "[sources]";
+        }
+        if !in_sources && !comment.contains(&line) {
+            kept.push(line);
+        }
+    }
+    while kept.last().is_some_and(|l| l.trim().is_empty()) {
+        kept.pop();
+    }
+    if kept.is_empty() { block.to_owned() } else { format!("{}\n\n{block}", kept.join("\n")) }
 }
 
 impl CatalogApp {

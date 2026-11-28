@@ -26,3 +26,19 @@ text = "升级 Forgejo 主版本前需要手动检查。本条目跟随长期支
 
 [[groups]]
 title = "访问"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "ded37c6d"
+"description.md" = "1bd2be71"
+"ports.web.purpose" = "56c83748"
+"ports.ssh.purpose" = "7eacba0c"
+"folders.DATA_FOLDER.description" = "6f5e3ac4"
+"secrets.SECRET_KEY.description" = "e3237e52"
+"secrets.INTERNAL_TOKEN.description" = "d4c4b1a2"
+"notes[0].text" = "4685a239"
+"notes[1].text" = "bad7fcb5"
+"form.ROOT_URL.title" = "9ac2b656"
+"form.ROOT_URL.description" = "505af4bc"
+"groups[0].title" = "65a984f2"

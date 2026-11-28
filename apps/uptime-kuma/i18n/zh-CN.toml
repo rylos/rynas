@@ -11,3 +11,12 @@ DATA_FOLDER.description = "监控数据库和上传内容"
 
 [[notes]]
 text = "首次访问时创建管理员账户，请在安装后立即打开 Uptime Kuma。经 rynas 代理访问时，需将 Settings → Reverse Proxy → Trusted Proxies 设为 Yes。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "4fb80097"
+"description.md" = "d3f016b9"
+"ports.web.purpose" = "515a8684"
+"folders.DATA_FOLDER.description" = "5c5a7db3"
+"notes[0].text" = "1fb6621e"

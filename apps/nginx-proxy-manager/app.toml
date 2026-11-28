@@ -11,7 +11,7 @@ changelog_url = "https://github.com/NginxProxyManager/nginx-proxy-manager/releas
 license = "MIT"
 maintainers = ["rynas"]
 categories = ["network"]
-min_rynas = "0.1.0"
+min_rynas = "0.9.21"
 arch = ["amd64", "arm64"]
 main_service = "app"
 # publishes 80/443 itself: installs only with web access in external proxy mode

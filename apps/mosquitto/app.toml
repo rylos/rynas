@@ -11,7 +11,7 @@ changelog_url = "https://mosquitto.org/ChangeLog.txt"
 license = "EPL-2.0 OR BSD-3-Clause"
 maintainers = ["rynas"]
 categories = ["home-automation"]
-min_rynas = "0.1.0"
+min_rynas = "0.9.21"
 arch = ["amd64", "arm64"]
 main_service = "mosquitto"
 

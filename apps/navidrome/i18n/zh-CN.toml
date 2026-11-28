@@ -15,3 +15,14 @@ MUSIC.description = "存放音乐的共享文件夹，以只读方式挂载到 /
 
 [[notes]]
 text = "首次访问时创建管理员账户，请在安装后立即打开 Navidrome。此条目已关闭向上游发送使用统计。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "149d800a"
+"description.md" = "533d0655"
+"ports.web.purpose" = "5d17c00c"
+"folders.DATA_FOLDER.description" = "7589230b"
+"shares.MUSIC.label" = "95ceaff2"
+"shares.MUSIC.description" = "32def4ba"
+"notes[0].text" = "5e5378aa"

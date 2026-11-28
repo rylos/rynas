@@ -251,7 +251,7 @@ fn read(dir: &Path, rel: &str, app: &str, issues: &mut Issues) -> Option<String>
     }
 }
 
-pub(crate) fn list(dir: &Path) -> Vec<PathBuf> {
+fn list(dir: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(dir).map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect()).unwrap_or_default();
     v.sort();
     v
@@ -388,7 +388,14 @@ impl CatalogApp {
         };
         manifest.check(id, &mut issues);
         for (code, t) in &translations {
-            t.check(id, code, &manifest, &form, &mut issues);
+            t.check(id, code, &manifest, &form, &description, &mut issues);
+        }
+        if dir.join(crate::i18n::DIR).exists() && manifest.min_rynas < crate::i18n::I18N_MIN_RYNAS {
+            issues.push(
+                id,
+                "app.toml",
+                format!("min_rynas must be at least {} with translations in i18n/: older rynas cannot load the entry", crate::i18n::I18N_MIN_RYNAS),
+            );
         }
 
         let mut taken: Vec<&str> = PROVIDED_VARS.to_vec();

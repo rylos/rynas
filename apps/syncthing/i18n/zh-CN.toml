@@ -27,3 +27,20 @@ text = "Syncthing 中的文件夹位于 /shares/<share> 下。请先在这里选
 
 [[notes]]
 text = "桥接网络使用发布的 UDP 端口进行局域网发现。如果设备在局域网内互相找不到，请在另一台设备上手动添加 NAS 地址 tcp://<nas>:22000。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "11d70011"
+"description.md" = "feefa9cf"
+"ports.web.purpose" = "f437e909"
+"ports.sync-tcp.purpose" = "5e411af0"
+"ports.sync-quic.purpose" = "7cc7d521"
+"ports.discovery.purpose" = "020eab8c"
+"folders.CONFIG_FOLDER.description" = "16a0cfea"
+"share_set.label" = "9cf49155"
+"share_set.description" = "1c0e6322"
+"secrets.ST_API_KEY.description" = "d4ecaca3"
+"notes[0].text" = "255ddfd4"
+"notes[1].text" = "fe419ba3"
+"notes[2].text" = "566005e3"

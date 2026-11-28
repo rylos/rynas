@@ -23,3 +23,18 @@ text = "AI 导入食谱支持 OpenAI 或兼容服务（如本地 Ollama）。请
 
 [[groups]]
 title = "访问"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "6777b9bb"
+"description.md" = "64db3702"
+"ports.web.purpose" = "62746048"
+"folders.DATA_FOLDER.description" = "ab0a3d02"
+"notes[0].text" = "cd8314a1"
+"notes[1].text" = "29c177b1"
+"form.ALLOW_SIGNUP.title" = "0b5a683b"
+"form.ALLOW_SIGNUP.description" = "d12c5e9e"
+"form.BASE_URL.title" = "9ac2b656"
+"form.BASE_URL.description" = "cba23050"
+"groups[0].title" = "65a984f2"

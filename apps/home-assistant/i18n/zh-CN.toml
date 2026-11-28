@@ -17,3 +17,14 @@ text = "使用 rynas 代理时，请在 configuration.yaml 的 http 配置中设
 
 [[notes]]
 text = "首次访问时进入初始设置流程并创建所有者账户，请在安装后立即打开它。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "6df92045"
+"description.md" = "27bd36b5"
+"ports.web.purpose" = "fbbe3273"
+"folders.CONFIG_FOLDER.description" = "b4084232"
+"notes[0].text" = "a39b1ba9"
+"notes[1].text" = "7f32b1b2"
+"notes[2].text" = "b9621c52"

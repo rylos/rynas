@@ -29,3 +29,20 @@ text = "请备份数据文件夹。它保存了 Zigbee 网络密钥和协调器�
 
 [[groups]]
 title = "协调器"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "56102893"
+"description.md" = "98a2b119"
+"ports.web.purpose" = "bd5538b9"
+"folders.DATA_FOLDER.description" = "238d5989"
+"secrets.FRONTEND_TOKEN.description" = "01324741"
+"overlays.usb-adapter.description" = "c8f6dc64"
+"notes[0].text" = "b257a1c2"
+"notes[1].text" = "7fc20c1f"
+"form.ADAPTER_DEVICE.title" = "7fee91f4"
+"form.ADAPTER_DEVICE.description" = "8b54923a"
+"form.USB_ADAPTER.title" = "07012146"
+"form.USB_ADAPTER.description" = "84690477"
+"groups[0].title" = "bb517671"

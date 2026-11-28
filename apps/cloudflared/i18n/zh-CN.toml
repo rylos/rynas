@@ -15,3 +15,14 @@ text = "在 Cloudflare 控制台的 Zero Trust → Networks → Tunnels 中创�
 
 [[groups]]
 title = "隧道"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "1fa18d32"
+"description.md" = "cf825716"
+"notes[0].text" = "bffdd89b"
+"notes[1].text" = "f384f0a8"
+"form.TUNNEL_TOKEN.title" = "4b442e89"
+"form.TUNNEL_TOKEN.description" = "2b26d1a2"
+"groups[0].title" = "0664a193"

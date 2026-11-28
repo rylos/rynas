@@ -16,3 +16,15 @@ text = "使用 admin 和 stirling 登录并立即设置新密码。登录验证�
 
 [[notes]]
 text = "Stirling-PDF 的部分功能采用商业许可。单点登录、审计等企业功能需要付费许可密钥。此条目关闭了匿名分析。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "926a0ca0"
+"description.md" = "2921c45a"
+"ports.web.purpose" = "0aa42040"
+"folders.CONFIGS_FOLDER.description" = "87b65ff8"
+"folders.STORAGE_FOLDER.description" = "c327ceac"
+"folders.LOGS_FOLDER.description" = "19a6b1ce"
+"notes[0].text" = "968dc52f"
+"notes[1].text" = "7fc368c9"

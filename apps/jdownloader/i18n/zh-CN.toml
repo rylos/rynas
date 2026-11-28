@@ -22,3 +22,17 @@ text = "使用 admin 和安装时显示的密码登录。要使用 MyJDownloader
 
 [[notes]]
 text = "下载操作使用应用运行账户在目标目录上的权限。请给该账户授予此共享文件夹的写入权限。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "29088d1c"
+"description.md" = "a8f350b4"
+"ports.web.purpose" = "d2d13c9c"
+"ports.myjd.purpose" = "b00617c6"
+"folders.CONFIG_FOLDER.description" = "4df1ff26"
+"shares.DOWNLOADS.label" = "fc59e0f6"
+"shares.DOWNLOADS.description" = "73f1928f"
+"secrets.WEB_PASSWORD.description" = "fa3ebb25"
+"notes[0].text" = "ee8b70c8"
+"notes[1].text" = "5d9cdd34"

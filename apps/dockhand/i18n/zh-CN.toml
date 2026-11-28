@@ -14,3 +14,13 @@ text = "Dockhand 可以访问 Docker 套接字，因此拥有这台 NAS 的 root
 
 [[notes]]
 text = "Dockhand 按 Business Source License 1.1 提供源码，个人使用和内部使用免费。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "4fc88443"
+"description.md" = "8a4985b0"
+"ports.web.purpose" = "f437e909"
+"folders.DATA_FOLDER.description" = "ea05bc2b"
+"notes[0].text" = "93d8dc89"
+"notes[1].text" = "cadf5f09"

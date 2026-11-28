@@ -11,7 +11,7 @@ changelog_url = "https://github.com/pocket-id/pocket-id/releases"
 license = "BSD-2-Clause"
 maintainers = ["rynas"]
 categories = ["security"]
-min_rynas = "0.1.0"
+min_rynas = "0.9.21"
 arch = ["amd64", "arm64"]
 # passkeys (WebAuthn) need a secure context
 antifeatures = ["requires-https"]

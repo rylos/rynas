@@ -103,9 +103,11 @@ struct W {
 }
 
 impl W {
-    /// The entry's texts in the UI language (empty until the entry arrived).
+    /// The entry's texts in the UI language (empty until the entry arrived). Tracked: a step
+    /// that shows them is drawn again when the entry is read again in another language
+    /// ([`texts::follow_lang`]); the answers live in signals and stay.
     fn texts(self) -> CatalogText {
-        CatalogText::new(self.detail.data.with_untracked(|d| d.as_ref().and_then(|d| d.texts.clone())))
+        CatalogText::new(self.detail.data.with(|d| d.as_ref().and_then(|d| d.texts.clone())))
     }
 
     /// The entry has a web interface on its own ports (the case web access is for).
@@ -256,9 +258,10 @@ impl W {
 
 pub fn wizard(id: String) -> AnyView {
     let a = apps();
+    let detail_path = format!("/api/v1/apps/catalog/{}", api::encode(&id));
     let w = W {
         id: StoredValue::new(id.clone()),
-        detail: Remote::new(texts::url(&format!("/api/v1/apps/catalog/{}", api::encode(&id)))),
+        detail: Remote::new(texts::url(&detail_path)),
         settings: Remote::new("/api/v1/docker/settings"),
         shares_list: Remote::new("/api/v1/shares"),
         step: RwSignal::new(0),
@@ -280,6 +283,7 @@ pub fn wizard(id: String) -> AnyView {
         proxy: a.proxy,
         proxy_known: a.proxy_known,
     };
+    texts::follow_lang(w.detail, detail_path);
     // the form's defaults once the entry arrived
     Effect::new(move |init: Option<bool>| {
         if init == Some(true) {

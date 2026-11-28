@@ -26,3 +26,21 @@ title = "管理员"
 
 [[groups]]
 title = "访问"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "816e83c1"
+"description.md" = "78fae939"
+"ports.web.purpose" = "08dfb331"
+"folders.HTML_FOLDER.description" = "d2a95d60"
+"folders.DATA_FOLDER.description" = "985f0804"
+"folders.DB_FOLDER.description" = "6f1a315b"
+"notes[0].text" = "2daaa0fc"
+"form.NEXTCLOUD_ADMIN_PASSWORD.title" = "8c81ae20"
+"form.NEXTCLOUD_ADMIN_PASSWORD.description" = "7a941f6c"
+"form.NEXTCLOUD_ADMIN_USER.title" = "d1f1bc2a"
+"form.NEXTCLOUD_DOMAIN.title" = "eb1c9ef6"
+"form.NEXTCLOUD_DOMAIN.description" = "88b32c96"
+"groups[0].title" = "c8b0be26"
+"groups[1].title" = "65a984f2"

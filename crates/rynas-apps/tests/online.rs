@@ -62,7 +62,15 @@ fn index(serial: u64, apps: Vec<IndexApp>) -> Index {
     }
 }
 
-const RUNNING: Version = Version::new(0, 5, 0);
+/// The `min_rynas` of the real entries (they carry translations, § 6.14).
+const MIN: &str = "0.9.21";
+/// A rynas that runs the real entries but not those for 9.0.0.
+const RUNNING: Version = Version::new(1, 0, 0);
+
+#[test]
+fn entries_need_the_rynas_that_reads_translations() {
+    assert_eq!(MIN, rynas_apps::i18n::I18N_MIN_RYNAS.to_string());
+}
 
 #[test]
 fn shipped_catalogue_has_a_serial() {
@@ -73,7 +81,7 @@ fn shipped_catalogue_has_a_serial() {
 fn valid_catalogue_passes() {
     let t = tempfile::tempdir().unwrap();
     let dir = catalogue(&t.path().join("c"), 7, &["uptime-kuma", "mosquitto"]);
-    let idx = index(7, vec![entry("uptime-kuma", "1.0.0", "0.1.0"), entry("mosquitto", "1.0.0", "0.1.0")]);
+    let idx = index(7, vec![entry("uptime-kuma", "1.0.0", MIN), entry("mosquitto", "1.0.0", MIN)]);
     let v = validate(&dir, &idx, RUNNING).unwrap();
     assert_eq!(v.apps.len(), 2);
     assert!(v.skipped.is_empty());
@@ -84,7 +92,7 @@ fn broken_entry_refuses_the_whole_catalogue() {
     let t = tempfile::tempdir().unwrap();
     let dir = catalogue(&t.path().join("c"), 7, &["uptime-kuma", "mosquitto"]);
     fs::write(dir.join("mosquitto/compose.yaml"), "services: [not, a, map]\n").unwrap();
-    let idx = index(7, vec![entry("uptime-kuma", "1.0.0", "0.1.0"), entry("mosquitto", "1.0.0", "0.1.0")]);
+    let idx = index(7, vec![entry("uptime-kuma", "1.0.0", MIN), entry("mosquitto", "1.0.0", MIN)]);
     assert!(matches!(validate(&dir, &idx, RUNNING), Err(OnlineError::Invalid(_))));
 }
 
@@ -94,9 +102,9 @@ fn entry_for_a_newer_rynas_may_fail_and_is_skipped() {
     let dir = catalogue(&t.path().join("c"), 7, &["uptime-kuma", "mosquitto"]);
     // a field this rynas does not know yet
     let p = dir.join("mosquitto/app.toml");
-    let text = fs::read_to_string(&p).unwrap().replace("min_rynas = \"0.1.0\"", "min_rynas = \"9.0.0\"\nfuture_field = true");
+    let text = fs::read_to_string(&p).unwrap().replace(&format!("min_rynas = \"{MIN}\""), "min_rynas = \"9.0.0\"\nfuture_field = true");
     fs::write(p, text).unwrap();
-    let idx = index(7, vec![entry("uptime-kuma", "1.0.0", "0.1.0"), entry("mosquitto", "1.0.0", "9.0.0")]);
+    let idx = index(7, vec![entry("uptime-kuma", "1.0.0", MIN), entry("mosquitto", "1.0.0", "9.0.0")]);
     let v = validate(&dir, &idx, RUNNING).unwrap();
     assert_eq!(v.apps, ["uptime-kuma"]);
     assert_eq!(v.skipped, ["mosquitto"]);
@@ -106,13 +114,13 @@ fn entry_for_a_newer_rynas_may_fail_and_is_skipped() {
 fn index_and_folders_must_agree() {
     let t = tempfile::tempdir().unwrap();
     let dir = catalogue(&t.path().join("c"), 7, &["uptime-kuma"]);
-    let ok = vec![entry("uptime-kuma", "1.0.0", "0.1.0")];
+    let ok = vec![entry("uptime-kuma", "1.0.0", MIN)];
     // serial of catalog.toml
     assert!(matches!(validate(&dir, &index(8, ok.clone()), RUNNING), Err(OnlineError::Invalid(_))));
     // version differs from app.toml
-    assert!(matches!(validate(&dir, &index(7, vec![entry("uptime-kuma", "1.0.1", "0.1.0")]), RUNNING), Err(OnlineError::Invalid(_))));
+    assert!(matches!(validate(&dir, &index(7, vec![entry("uptime-kuma", "1.0.1", MIN)]), RUNNING), Err(OnlineError::Invalid(_))));
     // listed but missing
-    let two = vec![entry("uptime-kuma", "1.0.0", "0.1.0"), entry("mosquitto", "1.0.0", "0.1.0")];
+    let two = vec![entry("uptime-kuma", "1.0.0", MIN), entry("mosquitto", "1.0.0", MIN)];
     assert!(matches!(validate(&dir, &index(7, two), RUNNING), Err(OnlineError::Invalid(_))));
     // an unexpected file at the top
     fs::write(dir.join("README"), "x").unwrap();
@@ -126,7 +134,7 @@ fn signed_archive_round_trip() {
     let files = files_of(&src, "");
     let refs: Vec<(&str, &[u8])> = files.iter().map(|(p, d)| (p.as_str(), d.as_slice())).collect();
     let ar = archive(&refs);
-    let mut idx = index(3, vec![entry("uptime-kuma", "1.0.0", "0.1.0")]);
+    let mut idx = index(3, vec![entry("uptime-kuma", "1.0.0", MIN)]);
     idx.archive = ArchiveRef { url: "apps-3.tar.zst".into(), sha256: sha256_hex(&ar), size: ar.len() as u64 };
     let body = serde_json::to_vec(&idx).unwrap();
     let key = TestKey::new(1);

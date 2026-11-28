@@ -34,3 +34,25 @@ text = "首次启动时会生成管理员密码，并显示在 Docker → 容器
 
 [[groups]]
 title = "硬件"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "4d1c6f5a"
+"description.md" = "262654cf"
+"ports.web.purpose" = "133b3382"
+"ports.rtsp.purpose" = "7e39aadf"
+"ports.webrtc.purpose" = "99a3883f"
+"ports.webrtc-udp.purpose" = "d96c1ff4"
+"folders.CONFIG_FOLDER.description" = "0f1a89c9"
+"folders.RECORDINGS_FOLDER.description" = "dc8761f6"
+"overlays.hw-accel.description" = "32b8c9cc"
+"notes[0].text" = "218e2957"
+"notes[1].text" = "d898629e"
+"notes[2].text" = "95710e8c"
+"form.HW_ACCEL.title" = "dde0f945"
+"form.HW_ACCEL.description" = "78b2917c"
+"form.LIBVA_DRIVER.title" = "7cf12854"
+"form.LIBVA_DRIVER.description" = "f823ddf1"
+"form.LIBVA_DRIVER.enum_labels" = "35326c11"
+"groups[0].title" = "a3f551a8"

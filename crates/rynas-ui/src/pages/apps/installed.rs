@@ -272,6 +272,20 @@ fn update_dialog(stack: String, close: Callback<()>) -> AnyView {
         });
         true
     });
+    // the entry's texts follow the UI language (the answers stay)
+    Effect::new(move |prev: Option<crate::i18n::Lang>| {
+        let l = crate::i18n::lang();
+        if prev.is_some_and(|p| p != l)
+            && let Some(app) = detail.with_untracked(|d| d.as_ref().map(|d| d.card.id.clone()))
+        {
+            spawn_local(async move {
+                if let Ok(d) = api::get::<AppDetail>(&super::texts::url(&format!("/api/v1/apps/catalog/{}", api::encode(&app)))).await {
+                    let _ = detail.try_set(Some(d));
+                }
+            });
+        }
+        l
+    });
     let n = StoredValue::new(stack.clone());
     let content = move || {
         let Some(p) = plan.data.get() else { return ().into_any() };

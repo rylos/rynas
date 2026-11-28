@@ -14,3 +14,13 @@ text = "Portainer 可以访问 Docker 套接字，因此拥有这台 NAS 的 roo
 
 [[notes]]
 text = "Portainer 将自己创建的应用栈保存在自身数据库中。在其他地方创建的应用栈会显示为外部应用栈，管理功能有限。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "8855995a"
+"description.md" = "75d51196"
+"ports.web.purpose" = "3d58e88c"
+"folders.DATA_FOLDER.description" = "5cb0bb28"
+"notes[0].text" = "8d8071a5"
+"notes[1].text" = "94873c45"

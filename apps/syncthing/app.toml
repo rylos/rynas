@@ -11,7 +11,7 @@ changelog_url = "https://github.com/syncthing/syncthing/releases"
 license = "MPL-2.0"
 maintainers = ["rynas"]
 categories = ["sync", "files"]
-min_rynas = "0.1.0"
+min_rynas = "0.9.21"
 arch = ["amd64", "arm64"]
 main_service = "syncthing"
 # runs as the NAS user who owns the synchronized files (files from the devices are theirs)

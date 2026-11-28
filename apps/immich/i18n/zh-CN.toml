@@ -14,9 +14,6 @@ DB_DATA_LOCATION.description = "PostgreSQL 数据库（建议使用本机 SSD，
 EXTERNAL_LIBRARY.label = "外部媒体库"
 EXTERNAL_LIBRARY.description = "存放现有照片的共享文件夹，以只读方式挂载到 /mnt/external。请在 Immich 中把它添加为外部媒体库。"
 
-[user_photos]
-description = "管理员确认 Immich 账户后，RyNAS 应用会把手机照片备份到相应 NAS 用户的 Photos 文件夹，并以只读方式挂载到 /mnt/photos/<user>。配置 API 密钥后，rynas 会为对应账户添加外部媒体库，并在每次备份后扫描。"
-
 [secrets]
 DB_PASSWORD.description = "PostgreSQL 密码（上游仅允许 A-Za-z0-9）"
 
@@ -44,3 +41,26 @@ text = "RyNAS 应用将手机备份到各用户的 Photos 文件夹，Immich 以
 
 [[groups]]
 title = "功能"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "2c0e48a0"
+"description.md" = "aef9fc80"
+"ports.web.purpose" = "829b2666"
+"folders.UPLOAD_LOCATION.description" = "5c55e2f1"
+"folders.DB_DATA_LOCATION.description" = "15956555"
+"shares.EXTERNAL_LIBRARY.label" = "573ca901"
+"shares.EXTERNAL_LIBRARY.description" = "929ff46c"
+"secrets.DB_PASSWORD.description" = "2bf5fc25"
+"overlays.no-ml.description" = "ec07f6ed"
+"overlays.hw-transcoding.description" = "0e2b19ba"
+"named_volumes.model-cache.description" = "b8b4ebfa"
+"notes[0].text" = "b305943f"
+"notes[1].text" = "3ecb31d7"
+"notes[2].text" = "1ce781e3"
+"form.HW_TRANSCODING.title" = "d7db7bd2"
+"form.HW_TRANSCODING.description" = "7c25cb6f"
+"form.ML_DISABLED.title" = "b37bcbdd"
+"form.ML_DISABLED.description" = "8d3bfeb9"
+"groups[0].title" = "3ca26e84"

@@ -17,3 +17,16 @@ text = "AdGuard Home 需要 53 端口。若安装时提示端口已被占用，�
 
 [[notes]]
 text = "请在设置向导中保留管理界面的容器端口 3000 和 DNS 端口 53，然后将路由器 DHCP 分配的 DNS 改为 NAS 地址。DHCP 服务需要主机网络，此安装不提供。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "19c5b807"
+"description.md" = "e2433766"
+"ports.dns.purpose" = "19a975d3"
+"ports.dns-udp.purpose" = "9a5f19e5"
+"ports.web.purpose" = "0001962d"
+"folders.CONF_FOLDER.description" = "7982d73c"
+"folders.WORK_FOLDER.description" = "15aaa1ed"
+"notes[0].text" = "9551f751"
+"notes[1].text" = "113ad307"
