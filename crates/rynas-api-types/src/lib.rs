@@ -179,8 +179,12 @@ pub struct RaidArray {
     pub size: u64,
     /// Member devices, e.g. ["sda3", "sdb3"].
     pub members: Vec<String>,
-    /// "clean", "active", "degraded", "resyncing", "recovering", …
+    /// "clean", "active", "degraded", "resyncing", "recovering", … (shown as a detail; the
+    /// health is [`RaidArray::status`]).
     pub state: String,
+    /// The health the server reads from the state: what the interface shows and colours.
+    #[serde(default)]
+    pub status: ArrayStatus,
     /// Progress of a resync/recovery/check, 0..=100.
     pub sync_pct: Option<f32>,
     /// A flexible RAID ("flex1"/"flex2": `name` is the volume label, `members` the disks):
@@ -203,6 +207,23 @@ pub struct Filesystem {
     /// (not in the storage health, the fullest volume or the volume count).
     #[serde(default)]
     pub removable: bool,
+}
+
+/// The health of an array in the storage overview ([`RaidArray::status`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ArrayStatus {
+    Healthy,
+    /// Running without full redundancy.
+    Degraded,
+    /// Failed or not running.
+    Failed,
+    /// A resync, recovery, check, repair or reshape runs or waits.
+    Syncing,
+    /// A state the server does not know (also any status of a newer server).
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 impl RaidArray {

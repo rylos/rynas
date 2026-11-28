@@ -2,7 +2,7 @@
 //! hardware status, storage overview). Pure functions: the notification center and the
 //! dashboard widgets localize the result, the tests run on the host.
 
-use rynas_api_types::{Filesystem, HardwareStatus, MetricsSample, RaidArray, StorageOverview};
+use rynas_api_types::{ArrayStatus, Filesystem, HardwareStatus, MetricsSample, RaidArray, StorageOverview};
 
 use crate::i18n::tf;
 use crate::ui::{Tone, temp_limits, usage_tone};
@@ -51,19 +51,14 @@ pub fn all_temps(sample: Option<&MetricsSample>, hw: Option<&HardwareStatus>) ->
     v
 }
 
-/// The array's state as (tone, i18n key).
+/// The array's health (the server's [`ArrayStatus`]) as (tone, i18n key).
 pub fn array_status(a: &RaidArray) -> (Tone, &'static str) {
-    let s = a.state.as_str();
-    if s.contains("degraded") {
-        (Tone::Warn, "health.degraded")
-    } else if s.contains("fail") || s.contains("inactive") {
-        (Tone::Err, "health.failed")
-    } else if s.contains("resync") || s.contains("recover") || s.contains("check") || s.contains("reshape") {
-        (Tone::Info, "health.syncing")
-    } else if s.contains("clean") || s.contains("active") || s == "read-auto" || s == "write-pending" {
-        (Tone::Ok, "health.healthy")
-    } else {
-        (Tone::Unknown, "health.unknown")
+    match a.status {
+        ArrayStatus::Degraded => (Tone::Warn, "health.degraded"),
+        ArrayStatus::Failed => (Tone::Err, "health.failed"),
+        ArrayStatus::Syncing => (Tone::Info, "health.syncing"),
+        ArrayStatus::Healthy => (Tone::Ok, "health.healthy"),
+        ArrayStatus::Unknown => (Tone::Unknown, "health.unknown"),
     }
 }
 
@@ -219,7 +214,7 @@ mod tests {
     #[test]
     fn a_full_usb_disk_is_not_a_storage_problem() {
         let mut st = StorageOverview {
-            arrays: vec![RaidArray { name: "root".into(), level: "btrfs raid1".into(), state: "clean".into(), members: vec!["sda2".into(), "sdb2".into()], ..Default::default() }],
+            arrays: vec![RaidArray { name: "root".into(), level: "btrfs raid1".into(), state: "clean".into(), status: ArrayStatus::Healthy, members: vec!["sda2".into(), "sdb2".into()], ..Default::default() }],
             filesystems: vec![
                 Filesystem { mountpoint: "/".into(), fstype: "btrfs".into(), size: 100, used: 30, ..Default::default() },
                 Filesystem { mountpoint: "/media/Elements".into(), fstype: "fuseblk".into(), size: 100, used: 99, removable: true, ..Default::default() },
@@ -230,11 +225,13 @@ mod tests {
         assert!(derive(None, None, Some(&st), 0.0, &[]).is_empty());
         // a degraded btrfs RAID warns like an md array
         st.arrays[0].state = "degraded".into();
+        st.arrays[0].status = ArrayStatus::Degraded;
         assert_eq!(storage_health(&st), (Tone::Warn, "h.warn"));
         let a = derive(None, None, Some(&st), 0.0, &[]);
         assert_eq!(a[0].key, "array:root:degraded");
         // the same disk, not removable: a full volume
         st.arrays[0].state = "clean".into();
+        st.arrays[0].status = ArrayStatus::Healthy;
         st.filesystems[1].removable = false;
         assert_eq!(storage_health(&st), (Tone::Warn, "h.warn"));
     }
@@ -289,9 +286,9 @@ mod tests {
         };
         let st = StorageOverview {
             arrays: vec![
-                RaidArray { name: "md2".into(), level: "raid5".into(), state: "clean, degraded".into(), ..Default::default() },
-                RaidArray { name: "md3".into(), level: "raid1".into(), state: "active, resyncing".into(), sync_pct: Some(42.0), ..Default::default() },
-                RaidArray { name: "md0".into(), level: "raid1".into(), state: "clean".into(), ..Default::default() },
+                RaidArray { name: "md2".into(), level: "raid5".into(), state: "clean, degraded".into(), status: ArrayStatus::Degraded, ..Default::default() },
+                RaidArray { name: "md3".into(), level: "raid1".into(), state: "active, resyncing".into(), status: ArrayStatus::Syncing, sync_pct: Some(42.0), ..Default::default() },
+                RaidArray { name: "md0".into(), level: "raid1".into(), state: "clean".into(), status: ArrayStatus::Healthy, ..Default::default() },
             ],
             filesystems: vec![
                 Filesystem { mountpoint: "/srv".into(), size: 100, used: 96, ..Default::default() },
@@ -319,9 +316,9 @@ mod tests {
     fn health_order() {
         let mut st = StorageOverview::default();
         assert_eq!(storage_health(&st).0, Tone::Ok);
-        st.arrays.push(RaidArray { state: "resyncing".into(), ..Default::default() });
+        st.arrays.push(RaidArray { status: ArrayStatus::Syncing, ..Default::default() });
         assert_eq!(storage_health(&st).0, Tone::Info);
-        st.arrays.push(RaidArray { state: "inactive".into(), ..Default::default() });
+        st.arrays.push(RaidArray { status: ArrayStatus::Failed, ..Default::default() });
         assert_eq!(storage_health(&st).0, Tone::Err);
     }
 }

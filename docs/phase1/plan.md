@@ -132,7 +132,7 @@ only goes to the debug log (A13).
 | GET | `/api/v1/metrics/history?minutes=N` | `Vec<MetricsSample>` (max 60 min, 1 sample/s, downsampled if needed); only the newest point has `cpu_per_thread` and `temps` (what the live numbers read: the charts plot CPU, memory, network and disk rates) ; `MetricsSample.zram` (initialized `/sys/block/zram*`: name, algorithm, disksize, data, compressed, mem_used, huge_pages from `mm_stat`/`comp_algorithm`, D-ZRAM) is sent only when there is zram and, in the history, only on the newest point |
 | GET | `/api/v1/metrics/stream` | SSE, `sample` event with a `MetricsSample` every second |
 | GET | `/api/v1/events` | SSE, one stream per tab: `metrics.sample` (`MetricsSample`), `task.started` / `task.updated` / `task.finished` (`TaskEvent`), `notification` (`NotificationEvent`, since P3), `hardware.status` (`HardwareStatus`: the latest on connect, then on change — `age_s` ignored — and at least every 60 s; replaces polling `/hardware`), `config.pending` (`PendingEvent` {generation}: some changeset may have changed — stage, discard, apply — re-read `/config/pending` with `If-None-Match`; replaces polling it), `storage.changed` (`{}`: disks, partitions, arrays or block-device mounts changed, from rynasd's system watcher; re-read `/storage`; 0.9.13), `resync` {"stream": "metrics"\|"tasks"\|"config"\|"notifications"\|"hardware"\|"storage"\|…} after missed events (re-read that collection). Capped at 6 streams per session (`/events`, `/metrics/stream`, `/tasks/stream` together; a new one closes the session's oldest) and 128 in total (then `429 rate_limited` + `Retry-After`) |
-| GET | `/api/v1/storage` | `StorageOverview` |
+| GET | `/api/v1/storage` | `StorageOverview` (each array: `state` as a detail, `status` = `ArrayStatus` healthy/degraded/failed/syncing/unknown, read by the interface) |
 | GET | `/api/v1/hardware` | `HardwareStatus` (empty if there is no provider) |
 
 Types in `crates/rynas-api-types`. Development: `cargo run -p rynas-web -- --listen 0.0.0.0:8080`
@@ -1042,9 +1042,14 @@ fields, most specific first; `nev.<code>.<field>.<value>` for values of closed s
 shows the task name `task.<type>`; decimals get the language's separator); a missing code, key or
 field (empty counts as missing) shows the server's text. `body_format: log` (command output) is
 never translated and is shown in monospace with its line breaks. Channel templates use the same
-rules (`rynas_api_types::notify::event_text`) for Italian targets, reading the `nev.*`/`task.*`
-lines of the UI dictionary at build time (`crates/rynas-notify/build.rs`). Notification db
-schema 2 added the `code` and `body_format` columns.
+rules (`rynas_api_types::notify::notification_text`, which formats run results from the
+fields and then applies `event_text`) for every target language that has the texts, reading the
+`nev.*`/`task.*`/`sch.run.*` lines of every language's dictionary at build time
+(`crates/rynas-notify/build.rs`). Notification db schema 2 added the `code` and `body_format`
+columns. Rows stored before events had codes (snapshot jobs, backup jobs, scheduled tasks) get
+their `code` and fields (`name`, `result`, `exit_code`, `signal`) once, at the first open by
+0.9.21 or later, in one transaction marked by the `meta` flag `legacy_run_codes`; the schema stays
+at 2, so an older rynasd still opens the db. No text is ever parsed afterwards.
 
 | Code | Fields (besides the source's own) | English title |
 |---|---|---|

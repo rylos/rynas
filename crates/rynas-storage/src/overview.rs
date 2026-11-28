@@ -11,7 +11,7 @@
 //! fields) until the coordinated move to the `DiskSummary`/`MdArray` subsets.
 
 use rynas_api_types::storage::{M2Ref, PowerState};
-use rynas_api_types::{Disk, Filesystem, HardwareStatus, RaidArray};
+use rynas_api_types::{ArrayStatus, Disk, Filesystem, HardwareStatus, RaidArray};
 
 use crate::host::Host;
 use crate::md::{StatArray, parse_mdstat, read_sysfs};
@@ -217,12 +217,14 @@ fn arrays_of(stats: &[StatArray], array_state: &dyn Fn(&str) -> Option<String>) 
             } else {
                 None
             };
+            let state = overview_state(a, st.as_deref());
             RaidArray {
                 name: a.name.clone(),
                 level: a.level.clone(),
                 size: a.blocks * 1024,
                 members: a.members.iter().map(|m| m.device.clone()).collect(),
-                state: overview_state(a, st.as_deref()),
+                status: status_of(&state),
+                state,
                 sync_pct: a.sync.as_ref().and_then(|s| s.pct),
                 tiers: Vec::new(),
             }
@@ -290,6 +292,23 @@ fn tier_number(name: &str) -> Option<(&str, u32)> {
 }
 
 /// How bad an overview state is, to pick the worst tier.
+/// The health of an overview state ([`overview_state`], the btrfs and flexible entries):
+/// what the interface shows, so that it never reads the words.
+pub fn status_of(state: &str) -> ArrayStatus {
+    let has = |w: &str| state.contains(w);
+    if has("degraded") {
+        ArrayStatus::Degraded
+    } else if has("fail") || has("inactive") {
+        ArrayStatus::Failed
+    } else if ["resync", "recover", "check", "repair", "reshape"].iter().any(|w| has(w)) {
+        ArrayStatus::Syncing
+    } else if has("clean") || has("active") || state == "read-auto" || state == "write-pending" {
+        ArrayStatus::Healthy
+    } else {
+        ArrayStatus::Unknown
+    }
+}
+
 fn state_rank(s: &str) -> u8 {
     match s {
         "inactive" => 5,
@@ -382,6 +401,7 @@ pub fn group_flexible(
             level: if tolerance >= 2 { "flex2" } else { "flex1" }.into(),
             size: tiers.iter().map(|t| t.size).sum(),
             members,
+            status: status_of(&worst),
             state: worst,
             sync_pct: tiers.iter().find_map(|t| t.sync_pct),
             tiers,
@@ -484,6 +504,7 @@ pub fn btrfs_arrays(host: &dyn Host) -> Vec<RaidArray> {
                 size: btrfs_usable(profile, &sizes),
                 members,
                 state: if degraded { "degraded" } else { "clean" }.into(),
+                status: if degraded { ArrayStatus::Degraded } else { ArrayStatus::Healthy },
                 sync_pct: None,
                 tiers: Vec::new(),
             })
@@ -537,6 +558,7 @@ pub fn btrfs_waiting(host: &dyn Host) -> Vec<RaidArray> {
             size: 0,
             members,
             state: "inactive".into(),
+            status: ArrayStatus::Failed,
             sync_pct: None,
             tiers: Vec::new(),
         })
@@ -789,6 +811,26 @@ mod tests {
         h.links.insert("/dev/md/vol2_t1".into(), "/dev/md126".into());
         h.links.insert("/dev/md/vol2_t2".into(), "/dev/md127".into());
         h
+    }
+
+    #[test]
+    fn the_health_comes_with_the_state() {
+        for (state, status) in [
+            ("clean", ArrayStatus::Healthy),
+            ("active", ArrayStatus::Healthy),
+            ("read-auto", ArrayStatus::Healthy),
+            ("degraded", ArrayStatus::Degraded),
+            ("inactive", ArrayStatus::Failed),
+            ("resyncing", ArrayStatus::Syncing),
+            ("recovery-delayed", ArrayStatus::Syncing),
+            ("checking", ArrayStatus::Syncing),
+            ("frozen", ArrayStatus::Unknown),
+        ] {
+            assert_eq!(status_of(state), status, "{state}");
+        }
+        // what an older interface gets from a newer server: unknown, never an error
+        let a: RaidArray = serde_json::from_str(r#"{"name":"md2","level":"raid1","size":0,"members":[],"state":"x","sync_pct":null,"status":"some_new_status"}"#).unwrap();
+        assert_eq!(a.status, ArrayStatus::Unknown);
     }
 
     #[test]
