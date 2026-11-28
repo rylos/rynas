@@ -201,8 +201,8 @@ pub enum WolWakeStep {
     Starting { name: String, macs: Vec<String> },
     /// The packets went out three times on these interfaces.
     Sent { ifaces: Vec<String> },
-    /// The packets could not go out on this interface.
-    NotSent { iface: String, error: String },
+    /// The packets could not go out on these interfaces (none of the three tries worked).
+    NotSent { failed: Vec<WolSendError> },
     /// No interface to send on (`iface`: the configured one, missing on this NAS).
     NoInterface {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -222,6 +222,23 @@ pub enum WolWakeStep {
     Online { secs: u32 },
     /// No answer within `secs` (the timeout).
     Timeout { secs: u32 },
+    /// A step of a newer rynas: clients show the task's own line.
+    #[serde(other)]
+    Unknown,
+}
+
+impl WolWakeStep {
+    /// The step says why the packets did not go out (the detail of a failed send).
+    pub fn is_send_failure(&self) -> bool {
+        matches!(self, Self::NotSent { .. } | Self::NoInterface { .. })
+    }
+}
+
+/// An interface a wake could not send on, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WolSendError {
+    pub iface: String,
+    pub error: String,
 }
 
 /// The paired agent of a device, as it last reported.
@@ -398,6 +415,12 @@ mod tests {
         assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"kind":"sent_again","ifaces":["eth0"],"secs":30}"#);
         let n: WolWakeStep = serde_json::from_str(r#"{"kind":"no_interface"}"#).unwrap();
         assert_eq!(n, WolWakeStep::NoInterface { iface: None });
+        // a step of a newer rynas does not stop the history from loading
+        let u: WolWakeStep = serde_json::from_str(r#"{"kind":"relayed","via":"pc2"}"#).unwrap();
+        assert_eq!(u, WolWakeStep::Unknown);
+        let w: WolWake = serde_json::from_str(r#"{"at_ms":1,"by":{"kind":"backup"},"end":"send_failed","step":{"kind":"relayed"}}"#).unwrap();
+        assert_eq!(w.step, Some(WolWakeStep::Unknown));
+        assert!(WolWakeStep::NotSent { failed: vec![] }.is_send_failure() && !WolWakeStep::Unknown.is_send_failure());
         // a wake stored before steps existed
         let w: WolWake = serde_json::from_str(r#"{"at_ms":1,"by":{"kind":"backup"},"end":"online"}"#).unwrap();
         assert_eq!(w.step, None);

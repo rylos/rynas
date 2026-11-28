@@ -501,7 +501,7 @@ pub fn step_line(name: &str, s: &WolWakeStep) -> String {
     match s {
         WolWakeStep::Starting { name, macs } => format!("Waking {name} ({})", macs.join(", ")),
         WolWakeStep::Sent { ifaces } => format!("Sent on {} (3×)", ifaces.join(", ")),
-        WolWakeStep::NotSent { iface, error } => format!("Not sent on {iface}: {error}"),
+        WolWakeStep::NotSent { failed } => failed.iter().map(|f| format!("Not sent on {}: {}", f.iface, f.error)).collect::<Vec<_>>().join("\n"),
         WolWakeStep::NoInterface { iface: Some(i) } => format!("no interface {i} on this NAS"),
         WolWakeStep::NoInterface { iface: None } => "no interface to send on".to_string(),
         WolWakeStep::SentAgain { ifaces, secs } => format!("Sent again on {} after {secs} s", ifaces.join(", ")),
@@ -511,6 +511,8 @@ pub fn step_line(name: &str, s: &WolWakeStep) -> String {
         WolWakeStep::AgentTimeout { secs } => format!("The network answered after {secs} s but the agent did not get in touch"),
         WolWakeStep::Online { secs } => format!("Online after {secs} s"),
         WolWakeStep::Timeout { secs } => format!("No answer within {secs} s"),
+        // never made here: only a newer rynas has steps this one does not know
+        WolWakeStep::Unknown => String::new(),
     }
 }
 
@@ -1052,8 +1054,10 @@ impl Wol {
                 }
             }
         }
-        for (name, e) in errors.iter().filter(|(n, _)| !ok.contains(n)) {
-            self.step(ctx, dev, WolWakeStep::NotSent { iface: name.clone(), error: e.clone() });
+        let failed: Vec<WolSendError> =
+            errors.into_iter().filter(|(n, _)| !ok.contains(n)).map(|(iface, error)| WolSendError { iface, error }).collect();
+        if !failed.is_empty() {
+            self.step(ctx, dev, WolWakeStep::NotSent { failed });
         }
         ok
     }
@@ -1067,7 +1071,9 @@ impl Wol {
 
     /// Logs `s` in the wake's task (English) and records it as its latest step.
     fn step(&self, ctx: &rynas_tasks::TaskCtx, dev: &WolDevice, s: WolWakeStep) {
-        ctx.log(&step_line(&dev.name, &s));
+        for line in step_line(&dev.name, &s).lines() {
+            ctx.log(line);
+        }
         self.set_step(dev, s);
     }
 
@@ -1575,7 +1581,8 @@ mod tests {
         let l = |s: WolWakeStep| step_line("pc", &s);
         assert_eq!(l(WolWakeStep::Starting { name: "pc".into(), macs: vec!["aa:bb:cc:dd:ee:f0".into(), "aa:bb:cc:dd:ee:f1".into()] }), "Waking pc (aa:bb:cc:dd:ee:f0, aa:bb:cc:dd:ee:f1)");
         assert_eq!(l(WolWakeStep::Sent { ifaces: vec!["eth0".into(), "eth1".into()] }), "Sent on eth0, eth1 (3×)");
-        assert_eq!(l(WolWakeStep::NotSent { iface: "eth1".into(), error: "down".into() }), "Not sent on eth1: down");
+        let failed = vec![WolSendError { iface: "eth1".into(), error: "down".into() }, WolSendError { iface: "eth2".into(), error: "no carrier".into() }];
+        assert_eq!(l(WolWakeStep::NotSent { failed }), "Not sent on eth1: down\nNot sent on eth2: no carrier");
         assert_eq!(l(WolWakeStep::NoInterface { iface: Some("eth9".into()) }), "no interface eth9 on this NAS");
         assert_eq!(l(WolWakeStep::SentAgain { ifaces: vec!["eth0".into()], secs: 30 }), "Sent again on eth0 after 30 s");
         assert_eq!(l(WolWakeStep::AlreadyOn), "pc is already on");

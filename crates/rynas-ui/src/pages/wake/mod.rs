@@ -492,12 +492,15 @@ pub(crate) fn sleep_menu(w: Wol, id: String) -> AnyView {
 }
 
 /// The text of a wake step (the task log keeps its English line).
-fn step_text(s: &WolWakeStep) -> String {
+/// `None` for a step of a newer rynas: the task's own line is shown instead.
+fn step_text(s: &WolWakeStep) -> Option<String> {
     let time = |secs: &u32| i18n::elapsed(u64::from(*secs));
-    match s {
+    Some(match s {
         WolWakeStep::Starting { name, macs } => tf("wol.progress.starting", &[("name", name), ("macs", &macs.join(", "))]),
         WolWakeStep::Sent { ifaces } => tf("wol.progress.sent", &[("ifaces", &ifaces.join(", "))]),
-        WolWakeStep::NotSent { iface, error } => tf("wol.progress.not_sent", &[("iface", iface), ("error", error)]),
+        WolWakeStep::NotSent { failed } => {
+            failed.iter().map(|f| tf("wol.progress.not_sent", &[("iface", &f.iface), ("error", &f.error)])).collect::<Vec<_>>().join("; ")
+        }
         WolWakeStep::NoInterface { iface: Some(i) } => tf("wol.progress.no_iface_named", &[("iface", i)]),
         WolWakeStep::NoInterface { iface: None } => t("wol.progress.no_iface").into(),
         WolWakeStep::SentAgain { ifaces, secs } => tf("wol.progress.sent_again", &[("ifaces", &ifaces.join(", ")), ("time", &time(secs))]),
@@ -507,7 +510,14 @@ fn step_text(s: &WolWakeStep) -> String {
         WolWakeStep::AgentTimeout { secs } => tf("wol.progress.agent_timeout", &[("time", &time(secs))]),
         WolWakeStep::Online { secs } => tf("wol.end.online", &[("time", &time(secs))]),
         WolWakeStep::Timeout { secs } => tf("wol.end.timeout", &[("time", &time(secs))]),
-    }
+        WolWakeStep::Unknown => return None,
+    })
+}
+
+/// The text of a wake's step under its result: for a failed send only a step that says why
+/// (not the last progress before the failure); `None`: the task's own line, when there is one.
+pub(super) fn shown_step(step: Option<&WolWakeStep>, send_failed: bool) -> Option<String> {
+    step.filter(|s| !send_failed || s.is_send_failure()).and_then(step_text)
 }
 
 pub(crate) fn wake_line(w: Wol, id: String, open: Option<Callback<()>>) -> AnyView {
@@ -526,9 +536,10 @@ pub(crate) fn wake_line(w: Wol, id: String, open: Option<Callback<()>>) -> AnyVi
         let (run, end, step) = state.get()?;
         let close = move |_| w.dismiss(&id.get_value());
         let x = view! { <button type="button" class="icon-btn sm" aria-label=tr("close") on:click=close><Icon icon=icons::X size=14 /></button> };
-        // the step, translated; the task's raw line (English) only when there is no step
-        let line = match (step, run.line) {
-            (Some(s), raw) => Some(view! { <span title=raw class="wol-task-line">{step_text(&s)}</span> }.into_any()),
+        // the step, translated; the task's raw line (English) only when no step applies
+        let send_failed = matches!(end, Some((WolWakeEnd::SendFailed, ..)));
+        let line = match (shown_step(step.as_ref(), send_failed), run.line) {
+            (Some(s), raw) => Some(view! { <span title=raw class="wol-task-line">{s}</span> }.into_any()),
             (None, Some(raw)) => Some(view! { <span lang="en" class="wol-task-line">{raw}</span> }.into_any()),
             (None, None) => None,
         };
@@ -702,11 +713,20 @@ mod tests {
 
     #[test]
     fn steps_are_translated_from_their_fields() {
-        let sent = step_text(&WolWakeStep::Sent { ifaces: vec!["eth0".into(), "eth1".into()] });
-        assert_eq!(sent, tf("wol.progress.sent", &[("ifaces", "eth0, eth1")]));
-        let not_sent = step_text(&WolWakeStep::NotSent { iface: "eth1".into(), error: "down".into() });
-        assert_eq!(not_sent, tf("wol.progress.not_sent", &[("iface", "eth1"), ("error", "down")]));
-        assert!(step_text(&WolWakeStep::NoInterface { iface: Some("eth9".into()) }).contains("eth9"));
-        assert_eq!(step_text(&WolWakeStep::AlreadyOn), t("wol.end.already_on"));
+        let sent = WolWakeStep::Sent { ifaces: vec!["eth0".into(), "eth1".into()] };
+        assert_eq!(step_text(&sent), Some(tf("wol.progress.sent", &[("ifaces", "eth0, eth1")])));
+        let failed = vec![WolSendError { iface: "eth1".into(), error: "down".into() }, WolSendError { iface: "eth2".into(), error: "no carrier".into() }];
+        let not_sent = WolWakeStep::NotSent { failed };
+        let text = step_text(&not_sent).unwrap();
+        assert!(text.contains(&tf("wol.progress.not_sent", &[("iface", "eth1"), ("error", "down")])));
+        assert!(text.contains(&tf("wol.progress.not_sent", &[("iface", "eth2"), ("error", "no carrier")])));
+        assert!(step_text(&WolWakeStep::NoInterface { iface: Some("eth9".into()) }).unwrap().contains("eth9"));
+        assert_eq!(step_text(&WolWakeStep::AlreadyOn).as_deref(), Some(t("wol.end.already_on")));
+        assert_eq!(step_text(&WolWakeStep::Unknown), None);
+        // a failed send: only a step that says why, else the task's own line
+        let starting = WolWakeStep::Starting { name: "pc".into(), macs: vec![] };
+        assert_eq!(shown_step(Some(&starting), true), None);
+        assert!(shown_step(Some(&starting), false).is_some());
+        assert_eq!(shown_step(Some(&not_sent), true), Some(text));
     }
 }

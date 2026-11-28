@@ -7,7 +7,7 @@ use rynas_api_types::pcagent::{AgentNic, PcBackupOverview};
 use rynas_api_types::UserView;
 use rynas_api_types::wol::*;
 
-use super::{Wol, URL, demo, dev_url, kind_icon, sleep_menu, status_view, wake_button, wake_line, warning_text};
+use super::{Wol, URL, demo, dev_url, kind_icon, shown_step, sleep_menu, status_view, wake_button, wake_line, warning_text};
 use crate::api;
 use crate::form::{In, SaveBar, area_field, form_error, number_field, save_bar_with, segmented, select_field, text_field};
 use crate::i18n::{self, t, tf, tr};
@@ -182,7 +182,11 @@ pub(super) fn drawer(w: Wol, id: String) -> AnyView {
                 ui::row(vec![
                     ui::text_cell("pca.col.when", "tnum", i18n::datetime(h.at_ms)),
                     ui::text_cell("wol.col.by", "wrap", by),
-                    ui::cell("wol.col.result", "", end_view(h.end)),
+                    // a failed send says why (the step it kept), the other results speak for themselves
+                    ui::cell("wol.col.result", "wrap", match shown_step(h.step.as_ref(), true).filter(|_| h.end == WolWakeEnd::SendFailed) {
+                        Some(why) => view! { <div class="cell-main">{end_view(h.end)}<span class="cell-sub small">{why}</span></div> }.into_any(),
+                        None => end_view(h.end),
+                    }),
                     ui::text_cell("wol.col.secs", "num tnum", h.secs.map(|s| i18n::elapsed(u64::from(s))).unwrap_or_else(|| ui::DASH.to_string())),
                     ui::cell("wol.col.ifaces", "wrap", view! { <span class="mono small">{if h.ifaces.is_empty() { ui::DASH.to_string() } else { h.ifaces.join(", ") }}</span> }.into_any()),
                 ])
