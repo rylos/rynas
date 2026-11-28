@@ -422,10 +422,12 @@ mod tests {
         event.fields.insert("signal".into(), "TERM".into());
         assert!(t.event_ctx(&event, false, lang, utc).body.contains("因信号 TERM 终止"));
 
+        // without a code (notify.db gives the old rows theirs once) the English text is shown
+        // as written, never read
         event.code.clear();
         event.fields.clear();
-        assert_eq!(t.event_ctx(&event, false, lang, utc).title, "备份任务「office」失败");
-        assert!(t.event_ctx(&event, false, lang, utc).body.contains("退出码 1"));
+        assert_eq!(t.event_ctx(&event, false, lang, utc).title, event.title);
+        assert_eq!(t.event_ctx(&event, false, lang, utc).body, event.body);
         event.body_format = BodyFormat::Log;
         event.body = "rsync: write failed".into();
         assert_eq!(t.event_ctx(&event, false, lang, utc).body, event.body);

@@ -326,7 +326,7 @@ fn stage_target(
         Some(x) => *x = t,
         None => job.replicas.push(t),
     }
-    let normalized = rynas_btrfs::domain::normalize_job(job.clone()).map_err(invalid)?;
+    let normalized = rynas_btrfs::domain::normalize_job(job.clone()).map_err(crate::snapshots::job_invalid)?;
     *job = normalized.clone();
     let t = normalized
         .replicas

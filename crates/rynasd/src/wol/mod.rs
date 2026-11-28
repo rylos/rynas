@@ -496,6 +496,34 @@ fn pending_of(d: &Dev) -> Option<String> {
     }
 }
 
+/// The task log line of a wake step (English, as the log keeps it; clients translate the step).
+pub fn step_line(name: &str, s: &WolWakeStep) -> String {
+    match s {
+        WolWakeStep::Starting { name, macs } => format!("Waking {name} ({})", macs.join(", ")),
+        WolWakeStep::Sent { ifaces } => format!("Sent on {} (3×)", ifaces.join(", ")),
+        WolWakeStep::NotSent { failed } => failed.iter().map(|f| format!("Not sent on {}: {}", f.iface, f.error)).collect::<Vec<_>>().join("\n"),
+        WolWakeStep::NoInterface { iface: Some(i) } => format!("no interface {i} on this NAS"),
+        WolWakeStep::NoInterface { iface: None } => "no interface to send on".to_string(),
+        WolWakeStep::SentAgain { ifaces, secs } => format!("Sent again on {} after {secs} s", ifaces.join(", ")),
+        WolWakeStep::AlreadyOn => format!("{name} is already on"),
+        WolWakeStep::Unconfirmed => "Nothing can confirm the wake: the device has no known address and no agent".to_string(),
+        WolWakeStep::WaitAgent { secs } => format!("Network up after {secs} s, waiting for the agent"),
+        WolWakeStep::AgentTimeout { secs } => format!("The network answered after {secs} s but the agent did not get in touch"),
+        WolWakeStep::Online { secs } => format!("Online after {secs} s"),
+        WolWakeStep::Timeout { secs } => format!("No answer within {secs} s"),
+        // never made here: only a newer rynas has steps this one does not know
+        WolWakeStep::Unknown => String::new(),
+    }
+}
+
+/// A running wake.
+struct Waking {
+    upid: String,
+    since_ms: u64,
+    /// Its latest step.
+    step: Option<WolWakeStep>,
+}
+
 fn now_ms() -> u64 {
     crate::pc_agent::now_ms()
 }
@@ -514,8 +542,8 @@ pub struct Wol {
     /// A system user of this name exists (the `users` of a device).
     user_exists: fn(&str) -> bool,
     state: Mutex<RunState>,
-    /// Running wakes: device id → (task id, start in ms).
-    waking: Mutex<HashMap<String, (String, u64)>>,
+    /// Running wakes by device id.
+    waking: Mutex<HashMap<String, Waking>>,
     /// Host names resolved lately: name → (when, address).
     dns: Mutex<HashMap<String, (Instant, Option<Ipv4Addr>)>>,
     /// The last time someone read the overview (ms).
@@ -786,7 +814,8 @@ impl Wol {
 
     pub fn overview(&self, who: &str, admin: bool) -> WolOverview {
         let ifaces = self.ifaces();
-        let waking = self.waking.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let waking: HashMap<String, (String, u64, Option<WolWakeStep>)> =
+            self.waking.lock().unwrap_or_else(|p| p.into_inner()).iter().map(|(id, w)| (id.clone(), (w.upid.clone(), w.since_ms, w.step.clone()))).collect();
         let devices = self
             .devices()
             .into_iter()
@@ -810,6 +839,7 @@ impl Wol {
                     ip: ip.map(|i| i.to_string()),
                     send_iface: send::send_iface(&ifaces, d.iface.as_deref(), ip),
                     waking_since_ms: wake.as_ref().map(|w| w.1),
+                    wake_step: wake.as_ref().and_then(|w| w.2.clone()),
                     waking: wake.map(|w| w.0),
                     history: st.history,
                     warnings: warnings(&d, agent.as_ref().and_then(|a| a.facts.as_ref()), ip, &ifaces),
@@ -977,12 +1007,12 @@ impl Wol {
     pub fn start_wake(self: &Arc<Self>, id: &str, by: WolTrigger, task_user: &str) -> Res<WolWakeStarted> {
         let dev = self.device(id)?;
         let mut waking = self.waking.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((upid, _)) = waking.get(id) {
-            return Ok(WolWakeStarted { upid: upid.clone(), joined: true });
+        if let Some(w) = waking.get(id) {
+            return Ok(WolWakeStarted { upid: w.upid.clone(), joined: true });
         }
         let w = self.clone();
         let upid = self.ops.tasks.spawn("wol.wake", task_user, move |ctx| async move { w.run_wake(ctx, dev, by).await })?;
-        waking.insert(id.to_string(), (upid.clone(), now_ms()));
+        waking.insert(id.to_string(), Waking { upid: upid.clone(), since_ms: now_ms(), step: None });
         Ok(WolWakeStarted { upid, joined: false })
     }
 
@@ -1024,10 +1054,27 @@ impl Wol {
                 }
             }
         }
-        for (name, e) in errors.iter().filter(|(n, _)| !ok.contains(n)) {
-            ctx.log(&format!("Not sent on {name}: {e}"));
+        let failed: Vec<WolSendError> =
+            errors.into_iter().filter(|(n, _)| !ok.contains(n)).map(|(iface, error)| WolSendError { iface, error }).collect();
+        if !failed.is_empty() {
+            self.step(ctx, dev, WolWakeStep::NotSent { failed });
         }
         ok
+    }
+
+    /// Records `s` as the latest step of the running wake of `dev`.
+    fn set_step(&self, dev: &WolDevice, s: WolWakeStep) {
+        if let Some(w) = self.waking.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&dev.id) {
+            w.step = Some(s);
+        }
+    }
+
+    /// Logs `s` in the wake's task (English) and records it as its latest step.
+    fn step(&self, ctx: &rynas_tasks::TaskCtx, dev: &WolDevice, s: WolWakeStep) {
+        for line in step_line(&dev.name, &s).lines() {
+            ctx.log(line);
+        }
+        self.set_step(dev, s);
     }
 
     async fn run_wake(self: Arc<Self>, ctx: rynas_tasks::TaskCtx, dev: WolDevice, by: WolTrigger) -> Result<(), String> {
@@ -1044,7 +1091,8 @@ impl Wol {
             Err(_) if cancelled => (WolWakeEnd::Timeout, None),
             Err(_) => (WolWakeEnd::SendFailed, None),
         };
-        let wake = WolWake { at_ms: started, by, end, secs, ifaces: ifaces_used, upid: Some(upid) };
+        let step = self.waking.lock().unwrap_or_else(|p| p.into_inner()).get(&id).and_then(|w| w.step.clone());
+        let wake = WolWake { at_ms: started, by, end, secs, ifaces: ifaces_used, upid: Some(upid), step };
         let (w, d2) = (self.clone(), dev.clone());
         let _ = tokio::task::spawn_blocking(move || w.finish(&d2, wake, cancelled)).await;
         self.waking.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
@@ -1064,7 +1112,7 @@ impl Wol {
         t0: Instant,
         used: &mut Vec<String>,
     ) -> Result<(WolWakeEnd, Option<u32>), String> {
-        ctx.log(&format!("Waking {} ({})", dev.name, dev.macs.join(", ")));
+        self.step(ctx, dev, WolWakeStep::Starting { name: dev.name.clone(), macs: dev.macs.clone() });
         // on already? (its agent's recent requests, or its own answer on the network); the
         // packets go out anyway: a PC that has just gone to sleep still looks on for a moment
         let d2 = dev.clone();
@@ -1090,23 +1138,24 @@ impl Wol {
             })
             .await?;
         if chosen.is_empty() {
-            return Err(match &dev.iface {
-                Some(i) => format!("no interface {i} on this NAS"),
-                None => "no interface to send on".to_string(),
-            });
+            // the task's error says it in the log
+            let s = WolWakeStep::NoInterface { iface: dev.iface.clone() };
+            let e = step_line(&dev.name, &s);
+            self.set_step(dev, s);
+            return Err(e);
         }
         let sent = self.send_round(ctx, dev, &chosen, ip).await;
         if sent.is_empty() {
             return Err("the packet could not be sent on any interface".into());
         }
-        ctx.log(&format!("Sent on {} (3×)", sent.join(", ")));
+        self.step(ctx, dev, WolWakeStep::Sent { ifaces: sent.clone() });
         *used = sent;
         if already {
-            ctx.log(&format!("{} is already on", dev.name));
+            self.step(ctx, dev, WolWakeStep::AlreadyOn);
             return Ok((WolWakeEnd::AlreadyOn, Some(0)));
         }
         if !agent_linked && ip.is_none() {
-            ctx.log("Nothing can confirm the wake: the device has no known address and no agent");
+            self.step(ctx, dev, WolWakeStep::Unconfirmed);
             return Ok((WolWakeEnd::Unconfirmed, None));
         }
         let timeout = Duration::from_secs(u64::from(dev.wake_timeout_s));
@@ -1131,26 +1180,26 @@ impl Wol {
             if net_up && net_up_at.is_none() {
                 net_up_at = Some(secs);
                 if agent_linked && !contact {
-                    ctx.log(&format!("Network up after {secs} s, waiting for the agent"));
+                    self.step(ctx, dev, WolWakeStep::WaitAgent { secs: secs as u32 });
                 }
             }
             if contact || (net_up && !agent_linked) {
-                ctx.log(&format!("Online after {secs} s"));
+                self.step(ctx, dev, WolWakeStep::Online { secs: secs as u32 });
                 return Ok((WolWakeEnd::Online, Some(secs as u32)));
             }
             if t0.elapsed() >= timeout {
                 if let Some(at) = net_up_at {
-                    ctx.log(&format!("The network answered after {at} s but the agent did not get in touch"));
+                    self.step(ctx, dev, WolWakeStep::AgentTimeout { secs: at as u32 });
                     return Ok((WolWakeEnd::Online, Some(at as u32)));
                 }
-                ctx.log(&format!("No answer within {} s", dev.wake_timeout_s));
+                self.step(ctx, dev, WolWakeStep::Timeout { secs: dev.wake_timeout_s });
                 return Ok((WolWakeEnd::Timeout, None));
             }
             if net_up_at.is_none() && resends.peek().is_some_and(|at| secs >= **at) {
                 resends.next();
                 let again = self.send_round(ctx, dev, &chosen, ip).await;
                 if !again.is_empty() {
-                    ctx.log(&format!("Sent again on {} after {secs} s", again.join(", ")));
+                    self.step(ctx, dev, WolWakeStep::SentAgain { ifaces: again, secs: secs as u32 });
                 }
             }
             if ctx.is_cancelled() {
@@ -1528,12 +1577,27 @@ mod tests {
     }
 
     #[test]
+    fn step_lines_keep_the_log_text() {
+        let l = |s: WolWakeStep| step_line("pc", &s);
+        assert_eq!(l(WolWakeStep::Starting { name: "pc".into(), macs: vec!["aa:bb:cc:dd:ee:f0".into(), "aa:bb:cc:dd:ee:f1".into()] }), "Waking pc (aa:bb:cc:dd:ee:f0, aa:bb:cc:dd:ee:f1)");
+        assert_eq!(l(WolWakeStep::Sent { ifaces: vec!["eth0".into(), "eth1".into()] }), "Sent on eth0, eth1 (3×)");
+        let failed = vec![WolSendError { iface: "eth1".into(), error: "down".into() }, WolSendError { iface: "eth2".into(), error: "no carrier".into() }];
+        assert_eq!(l(WolWakeStep::NotSent { failed }), "Not sent on eth1: down\nNot sent on eth2: no carrier");
+        assert_eq!(l(WolWakeStep::NoInterface { iface: Some("eth9".into()) }), "no interface eth9 on this NAS");
+        assert_eq!(l(WolWakeStep::SentAgain { ifaces: vec!["eth0".into()], secs: 30 }), "Sent again on eth0 after 30 s");
+        assert_eq!(l(WolWakeStep::AlreadyOn), "pc is already on");
+        assert_eq!(l(WolWakeStep::WaitAgent { secs: 12 }), "Network up after 12 s, waiting for the agent");
+        assert_eq!(l(WolWakeStep::Online { secs: 20 }), "Online after 20 s");
+        assert_eq!(l(WolWakeStep::Timeout { secs: 180 }), "No answer within 180 s");
+    }
+
+    #[test]
     fn what_other_users_see() {
         let mut d = dev("pc", "a8:bb:cc:dd:ee:f0");
         d.secureon = Some("01:02:03:04:05:06".into());
         d.users = vec!["bob".into(), "carol".into()];
         d.notes = "under the desk".into();
-        let wake = |by: WolTrigger| WolWake { at_ms: 1, by, end: WolWakeEnd::Online, secs: Some(9), ifaces: vec![], upid: None };
+        let wake = |by: WolTrigger| WolWake { at_ms: 1, by, end: WolWakeEnd::Online, secs: Some(9), ifaces: vec![], upid: None, step: None };
         let v = WolDeviceView {
             device: d,
             status: WolStatus::Online,
@@ -1543,6 +1607,7 @@ mod tests {
             send_iface: None,
             waking: None,
             waking_since_ms: None,
+            wake_step: None,
             history: vec![wake(WolTrigger::User { name: "carol".into() }), wake(WolTrigger::User { name: "bob".into() }), wake(WolTrigger::Backup)],
             agent: None,
             warnings: vec![],

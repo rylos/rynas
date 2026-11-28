@@ -25,7 +25,7 @@ use rynas_api_types::snapshots::{
 };
 use rynas_api_types::{SharesConfig, StagedChanges, TaskStarted, error_codes};
 use rynas_btrfs::btrbk::{conf_path, parse_report, render_conf};
-use rynas_btrfs::domain::normalize_job;
+use rynas_btrfs::domain::{JobInvalid, normalize_job};
 use rynas_btrfs::name::split_snapshot_name;
 use rynas_btrfs::scan::{self, JobLock, lock_path};
 use rynas_btrfs::{SNAPSHOTS_KEY, browse, ioctl, restore, rootfs, system};
@@ -237,13 +237,24 @@ fn resolve_job(d: &Docs, mut job: SnapshotJob) -> Res<SnapshotJob> {
             .shares
             .iter()
             .find(|x| x.name.eq_ignore_ascii_case(s))
-            .ok_or_else(|| invalid(format!("there is no share {s}")))?;
+            .ok_or_else(|| {
+                Error::new(StatusCode::BAD_REQUEST, error_codes::SNAPSHOT_SHARE_MISSING, format!("there is no share {s}")).field("share")
+            })?;
         job.share = Some(share.name.clone());
         if job.subvolume.is_empty() {
             job.subvolume = share.path.clone();
         }
     }
-    normalize_job(job).map_err(invalid)
+    normalize_job(job).map_err(job_invalid)
+}
+
+/// The API error of a refused snapshot job: its own code, and the field to blame when known.
+pub fn job_invalid(e: JobInvalid) -> Error {
+    let r = Error::new(StatusCode::BAD_REQUEST, e.code, e.message);
+    match e.field {
+        Some(f) => r.field(f),
+        None => r,
+    }
 }
 
 /// SMB previous versions of a share follow its job: on with the job's directory and names.
@@ -1160,6 +1171,17 @@ async fn snapshot_delete(
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn refused_jobs_answer_with_their_own_code() {
+        let d = Docs { snaps: SnapshotsConfig::default(), sched: SchedulerConfig::default(), shares: SharesConfig::default() };
+        let job: SnapshotJob = serde_json::from_value(serde_json::json!({ "name": "docs", "share": "gone", "subvolume": "" })).unwrap();
+        let e = resolve_job(&d, job).unwrap_err();
+        assert_eq!((e.1, e.3.as_deref()), (error_codes::SNAPSHOT_SHARE_MISSING, Some("share")));
+        let job: SnapshotJob = serde_json::from_value(serde_json::json!({ "name": "docs", "subvolume": "srv/docs" })).unwrap();
+        let e = resolve_job(&d, job).unwrap_err();
+        assert_eq!((e.1, e.3.as_deref()), (error_codes::SNAPSHOT_SOURCE_INVALID, Some("subvolume")));
+    }
 
     struct Fake<'a> {
         steps: &'a RefCell<Vec<String>>,

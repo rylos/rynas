@@ -543,22 +543,8 @@ mod tests {
 
     #[test]
     fn backup_outcomes_in_saved_notifications() {
-        let mut n = note("backup.job_failed", &[("name", "cs"), ("result", "exit-code"), ("exit_code", "1")], BodyFormat::Text);
+        let n = note("backup.job_failed", &[("name", "cs"), ("result", "exit-code"), ("exit_code", "1")], BodyFormat::Text);
         assert_eq!(title_with(&n, &zh, false), "备份任务「cs」失败");
         assert_eq!(body_with(&n, &zh, false), "运行结果为失败（退出码 1）。可在任务历史中查看详细输出。");
-
-        n.code.clear();
-        n.fields.clear();
-        n.source = "backup".into();
-        n.key = "backup:job:cs".into();
-        n.state = EventState::Firing;
-        n.title = "Backup job cs failed (exit code 1)".into();
-        n.body = "Result: exit-code (exit code 1). See the task history for the output.".into();
-        assert_eq!(title_with(&n, &zh, false), "备份任务「cs」失败");
-        assert_eq!(body_with(&n, &zh, false), "运行结果为失败（退出码 1）。可在任务历史中查看详细输出。");
-
-        n.source = "third-party".into();
-        assert_eq!(title_with(&n, &zh, false), n.title);
-        assert_eq!(body_with(&n, &zh, false), n.body);
     }
 }

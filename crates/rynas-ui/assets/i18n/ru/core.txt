@@ -1558,6 +1558,8 @@ wol.progress.wait_agent	Сеть ответила через {time}. Ожида�
 wol.progress.agent_timeout	Сеть ответила через {time}, но клиент резервного копирования не ответил.
 wol.progress.sent_again	Пакеты пробуждения повторно отправлены через {ifaces} через {time}
 wol.progress.not_sent	Не удалось отправить пакет через {iface}: {error}
+wol.progress.no_iface	Нет сетевого интерфейса для отправки пакета пробуждения.
+wol.progress.no_iface_named	На этом NAS нет интерфейса {iface} для отправки пакета пробуждения.
 hw.system_temp	Температура системы
 sto.stripe	Кэш полос (записей)
 sto.kernel_default	Значение ядра по умолчанию (256)
@@ -1699,7 +1701,7 @@ err.missing_field	Заполните обязательное поле.
 err.unknown_field	Запрос содержит неизвестное поле.
 err.invalid_type	В одном из полей указан неверный тип данных.
 err.decode	Не удалось прочитать ответ NAS.
-err.snapshot_share_missing	Общая папка {share} не найдена. Выберите другую папку для этого задания снимков.
+err.snapshot_share_missing	Общая папка не найдена. Выберите другую папку для этого задания снимков.
 err.snapshot_directory_invalid	Введите допустимый абсолютный путь к папке снимков.
 err.snapshot_source_invalid	Введите допустимый абсолютный путь к исходному подтому.
 pca.description_example	Рабочий ноутбук

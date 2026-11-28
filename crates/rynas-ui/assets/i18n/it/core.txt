@@ -1528,6 +1528,8 @@ wol.progress.wait_agent	La rete ha risposto dopo {time}. In attesa del client di
 wol.progress.agent_timeout	La rete ha risposto dopo {time}, ma il client di backup non ha risposto.
 wol.progress.sent_again	Pacchetti di riattivazione inviati di nuovo su {ifaces} dopo {time}
 wol.progress.not_sent	Impossibile inviare su {iface}: {error}
+wol.progress.no_iface	Nessuna interfaccia di rete da cui inviare il pacchetto di riattivazione.
+wol.progress.no_iface_named	Questo NAS non ha l'interfaccia {iface} da cui inviare il pacchetto di riattivazione.
 hw.system_temp	Temperatura di sistema
 sto.stripe	Stripe cache (voci)
 sto.kernel_default	Predefinito del kernel (256)
@@ -1667,7 +1669,7 @@ err.missing_field	Compila il campo obbligatorio.
 err.unknown_field	La richiesta contiene un campo sconosciuto.
 err.invalid_type	Un campo contiene un tipo di dati errato.
 err.decode	Impossibile leggere la risposta del NAS.
-err.snapshot_share_missing	Cartella condivisa {share} non trovata. Scegli un’altra cartella per questa attività di snapshot.
+err.snapshot_share_missing	Cartella condivisa non trovata. Scegli un’altra cartella per questa attività di snapshot.
 err.snapshot_directory_invalid	Inserisci un percorso assoluto valido per la cartella degli snapshot.
 err.snapshot_source_invalid	Inserisci un percorso assoluto valido per il sottovolume di origine.
 pca.description_example	Portatile dell’ufficio

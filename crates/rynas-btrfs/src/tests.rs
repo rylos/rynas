@@ -90,6 +90,20 @@ fn stage(e: &Env, c: &SnapshotsConfig) -> Result<bool, ConfigError> {
 }
 
 #[test]
+fn refused_paths_carry_their_code_and_field() {
+    use crate::domain::normalize_job;
+    use rynas_api_types::error_codes;
+    let e = normalize_job(job("x", "srv/vol1/docs")).unwrap_err();
+    assert_eq!((e.code, e.field), (error_codes::SNAPSHOT_SOURCE_INVALID, Some("subvolume")));
+    let mut dir = job("x", "/srv/vol1/docs");
+    dir.snapshot_dir = "/srv/../snap".into();
+    let e = normalize_job(dir).unwrap_err();
+    assert_eq!((e.code, e.field), (error_codes::SNAPSHOT_DIRECTORY_INVALID, Some("snapshot_dir")));
+    let e = normalize_job(job("bad name", "/srv/vol1/docs")).unwrap_err();
+    assert_eq!((e.code, e.field), (error_codes::INVALID_VALUE, None));
+}
+
+#[test]
 fn validation_fills_defaults_and_refuses_bad_jobs() {
     let e = env();
     let mut c = SnapshotsConfig {

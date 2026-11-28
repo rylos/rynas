@@ -1664,6 +1664,8 @@ wol.progress.wait_agent	{time} 后检测到设备上线，正在等待备份客�
 wol.progress.agent_timeout	{time} 后检测到设备上线，但备份客户端未响应。
 wol.progress.sent_again	{time} 后已通过 {ifaces} 再次发送唤醒包
 wol.progress.not_sent	无法通过 {iface} 发送唤醒包：{error}
+wol.progress.no_iface	没有可用于发送唤醒包的网络接口。
+wol.progress.no_iface_named	此 NAS 上没有用于发送唤醒包的接口 {iface}。
 hw.system_temp	系统温度
 sto.stripe	条带缓存（条目数）
 sto.kernel_default	内核默认值（256）
@@ -1803,7 +1805,7 @@ err.missing_field	请填写必填项。
 err.unknown_field	请求中包含无法识别的字段。
 err.invalid_type	字段的数据类型有误，请检查输入。
 err.decode	无法读取 NAS 返回的数据。
-err.snapshot_share_missing	找不到共享文件夹「{share}」，请为此快照任务选择其他共享文件夹。
+err.snapshot_share_missing	找不到该共享文件夹，请为此快照任务选择其他共享文件夹。
 err.snapshot_directory_invalid	请输入有效的快照目录绝对路径。
 err.snapshot_source_invalid	请输入有效的源子卷绝对路径。
 pca.description_example	办公笔记本

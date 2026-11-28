@@ -491,41 +491,33 @@ pub(crate) fn sleep_menu(w: Wol, id: String) -> AnyView {
     .into_any()
 }
 
-/// Translate the progress lines that the Wake task itself emits. Unrecognized diagnostics
-/// still read as written by the task; the task log retains all of its original lines.
-fn wake_progress_text(raw: &str) -> Option<String> {
-    let time = |s: &str| s.parse::<u64>().ok().map(i18n::elapsed);
-    if let Some((name, macs)) = raw.strip_prefix("Waking ").and_then(|s| s.strip_suffix(')')).and_then(|s| s.rsplit_once(" (")) {
-        return Some(tf("wol.progress.starting", &[("name", name), ("macs", macs)]));
-    }
-    if let Some(ifaces) = raw.strip_prefix("Sent on ").and_then(|s| s.strip_suffix(" (3×)")) {
-        return Some(tf("wol.progress.sent", &[("ifaces", ifaces)]));
-    }
-    if let Some(s) = raw.strip_prefix("Network up after ").and_then(|s| s.strip_suffix(" s, waiting for the agent")) {
-        return Some(tf("wol.progress.wait_agent", &[("time", &time(s)?)]));
-    }
-    if let Some(s) = raw.strip_prefix("The network answered after ").and_then(|s| s.strip_suffix(" s but the agent did not get in touch")) {
-        return Some(tf("wol.progress.agent_timeout", &[("time", &time(s)?)]));
-    }
-    if let Some((ifaces, s)) = raw.strip_prefix("Sent again on ").and_then(|s| s.strip_suffix(" s")).and_then(|s| s.rsplit_once(" after ")) {
-        return Some(tf("wol.progress.sent_again", &[("ifaces", ifaces), ("time", &time(s)?)]));
-    }
-    if let Some((iface, error)) = raw.strip_prefix("Not sent on ").and_then(|s| s.split_once(": ")) {
-        return Some(tf("wol.progress.not_sent", &[("iface", iface), ("error", error)]));
-    }
-    if let Some(s) = raw.strip_prefix("Online after ").and_then(|s| s.strip_suffix(" s")) {
-        return Some(tf("wol.end.online", &[("time", &time(s)?)]));
-    }
-    if let Some(s) = raw.strip_prefix("No answer within ").and_then(|s| s.strip_suffix(" s")) {
-        return Some(tf("wol.end.timeout", &[("time", &time(s)?)]));
-    }
-    if raw.ends_with(" is already on") {
-        return Some(t("wol.end.already_on").into());
-    }
-    if raw == "Nothing can confirm the wake: the device has no known address and no agent" {
-        return Some(t("wol.end.unconfirmed").into());
-    }
-    None
+/// The text of a wake step (the task log keeps its English line).
+/// `None` for a step of a newer rynas: the task's own line is shown instead.
+fn step_text(s: &WolWakeStep) -> Option<String> {
+    let time = |secs: &u32| i18n::elapsed(u64::from(*secs));
+    Some(match s {
+        WolWakeStep::Starting { name, macs } => tf("wol.progress.starting", &[("name", name), ("macs", &macs.join(", "))]),
+        WolWakeStep::Sent { ifaces } => tf("wol.progress.sent", &[("ifaces", &ifaces.join(", "))]),
+        WolWakeStep::NotSent { failed } => {
+            failed.iter().map(|f| tf("wol.progress.not_sent", &[("iface", &f.iface), ("error", &f.error)])).collect::<Vec<_>>().join("; ")
+        }
+        WolWakeStep::NoInterface { iface: Some(i) } => tf("wol.progress.no_iface_named", &[("iface", i)]),
+        WolWakeStep::NoInterface { iface: None } => t("wol.progress.no_iface").into(),
+        WolWakeStep::SentAgain { ifaces, secs } => tf("wol.progress.sent_again", &[("ifaces", &ifaces.join(", ")), ("time", &time(secs))]),
+        WolWakeStep::AlreadyOn => t("wol.end.already_on").into(),
+        WolWakeStep::Unconfirmed => t("wol.end.unconfirmed").into(),
+        WolWakeStep::WaitAgent { secs } => tf("wol.progress.wait_agent", &[("time", &time(secs))]),
+        WolWakeStep::AgentTimeout { secs } => tf("wol.progress.agent_timeout", &[("time", &time(secs))]),
+        WolWakeStep::Online { secs } => tf("wol.end.online", &[("time", &time(secs))]),
+        WolWakeStep::Timeout { secs } => tf("wol.end.timeout", &[("time", &time(secs))]),
+        WolWakeStep::Unknown => return None,
+    })
+}
+
+/// The text of a wake's step under its result: for a failed send only a step that says why
+/// (not the last progress before the failure); `None`: the task's own line, when there is one.
+pub(super) fn shown_step(step: Option<&WolWakeStep>, send_failed: bool) -> Option<String> {
+    step.filter(|s| !send_failed || s.is_send_failure()).and_then(step_text)
 }
 
 pub(crate) fn wake_line(w: Wol, id: String, open: Option<Callback<()>>) -> AnyView {
@@ -533,19 +525,24 @@ pub(crate) fn wake_line(w: Wol, id: String, open: Option<Callback<()>>) -> AnyVi
     let state = Memo::new(move |_| {
         let run = w.run_of(&id.get_value())?;
         let v = w.view_of(&id.get_value())?;
-        let end = v.history.iter().find(|h| !run.upid.is_empty() && h.upid.as_deref() == Some(run.upid.as_str())).map(|h| (h.end, h.secs, v.device.wake_timeout_s));
-        Some((run, end))
+        let mine = |upid: Option<&str>| !run.upid.is_empty() && upid == Some(run.upid.as_str());
+        let done = v.history.iter().find(|h| mine(h.upid.as_deref()));
+        let end = done.map(|h| (h.end, h.secs, v.device.wake_timeout_s));
+        // the wake's latest step: the running one's, else what its history entry kept
+        let step = if mine(v.waking.as_deref()) { v.wake_step.clone() } else { done.and_then(|h| h.step.clone()) };
+        Some((run, end, step))
     });
     (move || {
-        let (run, end) = state.get()?;
+        let (run, end, step) = state.get()?;
         let close = move |_| w.dismiss(&id.get_value());
         let x = view! { <button type="button" class="icon-btn sm" aria-label=tr("close") on:click=close><Icon icon=icons::X size=14 /></button> };
-        let line = run.line.map(|raw| {
-            let localized = wake_progress_text(&raw);
-            let lang = localized.is_none().then_some("en");
-            let shown = localized.unwrap_or_else(|| raw.clone());
-            view! { <span title=raw lang=lang class="wol-task-line">{shown}</span> }
-        });
+        // the step, translated; the task's raw line (English) only when no step applies
+        let send_failed = matches!(end, Some((WolWakeEnd::SendFailed, ..)));
+        let line = match (shown_step(step.as_ref(), send_failed), run.line) {
+            (Some(s), raw) => Some(view! { <span title=raw class="wol-task-line">{s}</span> }.into_any()),
+            (None, Some(raw)) => Some(view! { <span lang="en" class="wol-task-line">{raw}</span> }.into_any()),
+            (None, None) => None,
+        };
         match end {
             // running: the task's last line (the seconds are on the button)
             None if !run.done => line.map(|l| view! { <p class="wol-progress small" role="status">{l}</p> }.into_any()),
@@ -707,5 +704,29 @@ pub fn WakePage() -> impl IntoView {
             {move || w.open.get().map(|id| device::drawer(w, id))}
             {move || w.add.get().map(|init| device::add_dialog(w, init))}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn steps_are_translated_from_their_fields() {
+        let sent = WolWakeStep::Sent { ifaces: vec!["eth0".into(), "eth1".into()] };
+        assert_eq!(step_text(&sent), Some(tf("wol.progress.sent", &[("ifaces", "eth0, eth1")])));
+        let failed = vec![WolSendError { iface: "eth1".into(), error: "down".into() }, WolSendError { iface: "eth2".into(), error: "no carrier".into() }];
+        let not_sent = WolWakeStep::NotSent { failed };
+        let text = step_text(&not_sent).unwrap();
+        assert!(text.contains(&tf("wol.progress.not_sent", &[("iface", "eth1"), ("error", "down")])));
+        assert!(text.contains(&tf("wol.progress.not_sent", &[("iface", "eth2"), ("error", "no carrier")])));
+        assert!(step_text(&WolWakeStep::NoInterface { iface: Some("eth9".into()) }).unwrap().contains("eth9"));
+        assert_eq!(step_text(&WolWakeStep::AlreadyOn).as_deref(), Some(t("wol.end.already_on")));
+        assert_eq!(step_text(&WolWakeStep::Unknown), None);
+        // a failed send: only a step that says why, else the task's own line
+        let starting = WolWakeStep::Starting { name: "pc".into(), macs: vec![] };
+        assert_eq!(shown_step(Some(&starting), true), None);
+        assert!(shown_step(Some(&starting), false).is_some());
+        assert_eq!(shown_step(Some(&not_sent), true), Some(text));
     }
 }
