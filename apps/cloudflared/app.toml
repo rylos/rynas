@@ -11,7 +11,7 @@ changelog_url = "https://github.com/cloudflare/cloudflared/releases"
 license = "Apache-2.0"
 maintainers = ["rynas"]
 categories = ["network"]
-min_rynas = "0.1.0"
+min_rynas = "0.9.21"
 arch = ["amd64", "arm64"]
 main_service = "cloudflared"
 # outbound only; the host network lets the tunnel reach the web access proxy and apps bound

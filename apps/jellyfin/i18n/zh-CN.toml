@@ -1,0 +1,46 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "免费的媒体服务器，支持电影、剧集、音乐、电视直播和硬件转码。"
+
+[ports]
+web.purpose = "网页界面和客户端 API"
+discovery.purpose = "局域网客户端自动发现"
+
+[folders]
+CONFIG_FOLDER.description = "设置、用户和媒体库数据库"
+CACHE_FOLDER.description = "转码文件和图片缓存"
+
+[shares]
+MEDIA.label = "媒体文件"
+MEDIA.description = "存放电影、剧集和音乐的共享文件夹，以只读方式挂载到 /media。"
+
+[overlays]
+hw-transcoding.description = "提供 /dev/dri 和渲染设备所属组，用于 Intel Quick Sync 或 VA-API 转码。"
+
+[form]
+HW_TRANSCODING.title = "硬件转码"
+HW_TRANSCODING.description = "将 GPU 渲染设备交给 Jellyfin，使用 Intel Quick Sync 或 VA-API。低功耗 CPU 建议启用。"
+
+[[notes]]
+text = "首次访问时进入设置向导并创建管理员账户，请在安装后立即打开 Jellyfin。启用硬件转码后，请在 Dashboard → Playback → Transcoding 中选择 Intel QuickSync（QSV）或 VA-API。"
+
+[[groups]]
+title = "播放"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "19b23817"
+"description.md" = "f5147585"
+"ports.web.purpose" = "600acb71"
+"ports.discovery.purpose" = "f509df3c"
+"folders.CONFIG_FOLDER.description" = "209cbf24"
+"folders.CACHE_FOLDER.description" = "9cd271e1"
+"shares.MEDIA.label" = "58a8eecd"
+"shares.MEDIA.description" = "c2c43be6"
+"overlays.hw-transcoding.description" = "e9b61177"
+"notes[0].text" = "f216a290"
+"form.HW_TRANSCODING.title" = "747ec4cc"
+"form.HW_TRANSCODING.description" = "bd60b7c5"
+"groups[0].title" = "db4ef444"

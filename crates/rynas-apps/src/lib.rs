@@ -11,11 +11,15 @@
 //! 4. updates: [`plan::update_plan`] compares the installed `x-rynas` version and images with
 //!    the catalogue, [`plan::prepare_update`] migrates the stored values and re-renders;
 //! 5. [`render::convert_to_custom`] drops `x-rynas`: the stack stays, rynas forgets the app.
+//!
+//! An entry's texts are English; its translations (`i18n/<lang>.toml` and `.md`, keyed by
+//! field) are checked with the entry and picked per request language in [`i18n`].
 
 pub mod catalog;
 pub mod compose;
 pub mod error;
 pub mod form;
+pub mod i18n;
 pub mod manifest;
 #[cfg(feature = "online")]
 pub mod online;

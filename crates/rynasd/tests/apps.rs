@@ -331,7 +331,7 @@ async fn downloaded_catalogue_is_merged() {
     let index = json!({
         "schema": 1, "serial": 7, "published": "2026-11-10T00:00:00Z", "expires": "2099-01-01T00:00:00Z",
         "archive": {"url": "apps-7.tar.zst", "sha256": "0".repeat(64), "size": 1},
-        "apps": [{"id": "uptime-kuma", "version": "99.0.0", "min_rynas": "0.1.0"}]
+        "apps": [{"id": "uptime-kuma", "version": "99.0.0", "min_rynas": rynas_apps::i18n::I18N_MIN_RYNAS.to_string()}]
     });
     std::fs::write(dl.join("index.json"), index.to_string()).unwrap();
     std::os::unix::fs::symlink("7", dir.join("current")).unwrap();
@@ -445,6 +445,46 @@ async fn catalogue_cards_detail_and_images() {
     ] {
         let (s, _) = call(&e, "GET", uri, None).await;
         assert_eq!(s, StatusCode::NOT_FOUND, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn catalogue_texts_follow_the_language_asked_for() {
+    let e = env();
+    // English: only the plain fields
+    let (s, b) = call(&e, "GET", "/v1/apps/catalog", None).await;
+    let c: AppCatalog = json_of(s, &b);
+    assert!(c.apps.iter().all(|a| a.texts.is_none()));
+    let (s, b) = call(&e, "GET", "/v1/apps/catalog/paperless-ngx?lang=en", None).await;
+    assert!(json_of::<AppDetail>(s, &b).texts.is_none());
+
+    // a translated entry: its texts next to the English fields, which stay English
+    let (s, b) = call(&e, "GET", "/v1/apps/catalog?lang=zh-CN", None).await;
+    let c: AppCatalog = json_of(s, &b);
+    let card = c.apps.iter().find(|a| a.id == "paperless-ngx").unwrap();
+    let texts = card.texts.as_ref().expect("card texts");
+    assert_eq!(texts.lang, "zh-CN");
+    assert!(texts.summary.as_deref().is_some_and(|s| s.contains("文档")));
+    assert!(texts.ports.contains_key("web"));
+    assert!(texts.description.is_none() && texts.form.is_empty(), "a card carries only its own texts");
+    assert!(card.summary.starts_with("Document"), "{}", card.summary);
+
+    let (s, b) = call(&e, "GET", "/v1/apps/catalog/paperless-ngx?lang=zh-cn", None).await;
+    let d: AppDetail = json_of(s, &b);
+    let texts = d.texts.expect("detail texts");
+    assert_eq!(texts.lang, "zh-CN");
+    assert!(texts.description.is_some());
+    assert_eq!(texts.shares["CONSUME"].label.as_deref(), Some("导入目录"));
+    assert_eq!(texts.form["PAPERLESS_ADMIN_USER"].title.as_deref(), Some("管理员用户名"));
+    // a field the translation leaves out stays English: no entry for it
+    assert!(texts.form["PAPERLESS_ADMIN_USER"].description.is_none());
+    assert_eq!(texts.groups.len(), d.form.groups.len());
+    assert_eq!(d.form.properties["PAPERLESS_ADMIN_USER"].title, "Admin user name");
+
+    // another region or an unknown language: English
+    for lang in ["zh-TW", "it", "xx", ""] {
+        let (s, b) = call(&e, "GET", &format!("/v1/apps/catalog/paperless-ngx?lang={lang}"), None).await;
+        assert!(json_of::<AppDetail>(s, &b).texts.is_none(), "{lang}");
     }
 }
 

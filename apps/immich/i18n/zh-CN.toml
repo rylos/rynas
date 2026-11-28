@@ -1,0 +1,66 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "照片和视频库，支持手机备份、人脸识别、地图和智能搜索。"
+
+[ports]
+web.purpose = "网页界面和手机应用 API"
+
+[folders]
+UPLOAD_LOCATION.description = "上传的照片和视频、缩略图及转码文件"
+DB_DATA_LOCATION.description = "PostgreSQL 数据库（建议使用本机 SSD，不能放在网络共享上）"
+
+[shares]
+EXTERNAL_LIBRARY.label = "外部媒体库"
+EXTERNAL_LIBRARY.description = "存放现有照片的共享文件夹，以只读方式挂载到 /mnt/external。请在 Immich 中把它添加为外部媒体库。"
+
+[secrets]
+DB_PASSWORD.description = "PostgreSQL 密码（上游仅允许 A-Za-z0-9）"
+
+[overlays]
+no-ml.description = "移除提供人脸识别和智能搜索的机器学习容器，以便在 4 GB 内存的设备上运行。"
+hw-transcoding.description = "将 /dev/dri 映射到服务容器，用于 Quick Sync 或 VA-API 视频转码。"
+
+[named_volumes]
+model-cache.description = "下载的机器学习模型（丢失后会重新下载）"
+
+[form]
+ML_DISABLED.title = "关闭机器学习"
+ML_DISABLED.description = "人脸识别、智能搜索和重复照片检测会额外占用约 2 GB 内存。4 GB 内存的 NAS 建议关闭此处选项，然后在 Immich 的 Administration → Settings 中关闭 Machine Learning。"
+HW_TRANSCODING.title = "硬件视频转码"
+HW_TRANSCODING.description = "将 GPU 渲染设备交给 Immich，使用 Intel Quick Sync 或 VA-API。"
+
+[[notes]]
+text = "开启机器学习时，Immich 至少需要 6 GB 内存，建议 8 GB。内存为 4 GB 时请关闭机器学习。"
+
+[[notes]]
+text = "首次访问时创建管理员账户，请在安装后立即打开 Immich。"
+
+[[notes]]
+text = "RyNAS 应用将手机备份到各用户的 Photos 文件夹，Immich 以只读方式访问。在应用页面提供 Immich API 密钥并确认各用户的 Immich 账户后，rynas 会为该账户添加用户对应的外部媒体库，并在每次备份后扫描。Immich 自带的手机上传功能也能照常使用。"
+
+[[groups]]
+title = "功能"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "2c0e48a0"
+"description.md" = "aef9fc80"
+"ports.web.purpose" = "829b2666"
+"folders.UPLOAD_LOCATION.description" = "5c55e2f1"
+"folders.DB_DATA_LOCATION.description" = "15956555"
+"shares.EXTERNAL_LIBRARY.label" = "573ca901"
+"shares.EXTERNAL_LIBRARY.description" = "929ff46c"
+"secrets.DB_PASSWORD.description" = "2bf5fc25"
+"overlays.no-ml.description" = "ec07f6ed"
+"overlays.hw-transcoding.description" = "0e2b19ba"
+"named_volumes.model-cache.description" = "b8b4ebfa"
+"notes[0].text" = "b305943f"
+"notes[1].text" = "3ecb31d7"
+"notes[2].text" = "1ce781e3"
+"form.HW_TRANSCODING.title" = "d7db7bd2"
+"form.HW_TRANSCODING.description" = "7c25cb6f"
+"form.ML_DISABLED.title" = "b37bcbdd"
+"form.ML_DISABLED.description" = "8d3bfeb9"
+"groups[0].title" = "3ca26e84"

@@ -1,0 +1,36 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "适合低配置设备的快速文件夹相册，无需机器学习或独立数据库。"
+
+[ports]
+web.purpose = "网页相册"
+
+[folders]
+CONFIG_FOLDER.description = "相册设置"
+DB_FOLDER.description = "照片索引和用户账户（SQLite）"
+TMP_FOLDER.description = "缩略图和转码视频，删除后会重新生成。"
+
+[shares]
+PHOTOS.label = "照片"
+PHOTOS.description = "供所有人浏览的照片共享文件夹，以只读方式挂载，在相册中显示为 Shared。"
+
+[[notes]]
+text = "相册初始账户为 admin，密码为 admin。请登录后立即修改密码。"
+
+[[notes]]
+text = "要备份手机照片，请使用 RyNAS 应用的照片备份功能，照片会写入用户的 Photos 文件夹。默认不会显示任何用户的文件夹，请在 rynas 的应用页面选择用户。默认情况下，每个相册账户都能看到所选的所有文件夹。要限制访问，请在相册的 Users 设置中指定目录允许列表，所需的值可从应用页面查看。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "de6174fc"
+"description.md" = "68b272b8"
+"ports.web.purpose" = "6402cf97"
+"folders.CONFIG_FOLDER.description" = "3bbf2683"
+"folders.DB_FOLDER.description" = "ab3d496a"
+"folders.TMP_FOLDER.description" = "5ffef9d0"
+"shares.PHOTOS.label" = "f06cbb4e"
+"shares.PHOTOS.description" = "c804959d"
+"notes[0].text" = "c07a3049"
+"notes[1].text" = "019afdeb"

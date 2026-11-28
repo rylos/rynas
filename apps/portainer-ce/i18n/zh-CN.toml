@@ -1,0 +1,26 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "适用于 Docker、Swarm 和 Kubernetes 的容器管理界面（社区版）。"
+
+[ports]
+web.purpose = "网页界面（HTTPS，自签名证书）"
+
+[folders]
+DATA_FOLDER.description = "Portainer 数据库、由它创建的应用栈副本和证书"
+
+[[notes]]
+text = "Portainer 可以访问 Docker 套接字，因此拥有这台 NAS 的 root 权限，也使用自己的登录系统。首次启动后请在 5 分钟内创建管理员账户，超时后需重启应用栈。"
+
+[[notes]]
+text = "Portainer 将自己创建的应用栈保存在自身数据库中。在其他地方创建的应用栈会显示为外部应用栈，管理功能有限。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "8855995a"
+"description.md" = "75d51196"
+"ports.web.purpose" = "3d58e88c"
+"folders.DATA_FOLDER.description" = "5cb0bb28"
+"notes[0].text" = "8d8071a5"
+"notes[1].text" = "94873c45"

@@ -15,7 +15,7 @@ use rynas_api_types::docker::{DockerSettingsState, valid_stack_name};
 use rynas_api_types::ShareView;
 
 use super::catalog::{intent_text, notes_view, ssd_key};
-use super::texts::{CatalogText, lookup};
+use super::texts::{self, CatalogText};
 use super::{AppDetail, apps, ram_pill};
 use crate::api::{self, DETAIL_SEP};
 use crate::form::{In, form_error, spinner, text_field};
@@ -103,6 +103,13 @@ struct W {
 }
 
 impl W {
+    /// The entry's texts in the UI language (empty until the entry arrived). Tracked: a step
+    /// that shows them is drawn again when the entry is read again in another language
+    /// ([`texts::follow_lang`]); the answers live in signals and stay.
+    fn texts(self) -> CatalogText {
+        CatalogText::new(self.detail.data.with(|d| d.as_ref().and_then(|d| d.texts.clone())))
+    }
+
     /// The entry has a web interface on its own ports (the case web access is for).
     fn has_web(self) -> bool {
         self.detail.data.with(|d| d.as_ref().is_some_and(|d| d.web.is_some() && !d.host_network && !d.card.reverse_proxy))
@@ -251,9 +258,10 @@ impl W {
 
 pub fn wizard(id: String) -> AnyView {
     let a = apps();
+    let detail_path = format!("/api/v1/apps/catalog/{}", api::encode(&id));
     let w = W {
         id: StoredValue::new(id.clone()),
-        detail: Remote::new(format!("/api/v1/apps/catalog/{}", api::encode(&id))),
+        detail: Remote::new(texts::url(&detail_path)),
         settings: Remote::new("/api/v1/docker/settings"),
         shares_list: Remote::new("/api/v1/shares"),
         step: RwSignal::new(0),
@@ -275,6 +283,7 @@ pub fn wizard(id: String) -> AnyView {
         proxy: a.proxy,
         proxy_known: a.proxy_known,
     };
+    texts::follow_lang(w.detail, detail_path);
     // the form's defaults once the entry arrived
     Effect::new(move |init: Option<bool>| {
         if init == Some(true) {
@@ -388,7 +397,7 @@ fn options(w: W) -> AnyView {
         w.stack.with(|v| (!v.is_empty() && !valid_stack_name(v)).then(|| t("dk.ed.name_invalid").to_string()))
     });
     let form = SchemaForm {
-        texts: CatalogText(w.id),
+        texts: w.texts(),
         form: StoredValue::new(d.form.clone()),
         overlays: StoredValue::new(d.overlays.clone()),
         values: w.values,
@@ -463,7 +472,7 @@ fn folders(w: W) -> AnyView {
                         {f.nocow.then(|| view! { " "<span class="chip">{tr("shares.nocow")}</span> })}
                     </label>
                     <select id=fid class="input" on:change=move |ev| { let v = event_target_value(&ev); w.folders.update(|m| { m.insert(env.get_value(), v); }); }>{options}</select>
-                    <span class="field-help">{CatalogText(w.id).span(f.description.clone())}</span>
+                    <span class="field-help">{w.texts().span(|t| t.folders.get(&f.env), &f.description)}</span>
                     {hint.map(|k| view! { <span class="field-help app-hint"><Icon icon=icons::INFO size=12 />{tr(k)}</span> })}
                     {f.nocow.then(|| view! { <span class="field-help app-hint"><Icon icon=icons::INFO size=12 />{tr("apps.w.nocow_hint")}</span> })}
                     <span class="field-error" aria-live="polite">{move || err.get().map(|e| view! { <Icon icon=icons::CIRCLE_X size=12 />{ui::err_view(e)} })}</span>
@@ -500,12 +509,12 @@ fn folders(w: W) -> AnyView {
             view! {
                 <div class="field">
                     <label class="field-label" for=fid.clone()>
-                        {CatalogText(w.id).span(s.label.clone())}" "
+                        {w.texts().span(|t| t.shares.get(&s.env)?.label.as_ref(), &s.label)}" "
                         <span class="chip">{tr(if s.access == ShareAccess::Rw { "rm.set.rw" } else { "perm.ro" })}</span>
                         {(!required).then(|| view! { " "<span class="muted small">{tr("sf.optional")}</span> })}
                     </label>
                     <select id=fid class="input" on:change=move |ev| { let v = event_target_value(&ev); w.shares.update(|m| { m.insert(env.get_value(), v); }); }>{options}</select>
-                    <span class="field-help">{CatalogText(w.id).span(s.description.clone())}</span>
+                    <span class="field-help">{w.texts().span(|t| t.shares.get(&s.env)?.description.as_ref(), &s.description)}</span>
                     <span class="field-error" aria-live="polite">{move || err.get().map(|e| view! { <Icon icon=icons::CIRCLE_X size=12 />{ui::err_view(e)} })}</span>
                 </div>
             }
@@ -573,13 +582,13 @@ fn folders(w: W) -> AnyView {
         view! {
             <fieldset class="sf-group">
                 <legend class="mini-title">
-                    {CatalogText(w.id).span(ss.label.clone())}" "
+                    {w.texts().span(|t| t.share_set.as_ref()?.label.as_ref(), &ss.label)}" "
                     <span class="chip">{tr(if ss.access == ShareAccess::Rw { "rm.set.rw" } else { "perm.ro" })}</span>
                 </legend>
                 <p class="small muted">{tr("apps.w.share_set_text")}</p>
                 {move || w.shares_list.data.with(|l| l.as_ref().is_some_and(Vec::is_empty)).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("apps.w.no_shares_yet")}" "<a href="/shares">{tr("apps.w.to_shares")}</a> }.into_any()))}
                 <div class="app-share-set">{rows}</div>
-                <span class="field-help">{CatalogText(w.id).span(ss.description.clone())}</span>
+                <span class="field-help">{w.texts().span(|t| t.share_set.as_ref()?.description.as_ref(), &ss.description)}</span>
                 <span class="field-error" aria-live="polite">{move || err.get().map(|e| view! { <Icon icon=icons::CIRCLE_X size=12 />{ui::err_view(e)} })}</span>
             </fieldset>
         }
@@ -657,7 +666,7 @@ fn network(w: W) -> AnyView {
                     None => t("apps.host_network").to_string(),
                 };
                 ui::row(vec![
-                    ui::cell("apps.col.purpose", "wrap", view! { <div class="cell-main">{CatalogText(w.id).span(pp.purpose.clone())}<span class="cell-sub mono">{format!("{} · {proto}", pp.env)}</span></div> }.into_any()),
+                    ui::cell("apps.col.purpose", "wrap", view! { <div class="cell-main">{w.texts().span(|t| t.ports.get(&pp.name), &pp.purpose)}<span class="cell-sub mono">{format!("{} · {proto}", pp.env)}</span></div> }.into_any()),
                     ui::cell("apps.col.port", "", view! {
                         <div class="cell-main">
                             <div class="chips">{port_cell}</div>
@@ -750,9 +759,10 @@ fn review(w: W) -> AnyView {
             .collect_view();
         let has_errors = !p.errors.is_empty();
         let list = |items: Vec<String>| view! { <ul class="small app-list mono">{items.into_iter().map(|i| view! { <li>{i}</li> }).collect_view()}</ul> };
-        let ports = w.id.with_value(|id| p.ports.iter().map(|x| {
-            format!("{} → {} ({})", x.port, lookup(id, &x.purpose).0, x.bind.as_deref().unwrap_or("host"))
-        }).collect::<Vec<_>>());
+        let texts = w.texts();
+        let ports = p.ports.iter().map(|x| {
+            format!("{} → {} ({})", x.port, texts.plain(|t| t.ports.get(&x.name), &x.purpose), x.bind.as_deref().unwrap_or("host"))
+        }).collect::<Vec<_>>();
         view! {
             {has_errors.then(|| ui::note(Tone::Err, icons::CIRCLE_X, view! { {tr("apps.w.errors")}<ul class="small app-list">{errors}</ul> }.into_any()))}
             {p.port_conflicts.iter().filter(|c| !c.relocatable).map(|c| ui::note(Tone::Err, icons::CIRCLE_X, ui::text(tf("apps.w.port_fixed_used", &[("port", &c.port.to_string())])))).collect_view()}
@@ -766,7 +776,7 @@ fn review(w: W) -> AnyView {
                 ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(text))
             }).collect_view()}
             {(!matches!(p.ram, rynas_api_types::apps::RamGate::Ok)).then(|| view! { <div class="chips">{ram_pill(p.ram)}</div> })}
-            {notes_view(CatalogText(w.id), &p.notes)}
+            {notes_view(texts, &p.notes)}
             <dl class="kvs">
                 {ui::kv_row("dk.ed.name", Signal::stored(p.stack.clone()), "mono")}
                 {ui::kv_row("apps.w.folder", Signal::stored(p.stack_dir.clone()), "mono")}
@@ -786,7 +796,7 @@ fn review(w: W) -> AnyView {
             {(!p.secrets.is_empty()).then(|| view! {
                 <h4 class="mini-title">{tr("apps.d.secrets")}</h4>
                 <ul class="small app-list">{p.secrets.iter().map(|s| view! {
-                    <li><span class="mono">{s.env.clone()}</span>" ••••••••  "{CatalogText(w.id).span(s.description.clone())}{s.show.then(|| view! { " "<span class="chip">{tr("apps.secret.shown")}</span> })}</li>
+                    <li><span class="mono">{s.env.clone()}</span>" ••••••••  "{texts.span(|t| t.secrets.get(&s.env), &s.description)}{s.show.then(|| view! { " "<span class="chip">{tr("apps.secret.shown")}</span> })}</li>
                 }).collect_view()}</ul>
             })}
             {(!p.images.is_empty()).then(|| view! { <h4 class="mini-title">{tr("dk.col.images")}</h4>{list(p.images.clone())} })}
@@ -840,7 +850,7 @@ fn running(w: W) -> AnyView {
                     {secrets.into_iter().map(|x| view! {
                         <div class="app-secret">
                             <div class="cell-main">
-                                {CatalogText(w.id).span(x.description.clone())}
+                                {w.texts().span(|t| t.secrets.get(&x.env), &x.description)}
                                 <span class="cell-sub mono">{x.env.clone()}</span>
                                 <code class="app-secret-value">{x.value.clone()}</code>
                             </div>

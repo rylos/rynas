@@ -1,0 +1,46 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "通过网页界面管理反向代理和 Let's Encrypt 证书，可替代内置网页访问。"
+
+[ports]
+http.purpose = "代理站点的 HTTP 流量和 Let's Encrypt HTTP-01 验证"
+https.purpose = "代理站点的 HTTPS 流量"
+admin.purpose = "管理界面"
+
+[folders]
+DATA_FOLDER.description = "SQLite 数据库、代理主机配置和日志"
+LETSENCRYPT_FOLDER.description = "证书和 ACME 账户"
+
+[secrets]
+ADMIN_PASSWORD.description = "首位管理员的密码"
+
+[form]
+INITIAL_ADMIN_EMAIL.title = "管理员邮箱"
+INITIAL_ADMIN_EMAIL.description = "首位管理员的登录邮箱，也用于接收 Let's Encrypt 通知。"
+
+[[notes]]
+text = "Nginx Proxy Manager 需要 80 和 443 端口。请先将「网页访问」切换到外部代理模式。内置代理及其本地主机名和证书会停用，已安装的应用需要发布到局域网，Nginx Proxy Manager 才能访问。"
+
+[[notes]]
+text = "将代理主机转发到 host.docker.internal 及应用端口，或转发到 NAS 地址。使用此处设置的邮箱和安装后显示的密码登录。"
+
+[[groups]]
+title = "管理员"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "627e19cb"
+"description.md" = "83033e97"
+"ports.http.purpose" = "2dc9817b"
+"ports.https.purpose" = "c64a1be3"
+"ports.admin.purpose" = "56136042"
+"folders.DATA_FOLDER.description" = "2d13c851"
+"folders.LETSENCRYPT_FOLDER.description" = "509bd308"
+"secrets.ADMIN_PASSWORD.description" = "589a465b"
+"notes[0].text" = "538c4775"
+"notes[1].text" = "2551823b"
+"form.INITIAL_ADMIN_EMAIL.title" = "bbaf2713"
+"form.INITIAL_ADMIN_EMAIL.description" = "9069c592"
+"groups[0].title" = "c8b0be26"

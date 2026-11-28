@@ -129,7 +129,8 @@ fn inline(s: &str) -> AnyView {
 }
 
 /// The text as a view (`lang` marks the language of the source).
-pub fn render(src: &str, lang: &'static str) -> AnyView {
+pub fn render(src: &str, lang: &str) -> AnyView {
+    let lang = lang.to_owned();
     let body = blocks(src)
         .into_iter()
         .map(|b| match b {

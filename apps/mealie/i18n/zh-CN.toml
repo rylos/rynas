@@ -1,0 +1,40 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "食谱管理和膳食计划工具，可从网站导入食谱、安排一周餐食并生成购物清单。"
+
+[ports]
+web.purpose = "网页界面和 API"
+
+[folders]
+DATA_FOLDER.description = "SQLite 数据库、食谱图片、备份和自动生成的应用密钥"
+
+[form]
+BASE_URL.title = "公开访问地址"
+BASE_URL.description = "用户打开的地址，用于分享链接和邮件，例如 https://recipes.example.lan。"
+ALLOW_SIGNUP.title = "允许注册"
+ALLOW_SIGNUP.description = "开启后，能访问 Mealie 的人都可以注册账户。关闭时，可以在管理页面邀请用户。"
+
+[[notes]]
+text = "Mealie 初始管理员为 changeme@example.com，密码为 MyPassword。请在安装后立即登录，按设置向导创建自己的账户和密码。"
+
+[[notes]]
+text = "AI 导入食谱支持 OpenAI 或兼容服务（如本地 Ollama）。请安装后在 Mealie 设置中按组配置。"
+
+[[groups]]
+title = "访问"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "6777b9bb"
+"description.md" = "64db3702"
+"ports.web.purpose" = "62746048"
+"folders.DATA_FOLDER.description" = "ab0a3d02"
+"notes[0].text" = "cd8314a1"
+"notes[1].text" = "29c177b1"
+"form.ALLOW_SIGNUP.title" = "0b5a683b"
+"form.ALLOW_SIGNUP.description" = "d12c5e9e"
+"form.BASE_URL.title" = "9ac2b656"
+"form.BASE_URL.description" = "cba23050"
+"groups[0].title" = "65a984f2"

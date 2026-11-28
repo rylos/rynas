@@ -1,0 +1,48 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "连接 Zigbee 设备和 MQTT，兼容数千种传感器和灯具，无需厂商网关。"
+
+[ports]
+web.purpose = "先显示初始设置页，之后显示网页界面"
+
+[folders]
+DATA_FOLDER.description = "configuration.yaml、设备数据库和网络备份 coordinator_backup.json"
+
+[secrets]
+FRONTEND_TOKEN.description = "登录网页界面需要的令牌"
+
+[overlays]
+usb-adapter.description = "以 /dev/zigbee 将 USB Zigbee 协调器传入容器，并授予 dialout 组权限。"
+
+[form]
+USB_ADAPTER.title = "USB 适配器"
+USB_ADAPTER.description = "USB Zigbee 设备插在 NAS 上时开启。使用以太网或 Wi-Fi 协调器时关闭。"
+ADAPTER_DEVICE.title = "适配器设备"
+ADAPTER_DEVICE.description = "适配器在 /dev/serial/by-id/ 下的路径，重启或重新插拔后保持不变。"
+
+[[notes]]
+text = "先安装 MQTT 消息代理（Mosquitto 应用）。首次启动 Zigbee2MQTT 会进入初始设置页。请填写代理地址 mqtt://<NAS address>:1883 及用户名、密码，并填写适配器地址。USB 设备用 /dev/zigbee，网络协调器用 tcp://<address>:6638。"
+
+[[notes]]
+text = "请备份数据文件夹。它保存了 Zigbee 网络密钥和协调器备份，换用新适配器时可凭它们迁移，无需重新配对每台设备。"
+
+[[groups]]
+title = "协调器"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "56102893"
+"description.md" = "98a2b119"
+"ports.web.purpose" = "bd5538b9"
+"folders.DATA_FOLDER.description" = "238d5989"
+"secrets.FRONTEND_TOKEN.description" = "01324741"
+"overlays.usb-adapter.description" = "c8f6dc64"
+"notes[0].text" = "b257a1c2"
+"notes[1].text" = "7fc20c1f"
+"form.ADAPTER_DEVICE.title" = "7fee91f4"
+"form.ADAPTER_DEVICE.description" = "8b54923a"
+"form.USB_ADAPTER.title" = "07012146"
+"form.USB_ADAPTER.description" = "84690477"
+"groups[0].title" = "bb517671"

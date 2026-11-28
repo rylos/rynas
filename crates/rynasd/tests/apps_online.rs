@@ -85,15 +85,19 @@ fn publish(files: &Files, work: &Path, serial: u64, key: &TestKey, broken: bool,
     fs::write(src.join("catalog.toml"), format!("serial = {serial}\n")).unwrap();
     copy_dir(&apps.join("uptime-kuma"), &src.join("uptime-kuma"));
     // the index lists each package at its real version (Renovate bumps it)
-    let version_of = |id: &str| -> Version {
+    // and at its real min_rynas (validation compares both with app.toml)
+    let field_of = |id: &str, key: &str| -> Version {
         let t = fs::read_to_string(apps.join(id).join("app.toml")).unwrap();
-        t.lines().find_map(|l| l.strip_prefix("version = \"")).and_then(|v| v.strip_suffix('"')).expect("version line").parse().unwrap()
+        let prefix = format!("{key} = \"");
+        t.lines().find_map(|l| l.strip_prefix(prefix.as_str())).and_then(|v| v.strip_suffix('"')).expect("version line").parse().unwrap()
     };
-    let mut listed = vec![IndexApp { id: "uptime-kuma".into(), version: version_of("uptime-kuma"), min_rynas: Version::new(0, 1, 0) }];
+    let version_of = |id: &str| field_of(id, "version");
+    let min_of = |id: &str| field_of(id, "min_rynas");
+    let mut listed = vec![IndexApp { id: "uptime-kuma".into(), version: version_of("uptime-kuma"), min_rynas: min_of("uptime-kuma") }];
     if broken {
         copy_dir(&apps.join("mosquitto"), &src.join("mosquitto"));
         fs::write(src.join("mosquitto/compose.yaml"), "services: 3\n").unwrap();
-        listed.push(IndexApp { id: "mosquitto".into(), version: version_of("mosquitto"), min_rynas: Version::new(0, 1, 0) });
+        listed.push(IndexApp { id: "mosquitto".into(), version: version_of("mosquitto"), min_rynas: min_of("mosquitto") });
     }
     let all = files_of(&src, "");
     let refs: Vec<(&str, &[u8])> = all.iter().map(|(p, d)| (p.as_str(), d.as_slice())).collect();
@@ -130,7 +134,8 @@ fn numbered(dir: &Path) -> Vec<String> {
     v
 }
 
-const RUNNING: Version = Version::new(0, 5, 0);
+/// A rynas that runs the real entries (their `min_rynas`, 0.9.21 with translations).
+const RUNNING: Version = Version::new(1, 0, 0);
 
 #[tokio::test]
 async fn downloads_verify_switch_and_refuse() {

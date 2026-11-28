@@ -1,72 +1,78 @@
-//! Localized descriptions and form labels shipped with the application catalogue.
-//!
-//! Match the entry ID and its current source text so updated and third-party
-//! descriptions can still display their own wording.
-
-use std::collections::HashMap;
-use std::sync::OnceLock;
+//! The entry's own texts in the UI language. The server picks the entry's translation
+//! (`apps/<id>/i18n/<lang>.toml`, `docs/phase2/docker-apps.md` § 6.14) for the language asked
+//! in `?lang=` and sends it as [`AppTexts`] beside the English fields: what the translation
+//! has is shown in its language, anything else in English (`lang="en"`).
 
 use leptos::prelude::*;
+use rynas_api_types::apps::AppTexts;
+use serde::de::DeserializeOwned;
 
-const ZH_CN: &str = "zh-CN";
+use crate::i18n::{self, Lang};
+use crate::ui::Remote;
 
-// JSON strings with escapes cannot borrow from the input.
-type Dictionary = HashMap<String, HashMap<String, String>>;
-
-fn dictionary() -> &'static Dictionary {
-    static DICTIONARY: OnceLock<Dictionary> = OnceLock::new();
-    DICTIONARY.get_or_init(|| {
-        serde_json::from_str(include_str!("../../../assets/app-catalog/zh-CN.json"))
-            .expect("the bundled Chinese application catalogue should be valid JSON")
-    })
+/// `path` asking for the entry texts in `lang`.
+fn with_lang(path: &str, lang: Lang) -> String {
+    let sep = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{sep}lang={}", lang.code())
 }
 
-pub(super) fn lookup<'a>(id: &str, source: &'a str) -> (&'a str, &'static str) {
-    lookup_in(crate::i18n::lang().code(), id, source)
+/// A catalogue address (`/api/v1/apps/catalog…`) in the UI language.
+pub(crate) fn url(path: &str) -> String {
+    with_lang(path, i18n::lang())
 }
 
-fn lookup_in<'a>(language: &str, id: &str, source: &'a str) -> (&'a str, &'static str) {
-    let translated = (language == ZH_CN).then(|| {
-        let entry = dictionary().get(id)?;
-        let key = source.trim();
-        // Catalog Markdown can be checked out with Windows line endings.
-        if key.contains("\r\n") {
-            entry.get(&key.replace("\r\n", "\n"))
-        } else {
-            entry.get(key)
+/// Reads `r` again at `path` in the new language when the UI language changes.
+pub(crate) fn follow_lang<T: DeserializeOwned + Send + Sync + 'static>(r: Remote<T>, path: String) {
+    Effect::new(move |prev: Option<Lang>| {
+        let l = i18n::lang();
+        if prev.is_some_and(|p| p != l) {
+            r.load(with_lang(&path, l));
         }
-    }).flatten();
-    translated.map_or((source, "en"), |text| (text.as_str(), ZH_CN))
+        l
+    });
 }
 
+/// The text `pick` finds in `texts` with their language, else `english` with `en`.
+fn pick_text(texts: Option<&AppTexts>, pick: impl FnOnce(&AppTexts) -> Option<&String>, english: &str) -> (String, String) {
+    texts
+        .and_then(|t| pick(t).map(|s| (s.clone(), t.lang.clone())))
+        .unwrap_or_else(|| (english.to_owned(), "en".to_owned()))
+}
+
+/// The texts of one entry in the UI language, when the server sent some.
 #[derive(Clone, Copy)]
-pub(crate) struct CatalogText(pub StoredValue<String>);
+pub(crate) struct CatalogText(StoredValue<Option<AppTexts>>);
 
 impl CatalogText {
-    pub(super) fn new(id: &str) -> Self {
-        Self(StoredValue::new(id.to_owned()))
+    pub(crate) fn new(texts: Option<AppTexts>) -> Self {
+        Self(StoredValue::new(texts))
     }
 
-    pub(crate) fn signal(self, source: String) -> Memo<(String, &'static str)> {
-        Memo::new(move |_| {
-            let (text, lang) = self.0.with_value(|id| lookup(id, &source));
-            (text.to_owned(), lang)
-        })
+    /// The text `pick` finds in the translation and its language, else `english` and `en`.
+    pub(crate) fn text(self, pick: impl FnOnce(&AppTexts) -> Option<&String>, english: &str) -> (String, String) {
+        self.0.with_value(|t| pick_text(t.as_ref(), pick, english))
     }
 
-    pub(crate) fn span(self, source: String) -> AnyView {
-        let translated = self.signal(source);
-        view! {
-            <span lang=move || translated.with(|(_, lang)| *lang)>
-                {move || translated.with(|(text, _)| text.clone())}
-            </span>
-        }
-        .into_any()
+    /// Reads the texts (`None`: the entry has none in the UI language).
+    pub(crate) fn with<R>(self, f: impl FnOnce(Option<&AppTexts>) -> R) -> R {
+        self.0.with_value(|t| f(t.as_ref()))
     }
 
-    pub(super) fn markdown(self, source: String) -> AnyView {
-        let translated = self.signal(source);
-        (move || translated.with(|(text, lang)| crate::markdown::render(text, lang))).into_any()
+    /// Just the text of [`CatalogText::text`] (inside a text that has no element of its own).
+    pub(crate) fn plain(self, pick: impl FnOnce(&AppTexts) -> Option<&String>, english: &str) -> String {
+        self.text(pick, english).0
+    }
+
+    /// [`CatalogText::text`] in a `span` marked with its language.
+    pub(crate) fn span(self, pick: impl FnOnce(&AppTexts) -> Option<&String>, english: &str) -> AnyView {
+        let (text, lang) = self.text(pick, english);
+        view! { <span lang=lang>{text}</span> }.into_any()
+    }
+
+    /// The long description as Markdown, marked with its language.
+    pub(super) fn markdown(self, english: &str) -> AnyView {
+        let (text, lang) = self.text(|t| t.description.as_ref(), english);
+        crate::markdown::render(&text, &lang)
     }
 }
 
@@ -75,16 +81,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_uses_the_current_entry_and_language() {
-        assert_eq!(lookup_in(ZH_CN, "nextcloud", "Admin user name"), ("管理员用户名", ZH_CN));
-        assert_eq!(lookup_in("it", "nextcloud", "Admin user name"), ("Admin user name", "en"));
-        assert_eq!(lookup_in(ZH_CN, "custom", "Admin user name"), ("Admin user name", "en"));
-        assert_eq!(lookup_in(ZH_CN, "nextcloud", "Primary account"), ("Primary account", "en"));
+    fn each_text_falls_back_to_english_on_its_own() {
+        let mut t = AppTexts { lang: "zh-CN".into(), summary: Some("文档归档".into()), ..AppTexts::default() };
+        t.ports.insert("web".into(), "网页界面".into());
+        assert_eq!(pick_text(Some(&t), |t| t.summary.as_ref(), "Archive"), ("文档归档".into(), "zh-CN".into()));
+        assert_eq!(pick_text(Some(&t), |t| t.ports.get("web"), "Web"), ("网页界面".into(), "zh-CN".into()));
+        // a text the translation leaves out, and no translation at all
+        assert_eq!(pick_text(Some(&t), |t| t.ports.get("sync"), "Sync"), ("Sync".into(), "en".into()));
+        assert_eq!(pick_text(None, |t| t.summary.as_ref(), "Archive"), ("Archive".into(), "en".into()));
     }
 
     #[test]
-    fn descriptions_can_use_windows_line_endings() {
-        let (src, zh) = dictionary()["nextcloud"].iter().find(|(src, _)| src.contains('\n')).unwrap();
-        assert_eq!(lookup_in(ZH_CN, "nextcloud", &src.replace('\n', "\r\n")), (zh.as_str(), ZH_CN));
+    fn addresses_carry_the_language() {
+        assert_eq!(with_lang("/api/v1/apps/catalog", Lang::EN), "/api/v1/apps/catalog?lang=en");
+        assert_eq!(with_lang("/x?a=1", Lang::EN), "/x?a=1&lang=en");
     }
 }

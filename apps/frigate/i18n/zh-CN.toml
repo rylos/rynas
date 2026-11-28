@@ -1,0 +1,58 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "网络录像机，可对 IP 摄像头的视频在本地进行 AI 目标检测。"
+
+[ports]
+web.purpose = "网页界面和 API（需要身份验证）"
+rtsp.purpose = "摄像头的 RTSP 转发（go2rtc）"
+webrtc.purpose = "WebRTC 实时画面（TCP）"
+webrtc-udp.purpose = "WebRTC 实时画面（UDP）"
+
+[folders]
+CONFIG_FOLDER.description = "config.yml、事件数据库 frigate.db 和模型"
+RECORDINGS_FOLDER.description = "录像、片段和快照。由于持续写入，建议使用不启用快照的专用存储卷。"
+
+[overlays]
+hw-accel.description = "将 /dev/dri 映射到容器，并在初始配置中启用 VA-API 解码和 GPU 上的 OpenVINO 检测器。"
+
+[form]
+HW_ACCEL.title = "Intel GPU 加速"
+HW_ACCEL.description = "将核显交给 Frigate，用于视频解码（VA-API）和目标检测（OpenVINO）。建议启用，单靠 CPU 检测通常只能处理一两台摄像头。"
+LIBVA_DRIVER.title = "VA-API 驱动"
+LIBVA_DRIVER.description = "Intel Broadwell（第 5 代）及更新平台用 iHD，Gemini Lake Celeron（J4105、J4125）及更旧平台用 i965。"
+LIBVA_DRIVER.enum_labels = ["iHD（较新的 Intel 平台）", "i965（Gemini Lake 及更旧平台）"]
+
+[[notes]]
+text = "Frigate 官方要求 CPU 支持 AVX 和 AVX2。在不支持这些指令的 CPU 上（如 Intel Celeron J4105、J4125、N5105），Intel GPU 检测和录像仍可用，但分类和语义搜索会崩溃，人脸和车牌识别也无法使用，请关闭这些增强功能。"
+
+[[notes]]
+text = "录像会持续写入。在 Btrfs 上，安装程序会关闭录像目录的写时复制，采用原地写入，且不使用校验和或压缩。建议将录像放在不启用快照的专用存储卷中，避开应用栈目录，并在 Frigate 内设置保留期限。"
+
+[[notes]]
+text = "首次启动时会生成管理员密码，并显示在 Docker → 容器 → frigate → 日志中。请在 Frigate 的 Settings → Cameras 中添加摄像头。"
+
+[[groups]]
+title = "硬件"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "4d1c6f5a"
+"description.md" = "262654cf"
+"ports.web.purpose" = "133b3382"
+"ports.rtsp.purpose" = "7e39aadf"
+"ports.webrtc.purpose" = "99a3883f"
+"ports.webrtc-udp.purpose" = "d96c1ff4"
+"folders.CONFIG_FOLDER.description" = "0f1a89c9"
+"folders.RECORDINGS_FOLDER.description" = "dc8761f6"
+"overlays.hw-accel.description" = "32b8c9cc"
+"notes[0].text" = "218e2957"
+"notes[1].text" = "d898629e"
+"notes[2].text" = "95710e8c"
+"form.HW_ACCEL.title" = "dde0f945"
+"form.HW_ACCEL.description" = "78b2917c"
+"form.LIBVA_DRIVER.title" = "7cf12854"
+"form.LIBVA_DRIVER.description" = "f823ddf1"
+"form.LIBVA_DRIVER.enum_labels" = "35326c11"
+"groups[0].title" = "a3f551a8"

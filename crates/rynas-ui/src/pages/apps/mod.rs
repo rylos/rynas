@@ -27,6 +27,9 @@ use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::ui::{self, EmptyState, PageHeader, Remote, Tone};
 
+/// `GET /api/v1/apps/catalog` (without the language: [`texts::url`] adds it).
+const CATALOG: &str = "/api/v1/apps/catalog";
+
 const TABS: &[&str] = &["apps.tab.featured", "apps.tab.apps", "apps.tab.plugins", "apps.tab.installed", "apps.tab.updates"];
 
 /// The fields of `GET /api/v1/web-access` (`WebAccessState`) this page reads: the whole
@@ -82,6 +85,9 @@ pub(super) struct AppDetail {
     pub named_volumes: Vec<rynas_api_types::apps::AppNamedVolume>,
     pub notes: Vec<rynas_api_types::apps::AppNote>,
     pub screenshots: Vec<String>,
+    /// The entry's texts in the UI language ([`texts`]).
+    #[serde(default)]
+    pub texts: Option<rynas_api_types::apps::AppTexts>,
 }
 
 /// What the sections share: the catalogue, the installed apps, web access, and which drawer
@@ -139,9 +145,12 @@ pub fn AppsPage() -> impl IntoView {
     d.refresh();
     // `/plugins` (older links) opens the Plugins section
     let plugins_route = leptos_router::hooks::use_location().pathname.with_untracked(|p| p.starts_with("/plugins"));
+    // the catalogue's installed/update marks change only through a task; the cards' texts
+    // follow the UI language
+    let cat = remote::<AppCatalog>(&texts::url(CATALOG), d.ended);
+    texts::follow_lang(cat, CATALOG.to_string());
     let a = Apps {
-        // the catalogue's installed/update marks change only through a task
-        cat: remote::<AppCatalog>("/api/v1/apps/catalog", d.ended),
+        cat,
         inst: remote::<Vec<InstalledApp>>("/api/v1/apps/installed", d.generation),
         proxy: RwSignal::new(false),
         proxy_known: RwSignal::new(false),

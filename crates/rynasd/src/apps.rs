@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path as UrlPath, State};
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -700,7 +700,9 @@ impl AppsSvc {
             .is_some_and(|p| !p.up_to_date && !p.downgrade)
     }
 
-    fn card(&self, app: &CatalogApp, installed: &[&OnDisk], cat: &Catalog) -> AppCard {
+    /// The card of an entry; `lang`: the language of its [`AppCard::texts`] (none: English
+    /// only).
+    fn card(&self, app: &CatalogApp, installed: &[&OnDisk], cat: &Catalog, lang: Option<&str>) -> AppCard {
         let m = &app.manifest;
         let rynas = env!("CARGO_PKG_VERSION").parse::<Version>().ok();
         AppCard {
@@ -724,10 +726,13 @@ impl AppsSvc {
             icon: format!("/api/v1/apps/catalog/{}/icon", m.id),
             installed: installed.iter().map(|d| d.stack.clone()).collect(),
             update_available: installed.iter().any(|d| Self::update_available(cat, d)),
+            texts: lang.and_then(|l| app.card_texts(l)),
         }
     }
 
-    pub async fn list(&self) -> AppCatalog {
+    /// `GET /v1/apps/catalog`; `lang`: the language asked for (`?lang=`), for the cards'
+    /// texts.
+    pub async fn list(&self, lang: Option<&str>) -> AppCatalog {
         let (cat, issues) = self.catalog().await;
         let installed_ram_mb = self.mem_mb();
         let docker_installed = self.docker.facts(false).await.installed;
@@ -741,7 +746,7 @@ impl AppsSvc {
                     .iter()
                     .filter(|d| d.meta.app == a.manifest.id)
                     .collect();
-                self.card(a, &mine, &cat)
+                self.card(a, &mine, &cat, lang)
             })
             .collect();
         apps.sort_by_key(|a| a.name.to_lowercase());
@@ -756,7 +761,9 @@ impl AppsSvc {
         }
     }
 
-    pub async fn detail(&self, id: &str) -> Res<AppDetail> {
+    /// `GET /v1/apps/catalog/{id}`; `lang`: the language asked for (`?lang=`), for
+    /// [`AppDetail::texts`].
+    pub async fn detail(&self, id: &str, lang: Option<&str>) -> Res<AppDetail> {
         let (cat, _) = self.catalog().await;
         let app = cat
             .get(id)
@@ -765,7 +772,7 @@ impl AppsSvc {
         let mine: Vec<&OnDisk> = disk.iter().filter(|d| d.meta.app == id).collect();
         let m = &app.manifest;
         Ok(AppDetail {
-            card: self.card(app, &mine, &cat),
+            card: self.card(app, &mine, &cat, lang),
             description: app.description.clone(),
             homepage: m.homepage.clone(),
             source: m.source.clone(),
@@ -789,6 +796,7 @@ impl AppsSvc {
                 .filter_map(|p| p.file_name()?.to_str().map(str::to_string))
                 .map(|f| format!("/api/v1/apps/catalog/{id}/screenshots/{f}"))
                 .collect(),
+            texts: lang.and_then(|l| app.texts(l)),
         })
     }
 
@@ -1082,7 +1090,7 @@ impl AppsSvc {
                 purpose: p.purpose.clone(),
             })
             .collect();
-        let card = self.card(app, &[], &cat);
+        let card = self.card(app, &[], &cat, None);
         let share_set = match (&m.share_set, req.share_set.is_empty()) {
             (None, true) => Vec::new(),
             (None, false) => {
@@ -2047,20 +2055,33 @@ pub(crate) async fn update_task(
 // routes
 // ---------------------------------------------------------------------------------------------
 
-async fn catalog_get(State(st): State<AppsState>, hd: HeaderMap) -> Res<Json<AppCatalog>> {
+/// `?lang=<code>` of the catalogue reads: the language of the entries' own texts
+/// ([`AppTexts`]). Absent, or a language no entry is translated into: English only.
+#[derive(Debug, Default, serde::Deserialize)]
+struct LangQuery {
+    #[serde(default)]
+    lang: Option<String>,
+}
+
+async fn catalog_get(
+    State(st): State<AppsState>,
+    hd: HeaderMap,
+    Query(q): Query<LangQuery>,
+) -> Res<Json<AppCatalog>> {
     let a = asvc(&st)?;
     admin(&a, &hd)?;
-    Ok(Json(a.list().await))
+    Ok(Json(a.list(q.lang.as_deref()).await))
 }
 
 async fn detail_get(
     State(st): State<AppsState>,
     hd: HeaderMap,
     UrlPath(id): UrlPath<String>,
+    Query(q): Query<LangQuery>,
 ) -> Res<Json<AppDetail>> {
     let a = asvc(&st)?;
     admin(&a, &hd)?;
-    Ok(Json(a.detail(&id).await?))
+    Ok(Json(a.detail(&id, q.lang.as_deref()).await?))
 }
 
 /// An image file of an entry: bounded, typed by extension, cached by entity tag.

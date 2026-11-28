@@ -1,0 +1,38 @@
+# Simplified Chinese texts of the entry, by the field of app.toml and form.json they
+# translate (docs/phase2/docker-apps.md § 6.14). The long description is zh-CN.md.
+
+description = "面向文件托管网站和链接的下载管理器，可在浏览器内使用桌面界面。"
+
+[ports]
+web.purpose = "网页界面（浏览器中的 JDownloader 桌面）"
+myjd.purpose = "MyJDownloader 应用和浏览器扩展的局域网直连"
+
+[folders]
+CONFIG_FOLDER.description = "JDownloader 设置、账户、下载列表和日志"
+
+[shares]
+DOWNLOADS.label = "下载文件"
+DOWNLOADS.description = "存放已完成下载的共享文件夹，挂载到 /output。"
+
+[secrets]
+WEB_PASSWORD.description = "网页界面密码（用户名为 admin）"
+
+[[notes]]
+text = "使用 admin 和安装时显示的密码登录。要使用 MyJDownloader 手机应用和浏览器扩展，请在 JDownloader 的 Settings → MyJDownloader 中设置账户。"
+
+[[notes]]
+text = "下载操作使用应用运行账户在目标目录上的权限。请给该账户授予此共享文件夹的写入权限。"
+
+# Stamps of the English each text was translated from: after a review, refresh them with
+# cargo run -p rynas-apps --example catalog-i18n -- apps/<id>
+[sources]
+"description" = "29088d1c"
+"description.md" = "a8f350b4"
+"ports.web.purpose" = "d2d13c9c"
+"ports.myjd.purpose" = "b00617c6"
+"folders.CONFIG_FOLDER.description" = "4df1ff26"
+"shares.DOWNLOADS.label" = "fc59e0f6"
+"shares.DOWNLOADS.description" = "73f1928f"
+"secrets.WEB_PASSWORD.description" = "fa3ebb25"
+"notes[0].text" = "ee8b70c8"
+"notes[1].text" = "5d9cdd34"
