@@ -150,7 +150,8 @@ ended "ok").
   snapshots, an agent receive ended, Space deleted snapshots. Changes settle 30 s, the volume is
   marked pending (`SpaceOverview.pending`, shown on the page) and updated once its disks are
   awake (no deadline: the numbers are not urgent). It only compares the pairs not compared
-  before; Docker, the leftovers and the recycle bins keep their last sizes.
+  before, going on from the checkpoint of a pass that stopped (below); Docker, the leftovers and
+  the recycle bins keep their last sizes.
 
 Each line of snapshots is measured by neighbours (`rynas_btrfs::pcspace`, the same method as the
 PC backups' measure, numbers per volume and snapshot UUID in `<state>/space/known.json`, pruned to the snapshots present at each update of a volume, the PC backups'
@@ -158,9 +159,33 @@ numbers reused): with a live folder, what removing the line frees ≈ the `died`
 but the newest + what the newest holds alone (no full search ever); without one, the line's
 union (one full search of the newest the first time, on request only). Lines that cannot be
 compared pair by pair (writable snapshots, a lone snapshot of a live folder) are walked as before,
-on request only. A time budget (on request: 45 minutes or 3 × the estimate per volume; after a
-change: 10 minutes) ends **partial** naming the sources left; a source not measured keeps its last
-numbers and the volume keeps the age of its oldest number.
+on request only. A source not measured keeps its last numbers and the volume keeps the age of its
+oldest number.
+
+**Checkpoints** (2026-11-28; a retention pass on a real NAS left one pair of 228 802 candidate
+extents that the 10-minute budget of the update stopped every time, losing everything, so the
+next update started the same pair again). The comparisons keep their progress per volume in
+`<state>/space/measure-progress.json` (`rynas_btrfs::pcspace::Checkpoint`, written whole and
+renamed into place): each finished pair at once, keyed by both snapshots' UUIDs and generations
+and their own neighbours, and inside a pair a cursor (candidates counted in ascending start, the
+partial sums, a fingerprint of the candidate list) every 30 s and when it stops. The next pass
+takes finished pairs as they are and goes on in a stopped one from its cursor when the candidate
+list is the same (else it counts that pair again); the numbers are those of a pass never stopped
+(tests stop the fake source at many points, also losing the last write). A line measured to its
+end has its numbers written to `known.json` and its entries dropped; at the end of each scan of a
+volume the entries of snapshots gone or with another generation go; at most 2048 finished and 16
+stopped pairs per volume. Outcomes: on request a time budget (45 minutes or 3 × the estimate per
+volume) ends **partial** naming the sources left, the next Measure going on from there; an
+automatic update has no failing limit: it works a 30-minute slice (`CHANGES_SLICE`, soft: it
+stops only once it got somewhere, so the disks may sleep between slices instead of being read
+for hours), then ends **Ok** logging what is left; the volume stays pending
+(`MeasureProgress.unfinished`) and goes on at the next change of snapshots, at the next daily
+housekeeping once its disks are awake (also the first after a start), or with Measure; no new
+timer. The estimate counts a finished pair as nothing and a stopped one by its candidates left at
+this NAS's time per candidate (learnt from each pass of at least 1000 candidates; reference
+3 ms), other pairs by the learnt candidates per pair (else the PC backups' time per pair); the
+progress inside a pair moves by candidates counted, and the expected total is corrected once a
+pair's candidates are known.
 
 Expected costs on the DS920+ (one HDD, a PC folder of 21 snapshots in 3 lines and a deleted
 job): before, 2700 s of disk every day for nothing; now, nothing on a quiet day; after a nightly

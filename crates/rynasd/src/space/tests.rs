@@ -2,6 +2,7 @@
 //! before and after a scan, pins, protected deletions refused, a preview, the settings and a
 //! safe action, the low-space notification with its hysteresis.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,7 +23,9 @@ use tower::ServiceExt;
 
 use super::discover::fake::{TreeProbe, subvol};
 use super::discover::Probe;
-use super::{Claim, Env, Measured, Space};
+use super::{Claim, DockerFacts, Env, Measured, ScanMode, Space};
+use rynas_btrfs::extents::WalkError;
+use rynas_btrfs::pcspace::{Checkpoint, Hooks, LineSpace, PairCursor, PairFacts, Snap, Source, candidate_list, count_candidates};
 use rynas_api_types::notify::EventState;
 use crate::ops::Ops;
 use crate::roles::AdminPolicy;
@@ -63,6 +66,41 @@ struct TestEnv {
     kept: Mutex<Vec<Vec<PathBuf>>>,
     /// The lines of every preview measurement.
     lines: Mutex<Vec<Vec<rynas_btrfs::freed::Line>>>,
+    /// The extents `(start, size)` of the snapshots the neighbour comparison knows (by UUID;
+    /// any other snapshot: not comparable here), the reference lists it read in all, and
+    /// the count at which it stops as if its time ran out.
+    line_sets: Mutex<BTreeMap<String, BTreeSet<(u64, u64)>>>,
+    line_reads: AtomicUsize,
+    line_stop_at: Mutex<Option<usize>>,
+}
+
+/// A line of [`TestEnv::line_sets`] as a source of numbers: subvolume of snapshot `i` is
+/// `i + 1`, every candidate counted through [`count_candidates`].
+struct FakeLine<'a> {
+    sets: Vec<BTreeSet<(u64, u64)>>,
+    reads: &'a AtomicUsize,
+    stop: &'a dyn Fn() -> bool,
+}
+
+impl Source for FakeLine<'_> {
+    fn pair(&mut self, a: usize, b: usize) -> Result<PairFacts, WalkError> {
+        self.pair_from(a, b, None, &mut |_| {})
+    }
+    fn distinct(&mut self, i: usize) -> Result<u64, WalkError> {
+        Ok(self.sets[i].iter().map(|e| e.1).sum())
+    }
+    fn pair_from(&mut self, a: usize, b: usize, from: Option<&PairCursor>, at: &mut dyn FnMut(&PairCursor)) -> Result<PairFacts, WalkError> {
+        let cb: BTreeMap<u64, u64> = self.sets[b].difference(&self.sets[a]).copied().collect();
+        let ca: BTreeMap<u64, u64> = self.sets[a].difference(&self.sets[b]).copied().collect();
+        let all = candidate_list(&cb, &ca);
+        let (sets, reads) = (&self.sets, self.reads);
+        let mut roots = |bytenr: u64| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(sets.iter().enumerate().filter(|(_, s)| s.range((bytenr, 0)..=(bytenr, u64::MAX)).next().is_some()).map(|(i, _)| i as u64 + 1).collect()))
+        };
+        let c = count_candidates(&all, from, (a as u64 + 1, b as u64 + 1), &mut roots, self.stop, at, &|_| {})?;
+        Ok(PairFacts { born: c.born, died: c.died, excl_newer: c.excl_newer, excl_older: c.excl_older, distinct: None })
+    }
 }
 
 impl Env for TestEnv {
@@ -115,6 +153,17 @@ impl Env for TestEnv {
     fn fs_id(&self, path: &Path) -> Option<String> {
         path.exists().then(|| "test-fs".to_string())
     }
+    fn measure_line(&self, line: &[Snap], anchor: bool, stop: &dyn Fn() -> bool, _: &dyn Fn(&str), cp: &mut Checkpoint, hooks: &mut dyn Hooks) -> Result<LineSpace, WalkError> {
+        let sets = {
+            let known = self.line_sets.lock().unwrap();
+            line.iter().map(|s| known.get(&s.uuid).cloned()).collect::<Option<Vec<_>>>()
+        };
+        let sets = sets.ok_or_else(|| WalkError::Unsupported("no neighbour comparison here".into()))?;
+        let at = *self.line_stop_at.lock().unwrap();
+        let stop = || stop() || at.is_some_and(|n| self.line_reads.load(Ordering::SeqCst) >= n);
+        let mut src = FakeLine { sets, reads: &self.line_reads, stop: &stop };
+        rynas_btrfs::pcspace::measure_resumable(line, &mut src, true, anchor, cp, hooks)
+    }
 }
 
 struct World {
@@ -157,6 +206,9 @@ fn world() -> World {
         count_at_delete: Mutex::new(Vec::new()),
         kept: Mutex::new(Vec::new()),
         lines: Mutex::new(Vec::new()),
+        line_sets: Mutex::new(BTreeMap::new()),
+        line_reads: AtomicUsize::new(0),
+        line_stop_at: Mutex::new(None),
     });
     let thumbs = dir.path().join("thumbs");
     std::fs::create_dir_all(thumbs.join("1000")).unwrap();
@@ -469,4 +521,77 @@ async fn the_preview_keeps_only_the_neighbours_and_has_a_time_limit() {
     assert_eq!(r.timed_out_minutes, Some(0));
     assert!(r.done && r.error.is_none());
     assert!(lines.lock().unwrap().iter().any(|l| l.starts_with("not measured")));
+}
+
+/// A line of snapshots of thousands of extents, about 1900 candidates per pair.
+fn big_line(n: usize) -> Vec<BTreeSet<(u64, u64)>> {
+    let mut out = Vec::new();
+    let mut cur: BTreeSet<(u64, u64)> = (0..3000u64).map(|i| (i * 16, 4096 * (1 + i % 7))).collect();
+    let mut next = 1_000_000u64;
+    for s in 0..n as u64 {
+        out.push(cur.clone());
+        cur.retain(|e| (e.0 / 16 + s) % 3 != 0);
+        for j in 0..900 {
+            cur.insert((next, 8192 + 4096 * (j % 5)));
+            next += 16;
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn measures_go_on_from_where_they_stopped() {
+    let w = world();
+    let sets = big_line(5);
+    for (i, s) in sets.iter().enumerate() {
+        w.env.line_sets.lock().unwrap().insert(format!("u{i}"), s.clone());
+    }
+    let add = |i: usize| subvol(&w.env.vol.join(format!(".snapshots/big/big.2026110{}T0100", i + 1)), &format!(r#"{{"readonly": true, "uuid": "u{i}"}}"#));
+    for i in 0..4 {
+        add(i);
+    }
+    // a line without a live folder takes each extent once
+    let truth = |n: usize| -> u64 { sets[..n].iter().flatten().collect::<BTreeSet<_>>().iter().map(|e| e.1).sum() };
+    let candidates = |a: usize, b: usize| sets[a].symmetric_difference(&sets[b]).count();
+    let logs = Mutex::new(Vec::<String>::new());
+    let log = |l: &str| logs.lock().unwrap().push(l.to_string());
+    let scan = |mode, reads: Option<usize>| {
+        *w.env.line_stop_at.lock().unwrap() = reads.map(|n| w.env.line_reads.load(Ordering::SeqCst) + n);
+        w.space.scan(Some("vol1"), mode, &DockerFacts::default(), &log, &|_| {}, &|| false).unwrap()
+    };
+    let progress = || -> Value { serde_json::from_slice(&std::fs::read(w.env.state.join("space/measure-progress.json")).unwrap()).unwrap() };
+    let unfinished = |p: &Value| p["unfinished"].as_array().is_some_and(|a| a.iter().any(|v| v == "vol1"));
+
+    // a person's Measure out of time: partial, with what it compared kept
+    let end = scan(ScanMode::Full, Some(2500));
+    assert!(end.partial.as_deref().is_some_and(|p| p.contains("big")), "{end:?}");
+    let p = progress();
+    assert_eq!(p["volumes"]["vol1"]["pairs"].as_array().map(Vec::len), Some(1), "{p}");
+    assert_eq!(p["volumes"]["vol1"]["partial"].as_array().map(Vec::len), Some(1), "{p}");
+    assert!(unfinished(&p));
+    assert!(logs.lock().unwrap().iter().any(|l| l.contains("stopped at 768 of")), "{:?}", logs.lock().unwrap());
+
+    // the next one goes on from there: nothing read twice, the numbers of one never stopped
+    let end = scan(ScanMode::Full, None);
+    assert_eq!(end.partial, None);
+    assert_eq!(w.env.line_reads.load(Ordering::SeqCst), candidates(0, 1) + candidates(1, 2) + candidates(2, 3));
+    let freed = |o: &SpaceOverview| o.volumes[0].sources.iter().find(|s| s.dir.ends_with(".snapshots/big")).and_then(|s| s.freed_bytes);
+    assert_eq!(freed(&overview(&w).await), Some(truth(4)));
+    let p = progress();
+    assert!(p["volumes"].get("vol1").is_none() && !unfinished(&p), "{p}");
+
+    // a new snapshot: the automatic update stops part way, ends Ok (not partial), says what
+    // is left, and the volume's numbers show as pending
+    add(4);
+    logs.lock().unwrap().clear();
+    let end = scan(ScanMode::Changes, Some(300));
+    assert_eq!(end.partial, None);
+    assert!(logs.lock().unwrap().iter().any(|l| l.contains("left for next time")), "{:?}", logs.lock().unwrap());
+    assert!(unfinished(&progress()));
+    assert_eq!(overview(&w).await.pending, ["vol1"]);
+    // the next update ends it
+    let end = scan(ScanMode::Changes, None);
+    assert_eq!(end.partial, None);
+    assert_eq!(freed(&overview(&w).await), Some(truth(5)));
+    assert!(!unfinished(&progress()) && overview(&w).await.pending.is_empty());
 }

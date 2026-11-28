@@ -915,6 +915,25 @@ is a toast and stays on the row ("measuring failed", the reason in the drawer). 
 On disk column sits under its head (`td.num > .cell-main` right-aligned; the cell wraps instead of
 widening the table).
 
+**Checkpoints (2026-11-28).** The cost of a pair is its candidates: each needs a
+`LOGICAL_INO_V2`, a back-reference walk. On a real NAS a PC retention pass deleted a snapshot and
+left Storage › Space's automatic update one pair of 228 802 candidates; its 10-minute budget
+stopped it every time and, since results were kept only when a whole line ended, the next pass
+started the same pair again. `rynas_btrfs::pcspace` now keeps progress in a `Checkpoint` the
+caller writes down: every finished pair at once (`PairDone`, keyed by both snapshots' UUIDs and
+generations and their own neighbours, as what each holds alone depends on them), and inside a
+pair a `PairCursor`: the candidates are counted in ascending start, and the cursor holds how
+many are done, the partial born/died/exclusive sums and a fingerprint of the candidate list,
+saved every 30 s and when the pair stops. A later pass takes a finished pair as it is and
+goes on in a stopped one from the cursor when the regenerated candidate list has the same
+fingerprint (the list comes from read-only snapshots, so it does; otherwise the pair is counted
+again). The result equals an uninterrupted pass (tested by stopping a fake source at many
+points, also losing the last write). Space keeps it per volume in
+`<state>/space/measure-progress.json` (bounded, pruned to snapshots present with the same
+generation); its automatic update has no failing time limit any more but a soft 30-minute slice
+that ends Ok and goes on at the next trigger (`docs/phase1/tasks.md`, "Space measures"). The PC
+backups' own measure (`pcbackup.usage`, no time limit) still uses the plain `measure_line`.
+
 #### 11.12.1 Free numbers, the exact measure on request (decision of 2026-11-26)
 
 The first measure scales with the data (46 minutes for 400 GB on the DS920+ above; tens of TB

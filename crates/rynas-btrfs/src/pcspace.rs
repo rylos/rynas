@@ -37,9 +37,21 @@
 //! snapshots never change, so it is kept and later ones follow by the formula. Limits (shown
 //! as "≈"): the metadata (tree blocks, inline data of small files) is not counted; data a line
 //! shares with another line counts in both; a lone snapshot's own data is its whole size.
+//!
+//! **Checkpoints.** One pair can take long (the `LOGICAL_INO_V2` of each candidate is a
+//! back-reference walk: a pair of 228 802 candidates took more than 10 minutes on a J4125 with
+//! disks), so a measure keeps its progress in a [`Checkpoint`] the caller writes down
+//! ([`Hooks::save`]): every finished pair at once ([`PairDone`], by a [`PairKey`]: both
+//! snapshots' UUIDs and generations and their own neighbours), and inside a pair a
+//! [`PairCursor`] (how many candidates, in ascending start, are counted, with their sums and a
+//! fingerprint of the candidate list) at most every [`SAVE_EVERY`] and when the pair stops. A
+//! later measure reuses a finished pair as it is and goes on in a stopped one from its cursor
+//! when the candidates are the same list (else it counts that pair again): the numbers are
+//! those of a measure never stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -94,7 +106,7 @@ pub struct Snap {
 }
 
 /// The comparison of two neighbours.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairFacts {
     pub born: u64,
     pub died: u64,
@@ -102,6 +114,7 @@ pub struct PairFacts {
     pub excl_newer: u64,
     pub excl_older: u64,
     /// `distinct` of the older and the newer, when they were compared by full walks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distinct: Option<(u64, u64)>,
 }
 
@@ -110,6 +123,255 @@ pub trait Source {
     fn pair(&mut self, older: usize, newer: usize) -> Result<PairFacts, WalkError>;
     /// One full tree search: `distinct` of snapshot `i`.
     fn distinct(&mut self, i: usize) -> Result<u64, WalkError>;
+    /// The generation of snapshot `i` (0: not known). A snapshot whose generation changed is
+    /// not the one a checkpoint saw.
+    fn generation(&self, _i: usize) -> u64 {
+        0
+    }
+    /// [`Source::pair`] going on from `from` (a cursor of an earlier, stopped comparison of
+    /// the same pair; ignored when the candidates are not the same list), calling `at` with a
+    /// consistent cursor every few hundred candidates and right before it stops. By default
+    /// the pair is compared whole.
+    fn pair_from(&mut self, older: usize, newer: usize, _from: Option<&PairCursor>, _at: &mut dyn FnMut(&PairCursor)) -> Result<PairFacts, WalkError> {
+        self.pair(older, newer)
+    }
+}
+
+/// How often at most a cursor inside a pair is handed to [`Hooks::save`] (a finished pair and
+/// a stop always are).
+pub const SAVE_EVERY: Duration = Duration::from_secs(30);
+
+/// A pair of neighbours as a checkpoint knows it: both snapshots with their generations, and
+/// their own neighbours (what each one holds alone depends on them).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairKey {
+    pub older: String,
+    pub newer: String,
+    /// The older one's older neighbour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// The newer one's newer neighbour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// Of the older and the newer.
+    #[serde(default)]
+    pub generations: (u64, u64),
+}
+
+impl PairKey {
+    fn uuids(&self) -> impl Iterator<Item = &str> {
+        [Some(&self.older), Some(&self.newer), self.before.as_ref(), self.after.as_ref()].into_iter().flatten().map(String::as_str)
+    }
+}
+
+/// Where the counting of one pair stands: the first `done` of its `total` candidate extents
+/// (ascending start) are counted in the sums.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairCursor {
+    pub total: u64,
+    pub done: u64,
+    /// Of the candidate list: the count goes on only over the same list.
+    pub fingerprint: u64,
+    pub born: u64,
+    pub died: u64,
+    pub excl_newer: u64,
+    pub excl_older: u64,
+    /// Candidates with too many references to list (counted as shared).
+    #[serde(default)]
+    pub truncated: u64,
+}
+
+/// A finished pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairDone {
+    pub key: PairKey,
+    pub facts: PairFacts,
+}
+
+/// A pair stopped part way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairPartial {
+    pub key: PairKey,
+    pub cursor: PairCursor,
+}
+
+/// The progress of measures not finished yet (one per volume or folder, kept by the caller):
+/// the pairs they finished and the pairs they stopped in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pairs: Vec<PairDone>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partial: Vec<PairPartial>,
+}
+
+impl Checkpoint {
+    /// Most finished pairs kept (about 300 bytes each in JSON); the oldest go first.
+    pub const MAX_PAIRS: usize = 2048;
+    /// Most stopped pairs kept.
+    pub const MAX_PARTIAL: usize = 16;
+
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty() && self.partial.is_empty()
+    }
+
+    pub fn facts(&self, key: &PairKey) -> Option<PairFacts> {
+        self.pairs.iter().find(|p| &p.key == key).map(|p| p.facts)
+    }
+
+    pub fn cursor(&self, key: &PairKey) -> Option<&PairCursor> {
+        self.partial.iter().find(|p| &p.key == key).map(|p| &p.cursor)
+    }
+
+    fn put_facts(&mut self, key: PairKey, facts: PairFacts) {
+        self.partial.retain(|p| p.key != key);
+        self.pairs.retain(|p| p.key != key);
+        self.pairs.push(PairDone { key, facts });
+        let over = self.pairs.len().saturating_sub(Self::MAX_PAIRS);
+        self.pairs.drain(..over);
+    }
+
+    fn put_cursor(&mut self, key: PairKey, cursor: PairCursor) {
+        self.partial.retain(|p| p.key != key);
+        self.partial.push(PairPartial { key, cursor });
+        let over = self.partial.len().saturating_sub(Self::MAX_PARTIAL);
+        self.partial.drain(..over);
+    }
+
+    /// Keeps only what describes snapshots there now (`now`: UUID → generation): every UUID
+    /// of the key present, the two compared ones with the generations they had.
+    pub fn retain_present(&mut self, now: &BTreeMap<String, u64>) {
+        let ok = |k: &PairKey| k.uuids().all(|u| now.contains_key(u)) && now.get(&k.older) == Some(&k.generations.0) && now.get(&k.newer) == Some(&k.generations.1);
+        self.pairs.retain(|p| ok(&p.key));
+        self.partial.retain(|p| ok(&p.key));
+    }
+
+    /// Forgets the pairs of the snapshots `uuids` (a line whose numbers are now kept with its
+    /// snapshots).
+    pub fn forget(&mut self, uuids: &BTreeSet<&str>) {
+        let mine = |k: &PairKey| uuids.contains(k.older.as_str()) || uuids.contains(k.newer.as_str());
+        self.pairs.retain(|p| !mine(&p.key));
+        self.partial.retain(|p| !mine(&p.key));
+    }
+}
+
+/// What a measure tells its caller while it works (every method optional).
+pub trait Hooks {
+    /// Before each pair and before the full search.
+    fn step(&mut self, _s: Step) {}
+    /// Pair `newer` came whole from the checkpoint: nothing read.
+    fn reused(&mut self, _newer: usize) {}
+    /// Inside pair `newer`: `done` of its `total` candidate extents counted, `from` of them
+    /// already before this measure.
+    fn extents(&mut self, _newer: usize, _done: u64, _total: u64, _from: u64) {}
+    /// The checkpoint changed in a way worth keeping: write it down.
+    fn save(&mut self, _cp: &Checkpoint) {}
+}
+
+/// [`Hooks`] that only pass the steps on.
+struct StepOnly<'a>(&'a mut dyn FnMut(Step));
+
+impl Hooks for StepOnly<'_> {
+    fn step(&mut self, s: Step) {
+        (self.0)(s)
+    }
+}
+
+/// The key of the pair `(newer - 1, newer)` of `line` (`generations` by index; missing: 0).
+pub fn pair_key(line: &[Snap], generations: &[u64], newer: usize) -> PairKey {
+    let (a, b) = (newer - 1, newer);
+    let g = |i: usize| generations.get(i).copied().unwrap_or(0);
+    PairKey {
+        older: line[a].uuid.clone(),
+        newer: line[b].uuid.clone(),
+        before: a.checked_sub(1).map(|i| line[i].uuid.clone()),
+        after: line.get(b + 1).map(|s| s.uuid.clone()),
+        generations: (g(a), g(b)),
+    }
+}
+
+/// A fingerprint (FNV-1a) of a candidate list.
+fn fingerprint(all: &BTreeMap<u64, (Option<u64>, Option<u64>)>) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for (&k, &(n, o)) in all {
+        for w in [k, n.unwrap_or(u64::MAX), o.unwrap_or(u64::MAX)] {
+            for byte in w.to_le_bytes() {
+                h ^= u64::from(byte);
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+    }
+    h
+}
+
+/// Counts the candidates of one pair: `all` maps each candidate's start to its on-disk size as
+/// a candidate of the newer (root `rb`) and of the older (root `ra`); `roots` lists the
+/// subvolumes referencing a start (`None`: too many to list, counted as shared). Goes on from
+/// `from` when it was made over the same list; `at` gets the cursor every 256 candidates and
+/// right before a stop.
+#[allow(clippy::too_many_arguments)]
+pub fn count_candidates(
+    all: &BTreeMap<u64, (Option<u64>, Option<u64>)>,
+    from: Option<&PairCursor>,
+    (ra, rb): (u64, u64),
+    roots: &mut dyn FnMut(u64) -> Result<Option<BTreeSet<u64>>, WalkError>,
+    stop: &dyn Fn() -> bool,
+    at: &mut dyn FnMut(&PairCursor),
+    progress: &dyn Fn(&str),
+) -> Result<PairCursor, WalkError> {
+    let (total, fp) = (all.len() as u64, fingerprint(all));
+    let mut c = match from {
+        Some(c) if c.total == total && c.fingerprint == fp && c.done <= total => c.clone(),
+        Some(c) => {
+            progress(&format!("the candidate extents are not those of the saved point ({} then, {total} now): counted again from the start", c.total));
+            PairCursor { total, fingerprint: fp, ..PairCursor::default() }
+        }
+        None => PairCursor { total, fingerprint: fp, ..PairCursor::default() },
+    };
+    if c.done > 0 {
+        progress(&format!("going on from {} of {total} candidate extents", c.done));
+    }
+    for (&bytenr, &(newer, older)) in all.iter().skip(c.done as usize) {
+        if c.done % 256 == 0 {
+            at(&c);
+            if stop() {
+                return Err(WalkError::Stopped);
+            }
+        }
+        let r = roots(bytenr)?;
+        for (len, me, other, newer_side) in [(newer, rb, ra, true), (older, ra, rb, false)] {
+            let Some(len) = len else { continue };
+            // a list too long to read: referenced by many, so neither new nor gone here
+            let Some(r) = r.as_ref() else {
+                c.truncated += 1;
+                continue;
+            };
+            let mine = if r.contains(&me) && !r.contains(&other) { len } else { 0 };
+            let alone = if r.len() == 1 && r.contains(&me) { len } else { 0 };
+            if newer_side {
+                c.born += mine;
+                c.excl_newer += alone;
+            } else {
+                c.died += mine;
+                c.excl_older += alone;
+            }
+        }
+        c.done += 1;
+    }
+    at(&c);
+    Ok(c)
+}
+
+/// The candidate list of [`count_candidates`] from the newer's (`cb`) and the older's (`ca`).
+pub fn candidate_list(cb: &BTreeMap<u64, u64>, ca: &BTreeMap<u64, u64>) -> BTreeMap<u64, (Option<u64>, Option<u64>)> {
+    let mut all: BTreeMap<u64, (Option<u64>, Option<u64>)> = BTreeMap::new();
+    for (&k, &l) in cb {
+        all.entry(k).or_default().0 = Some(l);
+    }
+    for (&k, &l) in ca {
+        all.entry(k).or_default().1 = Some(l);
+    }
+    all
 }
 
 /// A measured line: every snapshot's [`Known`] filled in.
@@ -121,6 +383,8 @@ pub struct LineSpace {
     /// Pairs compared and full tree searches made by this measure.
     pub pairs: u32,
     pub walks: u32,
+    /// Pairs taken whole from the checkpoint.
+    pub reused: u32,
 }
 
 /// The pairs `(newer - 1, newer)` a measure compares (by the newer index): those whose
@@ -167,6 +431,53 @@ pub fn measure_with(line: &[Snap], src: &mut dyn Source, walk: bool, step: &mut 
 /// needed). Without any `distinct` known, `distinct` stays unknown and `union` is the sum of
 /// the `died` of every snapshot but the newest.
 pub fn measure_with_opts(line: &[Snap], src: &mut dyn Source, walk: bool, anchor: bool, step: &mut dyn FnMut(Step)) -> Result<LineSpace, WalkError> {
+    measure_core(line, src, walk, anchor, &mut Checkpoint::default(), &mut StepOnly(step), SAVE_EVERY)
+}
+
+/// [`measure_with_opts`] keeping its progress in `cp` (module text, "Checkpoints"): pairs
+/// finished there are taken as they are, a pair stopped there goes on from its cursor, and
+/// `hooks` is told of every change worth writing down. On an error (a stop) `cp` holds what
+/// was done.
+pub fn measure_resumable(line: &[Snap], src: &mut dyn Source, walk: bool, anchor: bool, cp: &mut Checkpoint, hooks: &mut dyn Hooks) -> Result<LineSpace, WalkError> {
+    measure_core(line, src, walk, anchor, cp, hooks, SAVE_EVERY)
+}
+
+/// One pair compared with its progress kept in `cp` (a cursor at most every `every`, and
+/// when it stops; the facts when it ends).
+fn pair_resumable(src: &mut dyn Source, newer: usize, key: PairKey, cp: &mut Checkpoint, hooks: &mut dyn Hooks, every: Duration) -> Result<PairFacts, WalkError> {
+    let from = cp.cursor(&key).cloned();
+    let mut saved = from.clone();
+    let mut last: Option<PairCursor> = None;
+    let mut first: Option<u64> = None;
+    let mut at = Instant::now();
+    let r = src.pair_from(newer - 1, newer, from.as_ref(), &mut |c: &PairCursor| {
+        let start = *first.get_or_insert(c.done);
+        hooks.extents(newer, c.done, c.total, start);
+        if c.done > 0 && saved.as_ref() != Some(c) && at.elapsed() >= every {
+            cp.put_cursor(key.clone(), c.clone());
+            hooks.save(cp);
+            saved = Some(c.clone());
+            at = Instant::now();
+        }
+        last = Some(c.clone());
+    });
+    match r {
+        Ok(f) => {
+            cp.put_facts(key, f);
+            hooks.save(cp);
+            Ok(f)
+        }
+        Err(e) => {
+            if let Some(c) = last.filter(|c| c.done > 0 && saved.as_ref() != Some(c)) {
+                cp.put_cursor(key, c);
+                hooks.save(cp);
+            }
+            Err(e)
+        }
+    }
+}
+
+fn measure_core(line: &[Snap], src: &mut dyn Source, walk: bool, anchor: bool, cp: &mut Checkpoint, hooks: &mut dyn Hooks, every: Duration) -> Result<LineSpace, WalkError> {
     let n = line.len();
     let mut out = LineSpace { known: line.iter().map(|s| s.known.clone()).collect(), ..LineSpace::default() };
     if n == 0 {
@@ -177,11 +488,23 @@ pub fn measure_with_opts(line: &[Snap], src: &mut dyn Source, walk: bool, anchor
     }
     let id = |i: usize| line[i].uuid.clone();
     let todo = pairs_needed(line);
+    let generations: Vec<u64> = (0..n).map(|i| src.generation(i)).collect();
     for (j, &b) in todo.iter().enumerate() {
-        step(Step::Pair { done: j, total: todo.len(), newer: b });
+        hooks.step(Step::Pair { done: j, total: todo.len(), newer: b });
         let a = b - 1;
-        let f = src.pair(a, b)?;
-        out.pairs += 1;
+        let key = pair_key(line, &generations, b);
+        let f = match cp.facts(&key) {
+            Some(f) => {
+                hooks.reused(b);
+                out.reused += 1;
+                f
+            }
+            None => {
+                let f = pair_resumable(src, b, key, cp, hooks, every)?;
+                out.pairs += 1;
+                f
+            }
+        };
         let k = &mut out.known;
         k[b].born = Some(Edge { uuid: id(a), bytes: f.born });
         k[a].died = Some(Edge { uuid: id(b), bytes: f.died });
@@ -202,7 +525,7 @@ pub fn measure_with_opts(line: &[Snap], src: &mut dyn Source, walk: bool, anchor
             return Ok(out);
         }
         // the newest stays longest: the anchor of the next measures
-        step(Step::Walk { index: n - 1 });
+        hooks.step(Step::Walk { index: n - 1 });
         out.known[n - 1].distinct = Some(src.distinct(n - 1)?);
         out.walks += 1;
     }
@@ -260,8 +583,16 @@ impl Tree<'_> {
 
 impl Source for Tree<'_> {
     fn pair(&mut self, a: usize, b: usize) -> Result<PairFacts, WalkError> {
+        self.pair_from(a, b, None, &mut |_| {})
+    }
+
+    fn generation(&self, i: usize) -> u64 {
+        self.facts[i].generation
+    }
+
+    fn pair_from(&mut self, a: usize, b: usize, from: Option<&PairCursor>, at: &mut dyn FnMut(&PairCursor)) -> Result<PairFacts, WalkError> {
         let (mut cb, mut ca) = (BTreeMap::new(), BTreeMap::new());
-        let mut f = PairFacts::default();
+        let mut distinct = None;
         match self.by_diff(a, b, &mut cb, &mut ca) {
             Ok(()) => {}
             Err(WalkError::Unsupported(e)) if self.walk => {
@@ -274,57 +605,21 @@ impl Source for Tree<'_> {
                 minus(&sb, &sa, &mut cb);
                 minus(&sa, &sb, &mut ca);
                 let sum = |s: &[u64]| s.iter().map(|&k| extents::unpack(k).1).sum::<u64>();
-                f.distinct = Some((sum(&sa), sum(&sb)));
+                distinct = Some((sum(&sa), sum(&sb)));
             }
             Err(e) => return Err(e),
         }
+        let all = candidate_list(&cb, &ca);
         let (ra, rb) = (self.line[a].root, self.line[b].root);
         let fd = &self.line[a].file;
-        let mut roots: BTreeMap<u64, Option<BTreeSet<u64>>> = BTreeMap::new();
-        for (i, &bytenr) in cb.keys().chain(ca.keys()).enumerate() {
-            if i % 256 == 0 && (self.lim.stop)() {
-                return Err(WalkError::Stopped);
-            }
-            if let std::collections::btree_map::Entry::Vacant(v) = roots.entry(bytenr) {
-                v.insert(freed::extent_roots(fd, bytenr)?);
-            }
+        let (pa, pb) = (self.line[a].path.display().to_string(), self.line[b].path.display().to_string());
+        let progress = |m: &str| (self.lim.progress)(&format!("{pa} → {pb}: {m}"));
+        let c = count_candidates(&all, from, (ra, rb), &mut |bytenr| freed::extent_roots(fd, bytenr), self.lim.stop, at, &progress)?;
+        progress(&format!("{} + {} candidate extents, {} bytes new, {} bytes gone", ca.len(), cb.len(), c.born, c.died));
+        if c.truncated > 0 {
+            (self.lim.progress)(&format!("{} extents with too many references to list: counted as shared", c.truncated));
         }
-        let mut truncated = 0u64;
-        for (side, cands) in [(true, &cb), (false, &ca)] {
-            let (me, other) = if side { (rb, ra) } else { (ra, rb) };
-            for (bytenr, &len) in cands {
-                // a list too long to read: referenced by many, so neither new nor gone here
-                let Some(r) = roots.get(bytenr).and_then(Option::as_ref) else {
-                    truncated += 1;
-                    continue;
-                };
-                let mine = r.contains(&me) && !r.contains(&other);
-                let alone = r.len() == 1 && r.contains(&me);
-                match side {
-                    true => {
-                        f.born += if mine { len } else { 0 };
-                        f.excl_newer += if alone { len } else { 0 };
-                    }
-                    false => {
-                        f.died += if mine { len } else { 0 };
-                        f.excl_older += if alone { len } else { 0 };
-                    }
-                }
-            }
-        }
-        (self.lim.progress)(&format!(
-            "{} → {}: {} + {} candidate extents, {} bytes new, {} bytes gone",
-            self.line[a].path.display(),
-            self.line[b].path.display(),
-            ca.len(),
-            cb.len(),
-            f.born,
-            f.died
-        ));
-        if truncated > 0 {
-            (self.lim.progress)(&format!("{truncated} extents with too many references to list: counted as shared"));
-        }
-        Ok(f)
+        Ok(PairFacts { born: c.born, died: c.died, excl_newer: c.excl_newer, excl_older: c.excl_older, distinct })
     }
 
     fn distinct(&mut self, i: usize) -> Result<u64, WalkError> {
@@ -347,6 +642,14 @@ pub fn measure_line_opts(line: &[Snap], lim: &Limits, walk: bool, anchor: bool, 
     let facts = opened.iter().map(|o| o.facts.clone()).collect();
     let mut src = Tree { line: opened, facts, lim, walk };
     measure_with_opts(line, &mut src, walk, anchor, step)
+}
+
+/// [`measure_line_opts`] with [`measure_resumable`]'s checkpoint.
+pub fn measure_line_resumable(line: &[Snap], lim: &Limits, walk: bool, anchor: bool, cp: &mut Checkpoint, hooks: &mut dyn Hooks) -> Result<LineSpace, WalkError> {
+    let opened: Vec<Opened> = line.iter().map(|s| freed::open(&s.path, false)).collect::<Result<_, _>>()?;
+    let facts = opened.iter().map(|o| o.facts.clone()).collect();
+    let mut src = Tree { line: opened, facts, lim, walk };
+    measure_resumable(line, &mut src, walk, anchor, cp, hooks)
 }
 
 /// Whether two neighbours can be compared without full walks: both read-only (the no-data
@@ -533,5 +836,258 @@ mod tests {
         let mut out = BTreeMap::new();
         minus(&b, &a, &mut out);
         assert!(out.is_empty());
+    }
+
+    /// Like [`Sets`], but every pair counted candidate by candidate through
+    /// [`count_candidates`] (root of snapshot `i`: `i + 1`; elsewhere: 999), stopping at the
+    /// next check once `stop_after` reference lists were read in all.
+    struct Counted {
+        sets: Vec<BTreeSet<(u64, u64)>>,
+        roots: BTreeMap<u64, BTreeSet<u64>>,
+        reads: std::cell::Cell<usize>,
+        stop_after: Option<usize>,
+        gens: Vec<u64>,
+    }
+
+    impl Counted {
+        fn new(sets: &[BTreeSet<(u64, u64)>], outside: &BTreeSet<(u64, u64)>) -> Self {
+            let mut roots: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+            for (i, s) in sets.iter().enumerate() {
+                for e in s {
+                    roots.entry(e.0).or_default().insert(i as u64 + 1);
+                }
+            }
+            for e in outside {
+                roots.entry(e.0).or_default().insert(999);
+            }
+            Counted { sets: sets.to_vec(), roots, reads: Default::default(), stop_after: None, gens: Vec::new() }
+        }
+    }
+
+    impl Source for Counted {
+        fn pair(&mut self, a: usize, b: usize) -> Result<PairFacts, WalkError> {
+            self.pair_from(a, b, None, &mut |_| {})
+        }
+
+        fn distinct(&mut self, i: usize) -> Result<u64, WalkError> {
+            Ok(sum(self.sets[i].iter()))
+        }
+
+        fn generation(&self, i: usize) -> u64 {
+            self.gens.get(i).copied().unwrap_or(0)
+        }
+
+        fn pair_from(&mut self, a: usize, b: usize, from: Option<&PairCursor>, at: &mut dyn FnMut(&PairCursor)) -> Result<PairFacts, WalkError> {
+            let (sa, sb) = (&self.sets[a], &self.sets[b]);
+            let cb: BTreeMap<u64, u64> = sb.difference(sa).copied().collect();
+            let ca: BTreeMap<u64, u64> = sa.difference(sb).copied().collect();
+            let all = candidate_list(&cb, &ca);
+            let (roots, reads, limit) = (&self.roots, &self.reads, self.stop_after);
+            let mut read = |bytenr: u64| {
+                reads.set(reads.get() + 1);
+                Ok(roots.get(&bytenr).cloned())
+            };
+            let stop = || limit.is_some_and(|l| reads.get() >= l);
+            let c = count_candidates(&all, from, (a as u64 + 1, b as u64 + 1), &mut read, &stop, at, &|_| {})?;
+            Ok(PairFacts { born: c.born, died: c.died, excl_newer: c.excl_newer, excl_older: c.excl_older, distinct: None })
+        }
+    }
+
+    /// Everything a measure tells.
+    #[derive(Default)]
+    struct Told {
+        saves: Vec<Checkpoint>,
+        extents: Vec<(usize, u64, u64, u64)>,
+        reused: Vec<usize>,
+    }
+
+    impl Hooks for Told {
+        fn reused(&mut self, newer: usize) {
+            self.reused.push(newer);
+        }
+        fn extents(&mut self, newer: usize, done: u64, total: u64, from: u64) {
+            self.extents.push((newer, done, total, from));
+        }
+        fn save(&mut self, cp: &Checkpoint) {
+            self.saves.push(cp.clone());
+        }
+    }
+
+    /// A line of thousands of extents, about 1900 candidates per pair.
+    fn big_history(n: usize) -> Vec<BTreeSet<(u64, u64)>> {
+        let mut out = Vec::new();
+        let mut cur: BTreeSet<(u64, u64)> = (0..3000u64).map(|i| (i * 16, 4096 * (1 + i % 7))).collect();
+        let mut next = 1_000_000u64;
+        for s in 0..n as u64 {
+            out.push(cur.clone());
+            let gone: Vec<_> = cur.iter().copied().filter(|e| (e.0 / 16 + s) % 3 == 0).collect();
+            for g in gone {
+                cur.remove(&g);
+            }
+            for j in 0..900 {
+                cur.insert((next, 8192 + 4096 * (j % 5)));
+                next += 16;
+            }
+        }
+        out
+    }
+
+    fn truth_of(sets: &[BTreeSet<(u64, u64)>], outside: &BTreeSet<(u64, u64)>) -> Sets {
+        Sets { sets: sets.to_vec(), outside: outside.clone(), pairs: vec![], walks: vec![] }
+    }
+
+    fn names(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("s{i}")).collect()
+    }
+
+    fn line_of(names: &[String]) -> Vec<Snap> {
+        names.iter().map(|n| Snap { path: PathBuf::from(n), uuid: n.clone(), known: Known::default() }).collect()
+    }
+
+    /// Runs until done, each run stopped after `every_reads` more reads; `lose_last`: each
+    /// stop loses the checkpoint's last write (a power cut), so the run goes on from the one
+    /// before. Returns the result and the runs.
+    fn interrupted(src: &mut Counted, l: &[Snap], every_reads: usize, save_every: Duration, lose_last: bool) -> (LineSpace, usize) {
+        let mut cp = Checkpoint::default();
+        for runs in 0..10_000 {
+            src.stop_after = Some(src.reads.get() + every_reads);
+            let mut told = Told::default();
+            match measure_core(l, src, true, true, &mut cp, &mut told, save_every) {
+                Ok(r) => return (r, runs),
+                Err(WalkError::Stopped) => {
+                    if lose_last && told.saves.len() >= 2 {
+                        cp = told.saves[told.saves.len() - 2].clone();
+                    }
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        panic!("never finished");
+    }
+
+    #[test]
+    fn a_stopped_measure_goes_on_and_ends_with_the_numbers_of_one_never_stopped() {
+        let sets = big_history(5);
+        let outside: BTreeSet<_> = sets[4].iter().copied().step_by(97).collect();
+        let l = line_of(&names(5));
+        let mut src = Counted::new(&sets, &outside);
+        let whole = measure_core(&l, &mut src, true, true, &mut Checkpoint::default(), &mut Told::default(), Duration::MAX).unwrap();
+        check(&whole, &truth_of(&sets, &outside));
+        let reads = src.reads.get();
+        assert!(reads > 4 * 1500, "{reads}");
+        for every in [1, 255, 256, 257, 700, 1000, 1999, 2500, 5000] {
+            // stopped and saved where it stopped: nothing read twice
+            let mut src = Counted::new(&sets, &outside);
+            let (r, runs) = interrupted(&mut src, &l, every, Duration::MAX, false);
+            assert!(runs >= 1, "every {every}");
+            assert_eq!((&r.known, r.union), (&whole.known, whole.union), "every {every}");
+            assert_eq!(src.reads.get(), reads, "every {every}: nothing read twice");
+            // saved at every cursor and each stop loses its last write: some read again
+            let mut src = Counted::new(&sets, &outside);
+            let (r, _) = interrupted(&mut src, &l, every, Duration::ZERO, true);
+            assert_eq!((&r.known, r.union), (&whole.known, whole.union), "every {every}, last write lost");
+            assert!(src.reads.get() >= reads);
+        }
+    }
+
+    #[test]
+    fn progress_inside_a_pair_and_finished_pairs_reused() {
+        let sets = big_history(3);
+        let l = line_of(&names(3));
+        let mut src = Counted::new(&sets, &BTreeSet::new());
+        let mut cp = Checkpoint::default();
+        // stopped part way in the second pair
+        let first: u64 = sets[1].symmetric_difference(&sets[0]).count() as u64;
+        src.stop_after = Some(first as usize + 600);
+        let mut told = Told::default();
+        assert_eq!(measure_core(&l, &mut src, true, true, &mut cp, &mut told, Duration::MAX), Err(WalkError::Stopped));
+        assert_eq!((cp.pairs.len(), cp.partial.len()), (1, 1));
+        let stopped_at = cp.partial[0].cursor.done;
+        assert!(stopped_at > 0 && stopped_at % 256 == 0, "{stopped_at}");
+        assert_eq!(told.saves.last(), Some(&cp));
+        // the next measure takes the first pair as it is and goes on in the second
+        src.stop_after = None;
+        let mut told = Told::default();
+        let r = measure_core(&l, &mut src, true, true, &mut cp, &mut told, Duration::MAX).unwrap();
+        assert_eq!((r.reused, r.pairs, told.reused.clone()), (1, 1, vec![1]));
+        let (b, done, total, from) = told.extents[0];
+        assert_eq!((b, done, from), (2, stopped_at, stopped_at));
+        assert!(told.extents.windows(2).all(|w| w[0].1 <= w[1].1));
+        assert_eq!(told.extents.last().map(|x| (x.1, x.2)), Some((total, total)));
+        assert!(cp.partial.is_empty() && cp.pairs.len() == 2);
+        check(&r, &truth_of(&sets, &BTreeSet::new()));
+    }
+
+    #[test]
+    fn a_checkpoint_holds_only_for_the_same_snapshots() {
+        let sets = big_history(5);
+        let none = BTreeSet::new();
+        let l = line_of(&names(5));
+        let truth = truth_of(&sets, &none);
+        // a cursor over another candidate list: the pair is counted again, right
+        let mut src = Counted::new(&sets, &none);
+        src.stop_after = Some(700);
+        let mut cp = Checkpoint::default();
+        assert!(measure_core(&l, &mut src, true, true, &mut cp, &mut Told::default(), Duration::MAX).is_err());
+        cp.partial[0].cursor.fingerprint ^= 1;
+        src.stop_after = None;
+        check(&measure_core(&l, &mut src, true, true, &mut cp, &mut Told::default(), Duration::MAX).unwrap(), &truth);
+        // a snapshot whose generation changed: none of its pairs reused
+        let mut src = Counted::new(&sets, &none);
+        src.gens = vec![1, 2, 3, 4, 5];
+        src.stop_after = Some(3 * 2000);
+        let mut cp = Checkpoint::default();
+        assert!(measure_core(&l, &mut src, true, true, &mut cp, &mut Told::default(), Duration::MAX).is_err());
+        assert!(cp.pairs.len() >= 2, "{}", cp.pairs.len());
+        src.gens[1] = 22;
+        src.stop_after = None;
+        let mut told = Told::default();
+        let r = measure_core(&l, &mut src, true, true, &mut cp, &mut told, Duration::MAX).unwrap();
+        check(&r, &truth);
+        assert!(!told.reused.contains(&1) && !told.reused.contains(&2), "{:?}", told.reused);
+        let now: BTreeMap<String, u64> = names(5).into_iter().zip(src.gens.clone()).collect();
+        let mut kept = cp.clone();
+        kept.retain_present(&now);
+        assert!(kept.pairs.iter().all(|p| p.key.older != "s1" || p.key.generations.0 == 22));
+        // a snapshot gone in the middle: the pairs that had it as a neighbour are compared again
+        let mut src = Counted::new(&sets, &none);
+        src.stop_after = Some(3 * 2000);
+        let mut cp = Checkpoint::default();
+        assert!(measure_core(&l, &mut src, true, true, &mut cp, &mut Told::default(), Duration::MAX).is_err());
+        let mut left = sets.clone();
+        left.remove(2);
+        let ln: Vec<String> = ["s0", "s1", "s3", "s4"].iter().map(|s| s.to_string()).collect();
+        let mut src = Counted::new(&left, &none);
+        let mut told = Told::default();
+        let r = measure_core(&line_of(&ln), &mut src, true, true, &mut cp, &mut told, Duration::MAX).unwrap();
+        check(&r, &truth_of(&left, &none));
+        assert!(told.reused.is_empty(), "{:?}", told.reused);
+        let now: BTreeMap<String, u64> = ln.iter().map(|n| (n.clone(), 0)).collect();
+        cp.retain_present(&now);
+        assert!(cp.pairs.iter().all(|p| p.key.uuids().all(|u| u != "s2")));
+        assert!(cp.partial.iter().all(|p| p.key.uuids().all(|u| u != "s2")));
+    }
+
+    #[test]
+    fn a_checkpoint_stays_small() {
+        let key = |i: usize| PairKey { older: format!("a{i}"), newer: format!("b{i}"), before: None, after: None, generations: (0, 0) };
+        let mut cp = Checkpoint::default();
+        for i in 0..Checkpoint::MAX_PAIRS + 10 {
+            cp.put_cursor(key(i), PairCursor { done: 1, ..PairCursor::default() });
+            cp.put_facts(key(i), PairFacts::default());
+        }
+        assert_eq!(cp.pairs.len(), Checkpoint::MAX_PAIRS);
+        assert!(cp.partial.is_empty());
+        assert_eq!(cp.pairs[0].key, key(10));
+        for i in 0..Checkpoint::MAX_PARTIAL + 3 {
+            cp.put_cursor(key(i), PairCursor::default());
+        }
+        assert_eq!(cp.partial.len(), Checkpoint::MAX_PARTIAL);
+        let line: BTreeSet<&str> = ["a20", "b30"].into_iter().collect();
+        let before = cp.pairs.len();
+        cp.forget(&line);
+        assert_eq!(cp.pairs.len(), before - 2);
+        let back: Checkpoint = serde_json::from_slice(&serde_json::to_vec(&cp).unwrap()).unwrap();
+        assert_eq!(back, cp);
     }
 }
