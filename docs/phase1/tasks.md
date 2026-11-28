@@ -166,19 +166,30 @@ oldest number.
 extents that the 10-minute budget of the update stopped every time, losing everything, so the
 next update started the same pair again). The comparisons keep their progress per volume in
 `<state>/space/measure-progress.json` (`rynas_btrfs::pcspace::Checkpoint`, written whole and
-renamed into place): each finished pair at once, keyed by both snapshots' UUIDs and generations
-and their own neighbours, and inside a pair a cursor (candidates counted in ascending start, the
-partial sums, a fingerprint of the candidate list) every 30 s and when it stops. The next pass
-takes finished pairs as they are and goes on in a stopped one from its cursor when the candidate
-list is the same (else it counts that pair again); the numbers are those of a pass never stopped
-(tests stop the fake source at many points, also losing the last write). A line measured to its
-end has its numbers written to `known.json` and its entries dropped; at the end of each scan of a
-volume the entries of snapshots gone or with another generation go; at most 2048 finished and 16
-stopped pairs per volume. Outcomes: on request a time budget (45 minutes or 3 × the estimate per
-volume) ends **partial** naming the sources left, the next Measure going on from there; an
-automatic update has no failing limit: it works a 30-minute slice (`CHANGES_SLICE`, soft: it
-stops only once it got somewhere, so the disks may sleep between slices instead of being read
-for hours), then ends **Ok** logging what is left; the volume stays pending
+renamed into place; kept in memory at every change, written at most every 30 s while a line is
+measured and always when its measure returns): each finished pair, keyed by both snapshots'
+UUIDs and generations, and inside a pair a cursor (candidates counted in ascending start, the
+partial sums, a fingerprint of the candidate list; dropped after 7 days) every 30 s and when it
+stops. Born and died depend on the two snapshots only and always carry over; what each of the two
+holds alone is recorded with the neighbours it was counted with, and a side whose neighbour
+changed during or after the count is not used. A snapshot's own data comes from either of its
+pairs, so a new backup compares only the new pair (it also reads what the previous newest holds
+alone) and a new snapshot never restarts the newest pair, even one that spans many passes; if a
+snapshot's own data is still out of date after its pairs (counts mixed across a change of
+neighbours), one of its pairs is counted afresh. The next pass takes finished pairs as they are
+and goes on in a stopped one from its cursor when the candidate list is the same (else it counts
+that pair again); the numbers are those of a pass never stopped (tests stop the fake source at
+many points, also losing the last write, and add snapshots between passes). A line measured to
+its end has its numbers written to `known.json` and its entries dropped; at the end of each scan
+of a volume the entries of snapshots gone or with another generation go; at most 2048 finished
+and 16 stopped pairs per volume. Outcomes: on request a time budget (45 minutes or 3 × the
+estimate per volume) ends **partial** naming the sources left, the next Measure going on from
+there; an automatic update has no failing limit: it works a 30-minute slice (`CHANGES_SLICE`,
+soft: it hands over only after a pair compared to its end or at least a third of the slice spent
+counting candidates, so building a long pair's candidate list again never eats a whole pass;
+pairs taken from the checkpoint do not count), then ends **Ok** logging what is left (the
+exception of guidelines A20b); a cancelled update keeps what it did but is not taken up by
+itself; the volume stays pending
 (`MeasureProgress.unfinished`) and goes on at the next change of snapshots, at the next daily
 housekeeping once its disks are awake (also the first after a start), or with Measure; no new
 timer. The estimate counts a finished pair as nothing and a stopped one by its candidates left at
@@ -189,7 +200,7 @@ pair's candidates are known.
 
 Expected costs on the DS920+ (one HDD, a PC folder of 21 snapshots in 3 lines and a deleted
 job): before, 2700 s of disk every day for nothing; now, nothing on a quiet day; after a nightly
-PC backup ~2 pairs per line (≈ 1 min, disks already awake); the first Measure ≈ the PC measure's
+PC backup 1 pair per line (≈ 30 s, disks already awake); the first Measure ≈ the PC measure's
 first run (≈ 45 min) unless the PC measure already ran (then ≈ 0).
 
 **Periodic jobs and the data disks** (2026-11-26; "data disks" = volumes on HDDs, not the system
@@ -197,7 +208,7 @@ disk, `/var/lib/rynas`, `/run`, `/proc`, `/sys`):
 
 | Job | Period | Before | Now |
 |---|---|---|---|
-| `space.scan` | daily | full measure of every volume (discover, FIEMAP walks, `docker system df`, recycle walks), skipped sleeping volumes only after discovering them; 45 min/volume budget, ended "ok" | never on a timer: on request, and incrementally after snapshot changes once the volume's disks are awake; partial at the budget |
+| `space.scan` | daily | full measure of every volume (discover, FIEMAP walks, `docker system df`, recycle walks), skipped sleeping volumes only after discovering them; 45 min/volume budget, ended "ok" | never on a timer: on request, and incrementally after snapshot changes once the volume's disks are awake; comparisons checkpointed per pair (`measure-progress.json`); a person's Measure ends partial at its budget and the next one goes on from there; an automatic update works a 30-min slice (it hands over only after real counting), ends Ok logging what is left, and a volume left unfinished is taken up at the next change, at the daily housekeeping once its disks are awake (no new timer), or by Measure; a cancelled update is not taken up by itself |
 | Space low-space watch (`guard`) | 5 min | `statvfs` per volume | unchanged: btrfs answers `statfs` from memory |
 | Space auto-free (`thin`) | in the watch, only below the low limit with auto-free on | deletes snapshots | unchanged (urgent by definition) |
 | Space recycle-bin cleanup | daily | walked every bin on every volume | per volume once its disks are awake (deadline: the next day's turn, then skipped for that day: a bin's retention is in days) |
