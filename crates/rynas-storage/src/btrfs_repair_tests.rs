@@ -304,14 +304,19 @@ fn configured_volumes_that_did_not_mount() {
 fn what_a_replacement_disk_holds() {
     let inv = crate::Inventory { graph: graph(), ..Default::default() };
     let h = disk_holds(&inv, "sdd1", UUID);
-    assert_eq!(h, ["btrfs “data2” other on sdd1 (part of another volume?)"]);
+    assert_eq!(
+        h,
+        [rynas_api_types::storage::DiskUse::ForeignBtrfs { label: Some("data2".into()), uuid: "other".into(), device: "sdd1".into() }]
+    );
+    assert_eq!(h[0].text(), "btrfs “data2” other on sdd1 (part of another volume?)");
     assert!(disk_holds(&inv, "sdb1", UUID).is_empty());
     let mut f = degraded_fs();
     f.repair.as_mut().unwrap().remove = None;
     let p = plan_replace(&f, 3, "sdd1", 2 << 30, &h);
     assert!(p.valid);
     assert_eq!(p.warning_items[0].code, PlanWarningCode::DataErased);
-    assert_eq!(p.warning_items[0].args.items, h);
+    assert_eq!(p.warning_items[0].args.uses, h);
+    assert_eq!(p.warning_items[0].args.items, [h[0].text()]);
 }
 
 fn member(devid: u64) -> BtrfsMember {

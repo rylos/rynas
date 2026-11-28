@@ -103,6 +103,10 @@ nev.md_state.recovering	восстановление
 nev.md_state.reshaping	перестроение
 nev.md_state.checking	проверка
 nev.md_state.repairing	исправление
+nev.md_state.delayed	отложено
+nev.md_state.pending	ожидает
+nev.md_state.remote	выполняется узлом кластера
+nev.list_join	{a}, {b}
 nev.md_role.active	активен
 nev.md_role.spare	резервный
 nev.md_role.faulty	сбойный
@@ -1560,6 +1564,7 @@ sto.usage.md_unknown	Компонент несобранного массива 
 sto.usage.md_array	{name} ({level})
 sto.usage.lvm	Том LVM {name}
 sto.usage.fs_label	{fs} «{label}»
+sto.usage.foreign_btrfs	{fs} {uuid} на {device}, возможно, часть другого тома
 sto.usage.partitions.one	{n} раздел
 sto.usage.partitions.other	{n} раздела
 sto.usage.partitions.few	{n} раздела
@@ -1577,6 +1582,15 @@ sto.stlog.electrical_failure	Завершён с электрической не
 sto.stlog.seek_failure	Завершён с ошибкой сервопривода или позиционирования
 sto.stlog.fatal	Критическая или неизвестная ошибка самотеста
 sto.stlog.handling_damage	Завершён, есть подозрение на механическое повреждение
+sto.stlog.short_captive	Короткий самотест в монопольном режиме
+sto.stlog.long_captive	Расширенный самотест в монопольном режиме
+sto.stlog.conveyance_captive	Тест на повреждения при транспортировке в монопольном режиме
+sto.stlog.selective_captive	Выборочный самотест в монопольном режиме
+sto.stlog.segment_failed	Завершён, есть непройденный сегмент
+sto.stlog.aborted_namespace	Прерван: пространство имён удалено
+sto.stlog.aborted_format	Прерван командой форматирования
+sto.stlog.aborted_sanitize	Прерван операцией очистки (sanitize)
+sto.stlog.aborted_unknown	Прерван по неизвестной причине
 wol.progress.starting	Пробуждение {name} ({macs})
 wol.progress.sent	Пакеты пробуждения отправлены через {ifaces} (3×)
 wol.progress.wait_agent	Сеть ответила через {time}. Ожидание клиента резервного копирования.

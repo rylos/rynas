@@ -255,8 +255,19 @@ pub enum DiskUse {
     Mounted { path: String },
     /// A partition table and nothing else rynas knows about.
     Partitions { count: u32 },
+    /// A btrfs that belongs to another volume (`uuid`), on `device`: what a replacement disk
+    /// would erase.
+    ForeignBtrfs {
+        label: Option<String>,
+        uuid: String,
+        device: String,
+    },
     /// Anything else, described in English.
     Other { text: String },
+    /// A kind this client does not know (a newer server): the `used_by` entry at the same
+    /// position names it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl DiskUse {
@@ -284,7 +295,12 @@ impl DiskUse {
             }
             DiskUse::Mounted { path } => format!("mounted {path}"),
             DiskUse::Partitions { count } => format!("{count} partition(s)"),
+            DiskUse::ForeignBtrfs { label, uuid, device } => {
+                let label = label.as_deref().map(|l| format!(" “{l}”")).unwrap_or_default();
+                format!("btrfs{label} {uuid} on {device} (part of another volume?)")
+            }
             DiskUse::Other { text } => text.clone(),
+            DiskUse::Unknown => String::new(),
         }
     }
 }
@@ -469,8 +485,8 @@ pub struct SelfTest {
     pub lba_first_error: Option<u64>,
 }
 
-/// The kind of a self-test log entry. `other`: a kind without a code (captive and vendor
-/// tests): `SelfTest.kind` names it.
+/// The kind of a self-test log entry. `other`: a kind without a code (vendor tests):
+/// `SelfTest.kind` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfTestKind {
@@ -482,6 +498,11 @@ pub enum SelfTestKind {
     ConveyanceOffline,
     /// ATA selective offline test.
     SelectiveOffline,
+    /// ATA short test in captive mode (the drive answers nothing else meanwhile).
+    ShortCaptive,
+    ExtendedCaptive,
+    ConveyanceCaptive,
+    SelectiveCaptive,
     /// NVMe short test.
     Short,
     /// NVMe extended test.
@@ -506,6 +527,16 @@ pub enum SelfTestStatus {
     Fatal,
     /// Completed with a failure of unknown kind (NVMe: a failed segment it does not name).
     UnknownFailure,
+    /// NVMe: completed with one or more failed segments (a real failure).
+    SegmentFailed,
+    /// NVMe: aborted because the namespace was removed.
+    AbortedNamespaceRemoved,
+    /// NVMe: aborted by a Format NVM command.
+    AbortedFormat,
+    /// NVMe: aborted by a sanitize operation.
+    AbortedSanitize,
+    /// NVMe: aborted for an unknown reason.
+    AbortedUnknown,
     ElectricalFailure,
     /// Servo or seek failure.
     ServoFailure,
@@ -614,7 +645,8 @@ impl MemberRole {
 }
 
 /// One word of an md array's state (`MdArray.state` is mdadm's or sysfs's comma-separated
-/// list). `other`: a word without a code, `MdArray.state` has it.
+/// list; a qualifier in parentheses, "resyncing (DELAYED)", is a word of its own). `other`: a
+/// word without a code, `MdArray.state_words` has it at the same position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MdStateFlag {
@@ -640,13 +672,19 @@ pub enum MdStateFlag {
     Reshaping,
     Checking,
     Repairing,
+    /// The resync or recovery before it waits for another array on the same disks (`DELAYED`).
+    Delayed,
+    /// The resync before it waits for the first write (`PENDING`).
+    Pending,
+    /// The resync before it is done by a cluster peer (`REMOTE`).
+    Remote,
     #[default]
     #[serde(other)]
     Other,
 }
 
 impl MdStateFlag {
-    pub const ALL: [MdStateFlag; 17] = [
+    pub const ALL: [MdStateFlag; 20] = [
         MdStateFlag::Clean,
         MdStateFlag::Active,
         MdStateFlag::ActiveIdle,
@@ -663,6 +701,9 @@ impl MdStateFlag {
         MdStateFlag::Reshaping,
         MdStateFlag::Checking,
         MdStateFlag::Repairing,
+        MdStateFlag::Delayed,
+        MdStateFlag::Pending,
+        MdStateFlag::Remote,
         MdStateFlag::Other,
     ];
 
@@ -685,6 +726,9 @@ impl MdStateFlag {
             MdStateFlag::Reshaping => "reshaping",
             MdStateFlag::Checking => "checking",
             MdStateFlag::Repairing => "repairing",
+            MdStateFlag::Delayed => "delayed",
+            MdStateFlag::Pending => "pending",
+            MdStateFlag::Remote => "remote",
             MdStateFlag::Other => "other",
         }
     }
@@ -755,9 +799,13 @@ pub struct MdArray {
     pub component_size: Option<u64>,
     /// md's own state, e.g. "clean", "active", "clean, degraded, recovering".
     pub state: String,
-    /// `state` word by word as stable codes, in the same order.
+    /// `state` word by word as stable codes, in the same order (a word said twice once).
     #[serde(default)]
     pub state_flags: Vec<MdStateFlag>,
+    /// mdadm's own word for each of `state_flags`, same positions: what a client shows for
+    /// `other`.
+    #[serde(default)]
+    pub state_words: Vec<String>,
     pub health: ArrayHealth,
     /// Number of missing members.
     pub degraded: u32,
@@ -773,6 +821,22 @@ pub struct MdArray {
     /// (sysfs `none` otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reshape_position: Option<u64>,
+}
+
+impl MdArray {
+    /// The state as codes for the translated texts: the code of each word, mdadm's own word
+    /// (without commas) where it has none. Clients show a code they have no text for as it is.
+    pub fn state_codes(&self) -> Vec<String> {
+        self.state_flags
+            .iter()
+            .enumerate()
+            .map(|(i, f)| match f {
+                MdStateFlag::Other => self.state_words.get(i).map_or(String::new(), |w| w.replace(',', " ")),
+                f => f.as_str().to_string(),
+            })
+            .filter(|c| !c.is_empty())
+            .collect()
+    }
 }
 
 // ------------------------------------------------------------------ btrfs
@@ -1781,6 +1845,10 @@ pub struct PlanArgs {
     /// A list: disks, what uses a disk (`md2 (raid5)`), SMART reason codes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<String>,
+    /// What uses a disk, when `items` names it (`data_erased`): the same entries in the same
+    /// order, structured, for a client to name in its own language.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uses: Vec<DiskUse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

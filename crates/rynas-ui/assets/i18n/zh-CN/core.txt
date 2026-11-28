@@ -103,6 +103,10 @@ nev.md_state.recovering	正在重建
 nev.md_state.reshaping	正在重整阵列
 nev.md_state.checking	正在检查
 nev.md_state.repairing	正在修复
+nev.md_state.delayed	已延迟
+nev.md_state.pending	等待中
+nev.md_state.remote	由集群节点执行
+nev.list_join	{a}、{b}
 nev.md_role.active	正常
 nev.md_role.spare	备用盘
 nev.md_role.faulty	故障
@@ -1669,6 +1673,7 @@ sto.usage.md_unknown	尚未组装的 RAID 阵列成员
 sto.usage.md_array	{name}（{level}）
 sto.usage.lvm	LVM 卷 {name}
 sto.usage.fs_label	{fs}「{label}」
+sto.usage.foreign_btrfs	{device} 上的 {fs} {uuid}，可能属于另一个存储卷
 sto.usage.partitions.other	{n} 个分区
 sto.stlog.short_offline	短时离线自检
 sto.stlog.long_offline	扩展离线自检
@@ -1683,6 +1688,15 @@ sto.stlog.electrical_failure	已完成，发现电气故障
 sto.stlog.seek_failure	已完成，发现伺服或寻道故障
 sto.stlog.fatal	发生严重或未知的自检错误
 sto.stlog.handling_damage	已完成，疑似存在搬运损伤
+sto.stlog.short_captive	短时独占模式自检
+sto.stlog.long_captive	扩展独占模式自检
+sto.stlog.conveyance_captive	运输损伤独占模式自检
+sto.stlog.selective_captive	选择性独占模式自检
+sto.stlog.segment_failed	已完成，有分段未通过
+sto.stlog.aborted_namespace	已中止：命名空间已被移除
+sto.stlog.aborted_format	已被格式化命令中止
+sto.stlog.aborted_sanitize	已被安全擦除操作中止
+sto.stlog.aborted_unknown	因未知原因中止
 wol.progress.starting	正在唤醒 {name}（{macs}）
 wol.progress.sent	已通过 {ifaces} 发送 3 次唤醒包
 wol.progress.wait_agent	{time} 后检测到设备上线，正在等待备份客户端响应。

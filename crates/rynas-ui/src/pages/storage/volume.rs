@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_params_map;
 use rynas_api_types::storage::{
-    DiskContent, DiskSummary, FlexBlocker, FlexLayout, FlexPending, MdArray, MdStateFlag, ScrubState, ScrubStatus, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings, VolumeStandby,
+    DiskContent, DiskSummary, FlexBlocker, FlexLayout, FlexPending, MdArray, ScrubState, ScrubStatus, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings, VolumeStandby,
     VolumeSettingsState,
 };
 use rynas_api_types::{TaskInfo, TaskStarted, TaskStatus};
@@ -660,13 +660,14 @@ fn usage_card(v: &Vol) -> AnyView {
     .into_any()
 }
 
-/// The array's state from its codes (the words the RAID events use too); mdadm's own words
-/// when one of them has no code.
+/// The array's state from its codes (the words the RAID events use too); mdadm's own word for
+/// one without a code.
 fn md_state_text(a: &MdArray) -> String {
-    if a.state_flags.is_empty() || a.state_flags.contains(&MdStateFlag::Other) {
+    let codes = a.state_codes();
+    if codes.is_empty() {
         return a.state.clone();
     }
-    rynas_api_types::notify::md_state_text(a.state_flags.iter().map(|f| f.as_str()), &i18n::try_t)
+    rynas_api_types::notify::md_state_text(codes.iter().map(String::as_str), &i18n::try_t)
 }
 
 fn member_role(role: MemberRole) -> (Tone, &'static str) {
@@ -683,10 +684,23 @@ fn member_role(role: MemberRole) -> (Tone, &'static str) {
 #[cfg(test)]
 #[test]
 fn array_state_from_codes() {
-    let a = |state: &str, flags: Vec<MdStateFlag>| MdArray { state: state.into(), state_flags: flags, ..Default::default() };
-    assert_eq!(md_state_text(&a("clean, degraded, recovering", vec![MdStateFlag::Clean, MdStateFlag::Degraded, MdStateFlag::Recovering])), "clean, degraded, rebuilding");
-    // a word without a code: mdadm's words as they are
-    assert_eq!(md_state_text(&a("clean, resyncing (DELAYED)", vec![MdStateFlag::Clean, MdStateFlag::Other])), "clean, resyncing (DELAYED)");
+    use rynas_api_types::storage::MdStateFlag;
+    let a = |flags: Vec<MdStateFlag>, words: &[&str]| MdArray {
+        state: words.join(", "),
+        state_flags: flags,
+        state_words: words.iter().map(|w| w.to_string()).collect(),
+        ..Default::default()
+    };
+    assert_eq!(
+        md_state_text(&a(vec![MdStateFlag::Clean, MdStateFlag::Degraded, MdStateFlag::Recovering], &["clean", "degraded", "recovering"])),
+        "clean, degraded, rebuilding"
+    );
+    assert_eq!(
+        md_state_text(&a(vec![MdStateFlag::Resyncing, MdStateFlag::Delayed], &["resyncing", "DELAYED"])),
+        "resynchronizing, delayed"
+    );
+    // a word without a code: only that word as mdadm says it
+    assert_eq!(md_state_text(&a(vec![MdStateFlag::Clean, MdStateFlag::Other], &["clean", "frozen"])), "clean, frozen");
 }
 
 fn raid_card(a: MdArray, selected: RwSignal<Option<String>>) -> AnyView {
@@ -1133,8 +1147,8 @@ pub fn disk_checklist(disks: Vec<rynas_api_types::storage::DiskSummary>, chosen:
                                 {contents_text(&d).map(|what| view! { <span class="small warn-text">{tf("wiz.holds", &[("what", &what)])}</span> })}
                             </span>
                             {d.smr.then(|| view! { <span class="chip warn" title=t("sto.smr_hint")>"SMR"</span> })}
-                            {(!d.usage.is_empty()).then(|| {
-                                let what = used_by_text(&d.usage);
+                            {(!d.used_by.is_empty() || !d.usage.is_empty()).then(|| {
+                                let what = used_by_text(&d);
                                 view! { <span class="chip warn" title=tf("wiz.will_erase", &[("what", &what)])>{tr("wiz.erase_chip")}</span> }
                             })}
                             <Status tone=htone text=t(hkey).to_string() />

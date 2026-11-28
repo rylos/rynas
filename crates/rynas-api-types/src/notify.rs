@@ -602,18 +602,30 @@ fn key_word(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// md array state flags ([`crate::storage::MdStateFlag`] codes) as text, from
-/// `nev.md_state.<code>`, joined with ", "; a code without a text stays as it is. The web
+/// `items` joined with the language's list separator: the text between `{a}` and `{b}` of
+/// `nev.list_join` ("{a}, {b}"; "{a}、{b}" in Chinese), ", " without it.
+pub fn join_list<S: AsRef<str>>(items: &[S], lookup: &dyn Fn(&str) -> Option<&'static str>) -> String {
+    let sep = lookup("nev.list_join")
+        .and_then(|t| t.split_once("{a}"))
+        .and_then(|(_, rest)| rest.split_once("{b}"))
+        .map_or(", ", |(sep, _)| sep);
+    items.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(sep)
+}
+
+/// md array state flags ([`crate::storage::MdStateFlag`] codes, see
+/// [`crate::storage::MdArray::state_codes`]) as text, from `nev.md_state.<code>`, joined as a
+/// list ([`join_list`]); a code without a text (mdadm's own word) stays as it is. The web
 /// interface's array card and the RAID events read the same words.
 pub fn md_state_text<'a>(
     codes: impl IntoIterator<Item = &'a str>,
     lookup: &dyn Fn(&str) -> Option<&'static str>,
 ) -> String {
-    codes
+    let words: Vec<&str> = codes
         .into_iter()
+        .filter(|c| !c.is_empty())
         .map(|c| lookup(&format!("nev.md_state.{c}")).unwrap_or(c))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect();
+    join_list(&words, lookup)
 }
 
 /// A field that holds a list of codes, as text: `state_codes` (md state flags, comma
@@ -635,7 +647,7 @@ fn code_list(name: &str, v: &str, lookup: &dyn Fn(&str) -> Option<&'static str>)
                     None => pair.to_string(),
                 })
                 .collect();
-            Some(members.join(", "))
+            Some(join_list(&members, lookup))
         }
         _ => None,
     }
@@ -952,6 +964,21 @@ mod tests {
         let f = fields(&[("array", "md2"), ("state", "clean, degraded"), ("members", "sdb3 (faulty)")]);
         assert_eq!(event_text("r.d", "body", &f, &zh, false), None);
         assert_eq!(md_state_text(["clean", "degraded"], &zh), "无待处理的写入, 降级");
+        // the language's list separator; mdadm's own word for one without a code
+        let zh_join = |k: &str| -> Option<&'static str> {
+            match k {
+                "nev.list_join" => Some("{a}、{b}"),
+                k => zh(k),
+            }
+        };
+        assert_eq!(md_state_text(["clean", "degraded", "frozen"], &zh_join), "无待处理的写入、降级、frozen");
+        let f = fields(&[("array", "md2"), ("state_codes", "degraded"), ("member_roles", "sdb3:faulty,sdc3:faulty")]);
+        assert_eq!(
+            event_text("r.d", "body", &f, &zh_join, false).as_deref(),
+            Some("md2：状态「降级」。成员：sdb3（故障）、sdc3（故障）。")
+        );
+        assert_eq!(join_list(&["a", "b"], &|_| None), "a, b");
+        assert_eq!(join_list(&["a", "b"], &|_| Some("broken")), "a, b");
     }
 
     /// A target's language is any code of the table, sent as the plain string; the stored

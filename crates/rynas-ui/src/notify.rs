@@ -528,7 +528,7 @@ mod tests {
         let n = note("storage.raid_degraded", &fields, BodyFormat::Text);
         assert_eq!(
             body_with(&n, &zh, false),
-            "md2（RAID 1）正在降级运行。共 2 个成员设备，其中 1 个缺失。当前状态为「无待处理的写入, 降级」。阵列成员：sdb3（故障）。"
+            "md2（RAID 1）正在降级运行。共 2 个成员设备，其中 1 个缺失。当前状态为「无待处理的写入、降级」。阵列成员：sdb3（故障）。"
         );
         assert_eq!(
             body_with(&n, &en, false),

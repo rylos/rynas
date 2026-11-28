@@ -738,12 +738,15 @@ mod tests {
 
     #[test]
     fn boot_flash_is_a_system_disk() {
-        let mut s = DiskSummary { used_by: vec!["vfat “boot”".into()], ..Default::default() };
+        let vfat = DiskUse::Filesystem { fs: "vfat".into(), label: Some("boot".into()), path: None };
+        let mut s = DiskSummary { used_by: vec![vfat.text()], usage: vec![vfat.clone()], ..Default::default() };
         mark_boot_flash(&mut s);
         mark_boot_flash(&mut s);
         assert!(s.system);
         assert_eq!(s.used_by, [BOOT_FLASH, "vfat “boot”"]);
-        assert_eq!(s.usage, [DiskUse::BootFlash]);
+        assert_eq!(s.usage, [DiskUse::BootFlash, vfat]);
+        // the two lists stay aligned, entry by entry
+        assert_eq!(s.used_by, s.usage.iter().map(DiskUse::text).collect::<Vec<_>>());
         let ids = vec![("f400".to_string(), "f400".to_string())];
         assert!(usb_id_matches(&ids, "F400", "f400\n"));
         assert!(!usb_id_matches(&ids, "f400", "f401"));

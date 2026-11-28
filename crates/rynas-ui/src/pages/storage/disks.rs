@@ -54,17 +54,18 @@ pub fn Disks() -> impl IntoView {
 }
 
 /// One use of a disk in the interface's language, from the server's structured entry; device
-/// names, labels and paths stay as they are.
-fn disk_use_text(u: &DiskUse) -> String {
+/// names, labels and paths stay as they are. `None` for a kind this interface does not know
+/// (the caller shows the server's English entry).
+fn disk_use_text(u: &DiskUse) -> Option<String> {
     let fs_name = |fs: &str, label: &Option<String>| match label {
         Some(l) => tf("sto.usage.fs_label", &[("fs", fs), ("label", l)]),
         None => fs.to_string(),
     };
-    match u {
+    Some(match u {
         DiskUse::BootFlash => t("sto.usage.boot_flash").into(),
         DiskUse::Swap => t("sto.usage.swap").into(),
         DiskUse::MdArray { array, level } => {
-            let level = super::volume::level_of(level).map_or_else(|| level.clone(), |l| t(super::level_key(l)).to_string());
+            let level = i18n::try_t(&format!("nev.md_level.{level}")).map_or_else(|| level.clone(), str::to_string);
             tf("sto.usage.md_array", &[("name", array), ("level", &level)])
         }
         DiskUse::MdMember { array: Some(name) } => tf("sto.usage.md_member", &[("name", name)]),
@@ -76,15 +77,36 @@ fn disk_use_text(u: &DiskUse) -> String {
         DiskUse::Filesystem { fs, label, path: None } => fs_name(fs, label),
         DiskUse::Mounted { path } => tf("sto.usage.mount", &[("path", path)]),
         DiskUse::Partitions { count } => i18n::tn("sto.usage.partitions", u64::from(*count), &[]),
+        DiskUse::ForeignBtrfs { label, uuid, device } => {
+            tf("sto.usage.foreign_btrfs", &[("fs", &fs_name("btrfs", label)), ("uuid", uuid), ("device", device)])
+        }
         DiskUse::Other { text } => text.clone(),
-    }
+        DiskUse::Unknown => return None,
+    })
 }
 
-pub(super) fn used_by_text(items: &[DiskUse]) -> String {
-    if items.is_empty() {
+/// What uses a disk as one list in the interface's language: `uses` entry by entry, the
+/// server's English entry (`english`, same positions) for a kind this interface does not know
+/// or when there are no structured entries.
+pub(super) fn uses_text(uses: &[DiskUse], english: &[String]) -> String {
+    let items: Vec<String> = if uses.is_empty() {
+        english.to_vec()
+    } else {
+        uses.iter()
+            .enumerate()
+            .filter_map(|(i, u)| disk_use_text(u).or_else(|| english.get(i).cloned()))
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    rynas_api_types::notify::join_list(&items, &i18n::try_t)
+}
+
+/// What uses a disk, or "not in use".
+pub(super) fn used_by_text(d: &DiskSummary) -> String {
+    if d.usage.is_empty() && d.used_by.is_empty() {
         t("sto.unused").to_string()
     } else {
-        items.iter().map(disk_use_text).collect::<Vec<_>>().join(", ")
+        uses_text(&d.usage, &d.used_by)
     }
 }
 
@@ -95,7 +117,7 @@ fn disk_table(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> An
                         let (htone, hkey) = disk_health(&d);
                         let no_smart = d.smart_unsupported.then(|| t("sto.h.no_smart_hint"));
                         let name = d.name.clone();
-                        let used = used_by_text(&d.usage);
+                        let used = used_by_text(&d);
                         let used_title = used.clone();
                         ui::row(vec![
                             ui::cell("sto.drive", "drive-cell", view! {
@@ -370,7 +392,7 @@ fn overview_tab(
     let (ptone, pkey) = power(d.power_state);
     let sleeping = asleep(d.power_state);
     let opt = |v: Option<String>| Signal::derive(move || v.clone().unwrap_or_else(|| ui::DASH.into()));
-    let used = used_by_text(&d.usage);
+    let used = used_by_text(&d);
     view! {
         <div class="drawer-sec">
             {(sleeping && detail.with(Option::is_none)).then(|| standby_note(reading, read))}
@@ -439,6 +461,10 @@ fn self_test_kind_key(kind: SelfTestKind) -> Option<&'static str> {
         SelfTestKind::ExtendedOffline => "sto.stlog.long_offline",
         SelfTestKind::ConveyanceOffline => "sto.stlog.conveyance",
         SelfTestKind::SelectiveOffline => "sto.stlog.selective",
+        SelfTestKind::ShortCaptive => "sto.stlog.short_captive",
+        SelfTestKind::ExtendedCaptive => "sto.stlog.long_captive",
+        SelfTestKind::ConveyanceCaptive => "sto.stlog.conveyance_captive",
+        SelfTestKind::SelectiveCaptive => "sto.stlog.selective_captive",
         SelfTestKind::Other => return None,
     })
 }
@@ -451,6 +477,11 @@ fn self_test_status_key(status: SelfTestStatus) -> Option<&'static str> {
         SelfTestStatus::InterruptedByReset => "sto.stlog.interrupted",
         SelfTestStatus::ReadFailure => "sto.stlog.read_failure",
         SelfTestStatus::UnknownFailure => "sto.stlog.unknown_failure",
+        SelfTestStatus::SegmentFailed => "sto.stlog.segment_failed",
+        SelfTestStatus::AbortedNamespaceRemoved => "sto.stlog.aborted_namespace",
+        SelfTestStatus::AbortedFormat => "sto.stlog.aborted_format",
+        SelfTestStatus::AbortedSanitize => "sto.stlog.aborted_sanitize",
+        SelfTestStatus::AbortedUnknown => "sto.stlog.aborted_unknown",
         SelfTestStatus::ElectricalFailure => "sto.stlog.electrical_failure",
         SelfTestStatus::ServoFailure => "sto.stlog.seek_failure",
         SelfTestStatus::HandlingDamage => "sto.stlog.handling_damage",
@@ -830,19 +861,40 @@ mod tests {
             label: label.map(Into::into),
             path: path.map(Into::into),
         };
-        assert_eq!(used_by_text(&[]), "Not in use");
+        let text = |u: &DiskUse| disk_use_text(u).unwrap();
+        assert_eq!(used_by_text(&DiskSummary::default()), "Not in use");
         assert_eq!(
-            used_by_text(&[DiskUse::MdArray { array: "md2".into(), level: "raid5".into() }, DiskUse::LuksUnlocked { name: "vol1".into() }]),
+            uses_text(&[DiskUse::MdArray { array: "md2".into(), level: "raid5".into() }, DiskUse::LuksUnlocked { name: "vol1".into() }], &[]),
             "md2 (RAID 5), LUKS vol1 (unlocked)"
         );
         // a label holding " on /" is just a label
-        assert_eq!(disk_use_text(&fs(Some("a on /b"), Some("/vol1"))), "btrfs “a on /b” mounted at /vol1");
-        assert_eq!(disk_use_text(&fs(None, None)), "btrfs");
-        assert_eq!(disk_use_text(&DiskUse::MdMember { array: None }), "Member of an unassembled RAID array");
-        assert_eq!(disk_use_text(&DiskUse::MdArray { array: "md9".into(), level: "linear".into() }), "md9 (linear)");
-        assert_eq!(disk_use_text(&DiskUse::Partitions { count: 1 }), "1 partition");
-        assert_eq!(disk_use_text(&DiskUse::Partitions { count: 3 }), "3 partitions");
-        assert_eq!(disk_use_text(&DiskUse::Other { text: "zfs member".into() }), "zfs member");
+        assert_eq!(text(&fs(Some("a on /b"), Some("/vol1"))), "btrfs “a on /b” mounted at /vol1");
+        assert_eq!(text(&fs(None, None)), "btrfs");
+        assert_eq!(text(&DiskUse::MdMember { array: None }), "Member of an unassembled RAID array");
+        // levels by their code, an unknown one as sent
+        assert_eq!(text(&DiskUse::MdArray { array: "md9".into(), level: "linear".into() }), "md9 (linear)");
+        assert_eq!(text(&DiskUse::MdArray { array: "md9".into(), level: "raid4".into() }), "md9 (RAID 4)");
+        assert_eq!(text(&DiskUse::MdArray { array: "md9".into(), level: "multipath".into() }), "md9 (multipath)");
+        assert_eq!(text(&DiskUse::Partitions { count: 1 }), "1 partition");
+        assert_eq!(text(&DiskUse::Partitions { count: 3 }), "3 partitions");
+        assert_eq!(text(&DiskUse::Other { text: "zfs member".into() }), "zfs member");
+        assert_eq!(
+            text(&DiskUse::ForeignBtrfs { label: Some("data2".into()), uuid: "u2".into(), device: "sdd1".into() }),
+            "btrfs “data2” u2 on sdd1, maybe part of another volume"
+        );
+        // a kind of a newer server: the English entry at its position; no structured entries:
+        // the English ones, so a disk in use never reads as unused
+        let d = DiskSummary {
+            used_by: vec!["swap".into(), "zfs pool tank".into()],
+            usage: vec![DiskUse::Swap, DiskUse::Unknown],
+            ..Default::default()
+        };
+        assert_eq!(used_by_text(&d), "Swap space, zfs pool tank");
+        let old = DiskSummary { used_by: vec!["md2 (raid5)".into()], ..Default::default() };
+        assert_eq!(used_by_text(&old), "md2 (raid5)");
+        // DiskUse of a kind this build does not know
+        let u: DiskUse = serde_json::from_str(r#"{"kind":"zfs_pool","name":"tank"}"#).unwrap();
+        assert_eq!(u, DiskUse::Unknown);
     }
 
     /// Self-test kinds and outcomes by code; `other` keeps the log's words.
@@ -852,5 +904,7 @@ mod tests {
         assert_eq!(self_test_kind_key(SelfTestKind::Other), None);
         assert_eq!(self_test_status_key(SelfTestStatus::ReadFailure), Some("sto.stlog.read_failure"));
         assert_eq!(self_test_status_key(SelfTestStatus::Other), None);
+        assert_eq!(self_test_kind_key(SelfTestKind::ShortCaptive), Some("sto.stlog.short_captive"));
+        assert_eq!(self_test_status_key(SelfTestStatus::SegmentFailed), Some("sto.stlog.segment_failed"));
     }
 }

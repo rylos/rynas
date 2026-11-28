@@ -103,6 +103,10 @@ nev.md_state.recovering	ricostruzione in corso
 nev.md_state.reshaping	rimodellamento in corso
 nev.md_state.checking	controllo in corso
 nev.md_state.repairing	riparazione in corso
+nev.md_state.delayed	in attesa
+nev.md_state.pending	in sospeso
+nev.md_state.remote	eseguita da un nodo del cluster
+nev.list_join	{a}, {b}
 nev.md_role.active	attivo
 nev.md_role.spare	riserva
 nev.md_role.faulty	guasto
@@ -1532,6 +1536,7 @@ sto.usage.md_unknown	Membro di un array RAID non assemblato
 sto.usage.md_array	{name} ({level})
 sto.usage.lvm	Volume LVM {name}
 sto.usage.fs_label	{fs} «{label}»
+sto.usage.foreign_btrfs	{fs} {uuid} su {device}, forse parte di un altro volume
 sto.usage.partitions.one	{n} partizione
 sto.usage.partitions.other	{n} partizioni
 sto.stlog.short_offline	Autotest breve offline
@@ -1547,6 +1552,15 @@ sto.stlog.electrical_failure	Completato con un guasto elettrico
 sto.stlog.seek_failure	Completato con un guasto al servo o al posizionamento
 sto.stlog.fatal	Errore di autotest grave o sconosciuto
 sto.stlog.handling_damage	Completato con sospetto danno da manipolazione
+sto.stlog.short_captive	Autotest breve in modalità esclusiva
+sto.stlog.long_captive	Autotest esteso in modalità esclusiva
+sto.stlog.conveyance_captive	Autotest di trasporto in modalità esclusiva
+sto.stlog.selective_captive	Autotest selettivo in modalità esclusiva
+sto.stlog.segment_failed	Completato con un segmento non superato
+sto.stlog.aborted_namespace	Interrotto: il namespace è stato rimosso
+sto.stlog.aborted_format	Interrotto da un comando di formattazione
+sto.stlog.aborted_sanitize	Interrotto da un’operazione di sanitize
+sto.stlog.aborted_unknown	Interrotto per un motivo sconosciuto
 wol.progress.starting	Riattivazione di {name} ({macs})
 wol.progress.sent	Pacchetti di riattivazione inviati su {ifaces} (3×)
 wol.progress.wait_agent	La rete ha risposto dopo {time}. In attesa del client di backup.

@@ -300,8 +300,9 @@ pub fn parse(json: &str, now_ms: u64) -> SmartRead {
                     kind_code: u64_at(t, &["self_test_code", "value"])
                         .map_or(SelfTestKind::Other, nvme_test_kind),
                     status_code: result.map_or(SelfTestStatus::Other, nvme_test_status),
-                    // 0 = completed without error; 1/2 = aborted by host/reset (not a fault)
-                    passed: result.map(|r| r == 0 || r == 1 || r == 2),
+                    // 0 = completed without error; 1-4, 8, 9 = aborted (host, reset, namespace
+                    // removed, format, unknown reason, sanitize: not a fault of the drive)
+                    passed: result.map(|r| matches!(r, 0..=4 | 8 | 9)),
                     lifetime_hours: u64_at(t, &["power_on_hours"]),
                     lba_first_error: u64_at(t, &["lba"]),
                 });
@@ -804,13 +805,17 @@ pub fn known_smr(model: &str) -> bool {
 }
 
 /// The kind of an ATA self-test log entry from its LBA-low value (ACS-3, SMART EXECUTE OFF-LINE
-/// IMMEDIATE subcommands): captive and vendor tests have no code.
+/// IMMEDIATE subcommands): vendor tests have no code.
 fn ata_test_kind(value: u64) -> SelfTestKind {
     match value {
         1 => SelfTestKind::ShortOffline,
         2 => SelfTestKind::ExtendedOffline,
         3 => SelfTestKind::ConveyanceOffline,
         4 => SelfTestKind::SelectiveOffline,
+        0x81 => SelfTestKind::ShortCaptive,
+        0x82 => SelfTestKind::ExtendedCaptive,
+        0x83 => SelfTestKind::ConveyanceCaptive,
+        0x84 => SelfTestKind::SelectiveCaptive,
         _ => SelfTestKind::Other,
     }
 }
@@ -842,16 +847,19 @@ fn nvme_test_kind(value: u64) -> SelfTestKind {
     }
 }
 
-/// The outcome of an NVMe self-test log entry (Self-test Result): the aborts for a removed
-/// namespace, a format, a sanitize or no reason, and the failed segments the device numbers,
-/// have no code.
+/// The outcome of an NVMe self-test log entry (Self-test Result, NVMe 2.0).
 fn nvme_test_status(value: u64) -> SelfTestStatus {
     match value {
         0 => SelfTestStatus::Passed,
         1 => SelfTestStatus::AbortedByHost,
         2 => SelfTestStatus::InterruptedByReset,
+        3 => SelfTestStatus::AbortedNamespaceRemoved,
+        4 => SelfTestStatus::AbortedFormat,
         5 => SelfTestStatus::Fatal,
         6 => SelfTestStatus::UnknownFailure,
+        7 => SelfTestStatus::SegmentFailed,
+        8 => SelfTestStatus::AbortedUnknown,
+        9 => SelfTestStatus::AbortedSanitize,
         _ => SelfTestStatus::Other,
     }
 }
@@ -864,7 +872,9 @@ mod tests {
     fn self_test_codes() {
         assert_eq!(ata_test_kind(1), SelfTestKind::ShortOffline);
         assert_eq!(ata_test_kind(4), SelfTestKind::SelectiveOffline);
-        assert_eq!(ata_test_kind(0x81), SelfTestKind::Other);
+        assert_eq!(ata_test_kind(0x81), SelfTestKind::ShortCaptive);
+        assert_eq!(ata_test_kind(0x84), SelfTestKind::SelectiveCaptive);
+        assert_eq!(ata_test_kind(0x7f), SelfTestKind::Other);
         assert_eq!(ata_test_status(0), SelfTestStatus::Passed);
         // read failure with 90% left
         assert_eq!(ata_test_status(0x79), SelfTestStatus::ReadFailure);
@@ -874,7 +884,12 @@ mod tests {
         assert_eq!(nvme_test_kind(2), SelfTestKind::Extended);
         assert_eq!(nvme_test_kind(0xe), SelfTestKind::Other);
         assert_eq!(nvme_test_status(2), SelfTestStatus::InterruptedByReset);
-        assert_eq!(nvme_test_status(7), SelfTestStatus::Other);
+        assert_eq!(nvme_test_status(3), SelfTestStatus::AbortedNamespaceRemoved);
+        assert_eq!(nvme_test_status(4), SelfTestStatus::AbortedFormat);
+        assert_eq!(nvme_test_status(7), SelfTestStatus::SegmentFailed);
+        assert_eq!(nvme_test_status(8), SelfTestStatus::AbortedUnknown);
+        assert_eq!(nvme_test_status(9), SelfTestStatus::AbortedSanitize);
+        assert_eq!(nvme_test_status(0xa), SelfTestStatus::Other);
         assert_eq!(serde_json::to_value(SelfTestStatus::InterruptedByReset).unwrap(), "interrupted_by_reset");
         assert_eq!(serde_json::from_value::<SelfTestKind>("captive".into()).unwrap(), SelfTestKind::Other);
     }

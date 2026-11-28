@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rynas_api_types::storage::{
-    BtrfsBlocker, BtrfsConvert, BtrfsFilesystem, BtrfsMember, BtrfsRepair, PlanAction, PlanArgs,
+    BtrfsBlocker, BtrfsConvert, BtrfsFilesystem, BtrfsMember, BtrfsRepair, DiskUse, PlanAction, PlanArgs,
     PlanStep, PlanStepKind, PlanWarningCode, ScrubState, StoragePlan,
 };
 use serde::{Deserialize, Serialize};
@@ -908,7 +908,7 @@ fn mounted_repair(fs: &BtrfsFilesystem) -> Result<(String, &BtrfsRepair), String
 /// clear its signatures, `btrfs replace start`, wait, grow the device to the disk, convert
 /// what a degraded mount wrote back. `holds`: what is on the new disk now (it is erased: a
 /// warning names it, e.g. the half of another btrfs volume).
-pub fn plan_replace(fs: &BtrfsFilesystem, devid: u64, new_disk: &str, size: u64, holds: &[String]) -> StoragePlan {
+pub fn plan_replace(fs: &BtrfsFilesystem, devid: u64, new_disk: &str, size: u64, holds: &[DiskUse]) -> StoragePlan {
     let op = "btrfs_replace";
     let (mnt, r) = match mounted_repair(fs) {
         Ok(x) => x,
@@ -961,7 +961,12 @@ pub fn plan_replace(fs: &BtrfsFilesystem, devid: u64, new_disk: &str, size: u64,
         crate::plan::warn(
             &mut p,
             PlanWarningCode::DataErased,
-            PlanArgs { subject: Some(new_disk.into()), items: holds.to_vec(), ..Default::default() },
+            PlanArgs {
+                subject: Some(new_disk.into()),
+                items: holds.iter().map(DiskUse::text).collect(),
+                uses: holds.to_vec(),
+                ..Default::default()
+            },
         );
     }
     p.summary = vec![("mountpoint".into(), mnt), ("devid".into(), devid.to_string()), ("disk".into(), new_disk.into())];
@@ -971,21 +976,17 @@ pub fn plan_replace(fs: &BtrfsFilesystem, devid: u64, new_disk: &str, size: u64,
 /// What is on disk `name` that a replace would erase: its uses (as the inventory names them)
 /// and every btrfs filesystem on it or its partitions other than `own` (the half of another
 /// volume, maybe the one a split brain left).
-pub fn disk_holds(inv: &crate::Inventory, name: &str, own: &str) -> Vec<String> {
-    let mut v: Vec<String> = inv.disks.iter().find(|d| d.name == name).map(|d| d.used_by.clone()).unwrap_or_default();
+pub fn disk_holds(inv: &crate::Inventory, name: &str, own: &str) -> Vec<DiskUse> {
+    let mut v: Vec<DiskUse> = inv.disks.iter().find(|d| d.name == name).map(|d| d.usage.clone()).unwrap_or_default();
     let mut devs: Vec<&crate::lsblk::BlockDev> = inv.graph.devs.values().filter(|d| d.kname == name || inv.graph.disks_under(&d.kname) == [name.to_string()]).collect();
     devs.sort_by(|a, b| a.kname.cmp(&b.kname));
     for d in devs {
-        if d.fstype.as_deref() == Some("btrfs") && d.uuid.as_deref().is_some_and(|u| !u.eq_ignore_ascii_case(own)) {
-            let s = format!(
-                "btrfs {} {} on {} (part of another volume?)",
-                d.label.as_deref().map(|l| format!("“{l}”")).unwrap_or_default(),
-                d.uuid.as_deref().unwrap_or(""),
-                d.kname
-            )
-            .replace("  ", " ");
-            if !v.contains(&s) {
-                v.push(s);
+        if d.fstype.as_deref() == Some("btrfs")
+            && let Some(uuid) = d.uuid.as_deref().filter(|u| !u.eq_ignore_ascii_case(own))
+        {
+            let u = DiskUse::ForeignBtrfs { label: d.label.clone(), uuid: uuid.to_string(), device: d.kname.clone() };
+            if !v.contains(&u) {
+                v.push(u);
             }
         }
     }
